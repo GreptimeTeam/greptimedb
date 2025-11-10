@@ -14,12 +14,12 @@
 
 use std::collections::HashMap;
 
-use client::api::v1::region::{region_request, CreateRequests, RegionRequest, RegionRequestHeader};
 use client::api::v1::CreateTableExpr;
+use client::api::v1::region::{CreateRequests, RegionRequest, RegionRequestHeader, region_request};
 use common_meta::ddl::create_logical_tables::create_region_request_builder;
 use common_meta::ddl::utils::region_storage_path;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::{find_leader_regions, RegionRoute};
+use common_meta::rpc::router::{RegionRoute, find_leader_regions};
 use operator::expr_helper::column_schemas_to_defs;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};
@@ -44,9 +44,9 @@ pub fn generate_create_table_expr(table_info: &RawTableInfo) -> Result<CreateTab
     let table_options = HashMap::from(&table_info.meta.options);
 
     Ok(CreateTableExpr {
-        catalog_name: table_info.catalog_name.to_string(),
-        schema_name: table_info.schema_name.to_string(),
-        table_name: table_info.name.to_string(),
+        catalog_name: table_info.catalog_name.clone(),
+        schema_name: table_info.schema_name.clone(),
+        table_name: table_info.name.clone(),
         desc: String::default(),
         column_defs,
         time_index,
@@ -54,7 +54,7 @@ pub fn generate_create_table_expr(table_info: &RawTableInfo) -> Result<CreateTab
         create_if_not_exists: true,
         table_options,
         table_id: None,
-        engine: table_info.meta.engine.to_string(),
+        engine: table_info.meta.engine.clone(),
     })
 }
 
@@ -74,11 +74,19 @@ pub fn make_create_region_request_for_peer(
     let catalog = &create_table_expr.catalog_name;
     let schema = &create_table_expr.schema_name;
     let storage_path = region_storage_path(catalog, schema);
+    let partition_exprs = region_routes
+        .iter()
+        .map(|r| (r.region.id.region_number(), r.region.partition_expr()))
+        .collect::<HashMap<_, _>>();
 
     for region_number in &regions_on_this_peer {
         let region_id = RegionId::new(logical_table_id, *region_number);
-        let region_request =
-            request_builder.build_one(region_id, storage_path.clone(), &HashMap::new());
+        let region_request = request_builder.build_one(
+            region_id,
+            storage_path.clone(),
+            &HashMap::new(),
+            &partition_exprs,
+        );
         requests.push(region_request);
     }
 

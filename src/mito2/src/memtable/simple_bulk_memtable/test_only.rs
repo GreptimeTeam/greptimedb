@@ -13,14 +13,15 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::time::Instant;
 
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceRange};
 
 use crate::error;
 use crate::memtable::simple_bulk_memtable::{Iter, SimpleBulkMemtable};
 use crate::memtable::time_series::Values;
-use crate::memtable::{BoxedBatchIterator, IterBuilder};
+use crate::memtable::{BoxedBatchIterator, IterBuilder, MemScanMetrics};
 use crate::read::dedup::LastNonNullIter;
 use crate::region::options::MergeMode;
 
@@ -32,7 +33,7 @@ impl SimpleBulkMemtable {
     pub(crate) fn create_iter(
         &self,
         projection: Option<&[ColumnId]>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> error::Result<BatchIterBuilderDeprecated> {
         let mut series = self.series.write().unwrap();
 
@@ -58,13 +59,14 @@ pub(crate) struct BatchIterBuilderDeprecated {
     region_metadata: RegionMetadataRef,
     values: Option<Values>,
     projection: HashSet<ColumnId>,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
     dedup: bool,
     merge_mode: MergeMode,
 }
 
 impl IterBuilder for BatchIterBuilderDeprecated {
-    fn build(&self) -> error::Result<BoxedBatchIterator> {
+    fn build(&self, metrics: Option<MemScanMetrics>) -> error::Result<BoxedBatchIterator> {
+        let start_time = Instant::now();
         let Some(values) = self.values.clone() else {
             return Ok(Box::new(Iter { batch: None }));
         };
@@ -77,6 +79,21 @@ impl IterBuilder for BatchIterBuilderDeprecated {
             })
             .map(Some)
             .transpose();
+
+        // Collect metrics from the batch
+        if let Some(metrics) = metrics {
+            let (num_rows, num_batches) = match &maybe_batch {
+                Some(Ok(batch)) => (batch.num_rows(), 1),
+                _ => (0, 0),
+            };
+            let inner = crate::memtable::MemScanMetricsData {
+                total_series: 1,
+                num_rows,
+                num_batches,
+                scan_cost: start_time.elapsed(),
+            };
+            metrics.merge_inner(&inner);
+        }
 
         let iter = Iter { batch: maybe_batch };
 

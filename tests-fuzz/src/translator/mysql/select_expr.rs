@@ -27,16 +27,14 @@ impl DslTranslator<SelectExpr, String> for SelectExprTranslator {
             .iter()
             .map(|c| c.name.to_string())
             .collect::<Vec<_>>()
-            .join(", ")
-            .to_string();
+            .join(", ");
 
         let order_by = input
             .order_by
             .iter()
             .map(|c| c.as_str())
             .collect::<Vec<_>>()
-            .join(", ")
-            .to_string();
+            .join(", ");
 
         Ok(format!(
             "SELECT {} FROM {} ORDER BY {} {};",
@@ -52,8 +50,8 @@ mod tests {
     use rand::SeedableRng;
 
     use super::SelectExprTranslator;
-    use crate::generator::select_expr::SelectExprGeneratorBuilder;
     use crate::generator::Generator;
+    use crate::generator::select_expr::SelectExprGeneratorBuilder;
     use crate::test_utils;
     use crate::translator::DslTranslator;
 

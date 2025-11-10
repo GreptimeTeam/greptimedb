@@ -19,7 +19,7 @@ use bytes::Bytes;
 use datatypes::arrow::array::RecordBatch;
 use datatypes::arrow::error::ArrowError;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowGroups, RowSelection};
-use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
+use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
 use parquet::column::page::{PageIterator, PageReader};
 use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
@@ -27,10 +27,10 @@ use snafu::ResultExt;
 use crate::error;
 use crate::error::ReadDataPartSnafu;
 use crate::memtable::bulk::context::BulkIterContextRef;
-use crate::sst::parquet::format::ReadFormat;
-use crate::sst::parquet::reader::{RowGroupReaderBase, RowGroupReaderContext};
-use crate::sst::parquet::row_group::{ColumnChunkIterator, RowGroupBase};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
+use crate::sst::parquet::format::ReadFormat;
+use crate::sst::parquet::reader::RowGroupReaderContext;
+use crate::sst::parquet::row_group::{ColumnChunkIterator, RowGroupBase};
 
 /// Helper for reading specific row group inside Memtable Parquet parts.
 // This is similar to [mito2::sst::parquet::row_group::InMemoryRowGroup] since
@@ -118,10 +118,7 @@ impl RowGroupReaderContext for BulkIterContextRef {
     }
 }
 
-pub(crate) type MemtableRowGroupReader = RowGroupReaderBase<BulkIterContextRef>;
-
 pub(crate) struct MemtableRowGroupReaderBuilder {
-    context: BulkIterContextRef,
     projection: ProjectionMask,
     parquet_metadata: Arc<ParquetMetaData>,
     field_levels: FieldLevels,
@@ -130,7 +127,7 @@ pub(crate) struct MemtableRowGroupReaderBuilder {
 
 impl MemtableRowGroupReaderBuilder {
     pub(crate) fn try_new(
-        context: BulkIterContextRef,
+        context: &BulkIterContextRef,
         projection: ProjectionMask,
         parquet_metadata: Arc<ParquetMetaData>,
         data: Bytes,
@@ -141,7 +138,6 @@ impl MemtableRowGroupReaderBuilder {
             parquet_to_arrow_field_levels(parquet_schema_desc, projection.clone(), hint)
                 .context(ReadDataPartSnafu)?;
         Ok(Self {
-            context,
             projection,
             parquet_metadata,
             field_levels,
@@ -154,7 +150,7 @@ impl MemtableRowGroupReaderBuilder {
         &self,
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
-    ) -> error::Result<MemtableRowGroupReader> {
+    ) -> error::Result<ParquetRecordBatchReader> {
         let mut row_group = MemtableRowGroupPageFetcher::create(
             row_group_idx,
             &self.parquet_metadata,
@@ -165,13 +161,31 @@ impl MemtableRowGroupReaderBuilder {
 
         // Builds the parquet reader.
         // Now the row selection is None.
-        let reader = ParquetRecordBatchReader::try_new_with_row_groups(
+        ParquetRecordBatchReader::try_new_with_row_groups(
             &self.field_levels,
             &row_group,
             DEFAULT_READ_BATCH_SIZE,
             row_selection,
         )
-        .context(ReadDataPartSnafu)?;
-        Ok(MemtableRowGroupReader::create(self.context.clone(), reader))
+        .context(ReadDataPartSnafu)
+    }
+
+    /// Computes whether to skip field filters for a specific row group based on PreFilterMode.
+    pub(crate) fn compute_skip_fields(
+        &self,
+        context: &BulkIterContextRef,
+        row_group_idx: usize,
+    ) -> bool {
+        use crate::sst::parquet::file_range::{PreFilterMode, row_group_contains_delete};
+
+        match context.pre_filter_mode() {
+            PreFilterMode::All => false,
+            PreFilterMode::SkipFields => true,
+            PreFilterMode::SkipFieldsOnDelete => {
+                // Check if this specific row group contains delete op
+                row_group_contains_delete(&self.parquet_metadata, row_group_idx, "memtable")
+                    .unwrap_or(true)
+            }
+        }
     }
 }

@@ -22,12 +22,12 @@ use datafusion::common::HashMap;
 use mito2::engine::MITO_ENGINE_NAME;
 use snafu::{OptionExt, ResultExt};
 use store_api::region_engine::{BatchResponses, RegionEngine};
-use store_api::region_request::{AffectedRows, PathType, RegionOpenRequest, RegionRequest};
+use store_api::region_request::{AffectedRows, PathType, RegionOpenRequest, ReplayCheckpoint};
 use store_api::storage::RegionId;
 
-use crate::engine::create::region_options_for_metadata_region;
-use crate::engine::options::{set_data_region_options, PhysicalRegionOptions};
 use crate::engine::MetricEngineInner;
+use crate::engine::create::region_options_for_metadata_region;
+use crate::engine::options::{PhysicalRegionOptions, set_data_region_options};
 use crate::error::{
     BatchOpenMitoRegionSnafu, NoOpenRegionResultSnafu, OpenMitoRegionSnafu,
     PhysicalRegionNotFoundSnafu, Result,
@@ -47,6 +47,7 @@ impl MetricEngineInner {
 
         for (region_id, request) in requests {
             if !request.is_physical_table() {
+                warn!("Skipping non-physical table open request: {region_id}");
                 continue;
             }
             let physical_region_options = PhysicalRegionOptions::try_from(&request.options)?;
@@ -72,17 +73,19 @@ impl MetricEngineInner {
             let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
             let data_region_id = utils::to_data_region_id(physical_region_id);
             let metadata_region_result = results.remove(&metadata_region_id);
-            let data_region_result = results.remove(&data_region_id);
+            let data_region_result: Option<std::result::Result<RegionResponse, BoxedError>> =
+                results.remove(&data_region_id);
             // Pass the optional `metadata_region_result` and `data_region_result` to
-            // `open_physical_region_with_results`. This function handles errors for each
+            // `recover_physical_region_with_results`. This function handles errors for each
             // open physical region request, allowing the process to continue with the
             // remaining regions even if some requests fail.
             let response = self
-                .open_physical_region_with_results(
+                .recover_physical_region_with_results(
                     metadata_region_result,
                     data_region_result,
                     physical_region_id,
                     physical_region_options,
+                    true,
                 )
                 .await
                 .map_err(BoxedError::new);
@@ -107,12 +110,13 @@ impl MetricEngineInner {
         }
     }
 
-    async fn open_physical_region_with_results(
+    pub(crate) async fn recover_physical_region_with_results(
         &self,
         metadata_region_result: Option<std::result::Result<RegionResponse, BoxedError>>,
         data_region_result: Option<std::result::Result<RegionResponse, BoxedError>>,
         physical_region_id: RegionId,
         physical_region_options: PhysicalRegionOptions,
+        close_region_on_failure: bool,
     ) -> Result<RegionResponse> {
         let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
         let data_region_id = utils::to_data_region_id(physical_region_id);
@@ -136,8 +140,10 @@ impl MetricEngineInner {
             .recover_states(physical_region_id, physical_region_options)
             .await
         {
-            self.close_physical_region_on_recovery_failure(physical_region_id)
-                .await;
+            if close_region_on_failure {
+                self.close_physical_region_on_recovery_failure(physical_region_id)
+                    .await;
+            }
             return Err(err);
         }
         Ok(data_region_response)
@@ -204,12 +210,18 @@ impl MetricEngineInner {
         request: RegionOpenRequest,
     ) -> (RegionOpenRequest, RegionOpenRequest) {
         let metadata_region_options = region_options_for_metadata_region(&request.options);
+        let checkpoint = request.checkpoint;
+
         let open_metadata_region_request = RegionOpenRequest {
             table_dir: request.table_dir.clone(),
             path_type: PathType::Metadata,
             options: metadata_region_options,
             engine: MITO_ENGINE_NAME.to_string(),
             skip_wal_replay: request.skip_wal_replay,
+            checkpoint: checkpoint.map(|checkpoint| ReplayCheckpoint {
+                entry_id: checkpoint.metadata_entry_id.unwrap_or_default(),
+                metadata_entry_id: None,
+            }),
         };
 
         let mut data_region_options = request.options;
@@ -223,6 +235,10 @@ impl MetricEngineInner {
             options: data_region_options,
             engine: MITO_ENGINE_NAME.to_string(),
             skip_wal_replay: request.skip_wal_replay,
+            checkpoint: checkpoint.map(|checkpoint| ReplayCheckpoint {
+                entry_id: checkpoint.entry_id,
+                metadata_entry_id: None,
+            }),
         };
 
         (open_metadata_region_request, open_data_region_request)
@@ -238,25 +254,17 @@ impl MetricEngineInner {
         let data_region_id = utils::to_data_region_id(region_id);
         let (open_metadata_region_request, open_data_region_request) =
             self.transform_open_physical_region_request(request);
-
-        self.mito
-            .handle_request(
-                metadata_region_id,
-                RegionRequest::Open(open_metadata_region_request),
+        let _ = self
+            .mito
+            .handle_batch_open_requests(
+                2,
+                vec![
+                    (metadata_region_id, open_metadata_region_request),
+                    (data_region_id, open_data_region_request),
+                ],
             )
             .await
-            .with_context(|_| OpenMitoRegionSnafu {
-                region_type: "metadata",
-            })?;
-        self.mito
-            .handle_request(
-                data_region_id,
-                RegionRequest::Open(open_data_region_request),
-            )
-            .await
-            .with_context(|_| OpenMitoRegionSnafu {
-                region_type: "data",
-            })?;
+            .context(BatchOpenMitoRegionSnafu {})?;
 
         info!("Opened physical metric region {region_id}");
         PHYSICAL_REGION_COUNT.inc();

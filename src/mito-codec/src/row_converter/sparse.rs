@@ -15,6 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use bytes::BufMut;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
@@ -23,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::ColumnId;
+use store_api::storage::consts::ReservedColumnId;
 
 use crate::error::{DeserializeFieldSnafu, Result, SerializeFieldSnafu, UnsupportedOperationSnafu};
 use crate::key_values::KeyValue;
@@ -85,28 +86,29 @@ impl SparseValues {
 }
 
 /// The column id of the tsid.
-const RESERVED_COLUMN_ID_TSID: ColumnId = ReservedColumnId::tsid();
+pub const RESERVED_COLUMN_ID_TSID: ColumnId = ReservedColumnId::tsid();
 /// The column id of the table id.
-const RESERVED_COLUMN_ID_TABLE_ID: ColumnId = ReservedColumnId::table_id();
+pub const RESERVED_COLUMN_ID_TABLE_ID: ColumnId = ReservedColumnId::table_id();
 /// The size of the column id in the encoded sparse row.
 pub const COLUMN_ID_ENCODE_SIZE: usize = 4;
 
 impl SparsePrimaryKeyCodec {
     /// Creates a new [`SparsePrimaryKeyCodec`] instance.
-    pub fn new(region_metadata: &RegionMetadataRef) -> Self {
+    pub fn from_columns(columns_ids: impl Iterator<Item = ColumnId>) -> Self {
+        let columns = columns_ids.collect();
         Self {
             inner: Arc::new(SparsePrimaryKeyCodecInner {
                 table_id_field: SortField::new(ConcreteDataType::uint32_datatype()),
                 tsid_field: SortField::new(ConcreteDataType::uint64_datatype()),
                 label_field: SortField::new(ConcreteDataType::string_datatype()),
-                columns: Some(
-                    region_metadata
-                        .primary_key_columns()
-                        .map(|c| c.column_id)
-                        .collect(),
-                ),
+                columns: Some(columns),
             }),
         }
+    }
+
+    /// Creates a new [`SparsePrimaryKeyCodec`] instance.
+    pub fn new(region_metadata: &RegionMetadataRef) -> Self {
+        Self::from_columns(region_metadata.primary_key_columns().map(|c| c.column_id))
     }
 
     /// Returns a new [`SparsePrimaryKeyCodec`] instance.
@@ -123,6 +125,7 @@ impl SparsePrimaryKeyCodec {
         }
     }
 
+    /// Creates a new [`SparsePrimaryKeyCodec`] instance with additional label `fields`.
     pub fn with_fields(fields: Vec<(ColumnId, SortField)>) -> Self {
         Self {
             inner: Arc::new(SparsePrimaryKeyCodecInner {
@@ -137,10 +140,10 @@ impl SparsePrimaryKeyCodec {
     /// Returns the field of the given column id.
     fn get_field(&self, column_id: ColumnId) -> Option<&SortField> {
         // if the `columns` is not specified, all unknown columns is primary key(label field).
-        if let Some(columns) = &self.inner.columns {
-            if !columns.contains(&column_id) {
-                return None;
-            }
+        if let Some(columns) = &self.inner.columns
+            && !columns.contains(&column_id)
+        {
+            return None;
         }
 
         match column_id {
@@ -171,6 +174,54 @@ impl SparsePrimaryKeyCodec {
                 common_telemetry::warn!("Column {} is not in primary key, skipping", column_id);
             }
         }
+        Ok(())
+    }
+
+    pub fn encode_raw_tag_value<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
+    where
+        I: Iterator<Item = (ColumnId, &'a [u8])>,
+    {
+        for (tag_column_id, tag_value) in row {
+            let value_len = tag_value.len();
+            buffer.reserve(6 + value_len / 8 * 9);
+            buffer.put_u32(tag_column_id);
+            buffer.put_u8(1);
+            buffer.put_u8(!tag_value.is_empty() as u8);
+
+            // Manual implementation of memcomparable::ser::Serializer::serialize_bytes
+            // to avoid byte-by-byte put.
+            let mut len = 0;
+            let num_chucks = value_len / 8;
+            let remainder = value_len % 8;
+
+            for idx in 0..num_chucks {
+                buffer.extend_from_slice(&tag_value[idx * 8..idx * 8 + 8]);
+                len += 8;
+                // append an extra byte that signals the number of significant bytes in this chunk
+                // 1-8: many bytes were significant and this group is the last group
+                // 9: all 8 bytes were significant and there is more data to come
+                let extra = if len == value_len { 8 } else { 9 };
+                buffer.put_u8(extra);
+            }
+
+            if remainder != 0 {
+                buffer.extend_from_slice(&tag_value[len..value_len]);
+                buffer.put_bytes(0, 8 - remainder);
+                buffer.put_u8(remainder as u8);
+            }
+        }
+        Ok(())
+    }
+
+    /// Encodes the given bytes into a [`SparseValues`].
+    pub fn encode_internal(&self, table_id: u32, tsid: u64, buffer: &mut Vec<u8>) -> Result<()> {
+        buffer.reserve_exact(22);
+        buffer.put_u32(RESERVED_COLUMN_ID_TABLE_ID);
+        buffer.put_u8(1);
+        buffer.put_u32(table_id);
+        buffer.put_u32(RESERVED_COLUMN_ID_TSID);
+        buffer.put_u8(1);
+        buffer.put_u64(tsid);
         Ok(())
     }
 
@@ -259,7 +310,7 @@ impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
         values: &[(ColumnId, ValueRef)],
         buffer: &mut Vec<u8>,
     ) -> Result<()> {
-        self.encode_to_vec(values.iter().map(|v| (v.0, v.1)), buffer)
+        self.encode_to_vec(values.iter().map(|v| (v.0, v.1.clone())), buffer)
     }
 
     fn estimated_size(&self) -> Option<usize> {
@@ -334,8 +385,9 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
-    use common_time::timestamp::TimeUnit;
+    use common_query::prelude::{greptime_timestamp, greptime_value};
     use common_time::Timestamp;
+    use common_time::timestamp::TimeUnit;
     use datatypes::schema::ColumnSchema;
     use datatypes::value::{OrderedFloat, Value};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -410,7 +462,7 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "greptime_value",
+                    greptime_value(),
                     ConcreteDataType::float64_datatype(),
                     false,
                 ),
@@ -419,7 +471,7 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "greptime_timestamp",
+                    greptime_timestamp(),
                     ConcreteDataType::timestamp_nanosecond_datatype(),
                     false,
                 ),
@@ -482,6 +534,50 @@ mod tests {
                 ValueRef::Timestamp(Timestamp::new(1618876800000000000, TimeUnit::Nanosecond)),
             ),
         ]
+    }
+
+    #[test]
+    fn test_encode_by_short_cuts() {
+        let region_metadata = test_region_metadata();
+        let codec = SparsePrimaryKeyCodec::new(&region_metadata);
+        let mut buffer = Vec::new();
+        let internal_columns = [
+            (RESERVED_COLUMN_ID_TABLE_ID, ValueRef::UInt32(1024)),
+            (RESERVED_COLUMN_ID_TSID, ValueRef::UInt64(42)),
+        ];
+        let tags = [
+            (1, "greptime-frontend-6989d9899-22222"),
+            (2, "greptime-cluster"),
+            (3, "greptime-frontend-6989d9899-22222"),
+            (4, "greptime-frontend-6989d9899-22222"),
+            (5, "10.10.10.10"),
+        ];
+        codec
+            .encode_to_vec(internal_columns.into_iter(), &mut buffer)
+            .unwrap();
+        codec
+            .encode_to_vec(
+                tags.iter()
+                    .map(|(col_id, tag_value)| (*col_id, ValueRef::String(tag_value))),
+                &mut buffer,
+            )
+            .unwrap();
+
+        let mut buffer_by_raw_encoding = Vec::new();
+        codec
+            .encode_internal(1024, 42, &mut buffer_by_raw_encoding)
+            .unwrap();
+        let tags: Vec<_> = tags
+            .into_iter()
+            .map(|(col_id, tag_value)| (col_id, tag_value.as_bytes()))
+            .collect();
+        codec
+            .encode_raw_tag_value(
+                tags.iter().map(|(c, b)| (*c, *b)),
+                &mut buffer_by_raw_encoding,
+            )
+            .unwrap();
+        assert_eq!(buffer, buffer_by_raw_encoding);
     }
 
     #[test]
@@ -583,7 +679,12 @@ mod tests {
                 .has_column(&buffer, &mut offsets_map, column_id)
                 .unwrap();
             let value = codec.decode_value_at(&buffer, offset, column_id).unwrap();
-            let expected_value = row.iter().find(|(id, _)| *id == column_id).unwrap().1;
+            let expected_value = row
+                .iter()
+                .find(|(id, _)| *id == column_id)
+                .unwrap()
+                .1
+                .clone();
             assert_eq!(value.as_value_ref(), expected_value);
         }
     }

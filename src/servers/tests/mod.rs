@@ -34,8 +34,8 @@ use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use session::context::QueryContextRef;
 use snafu::ensure;
 use sql::statements::statement::Statement;
-use table::table_name::TableName;
 use table::TableRef;
+use table::table_name::TableName;
 
 mod http;
 mod interceptor;
@@ -68,7 +68,12 @@ impl SqlQueryHandler for DummyInstance {
         vec![Ok(output)]
     }
 
-    async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
+    async fn do_exec_plan(
+        &self,
+        _stmt: Option<Statement>,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         Ok(self.query_engine.execute(plan, query_ctx).await.unwrap())
     }
 
@@ -139,6 +144,7 @@ impl GrpcQueryHandler for DummyInstance {
                             end: promql.end,
                             step: promql.step,
                             lookback: promql.lookback,
+                            alias: None,
                         };
                         let mut result =
                             SqlQueryHandler::do_promql_query(self, &prom_query, ctx).await;
@@ -163,6 +169,7 @@ impl GrpcQueryHandler for DummyInstance {
         _table_ref: &mut Option<TableRef>,
         _decoder: &mut FlightDecoder,
         _data: FlightData,
+        _ctx: QueryContextRef,
     ) -> std::result::Result<AffectedRows, Self::Error> {
         unimplemented!()
     }

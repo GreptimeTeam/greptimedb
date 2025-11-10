@@ -25,14 +25,16 @@ use async_trait::async_trait;
 use common_base::Plugins;
 use common_catalog::consts::is_readonly_schema;
 use common_error::ext::BoxedError;
+use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
+use datafusion::catalog::TableFunction;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::ResolvedTableReference;
 use datafusion_expr::{
     AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WriteOp,
@@ -41,15 +43,15 @@ use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
 use futures_util::StreamExt;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
-use table::requests::{DeleteRequest, InsertRequest};
 use table::TableRef;
+use table::requests::{DeleteRequest, InsertRequest};
 
 use crate::analyze::DistAnalyzeExec;
 use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
-use crate::dist_plan::MergeScanLogicalPlan;
+use crate::dist_plan::{DistPlannerOptions, MergeScanLogicalPlan};
 use crate::error::{
     CatalogSnafu, ConvertSchemaSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
     MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
@@ -60,11 +62,14 @@ use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
-use crate::{metrics, QueryEngine};
+use crate::{QueryEngine, metrics};
 
 /// Query parallelism hint key.
 /// This hint can be set in the query context to control the parallelism of the query execution.
 pub const QUERY_PARALLELISM_HINT: &str = "query_parallelism";
+
+/// Whether to fallback to the original plan when failed to push down.
+pub const QUERY_FALLBACK_HINT: &str = "query_fallback";
 
 pub struct DatafusionQueryEngine {
     state: Arc<QueryEngineState>,
@@ -187,7 +192,7 @@ impl DatafusionQueryEngine {
             .timestamp_column()
             .map(|x| &x.name)
             .with_context(|| MissingTimestampColumnSnafu {
-                table_name: table_name.to_string(),
+                table_name: table_name.clone(),
             })?;
 
         let table_info = table.table_info();
@@ -269,6 +274,37 @@ impl DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        /// Only print context on panic, to avoid cluttering logs.
+        ///
+        /// TODO(discord9): remove this once we catch the bug
+        #[derive(Debug)]
+        struct PanicLogger<'a> {
+            input_logical_plan: &'a LogicalPlan,
+            after_analyze: Option<LogicalPlan>,
+            after_optimize: Option<LogicalPlan>,
+            phy_plan: Option<Arc<dyn ExecutionPlan>>,
+        }
+        impl Drop for PanicLogger<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    common_telemetry::error!(
+                        "Panic while creating physical plan, input logical plan: {:?}, after analyze: {:?}, after optimize: {:?}, final physical plan: {:?}",
+                        self.input_logical_plan,
+                        self.after_analyze,
+                        self.after_optimize,
+                        self.phy_plan
+                    );
+                }
+            }
+        }
+
+        let mut logger = PanicLogger {
+            input_logical_plan: logical_plan,
+            after_analyze: None,
+            after_optimize: None,
+            phy_plan: None,
+        };
+
         let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
         let state = ctx.state();
 
@@ -292,6 +328,8 @@ impl DatafusionQueryEngine {
             .map_err(BoxedError::new)
             .context(QueryExecutionSnafu)?;
 
+        logger.after_analyze = Some(analyzed_plan.clone());
+
         common_telemetry::debug!("Create physical plan, analyzed plan: {analyzed_plan}");
 
         // skip optimize for MergeScan
@@ -309,12 +347,15 @@ impl DatafusionQueryEngine {
         };
 
         common_telemetry::debug!("Create physical plan, optimized plan: {optimized_plan}");
+        logger.after_optimize = Some(optimized_plan.clone());
 
         let physical_plan = state
             .query_planner()
             .create_physical_plan(&optimized_plan, state)
             .await?;
 
+        logger.phy_plan = Some(physical_plan.clone());
+        drop(logger);
         Ok(physical_plan)
     }
 
@@ -469,6 +510,10 @@ impl QueryEngine for DatafusionQueryEngine {
         self.state.register_scalar_function(func);
     }
 
+    fn register_table_function(&self, func: Arc<TableFunction>) {
+        self.state.register_table_function(func);
+    }
+
     fn read_table(&self, table: TableRef) -> Result<DataFrame> {
         Ok(DataFrame::DataFusion(
             self.state
@@ -497,6 +542,49 @@ impl QueryEngine for DatafusionQueryEngine {
                 );
             }
         }
+
+        // configure execution options
+        state.config_mut().options_mut().execution.time_zone = query_ctx.timezone().to_string();
+
+        // usually it's impossible to have both `set variable` set by sql client and
+        // hint in header by grpc client, so only need to deal with them separately
+        if query_ctx.configuration_parameter().allow_query_fallback() {
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(DistPlannerOptions {
+                    allow_query_fallback: true,
+                });
+        } else if let Some(fallback) = query_ctx.extension(QUERY_FALLBACK_HINT) {
+            // also check the query context for fallback hint
+            // if it is set, we will enable the fallback
+            if fallback.to_lowercase().parse::<bool>().unwrap_or(false) {
+                state
+                    .config_mut()
+                    .options_mut()
+                    .extensions
+                    .insert(DistPlannerOptions {
+                        allow_query_fallback: true,
+                    });
+            }
+        }
+
+        state
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(FunctionContext {
+                query_ctx: query_ctx.clone(),
+                state: self.engine_state().function_state(),
+            });
+
+        let config_options = state.config_options().clone();
+        let _ = state
+            .execution_props_mut()
+            .config_options
+            .insert(config_options);
+
         QueryEngineContext::new(state, query_ctx)
     }
 
@@ -512,6 +600,12 @@ impl QueryExecutor for DatafusionQueryEngine {
         ctx: &QueryEngineContext,
         plan: &Arc<dyn ExecutionPlan>,
     ) -> Result<SendableRecordBatchStream> {
+        let explain_verbose = ctx.query_ctx().explain_verbose();
+        let output_partitions = plan.properties().output_partitioning().partition_count();
+        if explain_verbose {
+            common_telemetry::info!("Executing query plan, output_partitions: {output_partitions}");
+        }
+
         let exec_timer = metrics::EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
 
@@ -535,9 +629,15 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
-                stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
+                stream.set_explain_verbose(explain_verbose);
                 let stream = OnDone::new(Box::pin(stream), move || {
-                    exec_timer.observe_duration();
+                    let exec_cost = exec_timer.stop_and_record();
+                    if explain_verbose {
+                        common_telemetry::info!(
+                            "DatafusionQueryEngine execute 1 stream, cost: {:?}s",
+                            exec_cost,
+                        );
+                    }
                 });
                 Ok(Box::pin(stream))
             }
@@ -564,7 +664,13 @@ impl QueryExecutor for DatafusionQueryEngine {
                 stream.set_metrics2(plan.clone());
                 stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
                 let stream = OnDone::new(Box::pin(stream), move || {
-                    exec_timer.observe_duration();
+                    let exec_cost = exec_timer.stop_and_record();
+                    if explain_verbose {
+                        common_telemetry::info!(
+                            "DatafusionQueryEngine execute {output_partitions} stream, cost: {:?}s",
+                            exec_cost
+                        );
+                    }
                 });
                 Ok(Box::pin(stream))
             }
@@ -584,7 +690,7 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::{Helper, UInt32Vector, UInt64Vector, VectorRef};
     use session::context::{QueryContext, QueryContextBuilder};
-    use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
+    use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
 
     use super::*;
     use crate::options::QueryOptions;
@@ -739,6 +845,9 @@ mod tests {
                 true
             )
         );
-        assert_eq!("Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[sum(CAST(numbers.number AS UInt64))]]\n    TableScan: numbers projection=[number]", format!("{}", logical_plan.display_indent()));
+        assert_eq!(
+            "Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[sum(CAST(numbers.number AS UInt64))]]\n    TableScan: numbers projection=[number]",
+            format!("{}", logical_plan.display_indent())
+        );
     }
 }

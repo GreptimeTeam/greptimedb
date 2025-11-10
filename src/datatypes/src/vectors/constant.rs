@@ -17,7 +17,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, UInt32Array};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result, SerializeSnafu};
@@ -52,7 +52,7 @@ impl ConstantVector {
     }
 
     /// Returns the constant value.
-    pub fn get_constant_ref(&self) -> ValueRef {
+    pub fn get_constant_ref(&self) -> ValueRef<'_> {
         self.vector.get_ref(0)
     }
 
@@ -105,7 +105,9 @@ impl ConstantVector {
         )
         .unwrap()
         {
-            panic!("Array index out of bounds, cannot take index out of the length of the array: {len}");
+            panic!(
+                "Array index out of bounds, cannot take index out of the length of the array: {len}"
+            );
         }
 
         Ok(Arc::new(ConstantVector::new(
@@ -177,16 +179,12 @@ impl Vector for ConstantVector {
         self.vector.get(0)
     }
 
-    fn get_ref(&self, _index: usize) -> ValueRef {
+    fn get_ref(&self, _index: usize) -> ValueRef<'_> {
         self.vector.get_ref(0)
     }
 
     fn null_count(&self) -> usize {
-        if self.only_null() {
-            self.len()
-        } else {
-            0
-        }
+        if self.only_null() { self.len() } else { 0 }
     }
 }
 

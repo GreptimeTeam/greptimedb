@@ -23,22 +23,22 @@ use datatypes::timestamp::TimestampMillisecond;
 use datatypes::vectors::{TimestampMillisecondVectorBuilder, VectorRef};
 use itertools::Itertools;
 use prost::Message;
+use query::QueryEngine;
 use query::options::QueryOptions;
 use query::parser::QueryLanguageParser;
 use query::query_engine::DefaultSerializer;
-use query::QueryEngine;
 use session::context::QueryContext;
 /// note here we are using the `substrait_proto_df` crate from the `substrait` module and
 /// rename it to `substrait_proto`
 use substrait::substrait_proto_df as substrait_proto;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use substrait_proto::proto;
-use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
+use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
 use table::test_util::MemTable;
 
+use crate::adapter::FlownodeContext;
 use crate::adapter::node_context::IdToNameMap;
 use crate::adapter::table_source::test::FlowDummyTableSource;
-use crate::adapter::FlownodeContext;
 use crate::df_optimizer::apply_df_optimizer;
 use crate::expr::GlobalId;
 use crate::transform::register_function_to_query_engine;
@@ -172,7 +172,9 @@ pub async fn sql_to_substrait(engine: Arc<dyn QueryEngine>, sql: &str) -> proto:
         .plan(&stmt, QueryContext::arc())
         .await
         .unwrap();
-    let plan = apply_df_optimizer(plan).await.unwrap();
+    let plan = apply_df_optimizer(plan, &QueryContext::arc())
+        .await
+        .unwrap();
 
     // encode then decode so to rely on the impl of conversion from logical plan to substrait plan
     let bytes = DFLogicalSubstraitConvertor {}

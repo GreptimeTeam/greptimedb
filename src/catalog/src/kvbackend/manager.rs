@@ -18,19 +18,19 @@ use std::sync::{Arc, Weak};
 
 use async_stream::try_stream;
 use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
-    PG_CATALOG_NAME,
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
 };
 use common_error::ext::BoxedError;
 use common_meta::cache::{
-    LayeredCacheRegistryRef, TableRoute, TableRouteCacheRef, ViewInfoCacheRef,
+    LayeredCacheRegistryRef, TableInfoCacheRef, TableNameCacheRef, TableRoute, TableRouteCacheRef,
+    ViewInfoCacheRef,
 };
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::table_name::TableNameKey;
-use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
 use futures_util::stream::BoxStream;
@@ -40,14 +40,15 @@ use partition::manager::PartitionRuleManagerRef;
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
-use table::dist_table::DistTable;
-use table::metadata::TableId;
-use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
-use table::table_name::TableName;
 use table::TableRef;
+use table::dist_table::DistTable;
+use table::metadata::{TableId, TableInfoRef};
+use table::table::PartitionRules;
+use table::table_name::TableName;
 use tokio::sync::Semaphore;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::CatalogManager;
 use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
     ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
@@ -57,9 +58,9 @@ use crate::information_schema::InformationSchemaTableFactoryRef;
 use crate::information_schema::{InformationExtensionRef, InformationSchemaProvider};
 use crate::kvbackend::TableCacheRef;
 use crate::process_manager::ProcessManagerRef;
-use crate::system_schema::pg_catalog::PGCatalogProvider;
 use crate::system_schema::SystemSchemaProvider;
-use crate::CatalogManager;
+use crate::system_schema::numbers_table_provider::NumbersTableProvider;
+use crate::system_schema::pg_catalog::PGCatalogProvider;
 
 /// Access all existing catalog, schema and tables.
 ///
@@ -131,6 +132,8 @@ impl KvBackendCatalogManager {
         {
             let mut new_table_info = (*table.table_info()).clone();
 
+            let mut phy_part_cols_not_in_logical_table = vec![];
+
             // Remap partition key indices from physical table to logical table
             new_table_info.meta.partition_key_indices = physical_table_info_value
                 .table_info
@@ -147,15 +150,30 @@ impl KvBackendCatalogManager {
                         .get(physical_index)
                         .and_then(|physical_column| {
                             // Find the corresponding index in the logical table schema
-                            new_table_info
+                            let idx = new_table_info
                                 .meta
                                 .schema
-                                .column_index_by_name(physical_column.name.as_str())
+                                .column_index_by_name(physical_column.name.as_str());
+                            if idx.is_none() {
+                                // not all part columns in physical table that are also in logical table
+                                phy_part_cols_not_in_logical_table
+                                    .push(physical_column.name.clone());
+                            }
+
+                            idx
                         })
                 })
                 .collect();
 
-            let new_table = DistTable::table(Arc::new(new_table_info));
+            let partition_rules = if !phy_part_cols_not_in_logical_table.is_empty() {
+                Some(PartitionRules {
+                    extra_phy_cols_not_in_logical_table: phy_part_cols_not_in_logical_table,
+                })
+            } else {
+                None
+            };
+
+            let new_table = DistTable::table_partitioned(Arc::new(new_table_info), partition_rules);
 
             return Ok(new_table);
         }
@@ -325,6 +343,63 @@ impl CatalogManager for KvBackendCatalogManager {
         Ok(None)
     }
 
+    async fn table_id(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Result<Option<TableId>> {
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
+        if let Some(table) =
+            self.system_catalog
+                .table(catalog_name, schema_name, table_name, query_ctx)
+        {
+            return Ok(Some(table.table_info().table_id()));
+        }
+
+        let table_cache: TableNameCacheRef =
+            self.cache_registry.get().context(CacheNotFoundSnafu {
+                name: "table_name_cache",
+            })?;
+
+        let table = table_cache
+            .get_by_ref(&TableName {
+                catalog_name: catalog_name.to_string(),
+                schema_name: schema_name.to_string(),
+                table_name: table_name.to_string(),
+            })
+            .await
+            .context(GetTableCacheSnafu)?;
+
+        if let Some(table) = table {
+            return Ok(Some(table));
+        }
+
+        if channel == Channel::Postgres {
+            // falldown to pg_catalog
+            if let Some(table) =
+                self.system_catalog
+                    .table(catalog_name, PG_CATALOG_NAME, table_name, query_ctx)
+            {
+                return Ok(Some(table.table_info().table_id()));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn table_info_by_id(&self, table_id: TableId) -> Result<Option<TableInfoRef>> {
+        let table_info_cache: TableInfoCacheRef =
+            self.cache_registry.get().context(CacheNotFoundSnafu {
+                name: "table_info_cache",
+            })?;
+        table_info_cache
+            .get_by_ref(&table_id)
+            .await
+            .context(GetTableCacheSnafu)
+    }
+
     async fn tables_by_ids(
         &self,
         catalog: &str,
@@ -479,6 +554,7 @@ pub(super) struct SystemCatalog {
     // system_schema_provider for default catalog
     pub(super) information_schema_provider: Arc<InformationSchemaProvider>,
     pub(super) pg_catalog_provider: Arc<PGCatalogProvider>,
+    pub(super) numbers_table_provider: NumbersTableProvider,
     pub(super) backend: KvBackendRef,
     pub(super) process_manager: Option<ProcessManagerRef>,
     #[cfg(feature = "enterprise")]
@@ -508,9 +584,7 @@ impl SystemCatalog {
             PG_CATALOG_NAME if channel == Channel::Postgres => {
                 self.pg_catalog_provider.table_names()
             }
-            DEFAULT_SCHEMA_NAME => {
-                vec![NUMBERS_TABLE_NAME.to_string()]
-            }
+            DEFAULT_SCHEMA_NAME => self.numbers_table_provider.table_names(),
             _ => vec![],
         }
     }
@@ -528,7 +602,7 @@ impl SystemCatalog {
         if schema == INFORMATION_SCHEMA_NAME {
             self.information_schema_provider.table(table).is_some()
         } else if schema == DEFAULT_SCHEMA_NAME {
-            table == NUMBERS_TABLE_NAME
+            self.numbers_table_provider.table_exists(table)
         } else if schema == PG_CATALOG_NAME && channel == Channel::Postgres {
             self.pg_catalog_provider.table(table).is_some()
         } else {
@@ -573,8 +647,8 @@ impl SystemCatalog {
                     });
                 pg_catalog_provider.table(table_name)
             }
-        } else if schema == DEFAULT_SCHEMA_NAME && table_name == NUMBERS_TABLE_NAME {
-            Some(NumbersTable::table(NUMBERS_TABLE_ID))
+        } else if schema == DEFAULT_SCHEMA_NAME {
+            self.numbers_table_provider.table(table_name)
         } else {
             None
         }

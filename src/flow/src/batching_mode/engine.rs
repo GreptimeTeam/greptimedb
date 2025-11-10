@@ -16,32 +16,39 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
-use api::v1::flow::{DirtyWindowRequests, FlowResponse};
+use api::v1::flow::DirtyWindowRequests;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
-use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
 use common_time::TimeToLive;
+use datafusion_common::tree_node::{TreeNodeRecursion, TreeNodeVisitor};
+use datafusion_expr::LogicalPlan;
+use datatypes::prelude::ConcreteDataType;
 use query::QueryEngineRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use session::context::QueryContext;
+use snafu::{OptionExt, ResultExt, ensure};
+use sql::parsers::utils::is_tql;
 use store_api::storage::{RegionId, TableId};
-use tokio::sync::{oneshot, RwLock};
+use table::table_reference::TableReference;
+use tokio::sync::{RwLock, oneshot};
 
+use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::task::{BatchingTask, TaskArgs};
-use crate::batching_mode::time_window::{find_time_window_expr, TimeWindowExpr};
+use crate::batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
 use crate::batching_mode::utils::sql_to_df_plan;
-use crate::batching_mode::BatchingModeOptions;
 use crate::engine::FlowEngine;
 use crate::error::{
-    ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu, TableNotFoundMetaSnafu,
-    UnexpectedSnafu, UnsupportedSnafu,
+    CreateFlowSnafu, DatafusionSnafu, ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu,
+    InvalidQuerySnafu, TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::metrics::METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW;
 use crate::{CreateFlowArgs, Error, FlowId, TableName};
@@ -87,7 +94,7 @@ impl BatchingEngine {
     pub async fn handle_mark_dirty_time_window(
         &self,
         reqs: DirtyWindowRequests,
-    ) -> Result<FlowResponse, Error> {
+    ) -> Result<(), Error> {
         let table_info_mgr = self.table_meta.table_info_manager();
 
         let mut group_by_table_id: HashMap<u32, Vec<_>> = HashMap::new();
@@ -149,9 +156,11 @@ impl BatchingEngine {
             let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                 let src_table_names = &task.config.source_table_names;
                 let mut all_dirty_windows = HashSet::new();
+                let mut is_dirty = false;
                 for src_table_name in src_table_names {
                     if let Some((timestamps, unit)) = group_by_table_name.get(src_table_name) {
                         let Some(expr) = &task.config.time_window_expr else {
+                            is_dirty = true;
                             continue;
                         };
                         for timestamp in timestamps {
@@ -166,6 +175,9 @@ impl BatchingEngine {
                     }
                 }
                 let mut state = task.state.write().unwrap();
+                if is_dirty {
+                    state.dirty_time_windows.set_dirty();
+                }
                 let flow_id_label = task.config.flow_id.to_string();
                 for timestamp in all_dirty_windows {
                     state.dirty_time_windows.add_window(timestamp, None);
@@ -191,7 +203,7 @@ impl BatchingEngine {
             }
         }
 
-        Ok(Default::default())
+        Ok(())
     }
 
     pub async fn handle_inserts_inner(
@@ -225,8 +237,7 @@ impl BatchingEngine {
         if !missing_tids.is_empty() {
             warn!(
                 "Failed to get all the table info for table ids, expected table ids: {:?}, those table doesn't exist: {:?}",
-                tids,
-                missing_tids
+                tids, missing_tids
             );
         }
 
@@ -267,9 +278,12 @@ impl BatchingEngine {
             let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                 let src_table_names = &task.config.source_table_names;
 
+                let mut is_dirty = false;
+
                 for src_table_name in src_table_names {
                     if let Some(entry) = group_by_table_name.get(src_table_name) {
                         let Some(expr) = &task.config.time_window_expr else {
+                            is_dirty = true;
                             continue;
                         };
                         let involved_time_windows = expr.handle_rows(entry.clone()).await?;
@@ -279,6 +293,10 @@ impl BatchingEngine {
                             .add_lower_bounds(involved_time_windows.into_iter());
                     }
                 }
+                if is_dirty {
+                    task.state.write().unwrap().dirty_time_windows.set_dirty();
+                }
+
                 Ok(())
             });
             handles.push(handle);
@@ -335,6 +353,7 @@ impl BatchingEngine {
             create_if_not_exists,
             or_replace,
             expire_after,
+            eval_interval,
             comment: _,
             sql,
             flow_options,
@@ -361,6 +380,24 @@ impl BatchingEngine {
             }
         }
 
+        let query_ctx = query_ctx.context({
+            UnexpectedSnafu {
+                reason: "Query context is None".to_string(),
+            }
+        })?;
+        let query_ctx = Arc::new(query_ctx);
+        let is_tql = is_tql(query_ctx.sql_dialect(), &sql)
+            .map_err(BoxedError::new)
+            .context(CreateFlowSnafu { sql: &sql })?;
+
+        // optionally set a eval interval for the flow
+        if eval_interval.is_none() && is_tql {
+            InvalidQuerySnafu {
+                reason: "TQL query requires EVAL INTERVAL to be set".to_string(),
+            }
+            .fail()?;
+        }
+
         let flow_type = flow_options.get(FlowType::FLOW_TYPE_KEY);
 
         ensure!(
@@ -374,13 +411,6 @@ impl BatchingEngine {
             }
         );
 
-        let Some(query_ctx) = query_ctx else {
-            UnexpectedSnafu {
-                reason: "Query context is None".to_string(),
-            }
-            .fail()?
-        };
-        let query_ctx = Arc::new(query_ctx);
         let mut source_table_names = Vec::with_capacity(2);
         for src_id in source_table_ids {
             // also check table option to see if ttl!=instant
@@ -403,6 +433,11 @@ impl BatchingEngine {
         let (tx, rx) = oneshot::channel();
 
         let plan = sql_to_df_plan(query_ctx.clone(), self.query_engine.clone(), &sql, true).await?;
+
+        if is_tql {
+            self.check_is_tql_table(&plan, &query_ctx).await?;
+        }
+
         let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
             &plan,
             self.query_engine.engine_state().catalog_manager().clone(),
@@ -442,6 +477,7 @@ impl BatchingEngine {
             catalog_manager: self.catalog_manager.clone(),
             shutdown_rx: rx,
             batch_opts: self.batch_opts.clone(),
+            flow_eval_interval: eval_interval.map(|secs| Duration::from_secs(secs as u64)),
         };
 
         let task = BatchingTask::try_new(task_args)?;
@@ -468,6 +504,128 @@ impl BatchingEngine {
         Ok(Some(flow_id))
     }
 
+    async fn check_is_tql_table(
+        &self,
+        query: &LogicalPlan,
+        query_ctx: &QueryContext,
+    ) -> Result<(), Error> {
+        struct CollectTableRef {
+            table_refs: HashSet<datafusion_common::TableReference>,
+        }
+
+        impl TreeNodeVisitor<'_> for CollectTableRef {
+            type Node = LogicalPlan;
+            fn f_down(
+                &mut self,
+                node: &Self::Node,
+            ) -> datafusion_common::Result<TreeNodeRecursion> {
+                if let LogicalPlan::TableScan(scan) = node {
+                    self.table_refs.insert(scan.table_name.clone());
+                }
+                Ok(TreeNodeRecursion::Continue)
+            }
+        }
+        let mut table_refs = CollectTableRef {
+            table_refs: HashSet::new(),
+        };
+        query
+            .visit_with_subqueries(&mut table_refs)
+            .context(DatafusionSnafu {
+                context: "Checking if all source tables are TQL tables",
+            })?;
+
+        let default_catalog = query_ctx.current_catalog();
+        let default_schema = query_ctx.current_schema();
+        let default_schema = &default_schema;
+
+        for table_ref in table_refs.table_refs {
+            let table_ref = match &table_ref {
+                datafusion_common::TableReference::Bare { table } => {
+                    TableReference::full(default_catalog, default_schema, table)
+                }
+                datafusion_common::TableReference::Partial { schema, table } => {
+                    TableReference::full(default_catalog, schema, table)
+                }
+                datafusion_common::TableReference::Full {
+                    catalog,
+                    schema,
+                    table,
+                } => TableReference::full(catalog, schema, table),
+            };
+
+            let table_id = self
+                .table_meta
+                .table_name_manager()
+                .get(table_ref.into())
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .with_context(|| UnexpectedSnafu {
+                    reason: format!("Failed to get table id for table: {}", table_ref),
+                })?
+                .table_id();
+            let table_info =
+                get_table_info(self.table_meta.table_info_manager(), &table_id).await?;
+            // first check if it's only one f64 value column
+            let value_cols = table_info
+                .table_info
+                .meta
+                .schema
+                .column_schemas
+                .iter()
+                .filter(|col| col.data_type == ConcreteDataType::float64_datatype())
+                .collect::<Vec<_>>();
+            ensure!(
+                value_cols.len() == 1,
+                InvalidQuerySnafu {
+                    reason: format!(
+                        "TQL query only supports one f64 value column, table `{}`(id={}) has {} f64 value columns, columns are: {:?}",
+                        table_ref,
+                        table_id,
+                        value_cols.len(),
+                        value_cols
+                    ),
+                }
+            );
+            // TODO(discord9): do need to check rest columns is string and is tag column?
+            let pk_idxs = table_info
+                .table_info
+                .meta
+                .primary_key_indices
+                .iter()
+                .collect::<HashSet<_>>();
+
+            for (idx, col) in table_info
+                .table_info
+                .meta
+                .schema
+                .column_schemas
+                .iter()
+                .enumerate()
+            {
+                // three cases:
+                // 1. val column
+                // 2. timestamp column
+                // 3. tag column (string)
+
+                let is_pk: bool = pk_idxs.contains(&&idx);
+
+                ensure!(
+                    col.data_type == ConcreteDataType::float64_datatype()
+                        || col.data_type.is_timestamp()
+                        || (col.data_type == ConcreteDataType::string_datatype() && is_pk),
+                    InvalidQuerySnafu {
+                        reason: format!(
+                            "TQL query only supports f64 value column, timestamp column and string tag columns, table `{}`(id={}) has column `{}` with type {:?} which is not supported",
+                            table_ref, table_id, col.name, col.data_type
+                        ),
+                    }
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub async fn remove_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
         if self.tasks.write().await.remove(&flow_id).is_none() {
             warn!("Flow {flow_id} not found in tasks");
@@ -480,7 +638,9 @@ impl BatchingEngine {
             .fail()?
         };
         if tx.send(()).is_err() {
-            warn!("Fail to shutdown flow {flow_id} due to receiver already dropped, maybe flow {flow_id} is already dropped?")
+            warn!(
+                "Fail to shutdown flow {flow_id} due to receiver already dropped, maybe flow {flow_id} is already dropped?"
+            )
         }
         Ok(())
     }
@@ -553,5 +713,11 @@ impl FlowEngine for BatchingEngine {
         request: api::v1::region::InsertRequests,
     ) -> Result<(), Error> {
         self.handle_inserts_inner(request).await
+    }
+    async fn handle_mark_window_dirty(
+        &self,
+        req: api::v1::flow::DirtyWindowRequests,
+    ) -> Result<(), Error> {
+        self.handle_mark_dirty_time_window(req).await
     }
 }

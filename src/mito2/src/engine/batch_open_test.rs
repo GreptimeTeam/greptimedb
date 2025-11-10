@@ -18,7 +18,7 @@ use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
-use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
+use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use rstest::rstest;
 use rstest_reuse::apply;
 use store_api::region_engine::RegionEngine;
@@ -28,13 +28,18 @@ use store_api::storage::{RegionId, ScanRequest};
 use super::MitoEngine;
 use crate::config::MitoConfig;
 use crate::test_util::{
-    build_rows, kafka_log_store_factory, multiple_log_store_factories,
-    prepare_test_for_kafka_log_store, put_rows, raft_engine_log_store_factory, rows_schema,
-    CreateRequestBuilder, LogStoreFactory, TestEnv,
+    CreateRequestBuilder, LogStoreFactory, TestEnv, build_rows, kafka_log_store_factory,
+    multiple_log_store_factories, prepare_test_for_kafka_log_store, put_rows,
+    raft_engine_log_store_factory, rows_schema,
 };
 
 #[apply(multiple_log_store_factories)]
 async fn test_batch_open(factory: Option<LogStoreFactory>) {
+    test_batch_open_with_format(factory.clone(), false).await;
+    test_batch_open_with_format(factory, true).await;
+}
+
+async fn test_batch_open_with_format(factory: Option<LogStoreFactory>, flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let Some(factory) = factory else {
         return;
@@ -42,7 +47,12 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
     let mut env = TestEnv::with_prefix("open-batch-regions")
         .await
         .with_log_store_factory(factory.clone());
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
     let topic = prepare_test_for_kafka_log_store(&factory).await;
 
     let num_regions = 3u32;
@@ -109,7 +119,7 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
             serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             }))
             .unwrap(),
         );
@@ -125,6 +135,7 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
                     options: options.clone(),
                     skip_wal_replay: false,
                     path_type: PathType::Bare,
+                    checkpoint: None,
                 },
             )
         })
@@ -137,11 +148,20 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
             options: options.clone(),
             skip_wal_replay: false,
             path_type: PathType::Bare,
+            checkpoint: None,
         },
     ));
 
     // Reopen engine.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     let mut results = engine
         .handle_batch_open_requests(4, requests)
         .await
@@ -159,6 +179,11 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
 
 #[apply(multiple_log_store_factories)]
 async fn test_batch_open_err(factory: Option<LogStoreFactory>) {
+    test_batch_open_err_with_format(factory.clone(), false).await;
+    test_batch_open_err_with_format(factory, true).await;
+}
+
+async fn test_batch_open_err_with_format(factory: Option<LogStoreFactory>, flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let Some(factory) = factory else {
         return;
@@ -166,14 +191,19 @@ async fn test_batch_open_err(factory: Option<LogStoreFactory>) {
     let mut env = TestEnv::with_prefix("open-batch-regions-err")
         .await
         .with_log_store_factory(factory.clone());
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
     let topic = prepare_test_for_kafka_log_store(&factory).await;
     let mut options = HashMap::new();
     if let Some(topic) = &topic {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
             serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             }))
             .unwrap(),
         );
@@ -186,10 +216,11 @@ async fn test_batch_open_err(factory: Option<LogStoreFactory>) {
                 RegionId::new(1, id),
                 RegionOpenRequest {
                     engine: String::new(),
-                    table_dir: table_dir.to_string(),
+                    table_dir: table_dir.clone(),
                     options: options.clone(),
                     skip_wal_replay: false,
                     path_type: PathType::Bare,
+                    checkpoint: None,
                 },
             )
         })

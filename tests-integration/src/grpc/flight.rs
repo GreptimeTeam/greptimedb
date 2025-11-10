@@ -40,7 +40,7 @@ mod test {
 
     use crate::cluster::GreptimeDbClusterBuilder;
     use crate::grpc::query_and_expect;
-    use crate::test_util::{setup_grpc_server, StorageType};
+    use crate::test_util::{StorageType, setup_grpc_server};
     use crate::tests::test_util::MockInstance;
 
     #[tokio::test(flavor = "multi_thread")]
@@ -83,16 +83,13 @@ mod test {
 
         let db = GreptimeDbClusterBuilder::new("test_distributed_flight_do_put")
             .await
-            .build()
+            .build(false)
             .await;
 
         let runtime = common_runtime::global_runtime().clone();
         let greptime_request_handler = GreptimeRequestHandler::new(
             ServerGrpcQueryHandlerAdapter::arc(db.frontend.instance.clone()),
-            user_provider_from_option(
-                &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
-            )
-            .ok(),
+            user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").ok(),
             Some(runtime.clone()),
             FlightCompression::default(),
         );

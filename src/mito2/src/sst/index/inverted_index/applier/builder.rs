@@ -27,6 +27,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use index::inverted_index::search::index_apply::PredicatesIndexApplier;
 use index::inverted_index::search::predicate::Predicate;
+use index::target::IndexTarget;
 use mito_codec::index::IndexValueCodec;
 use mito_codec::row_converter::SortField;
 use object_store::ObjectStore;
@@ -139,8 +140,13 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         let predicates = self
             .output
             .iter()
-            .map(|(column_id, predicates)| (column_id.to_string(), predicates.clone()))
-            .collect();
+            .map(|(column_id, predicates)| {
+                (
+                    format!("{}", IndexTarget::ColumnId(*column_id)),
+                    predicates.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
         let applier = PredicatesIndexApplier::try_from(predicates);
 
         Ok(Some(
@@ -220,7 +226,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
     /// Helper function to get a non-null literal.
     fn nonnull_lit(expr: &Expr) -> Option<&ScalarValue> {
         match expr {
-            Expr::Literal(lit) if !lit.is_null() => Some(lit),
+            Expr::Literal(lit, _) if !lit.is_null() => Some(lit),
             _ => None,
         }
     }
@@ -248,14 +254,14 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
 mod tests {
     use api::v1::SemanticType;
     use datafusion_common::Column;
-    use datafusion_expr::Between;
+    use datafusion_expr::{Between, Literal};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use index::inverted_index::search::predicate::{
         Bound, Range, RangePredicate, RegexMatchPredicate,
     };
-    use object_store::services::Memory;
     use object_store::ObjectStore;
+    use object_store::services::Memory;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
@@ -313,11 +319,11 @@ mod tests {
     }
 
     pub(crate) fn string_lit(s: impl Into<String>) -> Expr {
-        Expr::Literal(ScalarValue::Utf8(Some(s.into())))
+        s.into().lit()
     }
 
     pub(crate) fn int64_lit(i: impl Into<i64>) -> Expr {
-        Expr::Literal(ScalarValue::Int64(Some(i.into())))
+        i.into().lit()
     }
 
     pub(crate) fn encoded_string(s: impl Into<String>) -> Vec<u8> {
@@ -344,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_collect_and_basic() {
-        let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_collect_and_basic_");
+        let (_d, factory) = PuffinManagerFactory::new_for_test_block("test_collect_and_basic_");
 
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
@@ -353,7 +359,7 @@ mod tests {
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         let expr = Expr::BinaryExpr(BinaryExpr {

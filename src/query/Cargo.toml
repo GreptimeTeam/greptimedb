@@ -54,6 +54,7 @@ meter-core.workspace = true
 meter-macros.workspace = true
 object-store.workspace = true
 once_cell.workspace = true
+parking_lot.workspace = true
 partition.workspace = true
 prometheus.workspace = true
 promql.workspace = true
@@ -86,10 +87,9 @@ nalgebra.workspace = true
 num = "0.4"
 num-traits = "0.2"
 paste.workspace = true
-pretty_assertions = "1.4.0"
+pretty_assertions.workspace = true
 rand.workspace = true
 session = { workspace = true, features = ["testing"] }
-statrs = "0.16"
 store-api.workspace = true
 table = { workspace = true, features = ["testing"] }
 tokio-stream.workspace = true

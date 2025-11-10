@@ -17,10 +17,11 @@ use std::fmt;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, NullArray};
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
+use crate::prelude::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::NullType;
 use crate::value::{Value, ValueRef};
@@ -106,9 +107,24 @@ impl Vector for NullVector {
         Value::Null
     }
 
-    fn get_ref(&self, _index: usize) -> ValueRef {
+    fn get_ref(&self, _index: usize) -> ValueRef<'_> {
         // Skips bound check for null array.
         ValueRef::Null
+    }
+}
+
+impl ScalarVector for NullVector {
+    type OwnedItem = ();
+    type RefItem<'a> = ();
+    type Iter<'a> = NullIter<'a>;
+    type Builder = NullVectorBuilder;
+
+    fn get_data(&self, _idx: usize) -> Option<Self::RefItem<'_>> {
+        Some(())
+    }
+
+    fn iter_data(&self) -> Self::Iter<'_> {
+        NullIter::new(self)
     }
 }
 
@@ -125,6 +141,30 @@ impl Serializable for NullVector {
 }
 
 vectors::impl_try_from_arrow_array_for_vector!(NullArray, NullVector);
+
+pub struct NullIter<'a> {
+    vector: &'a NullVector,
+    index: usize,
+}
+
+impl<'a> NullIter<'a> {
+    pub fn new(vector: &'a NullVector) -> Self {
+        NullIter { vector, index: 0 }
+    }
+}
+
+impl<'a> Iterator for NullIter<'a> {
+    type Item = Option<()>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.vector.len() {
+            self.index += 1;
+            Some(Some(()))
+        } else {
+            None
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct NullVectorBuilder {
@@ -158,7 +198,7 @@ impl MutableVector for NullVectorBuilder {
         Arc::new(NullVector::new(self.length))
     }
 
-    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
         ensure!(
             value.is_null(),
             error::CastTypeSnafu {
@@ -194,6 +234,29 @@ impl MutableVector for NullVectorBuilder {
 
     fn push_null(&mut self) {
         self.length += 1;
+    }
+}
+
+impl ScalarVectorBuilder for NullVectorBuilder {
+    type VectorType = NullVector;
+
+    fn with_capacity(_capacity: usize) -> Self {
+        Self::default()
+    }
+
+    fn push(&mut self, _value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
+        self.length += 1;
+    }
+
+    fn finish(&mut self) -> Self::VectorType {
+        let result = NullVector::new(self.length);
+
+        self.length = 0;
+        result
+    }
+
+    fn finish_cloned(&self) -> Self::VectorType {
+        NullVector::new(self.length)
     }
 }
 
@@ -265,13 +328,15 @@ mod tests {
     fn test_null_vector_builder() {
         let mut builder = NullType.create_mutable_vector(3);
         builder.push_null();
-        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
+        assert!(builder.try_push_value_ref(&ValueRef::Int32(123)).is_err());
 
         let input = NullVector::new(3);
         builder.extend_slice_of(&input, 1, 2).unwrap();
-        assert!(builder
-            .extend_slice_of(&crate::vectors::Int32Vector::from_slice([13]), 0, 1)
-            .is_err());
+        assert!(
+            builder
+                .extend_slice_of(&crate::vectors::Int32Vector::from_slice([13]), 0, 1)
+                .is_err()
+        );
         let vector = builder.to_vector();
 
         let expect: VectorRef = Arc::new(input);

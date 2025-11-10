@@ -16,12 +16,13 @@ use std::collections::HashSet;
 
 use api::v1::SemanticType;
 use arrow_schema::SortOptions;
+use common_function::aggrs::aggr_wrapper::aggr_state_func_name;
 use common_recordbatch::OrderOption;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{Column, Result};
 use datafusion_expr::expr::Sort;
-use datafusion_expr::{utils, Expr, LogicalPlan};
+use datafusion_expr::{Expr, LogicalPlan, utils};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
@@ -217,13 +218,17 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
                     is_all_last_value = false;
                     break;
                 };
-                if func.func.name() != "last_value" || func.filter.is_some() || func.distinct {
+                if (func.func.name() != "last_value"
+                    && func.func.name() != aggr_state_func_name("last_value"))
+                    || func.params.filter.is_some()
+                    || func.params.distinct
+                {
                     is_all_last_value = false;
                     break;
                 }
                 // check order by requirement
-                if let Some(order_by) = &func.order_by
-                    && let Some(first_order_by) = order_by.first()
+                let order_by = &func.params.order_by;
+                if let Some(first_order_by) = order_by.first()
                     && order_by.len() == 1
                 {
                     if let Some(existing_order_by) = &order_by_expr {
@@ -298,8 +303,8 @@ mod test {
     use std::sync::Arc;
 
     use datafusion::functions_aggregate::first_last::last_value_udaf;
-    use datafusion_expr::expr::AggregateFunction;
-    use datafusion_expr::{col, LogicalPlanBuilder};
+    use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
+    use datafusion_expr::{LogicalPlanBuilder, col};
     use datafusion_optimizer::OptimizerContext;
     use store_api::storage::RegionId;
 
@@ -320,7 +325,6 @@ mod test {
             .unwrap();
 
         let context = OptimizerContext::default();
-        assert!(ScanHintRule.supports_rewrite());
         ScanHintRule.rewrite(plan, &context).unwrap();
 
         // should read the first (with `.sort(true, false)`) sort option
@@ -347,15 +351,17 @@ mod test {
                 vec![col("k0")],
                 vec![Expr::AggregateFunction(AggregateFunction {
                     func: last_value_udaf(),
-                    args: vec![col("v0")],
-                    distinct: false,
-                    filter: None,
-                    order_by: Some(vec![Sort {
-                        expr: col("ts"),
-                        asc: true,
-                        nulls_first: true,
-                    }]),
-                    null_treatment: None,
+                    params: AggregateFunctionParams {
+                        args: vec![col("v0")],
+                        distinct: false,
+                        filter: None,
+                        order_by: vec![Sort {
+                            expr: col("ts"),
+                            asc: true,
+                            nulls_first: true,
+                        }],
+                        null_treatment: None,
+                    },
                 })],
             )
             .unwrap()
@@ -363,7 +369,6 @@ mod test {
             .unwrap();
 
         let context = OptimizerContext::default();
-        assert!(ScanHintRule.supports_rewrite());
         ScanHintRule.rewrite(plan, &context).unwrap();
 
         let scan_req = provider.scan_request();

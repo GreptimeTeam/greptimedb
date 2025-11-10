@@ -24,15 +24,16 @@ mod shard_builder;
 mod tree;
 
 use std::fmt;
-use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
 use common_base::readable_size::ReadableSize;
+use common_stat::get_total_memory_readable;
 use mito_codec::key_values::KeyValue;
-use mito_codec::row_converter::{build_primary_key_codec, PrimaryKeyCodec};
+use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{Result, UnsupportedOperationSnafu};
@@ -41,9 +42,9 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::partition_tree::tree::PartitionTree;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableBuilder,
-    MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
-    PredicateGroup,
+    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable,
+    MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
+    MemtableStats, RangesOptions,
 };
 use crate::region::options::MergeMode;
 
@@ -91,9 +92,9 @@ pub struct PartitionTreeConfig {
 impl Default for PartitionTreeConfig {
     fn default() -> Self {
         let mut fork_dictionary_bytes = ReadableSize::mb(512);
-        if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+        if let Some(total_memory) = get_total_memory_readable() {
             let adjust_dictionary_bytes =
-                std::cmp::min(sys_memory / DICTIONARY_SIZE_FACTOR, fork_dictionary_bytes);
+                std::cmp::min(total_memory / DICTIONARY_SIZE_FACTOR, fork_dictionary_bytes);
             if adjust_dictionary_bytes.0 > 0 {
                 fork_dictionary_bytes = adjust_dictionary_bytes;
             }
@@ -181,17 +182,18 @@ impl Memtable for PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator> {
-        self.tree.read(projection, predicate, sequence)
+        self.tree.read(projection, predicate, sequence, None)
     }
 
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
+        options: RangesOptions,
     ) -> Result<MemtableRanges> {
+        let predicate = options.predicate;
+        let sequence = options.sequence;
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {
             tree: self.tree.clone(),
@@ -313,9 +315,9 @@ impl PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator> {
-        self.tree.read(projection, predicate, sequence)
+        self.tree.read(projection, predicate, sequence, None)
     }
 }
 
@@ -350,21 +352,26 @@ impl MemtableBuilder for PartitionTreeMemtableBuilder {
             &self.config,
         ))
     }
+
+    fn use_bulk_insert(&self, _metadata: &RegionMetadataRef) -> bool {
+        false
+    }
 }
 
 struct PartitionTreeIterBuilder {
     tree: Arc<PartitionTree>,
     projection: Option<Vec<ColumnId>>,
     predicate: Option<Predicate>,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
 }
 
 impl IterBuilder for PartitionTreeIterBuilder {
-    fn build(&self) -> Result<BoxedBatchIterator> {
+    fn build(&self, metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
         self.tree.read(
             self.projection.as_deref(),
             self.predicate.clone(),
             self.sequence,
+            metrics,
         )
     }
 }
@@ -372,12 +379,15 @@ impl IterBuilder for PartitionTreeIterBuilder {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
+    use api::v1::helper::{field_column_schema, row, tag_column_schema, time_index_column_schema};
     use api::v1::value::ValueData;
-    use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
+    use api::v1::{Mutation, OpType, Rows, SemanticType};
+    use common_query::prelude::{greptime_timestamp, greptime_value};
     use common_time::Timestamp;
-    use datafusion_common::{Column, ScalarValue};
-    use datafusion_expr::{BinaryExpr, Expr, Operator};
+    use datafusion_common::Column;
+    use datafusion_expr::{BinaryExpr, Expr, Literal, Operator};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::prelude::Vector;
     use datatypes::scalars::ScalarVector;
@@ -401,9 +411,9 @@ mod tests {
 
     fn write_iter_sorted_input(has_pk: bool) {
         let metadata = if has_pk {
-            memtable_util::metadata_with_primary_key(vec![1, 0], true)
+            Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true))
         } else {
-            memtable_util::metadata_with_primary_key(vec![], false)
+            Arc::new(memtable_util::metadata_with_primary_key(vec![], false))
         };
         let timestamps = (0..100).collect::<Vec<_>>();
         let kvs =
@@ -420,7 +430,13 @@ mod tests {
 
         let expected_ts = kvs
             .iter()
-            .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
+            .map(|kv| {
+                kv.timestamp()
+                    .try_into_timestamp()
+                    .unwrap()
+                    .unwrap()
+                    .value()
+            })
             .collect::<Vec<_>>();
 
         let iter = memtable.iter(None, None, None).unwrap();
@@ -446,9 +462,9 @@ mod tests {
 
     fn write_iter_unsorted_input(has_pk: bool) {
         let metadata = if has_pk {
-            memtable_util::metadata_with_primary_key(vec![1, 0], true)
+            Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true))
         } else {
-            memtable_util::metadata_with_primary_key(vec![], false)
+            Arc::new(memtable_util::metadata_with_primary_key(vec![], false))
         };
         let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
         let memtable = PartitionTreeMemtable::new(
@@ -511,9 +527,9 @@ mod tests {
 
     fn write_iter_projection(has_pk: bool) {
         let metadata = if has_pk {
-            memtable_util::metadata_with_primary_key(vec![1, 0], true)
+            Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true))
         } else {
-            memtable_util::metadata_with_primary_key(vec![], false)
+            Arc::new(memtable_util::metadata_with_primary_key(vec![], false))
         };
         // Try to build a memtable via the builder.
         let memtable = PartitionTreeMemtableBuilder::new(PartitionTreeConfig::default(), None)
@@ -551,7 +567,7 @@ mod tests {
     }
 
     fn write_iter_multi_keys(max_keys: usize, freeze_threshold: usize) {
-        let metadata = memtable_util::metadata_with_primary_key(vec![1, 0], true);
+        let metadata = Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true));
         let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
         let memtable = PartitionTreeMemtable::new(
             1,
@@ -601,7 +617,7 @@ mod tests {
 
     #[test]
     fn test_memtable_filter() {
-        let metadata = memtable_util::metadata_with_primary_key(vec![0, 1], false);
+        let metadata = Arc::new(memtable_util::metadata_with_primary_key(vec![0, 1], false));
         // Try to build a memtable via the builder.
         let memtable = PartitionTreeMemtableBuilder::new(
             PartitionTreeConfig {
@@ -624,7 +640,7 @@ mod tests {
             let expr = Expr::BinaryExpr(BinaryExpr {
                 left: Box::new(Expr::Column(Column::from_name("k1"))),
                 op: Operator::Eq,
-                right: Box::new(Expr::Literal(ScalarValue::UInt32(Some(i)))),
+                right: Box::new((i as u32).lit()),
             });
             let iter = memtable
                 .iter(None, Some(Predicate::new(vec![expr])), None)
@@ -679,7 +695,7 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "greptime_timestamp",
+                    greptime_timestamp(),
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     false,
                 ),
@@ -688,7 +704,7 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "greptime_value",
+                    greptime_value(),
                     ConcreteDataType::float64_datatype(),
                     true,
                 ),
@@ -717,24 +733,14 @@ mod tests {
             .zip(ts_id.iter())
             .zip(labels.iter())
             .zip(values.iter())
-            .map(|((((ts, table_id), ts_id), label), val)| Row {
-                values: vec![
-                    api::v1::Value {
-                        value_data: Some(ValueData::U32Value(*table_id)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::U64Value(*ts_id)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::StringValue(label.to_string())),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::TimestampMillisecondValue(*ts)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::F64Value(*val)),
-                    },
-                ],
+            .map(|((((ts, table_id), ts_id), label), val)| {
+                row(vec![
+                    ValueData::U32Value(*table_id),
+                    ValueData::U64Value(*ts_id),
+                    ValueData::StringValue(label.to_string()),
+                    ValueData::TimestampMillisecondValue(*ts),
+                    ValueData::F64Value(*val),
+                ])
             })
             .collect();
         let mutation = api::v1::Mutation {
@@ -834,24 +840,9 @@ mod tests {
 
     fn kv_column_schemas() -> Vec<api::v1::ColumnSchema> {
         vec![
-            api::v1::ColumnSchema {
-                column_name: "ts".to_string(),
-                datatype: api::v1::ColumnDataType::TimestampMillisecond as i32,
-                semantic_type: SemanticType::Timestamp as i32,
-                ..Default::default()
-            },
-            api::v1::ColumnSchema {
-                column_name: "k".to_string(),
-                datatype: api::v1::ColumnDataType::String as i32,
-                semantic_type: SemanticType::Tag as i32,
-                ..Default::default()
-            },
-            api::v1::ColumnSchema {
-                column_name: "v".to_string(),
-                datatype: api::v1::ColumnDataType::String as i32,
-                semantic_type: SemanticType::Field as i32,
-                ..Default::default()
-            },
+            time_index_column_schema("ts", api::v1::ColumnDataType::TimestampMillisecond),
+            tag_column_schema("k", api::v1::ColumnDataType::String),
+            field_column_schema("v", api::v1::ColumnDataType::String),
         ]
     }
 
@@ -860,18 +851,12 @@ mod tests {
         keys: impl Iterator<Item = T>,
     ) -> KeyValues {
         let rows = keys
-            .map(|c| Row {
-                values: vec![
-                    api::v1::Value {
-                        value_data: Some(ValueData::TimestampMillisecondValue(0)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::StringValue(c.as_ref().to_string())),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::StringValue(c.as_ref().to_string())),
-                    },
-                ],
+            .map(|c| {
+                row(vec![
+                    ValueData::TimestampMillisecondValue(0),
+                    ValueData::StringValue(c.as_ref().to_string()),
+                    ValueData::StringValue(c.as_ref().to_string()),
+                ])
             })
             .collect();
         let mutation = Mutation {

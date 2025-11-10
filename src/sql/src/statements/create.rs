@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
+use datatypes::json::JsonStructureSettings;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use itertools::Itertools;
 use serde::Serialize;
@@ -25,16 +26,24 @@ use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
 use crate::error::{
-    InvalidFlowQuerySnafu, Result, SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
+    InvalidFlowQuerySnafu, InvalidSqlSnafu, Result, SetFulltextOptionSnafu,
+    SetSkippingIndexOptionSnafu,
 };
+use crate::statements::OptionMap;
 use crate::statements::statement::Statement;
 use crate::statements::tql::Tql;
-use crate::statements::OptionMap;
+use crate::util::OptionValue;
 
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";
 const INDENT: usize = 2;
 pub const VECTOR_OPT_DIM: &str = "dim";
+
+pub const JSON_OPT_UNSTRUCTURED_KEYS: &str = "unstructured_keys";
+pub const JSON_OPT_FORMAT: &str = "format";
+pub const JSON_FORMAT_FULL_STRUCTURED: &str = "structured";
+pub const JSON_FORMAT_RAW: &str = "raw";
+pub const JSON_FORMAT_PARTIAL: &str = "partial";
 
 macro_rules! format_indent {
     ($fmt: expr, $arg: expr) => {
@@ -124,6 +133,7 @@ pub struct ColumnExtensions {
     ///
     /// Inverted index doesn't have options at present. There won't be any options in that map.
     pub inverted_index_options: Option<OptionMap>,
+    pub json_datatype_options: Option<OptionMap>,
 }
 
 impl Column {
@@ -150,14 +160,27 @@ impl Column {
 
 impl Display for Column {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if let Some(vector_options) = &self.extensions.vector_options {
-            if let Some(dim) = vector_options.get(VECTOR_OPT_DIM) {
-                write!(f, "{} VECTOR({})", self.column_def.name, dim)?;
-                return Ok(());
-            }
+        if let Some(vector_options) = &self.extensions.vector_options
+            && let Some(dim) = vector_options.get(VECTOR_OPT_DIM)
+        {
+            write!(f, "{} VECTOR({})", self.column_def.name, dim)?;
+            return Ok(());
         }
 
-        write!(f, "{}", self.column_def)?;
+        write!(f, "{} {}", self.column_def.name, self.column_def.data_type)?;
+        if let Some(options) = &self.extensions.json_datatype_options {
+            write!(
+                f,
+                "({})",
+                options
+                    .entries()
+                    .map(|(k, v)| format!("{k} = {v}"))
+                    .join(COMMA_SEP)
+            )?;
+        }
+        for option in &self.column_def.options {
+            write!(f, " {option}")?;
+        }
 
         if let Some(fulltext_options) = &self.extensions.fulltext_index_options {
             if !fulltext_options.is_empty() {
@@ -208,6 +231,67 @@ impl ColumnExtensions {
         Ok(Some(
             options.try_into().context(SetSkippingIndexOptionSnafu)?,
         ))
+    }
+
+    pub fn build_json_structure_settings(&self) -> Result<Option<JsonStructureSettings>> {
+        let Some(options) = self.json_datatype_options.as_ref() else {
+            return Ok(None);
+        };
+
+        let unstructured_keys = options
+            .value(JSON_OPT_UNSTRUCTURED_KEYS)
+            .and_then(|v| {
+                v.as_list().map(|x| {
+                    x.into_iter()
+                        .map(|x| x.to_string())
+                        .collect::<HashSet<String>>()
+                })
+            })
+            .unwrap_or_default();
+
+        options
+            .get(JSON_OPT_FORMAT)
+            .map(|format| match format {
+                JSON_FORMAT_FULL_STRUCTURED => Ok(JsonStructureSettings::Structured(None)),
+                JSON_FORMAT_PARTIAL => Ok(JsonStructureSettings::PartialUnstructuredByKey {
+                    fields: None,
+                    unstructured_keys,
+                }),
+                JSON_FORMAT_RAW => Ok(JsonStructureSettings::UnstructuredRaw),
+                _ => InvalidSqlSnafu {
+                    msg: format!("unknown JSON datatype 'format': {format}"),
+                }
+                .fail(),
+            })
+            .transpose()
+    }
+
+    pub fn set_json_structure_settings(&mut self, settings: JsonStructureSettings) {
+        let mut map = OptionMap::default();
+
+        let format = match settings {
+            JsonStructureSettings::Structured(_) => JSON_FORMAT_FULL_STRUCTURED,
+            JsonStructureSettings::PartialUnstructuredByKey { .. } => JSON_FORMAT_PARTIAL,
+            JsonStructureSettings::UnstructuredRaw => JSON_FORMAT_RAW,
+        };
+        map.insert(JSON_OPT_FORMAT.to_string(), format.to_string());
+
+        if let JsonStructureSettings::PartialUnstructuredByKey {
+            fields: _,
+            unstructured_keys,
+        } = settings
+        {
+            let value = OptionValue::from(
+                unstructured_keys
+                    .iter()
+                    .map(|x| x.as_str())
+                    .sorted()
+                    .collect::<Vec<_>>(),
+            );
+            map.insert_options(JSON_OPT_UNSTRUCTURED_KEYS, value);
+        }
+
+        self.json_datatype_options = Some(map);
     }
 }
 
@@ -383,6 +467,10 @@ pub struct CreateFlow {
     /// `EXPIRE AFTER`
     /// Duration in second as `i64`
     pub expire_after: Option<i64>,
+    /// Duration for flow evaluation interval
+    /// Duration in seconds as `i64`
+    /// If not set, flow will be evaluated based on time window size and other args.
+    pub eval_interval: Option<i64>,
     /// Comment string
     pub comment: Option<String>,
     /// SQL statement
@@ -436,7 +524,10 @@ impl Display for CreateFlow {
         writeln!(f, "{}", &self.flow_name)?;
         writeln!(f, "SINK TO {}", &self.sink_table_name)?;
         if let Some(expire_after) = &self.expire_after {
-            writeln!(f, "EXPIRE AFTER {} ", expire_after)?;
+            writeln!(f, "EXPIRE AFTER '{} s'", expire_after)?;
+        }
+        if let Some(eval_interval) = &self.eval_interval {
+            writeln!(f, "EVAL INTERVAL '{} s'", eval_interval)?;
         }
         if let Some(comment) = &self.comment {
             writeln!(f, "COMMENT '{}'", comment)?;

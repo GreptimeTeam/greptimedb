@@ -23,6 +23,14 @@ backend = "etcd_store"
 ## **Only used when backend is `postgres_store`.**
 meta_table_name = "greptime_metakv"
 
+## Optional PostgreSQL schema for metadata table and election table name qualification.
+## When PostgreSQL public schema is not writable (e.g., PostgreSQL 15+ with restricted public),
+## set this to a writable schema. GreptimeDB will use `meta_schema_name`.`meta_table_name`.
+## GreptimeDB will NOT create the schema automatically; please ensure it exists or the user has permission.
+## **Only used when backend is `postgres_store`.**
+
+meta_schema_name = "greptime_schema"
+
 ## Advisory lock id in PostgreSQL for election. Effect when using PostgreSQL as kvbackend
 ## Only used when backend is `postgres_store`.
 meta_election_lock_id = 1
@@ -64,6 +72,34 @@ node_max_idle_time = "24hours"
 #+ global_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
+
+## TLS configuration for kv store backend (applicable for etcd, PostgreSQL, and MySQL backends)
+## When using etcd, PostgreSQL, or MySQL as metadata store, you can configure TLS here
+[backend_tls]
+## TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html
+## - "disable" - No TLS
+## - "prefer" (default) - Try TLS, fallback to plain
+## - "require" - Require TLS
+## - "verify_ca" - Require TLS and verify CA
+## - "verify_full" - Require TLS and verify hostname
+mode = "prefer"
+
+## Path to client certificate file (for client authentication)
+## Like "/path/to/client.crt"
+cert_path = ""
+
+## Path to client private key file (for client authentication)
+## Like "/path/to/client.key"
+key_path = ""
+
+## Path to CA certificate file (for server certificate verification)
+## Required when using custom CAs or self-signed certificates
+## Leave empty to use system root certificates only
+## Like "/path/to/ca.crt"
+ca_cert_path = ""
+
+## Watch for certificate file changes and auto reload
+watch = false
 
 ## The gRPC server options.
 [grpc]
@@ -113,19 +149,17 @@ max_metadata_value_size = "1500KiB"
 max_running_procedures = 128
 
 # Failure detectors options.
+# GreptimeDB uses the Phi Accrual Failure Detector algorithm to detect datanode failures.
 [failure_detector]
-
-## The threshold value used by the failure detector to determine failure conditions.
+## Maximum acceptable φ before the peer is treated as failed.
+## Lower values react faster but yield more false positives.
 threshold = 8.0
-
-## The minimum standard deviation of the heartbeat intervals, used to calculate acceptable variations.
+## The minimum standard deviation of the heartbeat intervals.
+## So tiny variations don’t make φ explode. Prevents hypersensitivity when heartbeat intervals barely vary.
 min_std_deviation = "100ms"
-
-## The acceptable pause duration between heartbeats, used to determine if a heartbeat interval is acceptable.
+## The acceptable pause duration between heartbeats.
+## Additional extra grace period to the learned mean interval before φ rises, absorbing temporary network hiccups or GC pauses.
 acceptable_heartbeat_pause = "10000ms"
-
-## The initial estimate of the heartbeat interval used by the failure detector.
-first_heartbeat_estimate = "1000ms"
 
 ## Datanode options.
 [datanode]
@@ -148,50 +182,69 @@ tcp_nodelay = true
 # - `kafka`: metasrv **have to be** configured with kafka wal config when using kafka wal provider in datanode.
 provider = "raft_engine"
 
-# Kafka wal config.
-
 ## The broker endpoints of the Kafka cluster.
+##
+## **It's only used when the provider is `kafka`**.
 broker_endpoints = ["127.0.0.1:9092"]
 
 ## Automatically create topics for WAL.
 ## Set to `true` to automatically create topics for WAL.
 ## Otherwise, use topics named `topic_name_prefix_[0..num_topics)`
+## **It's only used when the provider is `kafka`**.
 auto_create_topics = true
 
 ## Interval of automatically WAL pruning.
 ## Set to `0s` to disable automatically WAL pruning which delete unused remote WAL entries periodically.
-auto_prune_interval = "0s"
+## **It's only used when the provider is `kafka`**.
+auto_prune_interval = "30m"
 
-## The threshold to trigger a flush operation of a region in automatically WAL pruning.
-## Metasrv will send a flush request to flush the region when:
-## `trigger_flush_threshold` + `prunable_entry_id` < `max_prunable_entry_id`
-## where:
-## - `prunable_entry_id` is the maximum entry id that can be pruned of the region.
-## - `max_prunable_entry_id` is the maximum prunable entry id among all regions in the same topic.
-## Set to `0` to disable the flush operation.
-trigger_flush_threshold = 0
+
+## Estimated size threshold to trigger a flush when using Kafka remote WAL.
+## Since multiple regions may share a Kafka topic, the estimated size is calculated as:
+##   (latest_entry_id - flushed_entry_id) * avg_record_size
+## MetaSrv triggers a flush for a region when this estimated size exceeds `flush_trigger_size`.
+## - `latest_entry_id`: The latest entry ID in the topic.
+## - `flushed_entry_id`: The last flushed entry ID for the region.
+## Set to "0" to let the system decide the flush trigger size.
+## **It's only used when the provider is `kafka`**.
+flush_trigger_size = "512MB"
+
+## Estimated size threshold to trigger a checkpoint when using Kafka remote WAL.
+## The estimated size is calculated as:
+##   (latest_entry_id - last_checkpoint_entry_id) * avg_record_size
+## MetaSrv triggers a checkpoint for a region when this estimated size exceeds `checkpoint_trigger_size`.
+## Set to "0" to let the system decide the checkpoint trigger size.
+## **It's only used when the provider is `kafka`**.
+checkpoint_trigger_size = "128MB"
 
 ## Concurrent task limit for automatically WAL pruning.
+## **It's only used when the provider is `kafka`**.
 auto_prune_parallelism = 10
 
-## Number of topics.
+## Number of topics used for remote WAL.
+## **It's only used when the provider is `kafka`**.
 num_topics = 64
 
 ## Topic selector type.
 ## Available selector types:
 ## - `round_robin` (default)
+## **It's only used when the provider is `kafka`**.
 selector_type = "round_robin"
+
 
 ## A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.
 ## Only accepts strings that match the following regular expression pattern:
 ## [a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*
 ## i.g., greptimedb_wal_topic_0, greptimedb_wal_topic_1.
+## **It's only used when the provider is `kafka`**.
 topic_name_prefix = "greptimedb_wal_topic"
 
 ## Expected number of replicas of each partition.
+## **It's only used when the provider is `kafka`**.
 replication_factor = 1
 
-## Above which a topic creation operation will be cancelled.
+## The timeout for creating a Kafka topic.
+## **It's only used when the provider is `kafka`**.
 create_topic_timeout = "30s"
 
 # The Kafka SASL configuration.
@@ -212,6 +265,23 @@ create_topic_timeout = "30s"
 # client_cert_path = "/path/to/client_cert"
 # client_key_path = "/path/to/key"
 
+## Configuration options for the event recorder.
+[event_recorder]
+## TTL for the events table that will be used to store the events. Default is `90d`.
+ttl = "90d"
+
+## Configuration options for the stats persistence.
+[stats_persistence]
+## TTL for the stats table that will be used to store the stats.
+## Set to `0s` to disable stats persistence.
+## Default is `0s`.
+## If you want to enable stats persistence, set the TTL to a value greater than 0.
+## It is recommended to set a small value, e.g., `3h`.
+ttl = "0s"
+## The interval to persist the stats. Default is `10m`.
+## The minimum value is `10m`, if the value is less than `10m`, it will be overridden to `10m`.
+interval = "10m"
+
 ## The logging options.
 [logging]
 ## The directory to store the log files. If set to empty, logs will not be written to files.
@@ -225,7 +295,7 @@ level = "info"
 enable_otlp_tracing = false
 
 ## The OTLP tracing endpoint.
-otlp_endpoint = "http://localhost:4318"
+otlp_endpoint = "http://localhost:4318/v1/traces"
 
 ## Whether to append logs to stdout.
 append_stdout = true
@@ -238,6 +308,14 @@ max_log_files = 720
 
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.
 otlp_export_protocol = "http"
+
+## Additional OTLP headers, only valid when using OTLP http
+[logging.otlp_headers]
+## @toml2docs:none-default
+#Authorization = "Bearer my-token"
+## @toml2docs:none-default
+#Database = "My database"
+
 
 ## The percentage of tracing will be sampled and exported.
 ## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.
@@ -265,3 +343,11 @@ headers = { }
 ## The tokio console address.
 ## @toml2docs:none-default
 #+ tokio_console_addr = "127.0.0.1"
+
+## The memory options.
+[memory]
+## Whether to enable heap profiling activation during startup.
+## When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable
+## is set to "prof:true,prof_active:false". The official image adds this env variable.
+## Default is true.
+enable_heap_profiling = true

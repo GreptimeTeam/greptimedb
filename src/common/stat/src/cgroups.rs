@@ -19,17 +19,19 @@ use std::path::Path;
 
 #[cfg(target_os = "linux")]
 use nix::sys::{statfs, statfs::statfs};
-
-/// `MAX_VALUE` is used to indicate that the resource is unlimited.
-pub const MAX_VALUE: i64 = -1;
+use prometheus::core::{Collector, Desc};
+use prometheus::proto::MetricFamily;
+use prometheus::{IntGauge, Opts};
 
 const CGROUP_UNIFIED_MOUNTPOINT: &str = "/sys/fs/cgroup";
 
 const MEMORY_MAX_FILE_CGROUP_V2: &str = "memory.max";
 const MEMORY_MAX_FILE_CGROUP_V1: &str = "memory.limit_in_bytes";
+const MEMORY_USAGE_FILE_CGROUP_V2: &str = "memory.current";
 const CPU_MAX_FILE_CGROUP_V2: &str = "cpu.max";
 const CPU_QUOTA_FILE_CGROUP_V1: &str = "cpu.cfs_quota_us";
 const CPU_PERIOD_FILE_CGROUP_V1: &str = "cpu.cfs_period_us";
+const CPU_USAGE_FILE_CGROUP_V2: &str = "cpu.stat";
 
 // `MAX_VALUE_CGROUP_V2` string in `/sys/fs/cgroup/cpu.max` and `/sys/fs/cgroup/memory.max` to indicate that the resource is unlimited.
 const MAX_VALUE_CGROUP_V2: &str = "max";
@@ -38,11 +40,11 @@ const MAX_VALUE_CGROUP_V2: &str = "max";
 // For easier comparison, if the memory limit is larger than 1PB we consider it as unlimited.
 const MAX_MEMORY_IN_BYTES: i64 = 1125899906842624; // 1PB
 
-/// Get the limit of memory in bytes.
+/// Get the limit of memory in bytes from cgroups filesystem.
 ///
-/// - If the memory is unlimited, return `-1`.
+/// - If the cgroup total memory is unset, return `None`.
 /// - Return `None` if it fails to read the memory limit or not on linux.
-pub fn get_memory_limit() -> Option<i64> {
+pub fn get_memory_limit_from_cgroups() -> Option<i64> {
     #[cfg(target_os = "linux")]
     {
         let memory_max_file = if is_cgroup_v2()? {
@@ -53,13 +55,13 @@ pub fn get_memory_limit() -> Option<i64> {
             MEMORY_MAX_FILE_CGROUP_V1
         };
 
-        // For cgroup v1, it will return a very large value(different from platform) if the memory is unlimited.
+        // For cgroup v1, it will return a very large value(different from platform) if the memory is unset.
         let memory_limit =
             read_value_from_file(Path::new(CGROUP_UNIFIED_MOUNTPOINT).join(memory_max_file))?;
 
-        // If memory limit exceeds 1PB(cgroup v1), consider it as unlimited.
+        // If memory limit exceeds 1PB(cgroup v1), consider it as unset.
         if memory_limit > MAX_MEMORY_IN_BYTES {
-            return Some(MAX_VALUE);
+            return None;
         }
         Some(memory_limit)
     }
@@ -68,11 +70,31 @@ pub fn get_memory_limit() -> Option<i64> {
     None
 }
 
-/// Get the limit of cpu in millicores.
+/// Get the usage of memory in bytes from cgroups filesystem.
 ///
-/// - If the cpu is unlimited, return `-1`.
+/// - Return `None` if it fails to read the memory usage or not on linux or cgroup is v1.
+pub fn get_memory_usage_from_cgroups() -> Option<i64> {
+    #[cfg(target_os = "linux")]
+    {
+        if is_cgroup_v2()? {
+            let usage = read_value_from_file(
+                Path::new(CGROUP_UNIFIED_MOUNTPOINT).join(MEMORY_USAGE_FILE_CGROUP_V2),
+            )?;
+            Some(usage)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
+/// Get the limit of cpu in millicores from cgroups filesystem.
+///
+/// - If the cpu limit is unset, return `None`.
 /// - Return `None` if it fails to read the cpu limit or not on linux.
-pub fn get_cpu_limit() -> Option<i64> {
+pub fn get_cpu_limit_from_cgroups() -> Option<i64> {
     #[cfg(target_os = "linux")]
     if is_cgroup_v2()? {
         // Read `/sys/fs/cgroup/cpu.max` to get the cpu limit.
@@ -82,10 +104,6 @@ pub fn get_cpu_limit() -> Option<i64> {
         let quota = read_value_from_file(
             Path::new(CGROUP_UNIFIED_MOUNTPOINT).join(CPU_QUOTA_FILE_CGROUP_V1),
         )?;
-
-        if quota == MAX_VALUE {
-            return Some(MAX_VALUE);
-        }
 
         let period = read_value_from_file(
             Path::new(CGROUP_UNIFIED_MOUNTPOINT).join(CPU_PERIOD_FILE_CGROUP_V1),
@@ -97,6 +115,50 @@ pub fn get_cpu_limit() -> Option<i64> {
 
     #[cfg(not(target_os = "linux"))]
     None
+}
+
+/// Get the usage of cpu in millicores from cgroups filesystem.
+///
+/// - Return `None` if it's not in the cgroups v2 environment or fails to read the cpu usage.
+pub fn get_cpu_usage_from_cgroups() -> Option<i64> {
+    // In certain bare-metal environments, the `/sys/fs/cgroup/cpu.stat` file may be present and reflect system-wide CPU usage rather than container-specific metrics.
+    // To ensure accurate collection of container-level CPU usage, verify the existence of the `/sys/fs/cgroup/memory.current` file.
+    // The presence of this file typically indicates execution within a containerized environment, thereby validating the relevance of the collected CPU usage data.
+    if !Path::new(CGROUP_UNIFIED_MOUNTPOINT)
+        .join(MEMORY_USAGE_FILE_CGROUP_V2)
+        .exists()
+    {
+        return None;
+    }
+
+    // Read `/sys/fs/cgroup/cpu.stat` to get `usage_usec`.
+    let content =
+        read_to_string(Path::new(CGROUP_UNIFIED_MOUNTPOINT).join(CPU_USAGE_FILE_CGROUP_V2)).ok()?;
+
+    // Read the first line of the content. It will be like this: `usage_usec 447926`.
+    let first_line = content.lines().next()?;
+    let fields = first_line.split(' ').collect::<Vec<&str>>();
+    if fields.len() != 2 {
+        return None;
+    }
+
+    fields[1].trim().parse::<i64>().ok()
+}
+
+// Calculate the cpu usage in millicores from cgroups filesystem.
+//
+// - Return `0` if the current cpu usage is equal to the last cpu usage or the interval is 0.
+pub(crate) fn calculate_cpu_usage(
+    current_cpu_usage_usecs: i64,
+    last_cpu_usage_usecs: i64,
+    interval_milliseconds: i64,
+) -> i64 {
+    let diff = current_cpu_usage_usecs - last_cpu_usage_usecs;
+    if diff > 0 && interval_milliseconds > 0 {
+        ((diff as f64 / interval_milliseconds as f64).round() as i64).max(1)
+    } else {
+        0
+    }
 }
 
 // Check whether the cgroup is v2.
@@ -117,9 +179,9 @@ fn is_cgroup_v2() -> Option<bool> {
 fn read_value_from_file<P: AsRef<Path>>(path: P) -> Option<i64> {
     let content = read_to_string(&path).ok()?;
 
-    // If the content starts with "max", return `MAX_VALUE`.
+    // If the content starts with "max", return `None`.
     if content.starts_with(MAX_VALUE_CGROUP_V2) {
-        return Some(MAX_VALUE);
+        return None;
     }
 
     content.trim().parse::<i64>().ok()
@@ -133,10 +195,10 @@ fn get_cgroup_v2_cpu_limit<P: AsRef<Path>>(path: P) -> Option<i64> {
         return None;
     }
 
-    // If the cpu is unlimited, it will be `-1`.
+    // If the cgroup cpu limit is unset, return `None`.
     let quota = fields[0].trim();
     if quota == MAX_VALUE_CGROUP_V2 {
-        return Some(MAX_VALUE);
+        return None;
     }
 
     let quota = quota.parse::<i64>().ok()?;
@@ -146,6 +208,60 @@ fn get_cgroup_v2_cpu_limit<P: AsRef<Path>>(path: P) -> Option<i64> {
 
     // Return the cpu limit in millicores.
     Some(quota * 1000 / period)
+}
+
+/// A collector that collects cgroups metrics.
+#[derive(Debug)]
+pub struct CgroupsMetricsCollector {
+    descs: Vec<Desc>,
+    memory_usage: IntGauge,
+    cpu_usage: IntGauge,
+}
+
+impl Default for CgroupsMetricsCollector {
+    fn default() -> Self {
+        let mut descs = vec![];
+        let cpu_usage = IntGauge::with_opts(Opts::new(
+            "greptime_cgroups_cpu_usage_microseconds",
+            "the current cpu usage in microseconds that collected from cgroups filesystem",
+        ))
+        .unwrap();
+        descs.extend(cpu_usage.desc().into_iter().cloned());
+
+        let memory_usage = IntGauge::with_opts(Opts::new(
+            "greptime_cgroups_memory_usage_bytes",
+            "the current memory usage that collected from cgroups filesystem",
+        ))
+        .unwrap();
+        descs.extend(memory_usage.desc().into_iter().cloned());
+
+        Self {
+            descs,
+            memory_usage,
+            cpu_usage,
+        }
+    }
+}
+
+impl Collector for CgroupsMetricsCollector {
+    fn desc(&self) -> Vec<&Desc> {
+        self.descs.iter().collect()
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        if let Some(cpu_usage) = get_cpu_usage_from_cgroups() {
+            self.cpu_usage.set(cpu_usage);
+        }
+
+        if let Some(memory_usage) = get_memory_usage_from_cgroups() {
+            self.memory_usage.set(memory_usage);
+        }
+
+        let mut mfs = Vec::with_capacity(self.descs.len());
+        mfs.extend(self.cpu_usage.collect());
+        mfs.extend(self.memory_usage.collect());
+        mfs
+    }
 }
 
 #[cfg(test)]
@@ -159,8 +275,8 @@ mod tests {
             100000
         );
         assert_eq!(
-            read_value_from_file(Path::new("testdata").join("memory.max.unlimited")).unwrap(),
-            MAX_VALUE
+            read_value_from_file(Path::new("testdata").join("memory.max.unlimited")),
+            None
         );
         assert_eq!(read_value_from_file(Path::new("non_existent_file")), None);
     }
@@ -172,8 +288,8 @@ mod tests {
             1500
         );
         assert_eq!(
-            get_cgroup_v2_cpu_limit(Path::new("testdata").join("cpu.max.unlimited")).unwrap(),
-            MAX_VALUE
+            get_cgroup_v2_cpu_limit(Path::new("testdata").join("cpu.max.unlimited")),
+            None
         );
         assert_eq!(
             get_cgroup_v2_cpu_limit(Path::new("non_existent_file")),

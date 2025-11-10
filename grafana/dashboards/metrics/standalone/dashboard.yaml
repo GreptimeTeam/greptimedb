@@ -180,13 +180,18 @@ groups:
         - title: Datanode Memory per Instance
           type: timeseries
           description: Current memory usage by instance
-          unit: decbytes
+          unit: bytes
           queries:
             - expr: sum(process_resident_memory_bytes{}) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{ pod }}]'
+            - expr: max(greptime_memory_limit_in_bytes{})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Datanode CPU Usage per Instance
           type: timeseries
           description: Current cpu usage by instance
@@ -197,16 +202,26 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
+            - expr: max(greptime_cpu_limit_in_millicores{})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Frontend Memory per Instance
           type: timeseries
           description: Current memory usage by instance
-          unit: decbytes
+          unit: bytes
           queries:
             - expr: sum(process_resident_memory_bytes{}) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
+            - expr: max(greptime_memory_limit_in_bytes{})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Frontend CPU Usage per Instance
           type: timeseries
           description: Current cpu usage by instance
@@ -217,16 +232,26 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]-cpu'
+            - expr: max(greptime_cpu_limit_in_millicores{})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Metasrv Memory per Instance
           type: timeseries
           description: Current memory usage by instance
-          unit: decbytes
+          unit: bytes
           queries:
             - expr: sum(process_resident_memory_bytes{}) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]-resident'
+            - expr: max(greptime_memory_limit_in_bytes{})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Metasrv CPU Usage per Instance
           type: timeseries
           description: Current cpu usage by instance
@@ -237,16 +262,26 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
+            - expr: max(greptime_cpu_limit_in_millicores{})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Flownode Memory per Instance
           type: timeseries
           description: Current memory usage by instance
-          unit: decbytes
+          unit: bytes
           queries:
             - expr: sum(process_resident_memory_bytes{}) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
+            - expr: max(greptime_memory_limit_in_bytes{})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Flownode CPU Usage per Instance
           type: timeseries
           description: Current cpu usage by instance
@@ -257,6 +292,11 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
+            - expr: max(greptime_cpu_limit_in_millicores{})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
     - title: Frontend Requests
       panels:
         - title: HTTP QPS per Instance
@@ -642,6 +682,15 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-AVG'
+        - title: Cache Miss
+          type: timeseries
+          description: The local cache miss of the datanode.
+          queries:
+            - expr: sum by (instance,pod, type) (rate(greptime_mito_cache_miss{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]'
     - title: OpenDAL
       panels:
         - title: QPS per Instance
@@ -753,6 +802,48 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]-[{{error}}]'
+    - title: Remote WAL
+      panels:
+        - title: Triggered region flush total
+          type: timeseries
+          description: Triggered region flush total
+          unit: none
+          queries:
+            - expr: meta_triggered_region_flush_total
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}}-{{topic_name}}'
+        - title: Triggered region checkpoint total
+          type: timeseries
+          description: Triggered region checkpoint total
+          unit: none
+          queries:
+            - expr: meta_triggered_region_checkpoint_total
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}}-{{topic_name}}'
+        - title: Topic estimated replay size
+          type: timeseries
+          description: Topic estimated max replay size
+          unit: bytes
+          queries:
+            - expr: meta_topic_estimated_replay_size
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}}-{{topic_name}}'
+        - title: Kafka logstore's bytes traffic
+          type: timeseries
+          description: Kafka logstore's bytes traffic
+          unit: bytes
+          queries:
+            - expr: rate(greptime_logstore_kafka_client_bytes_total[$__rate_interval])
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}}-{{logstore}}'
     - title: Metasrv
       panels:
         - title: Region migration datanode
@@ -899,6 +990,26 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: AlterTable-{{step}} p90
+        - title: Reconciliation stats
+          type: timeseries
+          description: Reconciliation stats
+          unit: s
+          queries:
+            - expr: greptime_meta_reconciliation_stats
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}}-{{table_type}}-{{type}}'
+        - title: Reconciliation steps
+          type: timeseries
+          description: 'Elapsed of Reconciliation steps '
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.9, greptime_meta_reconciliation_procedure_bucket)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{procedure_name}}-{{step}}-P90'
     - title: Flownode
       panels:
         - title: Flow Ingest / Output Rate

@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
 use common_time::Timestamp;
-use datatypes::arrow::array::{BinaryArray, TimestampMillisecondArray, UInt64Array, UInt8Array};
+use datatypes::arrow::array::{BinaryArray, TimestampMillisecondArray, UInt8Array, UInt64Array};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::ValueRef;
@@ -27,11 +27,11 @@ use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 
 use crate::read::{Batch, BatchBuilder, Source};
-use crate::sst::file::{FileHandle, FileId, FileMeta};
-use crate::test_util::{new_batch_builder, new_noop_file_purger, VecBatchReader};
+use crate::sst::file::{FileHandle, FileMeta};
+use crate::test_util::{VecBatchReader, new_batch_builder, new_noop_file_purger};
 
 /// Test region id.
 const REGION_ID: RegionId = RegionId::new(0, 0);
@@ -125,9 +125,12 @@ pub fn sst_file_handle_with_file_id(file_id: FileId, start_ms: i64, end_ms: i64)
             file_size: 0,
             available_indexes: Default::default(),
             index_file_size: 0,
+            index_file_id: None,
             num_rows: 0,
             num_row_groups: 0,
+            num_series: 0,
             sequence: None,
+            partition_expr: None,
         },
         file_purger,
     )

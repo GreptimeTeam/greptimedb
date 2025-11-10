@@ -14,17 +14,18 @@
 
 use std::collections::HashMap;
 
+use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY};
 use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions,
-    SkippingIndexOptions, SkippingIndexType, COMMENT_KEY, FULLTEXT_KEY, INVERTED_INDEX_KEY,
-    SKIPPING_INDEX_KEY,
+    COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema, FULLTEXT_KEY, FulltextAnalyzer,
+    FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY, SkippingIndexOptions,
+    SkippingIndexType,
 };
 use greptime_proto::v1::{
     Analyzer, FulltextBackend as PbFulltextBackend, SkippingIndexType as PbSkippingIndexType,
 };
 use snafu::ResultExt;
 
-use crate::error::{self, Result};
+use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
 use crate::helper::ColumnDataTypeWrapper;
 use crate::v1::{ColumnDef, ColumnOptions, SemanticType};
 
@@ -37,8 +38,10 @@ const SKIPPING_INDEX_GRPC_KEY: &str = "skipping_index";
 
 /// Tries to construct a `ColumnSchema` from the given  `ColumnDef`.
 pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
-    let data_type =
-        ColumnDataTypeWrapper::try_new(column_def.data_type, column_def.datatype_extension)?;
+    let data_type = ColumnDataTypeWrapper::try_new(
+        column_def.data_type,
+        column_def.datatype_extension.clone(),
+    )?;
 
     let constraint = if column_def.default_constraint.is_empty() {
         None
@@ -66,6 +69,15 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         if let Some(skipping_index) = options.options.get(SKIPPING_INDEX_GRPC_KEY) {
             metadata.insert(SKIPPING_INDEX_KEY.to_string(), skipping_index.to_owned());
         }
+        if let Some(extension_name) = options.options.get(EXTENSION_TYPE_NAME_KEY) {
+            metadata.insert(EXTENSION_TYPE_NAME_KEY.to_string(), extension_name.clone());
+        }
+        if let Some(extension_metadata) = options.options.get(EXTENSION_TYPE_METADATA_KEY) {
+            metadata.insert(
+                EXTENSION_TYPE_METADATA_KEY.to_string(),
+                extension_metadata.clone(),
+            );
+        }
     }
 
     ColumnSchema::new(&column_def.name, data_type.into(), column_def.is_nullable)
@@ -75,6 +87,48 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         .context(error::InvalidColumnDefaultConstraintSnafu {
             column: &column_def.name,
         })
+}
+
+/// Tries to construct a `ColumnDef` from the given `ColumnSchema`.
+///
+/// TODO(weny): Add tests for this function.
+pub fn try_as_column_def(column_schema: &ColumnSchema, is_primary_key: bool) -> Result<ColumnDef> {
+    let column_datatype =
+        ColumnDataTypeWrapper::try_from(column_schema.data_type.clone()).map(|w| w.to_parts())?;
+
+    let semantic_type = if column_schema.is_time_index() {
+        SemanticType::Timestamp
+    } else if is_primary_key {
+        SemanticType::Tag
+    } else {
+        SemanticType::Field
+    } as i32;
+    let comment = column_schema
+        .metadata()
+        .get(COMMENT_KEY)
+        .cloned()
+        .unwrap_or_default();
+
+    let default_constraint = match column_schema.default_constraint() {
+        None => vec![],
+        Some(v) => v
+            .clone()
+            .try_into()
+            .context(ConvertColumnDefaultConstraintSnafu {
+                column: &column_schema.name,
+            })?,
+    };
+    let options = options_from_column_schema(column_schema);
+    Ok(ColumnDef {
+        name: column_schema.name.clone(),
+        data_type: column_datatype.0 as i32,
+        is_nullable: column_schema.is_nullable(),
+        default_constraint,
+        semantic_type,
+        comment,
+        datatype_extension: column_datatype.1,
+        options,
+    })
 }
 
 /// Constructs a `ColumnOptions` from the given `ColumnSchema`.
@@ -94,6 +148,17 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
         options
             .options
             .insert(SKIPPING_INDEX_GRPC_KEY.to_string(), skipping_index.clone());
+    }
+    if let Some(extension_name) = column_schema.metadata().get(EXTENSION_TYPE_NAME_KEY) {
+        options
+            .options
+            .insert(EXTENSION_TYPE_NAME_KEY.to_string(), extension_name.clone());
+    }
+    if let Some(extension_metadata) = column_schema.metadata().get(EXTENSION_TYPE_METADATA_KEY) {
+        options.options.insert(
+            EXTENSION_TYPE_METADATA_KEY.to_string(),
+            extension_metadata.clone(),
+        );
     }
 
     (!options.options.is_empty()).then_some(options)

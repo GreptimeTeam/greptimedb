@@ -32,16 +32,16 @@ use datafusion::physical_plan::{
 use datafusion::prelude::Expr;
 use datafusion::sql::TableReference;
 use datatypes::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
-use datatypes::arrow::compute::{cast_with_options, concat_batches, CastOptions};
+use datatypes::arrow::compute::{CastOptions, cast_with_options, concat_batches};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{ColumnNotFoundSnafu, DataFusionPlanningSnafu, DeserializeSnafu, Result};
-use crate::extension_plan::Millisecond;
+use crate::extension_plan::{Millisecond, resolve_column_name, serialize_column_index};
 
 /// `ScalarCalculate` is the custom logical plan to calculate
 /// [`scalar`](https://prometheus.io/docs/prometheus/latest/querying/functions/#scalar)
@@ -59,6 +59,14 @@ pub struct ScalarCalculate {
     field_column: String,
     input: LogicalPlan,
     output_schema: DFSchemaRef,
+    unfix: Option<UnfixIndices>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
+struct UnfixIndices {
+    pub time_index_idx: u64,
+    pub tag_column_indices: Vec<u64>,
+    pub field_column_idx: u64,
 }
 
 impl ScalarCalculate {
@@ -70,7 +78,7 @@ impl ScalarCalculate {
         interval: Millisecond,
         input: LogicalPlan,
         time_index: &str,
-        tag_colunms: &[String],
+        tag_columns: &[String],
         field_column: &str,
         table_name: Option<&str>,
     ) -> Result<Self> {
@@ -97,10 +105,11 @@ impl ScalarCalculate {
             end,
             interval,
             time_index: time_index.to_string(),
-            tag_columns: tag_colunms.to_vec(),
+            tag_columns: tag_columns.to_vec(),
             field_column: field_column.to_string(),
             input,
             output_schema: Arc::new(schema),
+            unfix: None,
         })
     }
 
@@ -123,10 +132,10 @@ impl ScalarCalculate {
         let input_schema = exec_input.schema();
         let ts_index = input_schema
             .index_of(&self.time_index)
-            .map_err(|e| DataFusionError::ArrowError(e, None))?;
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
         let val_index = input_schema
             .index_of(&self.field_column)
-            .map_err(|e| DataFusionError::ArrowError(e, None))?;
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
         let schema = Arc::new(Schema::new(fields));
         let properties = exec_input.properties();
         let properties = PlanProperties::new(
@@ -149,13 +158,24 @@ impl ScalarCalculate {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
+        let time_index_idx = serialize_column_index(self.input.schema(), &self.time_index);
+
+        let tag_column_indices = self
+            .tag_columns
+            .iter()
+            .map(|name| serialize_column_index(self.input.schema(), name))
+            .collect::<Vec<u64>>();
+
+        let field_column_idx = serialize_column_index(self.input.schema(), &self.field_column);
+
         pb::ScalarCalculate {
             start: self.start,
             end: self.end,
             interval: self.interval,
-            time_index: self.time_index.clone(),
-            tag_columns: self.tag_columns.clone(),
-            field_column: self.field_column.clone(),
+            time_index_idx,
+            tag_column_indices,
+            field_column_idx,
+            ..Default::default()
         }
         .encode_to_vec()
     }
@@ -166,17 +186,20 @@ impl ScalarCalculate {
             produce_one_row: false,
             schema: Arc::new(DFSchema::empty()),
         });
+
+        let unfix = UnfixIndices {
+            time_index_idx: pb_scalar_calculate.time_index_idx,
+            tag_column_indices: pb_scalar_calculate.tag_column_indices.clone(),
+            field_column_idx: pb_scalar_calculate.field_column_idx,
+        };
+
         // TODO(Taylor-lagrange): Supports timestamps of different precisions
         let ts_field = Field::new(
-            &pb_scalar_calculate.time_index,
+            "placeholder_time_index",
             DataType::Timestamp(TimeUnit::Millisecond, None),
             true,
         );
-        let val_field = Field::new(
-            format!("scalar({})", pb_scalar_calculate.field_column),
-            DataType::Float64,
-            true,
-        );
+        let val_field = Field::new("placeholder_field", DataType::Float64, true);
         // TODO(Taylor-lagrange): missing tablename in pb
         let schema = DFSchema::new_with_metadata(
             vec![(None, Arc::new(ts_field)), (None, Arc::new(val_field))],
@@ -188,11 +211,12 @@ impl ScalarCalculate {
             start: pb_scalar_calculate.start,
             end: pb_scalar_calculate.end,
             interval: pb_scalar_calculate.interval,
-            time_index: pb_scalar_calculate.time_index,
-            tag_columns: pb_scalar_calculate.tag_columns,
-            field_column: pb_scalar_calculate.field_column,
+            time_index: String::new(),
+            tag_columns: Vec::new(),
+            field_column: String::new(),
             output_schema: Arc::new(schema),
             input: placeholder_plan,
+            unfix: Some(unfix),
         })
     }
 }
@@ -259,16 +283,70 @@ impl UserDefinedLogicalNodeCore for ScalarCalculate {
                 "ScalarCalculate should not have any expressions".to_string(),
             ));
         }
-        Ok(ScalarCalculate {
-            start: self.start,
-            end: self.end,
-            interval: self.interval,
-            time_index: self.time_index.clone(),
-            tag_columns: self.tag_columns.clone(),
-            field_column: self.field_column.clone(),
-            input: inputs.into_iter().next().unwrap(),
-            output_schema: self.output_schema.clone(),
-        })
+
+        let input: LogicalPlan = inputs.into_iter().next().unwrap();
+        let input_schema = input.schema();
+
+        if let Some(unfix) = &self.unfix {
+            // transform indices to names
+            let time_index = resolve_column_name(
+                unfix.time_index_idx,
+                input_schema,
+                "ScalarCalculate",
+                "time index",
+            )?;
+
+            let tag_columns = unfix
+                .tag_column_indices
+                .iter()
+                .map(|idx| resolve_column_name(*idx, input_schema, "ScalarCalculate", "tag"))
+                .collect::<DataFusionResult<Vec<String>>>()?;
+
+            let field_column = resolve_column_name(
+                unfix.field_column_idx,
+                input_schema,
+                "ScalarCalculate",
+                "field",
+            )?;
+
+            // Recreate output schema with actual field names
+            let ts_field = Field::new(
+                &time_index,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            );
+            let val_field =
+                Field::new(format!("scalar({})", field_column), DataType::Float64, true);
+            let schema = DFSchema::new_with_metadata(
+                vec![(None, Arc::new(ts_field)), (None, Arc::new(val_field))],
+                HashMap::new(),
+            )
+            .context(DataFusionPlanningSnafu)?;
+
+            Ok(ScalarCalculate {
+                start: self.start,
+                end: self.end,
+                interval: self.interval,
+                time_index,
+                tag_columns,
+                field_column,
+                input,
+                output_schema: Arc::new(schema),
+                unfix: None,
+            })
+        } else {
+            Ok(ScalarCalculate {
+                start: self.start,
+                end: self.end,
+                interval: self.interval,
+                time_index: self.time_index.clone(),
+                tag_columns: self.tag_columns.clone(),
+                field_column: self.field_column.clone(),
+                input,
+                output_schema: self.output_schema.clone(),
+                unfix: None,
+            })
+        }
     }
 }
 
@@ -366,8 +444,8 @@ impl ExecutionPlan for ScalarCalculateExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> DataFusionResult<Statistics> {
-        let input_stats = self.input.statistics()?;
+    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
+        let input_stats = self.input.partition_statistics(partition)?;
 
         let estimated_row_num = (self.end - self.start) as f64 / self.interval as f64;
         let estimated_total_bytes = input_stats
@@ -395,7 +473,9 @@ impl ExecutionPlan for ScalarCalculateExec {
 impl DisplayAs for ScalarCalculateExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(f, "ScalarCalculateExec: tags={:?}", self.tag_columns)
             }
         }
@@ -535,22 +615,25 @@ impl Stream for ScalarCalculateStream {
 #[cfg(test)]
 mod test {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
     use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-    use datafusion::physical_plan::memory::MemoryExec;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
     use datatypes::arrow::datatypes::TimeUnit;
 
     use super::*;
 
-    fn prepare_test_data(series: Vec<RecordBatch>) -> MemoryExec {
+    fn prepare_test_data(series: Vec<RecordBatch>) -> DataSourceExec {
         let schema = Arc::new(Schema::new(vec![
             Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
             Field::new("tag1", DataType::Utf8, true),
             Field::new("tag2", DataType::Utf8, true),
             Field::new("val", DataType::Float64, true),
         ]));
-        MemoryExec::try_new(&[series], schema, None).unwrap()
+        DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[series], schema, None).unwrap(),
+        ))
     }
 
     async fn run_test(series: Vec<RecordBatch>, expected: &str) {
@@ -681,16 +764,18 @@ mod test {
             Field::new("val", DataType::Float64, true),
         ]));
         run_test(
-            vec![RecordBatch::try_new(
-                schema,
-                vec![
-                    Arc::new(TimestampMillisecondArray::new_null(0)),
-                    Arc::new(StringArray::new_null(0)),
-                    Arc::new(StringArray::new_null(0)),
-                    Arc::new(Float64Array::new_null(0)),
-                ],
-            )
-            .unwrap()],
+            vec![
+                RecordBatch::try_new(
+                    schema,
+                    vec![
+                        Arc::new(TimestampMillisecondArray::new_null(0)),
+                        Arc::new(StringArray::new_null(0)),
+                        Arc::new(StringArray::new_null(0)),
+                        Arc::new(Float64Array::new_null(0)),
+                    ],
+                )
+                .unwrap(),
+            ],
             "+---------------------+-----+\
             \n| ts                  | val |\
             \n+---------------------+-----+\

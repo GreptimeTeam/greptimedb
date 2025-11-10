@@ -13,8 +13,6 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
-#![feature(btree_extract_if)]
-#![feature(let_chains)]
 #![feature(duration_millis_float)]
 
 pub mod cache;
@@ -32,19 +30,21 @@ pub mod key;
 pub mod kv_backend;
 pub mod leadership_notifier;
 pub mod lock_key;
-pub mod maintenance;
 pub mod metrics;
 pub mod node_expiry_listener;
 pub mod node_manager;
 pub mod peer;
 pub mod poison_key;
+pub mod procedure_executor;
 pub mod range_stream;
+pub mod reconciliation;
 pub mod region_keeper;
 pub mod region_registry;
 pub mod rpc;
 pub mod sequence;
 pub mod snapshot;
 pub mod state_store;
+pub mod stats;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 pub mod util;

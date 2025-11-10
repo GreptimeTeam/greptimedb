@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::helper::{row, tag_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Row, Rows, SemanticType};
 use common_error::ext::ErrorExt;
@@ -34,12 +35,12 @@ use store_api::region_request::{
 use store_api::storage::{ColumnId, RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
-use crate::engine::listener::{AlterFlushListener, NotifyRegionChangeResultListener};
 use crate::engine::MitoEngine;
+use crate::engine::listener::{AlterFlushListener, NotifyRegionChangeResultListener};
 use crate::error;
 use crate::test_util::{
-    build_rows, build_rows_for_key, flush_region, put_rows, rows_schema, CreateRequestBuilder,
-    TestEnv,
+    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, flush_region, put_rows,
+    rows_schema,
 };
 
 async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expected: &str) {
@@ -128,10 +129,20 @@ fn assert_column_metadatas(column_name: &[(&str, ColumnId)], column_metadatas: &
 
 #[tokio::test]
 async fn test_alter_region() {
+    test_alter_region_with_format(false).await;
+    test_alter_region_with_format(true).await;
+}
+
+async fn test_alter_region_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -196,7 +207,15 @@ async fn test_alter_region() {
     );
 
     // Reopen region.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     engine
         .handle_request(
             region_id,
@@ -206,6 +225,7 @@ async fn test_alter_region() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -224,29 +244,31 @@ fn build_rows_for_tags(
 ) -> Vec<Row> {
     (start..end)
         .enumerate()
-        .map(|(idx, ts)| Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(tag0.to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::F64Value((value_start + idx) as f64)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(ts as i64 * 1000)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(tag1.to_string())),
-                },
-            ],
+        .map(|(idx, ts)| {
+            row(vec![
+                ValueData::StringValue(tag0.to_string()),
+                ValueData::F64Value((value_start + idx) as f64),
+                ValueData::TimestampMillisecondValue(ts as i64 * 1000),
+                ValueData::StringValue(tag1.to_string()),
+            ])
         })
         .collect()
 }
 
 #[tokio::test]
 async fn test_put_after_alter() {
+    test_put_after_alter_with_format(false).await;
+    test_put_after_alter_with_format(true).await;
+}
+
+async fn test_put_after_alter_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
 
@@ -290,7 +312,15 @@ async fn test_put_after_alter() {
     scan_check_after_alter(&engine, region_id, expected).await;
 
     // Reopen region.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     engine
         .handle_request(
             region_id,
@@ -300,6 +330,7 @@ async fn test_put_after_alter() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -317,12 +348,7 @@ async fn test_put_after_alter() {
     put_rows(&engine, region_id, rows).await;
 
     // Push tag_1 to schema.
-    column_schemas.push(api::v1::ColumnSchema {
-        column_name: "tag_1".to_string(),
-        datatype: ColumnDataType::String as i32,
-        semantic_type: SemanticType::Tag as i32,
-        ..Default::default()
-    });
+    column_schemas.push(tag_column_schema("tag_1", ColumnDataType::String));
     // Put with new schema.
     let rows = Rows {
         schema: column_schemas.clone(),
@@ -349,10 +375,20 @@ async fn test_put_after_alter() {
 
 #[tokio::test]
 async fn test_alter_region_retry() {
+    test_alter_region_retry_with_format(false).await;
+    test_alter_region_retry_with_format(true).await;
+}
+
+async fn test_alter_region_retry_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -407,12 +443,25 @@ async fn test_alter_region_retry() {
 
 #[tokio::test]
 async fn test_alter_on_flushing() {
+    test_alter_on_flushing_with_format(false).await;
+    test_alter_on_flushing_with_format(true).await;
+}
+
+async fn test_alter_on_flushing_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
     let listener = Arc::new(AlterFlushListener::default());
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .create_engine_with(
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
         .await;
 
     let region_id = RegionId::new(1, 1);
@@ -511,12 +560,25 @@ async fn test_alter_on_flushing() {
 
 #[tokio::test]
 async fn test_alter_column_fulltext_options() {
+    test_alter_column_fulltext_options_with_format(false).await;
+    test_alter_column_fulltext_options_with_format(true).await;
+}
+
+async fn test_alter_column_fulltext_options_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
     let listener = Arc::new(AlterFlushListener::default());
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .create_engine_with(
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
         .await;
 
     let region_id = RegionId::new(1, 1);
@@ -613,7 +675,15 @@ async fn test_alter_column_fulltext_options() {
     check_region_version(&engine, region_id, 1, 3, 1, 3);
 
     // Reopen region.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     engine
         .handle_request(
             region_id,
@@ -623,6 +693,7 @@ async fn test_alter_column_fulltext_options() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -633,12 +704,25 @@ async fn test_alter_column_fulltext_options() {
 
 #[tokio::test]
 async fn test_alter_column_set_inverted_index() {
+    test_alter_column_set_inverted_index_with_format(false).await;
+    test_alter_column_set_inverted_index_with_format(true).await;
+}
+
+async fn test_alter_column_set_inverted_index_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
     let listener = Arc::new(AlterFlushListener::default());
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .create_engine_with(
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
         .await;
 
     let region_id = RegionId::new(1, 1);
@@ -711,20 +795,30 @@ async fn test_alter_column_set_inverted_index() {
     alter_job.await.unwrap();
 
     let check_inverted_index_set = |engine: &MitoEngine| {
-        assert!(engine
-            .get_region(region_id)
-            .unwrap()
-            .metadata()
-            .column_by_name("tag_0")
-            .unwrap()
-            .column_schema
-            .is_inverted_indexed())
+        assert!(
+            engine
+                .get_region(region_id)
+                .unwrap()
+                .metadata()
+                .column_by_name("tag_0")
+                .unwrap()
+                .column_schema
+                .is_inverted_indexed()
+        )
     };
     check_inverted_index_set(&engine);
     check_region_version(&engine, region_id, 1, 3, 1, 3);
 
     // Reopen region.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     engine
         .handle_request(
             region_id,
@@ -734,6 +828,7 @@ async fn test_alter_column_set_inverted_index() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -744,12 +839,25 @@ async fn test_alter_column_set_inverted_index() {
 
 #[tokio::test]
 async fn test_alter_region_ttl_options() {
+    test_alter_region_ttl_options_with_format(false).await;
+    test_alter_region_ttl_options_with_format(true).await;
+}
+
+async fn test_alter_region_ttl_options_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
     let listener = Arc::new(AlterFlushListener::default());
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .create_engine_with(
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
         .await;
 
     let region_id = RegionId::new(1, 1);
@@ -794,12 +902,25 @@ async fn test_alter_region_ttl_options() {
 
 #[tokio::test]
 async fn test_write_stall_on_altering() {
+    test_write_stall_on_altering_with_format(false).await;
+    test_write_stall_on_altering_with_format(true).await;
+}
+
+async fn test_write_stall_on_altering_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
     let listener = Arc::new(NotifyRegionChangeResultListener::default());
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .create_engine_with(
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
         .await;
 
     let region_id = RegionId::new(1, 1);

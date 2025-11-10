@@ -12,19 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
+use std::collections::hash_map::Entry;
+use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::v1::frontend::{KillProcessRequest, ListProcessRequest, ProcessInfo};
 use common_base::cancellation::CancellationHandle;
+use common_event_recorder::EventRecorderRef;
 use common_frontend::selector::{FrontendSelector, MetaClientSelector};
-use common_telemetry::{debug, info, warn};
+use common_frontend::slow_query_event::SlowQueryEvent;
+use common_telemetry::logging::SlowQueriesRecordType;
+use common_telemetry::{debug, info, slow, warn};
 use common_time::util::current_time_millis;
 use meta_client::MetaClientRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use promql_parser::parser::EvalStmt;
+use rand::random;
+use snafu::{OptionExt, ResultExt, ensure};
+use sql::statements::statement::Statement;
 
 use crate::error;
 use crate::metrics::{PROCESS_KILL_COUNT, PROCESS_LIST_COUNT};
@@ -42,6 +49,30 @@ pub struct ProcessManager {
     catalogs: RwLock<HashMap<String, HashMap<ProcessId, CancellableProcess>>>,
     /// Frontend selector to locate frontend nodes.
     frontend_selector: Option<MetaClientSelector>,
+}
+
+/// Represents a parsed query statement, functionally equivalent to [query::parser::QueryStatement].
+/// This enum is defined here to avoid cyclic dependencies with the query parser module.
+#[derive(Debug, Clone)]
+pub enum QueryStatement {
+    Sql(Statement),
+    // The optional string is the alias of the PromQL query.
+    Promql(EvalStmt, Option<String>),
+}
+
+impl Display for QueryStatement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryStatement::Sql(stmt) => write!(f, "{}", stmt),
+            QueryStatement::Promql(eval_stmt, alias) => {
+                if let Some(alias) = alias {
+                    write!(f, "{} AS {}", eval_stmt, alias)
+                } else {
+                    write!(f, "{}", eval_stmt)
+                }
+            }
+        }
+    }
 }
 
 impl ProcessManager {
@@ -67,6 +98,7 @@ impl ProcessManager {
         query: String,
         client: String,
         query_id: Option<ProcessId>,
+        _slow_query_timer: Option<SlowQueryTimer>,
     ) -> Ticket {
         let id = query_id.unwrap_or_else(|| self.next_id.fetch_add(1, Ordering::Relaxed));
         let process = ProcessInfo {
@@ -93,6 +125,7 @@ impl ProcessManager {
             manager: self.clone(),
             id,
             cancellation_handle,
+            _slow_query_timer,
         }
     }
 
@@ -223,6 +256,9 @@ pub struct Ticket {
     pub(crate) manager: ProcessManagerRef,
     pub(crate) id: ProcessId,
     pub cancellation_handle: Arc<CancellationHandle>,
+
+    // Keep the handle of the slow query timer to ensure it will trigger the event recording when dropped.
+    _slow_query_timer: Option<SlowQueryTimer>,
 }
 
 impl Drop for Ticket {
@@ -263,6 +299,114 @@ impl Debug for CancellableProcess {
     }
 }
 
+/// SlowQueryTimer is used to log slow query when it's dropped.
+/// In drop(), it will check if the query is slow and send the slow query event to the handler.
+pub struct SlowQueryTimer {
+    start: Instant,
+    stmt: QueryStatement,
+    threshold: Duration,
+    sample_ratio: f64,
+    record_type: SlowQueriesRecordType,
+    recorder: EventRecorderRef,
+}
+
+impl SlowQueryTimer {
+    pub fn new(
+        stmt: QueryStatement,
+        threshold: Duration,
+        sample_ratio: f64,
+        record_type: SlowQueriesRecordType,
+        recorder: EventRecorderRef,
+    ) -> Self {
+        Self {
+            start: Instant::now(),
+            stmt,
+            threshold,
+            sample_ratio,
+            record_type,
+            recorder,
+        }
+    }
+}
+
+impl SlowQueryTimer {
+    fn send_slow_query_event(&self, elapsed: Duration) {
+        let mut slow_query_event = SlowQueryEvent {
+            cost: elapsed.as_millis() as u64,
+            threshold: self.threshold.as_millis() as u64,
+            query: "".to_string(),
+
+            // The following fields are only used for PromQL queries.
+            is_promql: false,
+            promql_range: None,
+            promql_step: None,
+            promql_start: None,
+            promql_end: None,
+        };
+
+        match &self.stmt {
+            QueryStatement::Promql(stmt, _alias) => {
+                slow_query_event.is_promql = true;
+                slow_query_event.query = self.stmt.to_string();
+                slow_query_event.promql_step = Some(stmt.interval.as_millis() as u64);
+
+                let start = stmt
+                    .start
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+
+                let end = stmt
+                    .end
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+
+                slow_query_event.promql_range = Some((end - start) as u64);
+                slow_query_event.promql_start = Some(start);
+                slow_query_event.promql_end = Some(end);
+            }
+            QueryStatement::Sql(stmt) => {
+                slow_query_event.query = stmt.to_string();
+            }
+        }
+
+        match self.record_type {
+            // Send the slow query event to the event recorder to persist it as the system table.
+            SlowQueriesRecordType::SystemTable => {
+                self.recorder.record(Box::new(slow_query_event));
+            }
+            // Record the slow query in a specific logs file.
+            SlowQueriesRecordType::Log => {
+                slow!(
+                    cost = slow_query_event.cost,
+                    threshold = slow_query_event.threshold,
+                    query = slow_query_event.query,
+                    is_promql = slow_query_event.is_promql,
+                    promql_range = slow_query_event.promql_range,
+                    promql_step = slow_query_event.promql_step,
+                    promql_start = slow_query_event.promql_start,
+                    promql_end = slow_query_event.promql_end,
+                );
+            }
+        }
+    }
+}
+
+impl Drop for SlowQueryTimer {
+    fn drop(&mut self) {
+        // Calculate the elaspsed duration since the timer is created.
+        let elapsed = self.start.elapsed();
+        if elapsed > self.threshold {
+            // Only capture a portion of slow queries based on sample_ratio.
+            // Generate a random number in [0, 1) and compare it with sample_ratio.
+            if self.sample_ratio >= 1.0 || random::<f64>() <= self.sample_ratio {
+                self.send_slow_query_event(elapsed);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -277,6 +421,7 @@ mod tests {
             vec!["test".to_string()],
             "SELECT * FROM table".to_string(),
             "".to_string(),
+            None,
             None,
         );
 
@@ -301,6 +446,7 @@ mod tests {
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
             Some(custom_id),
+            None,
         );
 
         assert_eq!(ticket.id, custom_id);
@@ -321,6 +467,7 @@ mod tests {
             "SELECT * FROM table1".to_string(),
             "client1".to_string(),
             None,
+            None,
         );
 
         let ticket2 = process_manager.clone().register_query(
@@ -328,6 +475,7 @@ mod tests {
             vec!["schema2".to_string()],
             "SELECT * FROM table2".to_string(),
             "client2".to_string(),
+            None,
             None,
         );
 
@@ -350,6 +498,7 @@ mod tests {
             "SELECT * FROM table1".to_string(),
             "client1".to_string(),
             None,
+            None,
         );
 
         let _ticket2 = process_manager.clone().register_query(
@@ -357,6 +506,7 @@ mod tests {
             vec!["schema2".to_string()],
             "SELECT * FROM table2".to_string(),
             "client2".to_string(),
+            None,
             None,
         );
 
@@ -384,6 +534,7 @@ mod tests {
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
             None,
+            None,
         );
         assert_eq!(process_manager.local_processes(None).unwrap().len(), 1);
         process_manager.deregister_query("public".to_string(), ticket.id);
@@ -399,6 +550,7 @@ mod tests {
             vec!["test".to_string()],
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
+            None,
             None,
         );
 
@@ -416,6 +568,7 @@ mod tests {
             vec!["test".to_string()],
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
+            None,
             None,
         );
         assert!(!ticket.cancellation_handle.is_cancelled());
@@ -462,6 +615,7 @@ mod tests {
             "SELECT COUNT(*) FROM users WHERE age > 18".to_string(),
             "test_client".to_string(),
             Some(42),
+            None,
         );
 
         let processes = process_manager.local_processes(None).unwrap();
@@ -487,6 +641,7 @@ mod tests {
                 vec!["test".to_string()],
                 "SELECT * FROM table".to_string(),
                 "client1".to_string(),
+                None,
                 None,
             );
 

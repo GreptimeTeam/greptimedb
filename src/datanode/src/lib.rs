@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
-#![feature(let_chains)]
 
 pub mod alive_keeper;
 pub mod config;
@@ -23,8 +22,10 @@ pub mod event_listener;
 mod greptimedb_telemetry;
 pub mod heartbeat;
 pub mod metrics;
+mod partition_expr_fetcher;
 pub mod region_server;
 pub mod service;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod tests;
+pub mod utils;

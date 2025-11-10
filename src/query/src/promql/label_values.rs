@@ -14,11 +14,11 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::utils::conjunction;
-use datafusion_expr::{col, Expr, LogicalPlan, LogicalPlanBuilder};
+use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, col};
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 
@@ -29,8 +29,8 @@ use crate::promql::error::{
 fn build_time_filter(time_index_expr: Expr, start: Timestamp, end: Timestamp) -> Expr {
     time_index_expr
         .clone()
-        .gt_eq(Expr::Literal(timestamp_to_scalar_value(start)))
-        .and(time_index_expr.lt_eq(Expr::Literal(timestamp_to_scalar_value(end))))
+        .gt_eq(Expr::Literal(timestamp_to_scalar_value(start), None))
+        .and(time_index_expr.lt_eq(Expr::Literal(timestamp_to_scalar_value(end), None)))
 }
 
 fn timestamp_to_scalar_value(timestamp: Timestamp) -> ScalarValue {

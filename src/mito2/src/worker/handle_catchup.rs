@@ -17,17 +17,18 @@
 use std::sync::Arc;
 
 use common_telemetry::tracing::warn;
-use common_telemetry::{debug, info};
-use snafu::ensure;
+use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;
-use store_api::region_engine::RegionRole;
-use store_api::region_request::{AffectedRows, RegionCatchupRequest};
+use store_api::region_engine::{RegionRole, SettableRegionRoleState};
+use store_api::region_request::RegionCatchupRequest;
 use store_api::storage::RegionId;
-use tokio::time::Instant;
 
 use crate::error::{self, Result};
-use crate::region::opener::{replay_memtable, RegionOpener};
 use crate::region::MitoRegion;
+use crate::region::catchup::RegionCatchupTask;
+use crate::region::opener::RegionOpener;
+use crate::request::OptionOutputTx;
+use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -35,100 +36,68 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionCatchupRequest,
-    ) -> Result<AffectedRows> {
+        entry_receiver: Option<WalEntryReceiver>,
+        sender: OptionOutputTx,
+    ) {
         let Some(region) = self.regions.get_region(region_id) else {
-            return error::RegionNotFoundSnafu { region_id }.fail();
+            sender.send(Err(error::RegionNotFoundSnafu { region_id }.build()));
+            return;
         };
 
         if region.is_writable() {
             debug!("Region {region_id} is writable, skip catchup");
-            return Ok(0);
+            sender.send(Ok(0));
+            return;
         }
-        // Note: Currently, We protect the split brain by ensuring the mutable table is empty.
-        // It's expensive to execute catch-up requests without `set_writable=true` multiple times.
-        let version = region.version();
-        let is_empty_memtable = version.memtables.is_empty();
 
-        // Utilizes the short circuit evaluation.
-        let region = if !is_empty_memtable || region.manifest_ctx.has_update().await? {
-            if !is_empty_memtable {
-                warn!("Region {} memtables is not empty, which should not happen, manifest version: {}, last entry id: {}",
-                    region.region_id,
-                    region.manifest_ctx.manifest_version().await,
-                    region.version_control.current().last_entry_id
-                );
+        if self.catchup_regions.is_region_exists(region_id) {
+            warn!("Region {region_id} under catching up");
+            sender.send(Err(error::RegionBusySnafu { region_id }.build()));
+            return;
+        }
+
+        // If the memtable is not empty or the manifest has been updated, we need to reopen the region.
+        let region = match self.reopen_region_if_needed(region).await {
+            Ok(region) => region,
+            Err(e) => {
+                sender.send(Err(e));
+                return;
             }
-            self.reopen_region(&region).await?
-        } else {
-            region
         };
 
-        if region.provider.is_remote_wal() {
-            let flushed_entry_id = region.version_control.current().last_entry_id;
-            info!("Trying to replay memtable for region: {region_id}, flushed entry id: {flushed_entry_id}");
-            let timer = Instant::now();
-            let wal_entry_reader =
-                self.wal
-                    .wal_entry_reader(&region.provider, region_id, request.location_id);
-            let on_region_opened = self.wal.on_region_opened();
-            let last_entry_id = replay_memtable(
-                &region.provider,
-                wal_entry_reader,
-                region_id,
-                flushed_entry_id,
-                &region.version_control,
-                self.config.allow_stale_entries,
-                on_region_opened,
-            )
-            .await?;
-            info!(
-                "Elapsed: {:?}, region: {region_id} catchup finished. last entry id: {last_entry_id}, expected: {:?}.",
-                timer.elapsed(),
-                request.entry_id
-            );
-            if let Some(expected_last_entry_id) = request.entry_id {
-                ensure!(
-                    // The replayed last entry id may be greater than the `expected_last_entry_id`.
-                    last_entry_id >= expected_last_entry_id,
-                    error::UnexpectedSnafu {
-                        reason: format!(
-                            "failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}", 
-                            region_id, expected_last_entry_id, last_entry_id,
-                        ),
+        self.catchup_regions.insert_region(region_id);
+        let catchup_regions = self.catchup_regions.clone();
+        let wal = self.wal.clone();
+        let allow_stale_entries = self.config.allow_stale_entries;
+        common_runtime::spawn_global(async move {
+            let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
+                .with_entry_receiver(entry_receiver)
+                .with_expected_last_entry_id(request.entry_id)
+                .with_location_id(request.location_id)
+                .with_replay_checkpoint_entry_id(request.checkpoint.map(|c| c.entry_id));
+
+            match task.run().await {
+                Ok(_) => {
+                    if request.set_writable {
+                        region.set_role(RegionRole::Leader);
+                        // Finalize leadership: persist backfilled metadata.
+                        if let Err(err) = region
+                            .set_role_state_gracefully(SettableRegionRoleState::Leader)
+                            .await
+                        {
+                            error!(err; "Failed to set region {region_id} to leader");
+                        }
                     }
-                )
+                    sender.send(Ok(0));
+                    catchup_regions.remove_region(region_id);
+                }
+                Err(err) => {
+                    error!(err; "Failed to catchup region {region_id}");
+                    sender.send(Err(err));
+                    catchup_regions.remove_region(region_id);
+                }
             }
-        } else {
-            let version = region.version_control.current();
-            let mut flushed_entry_id = version.last_entry_id;
-
-            let high_watermark = self
-                .wal
-                .store()
-                .high_watermark(&region.provider)
-                .unwrap_or_default();
-            warn!(
-                "Skips to replay memtable for region: {}, flushed entry id: {}, high watermark: {}",
-                region.region_id, flushed_entry_id, high_watermark
-            );
-
-            if high_watermark > flushed_entry_id {
-                warn!(
-                    "Found high watermark is greater than flushed entry id, using high watermark as flushed entry id, region: {}, high watermark: {}, flushed entry id: {}",
-                    region_id, high_watermark, flushed_entry_id
-                );
-                flushed_entry_id = high_watermark;
-                region.version_control.set_entry_id(flushed_entry_id);
-            }
-            let on_region_opened = self.wal.on_region_opened();
-            on_region_opened(region_id, flushed_entry_id, &region.provider).await?;
-        }
-
-        if request.set_writable {
-            region.set_role(RegionRole::Leader);
-        }
-
-        Ok(0)
+        });
     }
 
     /// Reopens a region.
@@ -139,7 +108,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let region_id = region.region_id;
         let manifest_version = region.manifest_ctx.manifest_version().await;
         let flushed_entry_id = region.version_control.current().last_entry_id;
-        info!("Reopening the region: {region_id}, manifest version: {manifest_version}, flushed entry id: {flushed_entry_id}");
+        info!(
+            "Reopening the region: {region_id}, manifest version: {manifest_version}, flushed entry id: {flushed_entry_id}"
+        );
         let reopened_region = Arc::new(
             RegionOpener::new(
                 region_id,
@@ -151,6 +122,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.puffin_manager_factory.clone(),
                 self.intermediate_manager.clone(),
                 self.time_provider.clone(),
+                self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
             )
             .cache(Some(self.cache_manager.clone()))
             .options(region.version().options.clone())?
@@ -162,5 +135,32 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.regions.insert_region(reopened_region.clone());
 
         Ok(reopened_region)
+    }
+
+    async fn reopen_region_if_needed(
+        &mut self,
+        region: Arc<MitoRegion>,
+    ) -> Result<Arc<MitoRegion>> {
+        // Note: Currently, We protect the split brain by ensuring the memtable table is empty.
+        // It's expensive to execute catch-up requests without `set_writable=true` multiple times.
+        let version = region.version();
+        let is_empty_memtable = version.memtables.is_empty();
+
+        // Utilizes the short circuit evaluation.
+        let region = if !is_empty_memtable || region.manifest_ctx.has_update().await? {
+            if !is_empty_memtable {
+                warn!(
+                    "Region {} memtables is not empty, which should not happen, manifest version: {}, last entry id: {}",
+                    region.region_id,
+                    region.manifest_ctx.manifest_version().await,
+                    region.version_control.current().last_entry_id
+                );
+            }
+            self.reopen_region(&region).await?
+        } else {
+            region
+        };
+
+        Ok(region)
     }
 }

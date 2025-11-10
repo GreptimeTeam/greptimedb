@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use api::v1::OpType;
 use datatypes::vectors::Helper;
@@ -26,20 +27,19 @@ use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::ColumnId;
 
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::time_series::Series;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableId, MemtableRange,
-    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
+    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableId,
+    MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
 };
 use crate::metrics::MEMTABLE_ACTIVE_SERIES_COUNT;
-use crate::read::dedup::LastNonNullIter;
-use crate::read::scan_region::PredicateGroup;
 use crate::read::Batch;
+use crate::read::dedup::LastNonNullIter;
 use crate::region::options::MergeMode;
 use crate::{error, metrics};
 
@@ -110,7 +110,12 @@ impl SimpleBulkMemtable {
         let size = series.push(ts, sequence, op_type, kv.fields());
         stats.value_bytes += size;
         // safety: timestamp of kv must be both present and a valid timestamp value.
-        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        let ts = kv
+            .timestamp()
+            .try_into_timestamp()
+            .unwrap()
+            .unwrap()
+            .value();
         stats.min_ts = stats.min_ts.min(ts);
         stats.max_ts = stats.max_ts.max(ts);
     }
@@ -204,8 +209,8 @@ impl Memtable for SimpleBulkMemtable {
         self.update_stats(WriteMetrics {
             key_bytes: 0,
             value_bytes: part.estimated_size(),
-            min_ts: part.min_ts,
-            max_ts: part.max_ts,
+            min_ts: part.min_timestamp,
+            max_ts: part.max_timestamp,
             num_rows: part.num_rows(),
             max_sequence: sequence,
         });
@@ -217,9 +222,9 @@ impl Memtable for SimpleBulkMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         _predicate: Option<table::predicate::Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<store_api::storage::SequenceRange>,
     ) -> error::Result<BoxedBatchIterator> {
-        let iter = self.create_iter(projection, sequence)?.build()?;
+        let iter = self.create_iter(projection, sequence)?.build(None)?;
 
         if self.merge_mode == MergeMode::LastNonNull {
             let iter = LastNonNullIter::new(iter);
@@ -232,9 +237,11 @@ impl Memtable for SimpleBulkMemtable {
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
+        options: RangesOptions,
     ) -> error::Result<MemtableRanges> {
+        let predicate = options.predicate;
+        let sequence = options.sequence;
+        let start_time = Instant::now();
         let projection = Arc::new(self.build_projection(projection));
         let values = self.series.read().unwrap().read_to_values();
         let contexts = values
@@ -263,6 +270,7 @@ impl Memtable for SimpleBulkMemtable {
                     let builder = BatchRangeBuilder {
                         batch,
                         merge_mode: self.merge_mode,
+                        scan_cost: start_time.elapsed(),
                     };
                     (
                         num_rows,
@@ -346,11 +354,22 @@ impl Memtable for SimpleBulkMemtable {
 pub struct BatchRangeBuilder {
     pub batch: Batch,
     pub merge_mode: MergeMode,
+    scan_cost: Duration,
 }
 
 impl IterBuilder for BatchRangeBuilder {
-    fn build(&self) -> error::Result<BoxedBatchIterator> {
+    fn build(&self, metrics: Option<MemScanMetrics>) -> error::Result<BoxedBatchIterator> {
         let batch = self.batch.clone();
+        if let Some(metrics) = metrics {
+            let inner = crate::memtable::MemScanMetricsData {
+                total_series: 1,
+                num_rows: batch.num_rows(),
+                num_batches: 1,
+                scan_cost: self.scan_cost,
+            };
+            metrics.merge_inner(&inner);
+        }
+
         let iter = Iter {
             batch: Some(Ok(batch)),
         };
@@ -379,8 +398,9 @@ impl Iterator for Iter {
 mod tests {
     use std::sync::Arc;
 
+    use api::v1::helper::row;
     use api::v1::value::ValueData;
-    use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
+    use api::v1::{Mutation, OpType, Rows, SemanticType};
     use common_recordbatch::DfRecordBatch;
     use common_time::Timestamp;
     use datatypes::arrow::array::{ArrayRef, Float64Array, RecordBatch, TimestampMillisecondArray};
@@ -391,7 +411,7 @@ mod tests {
     use datatypes::value::Value;
     use datatypes::vectors::TimestampMillisecondVector;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::{RegionId, SequenceNumber};
+    use store_api::storage::{RegionId, SequenceNumber, SequenceRange};
 
     use super::*;
     use crate::read;
@@ -444,18 +464,12 @@ mod tests {
 
         let rows: Vec<_> = row_values
             .iter()
-            .map(|(ts, f1, f2)| Row {
-                values: vec![
-                    api::v1::Value {
-                        value_data: Some(ValueData::TimestampMillisecondValue(*ts)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::F64Value(*f1)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::StringValue(f2.clone())),
-                    },
-                ],
+            .map(|(ts, f1, f2)| {
+                row(vec![
+                    ValueData::TimestampMillisecondValue(*ts),
+                    ValueData::F64Value(*f1),
+                    ValueData::StringValue(f2.clone()),
+                ])
             })
             .collect();
         let mutation = Mutation {
@@ -602,9 +616,7 @@ mod tests {
         let kv = kvs.iter().next().unwrap();
         memtable.write_one(kv).unwrap();
 
-        let ranges = memtable
-            .ranges(None, PredicateGroup::default(), None)
-            .unwrap();
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
         let mut source = vec![];
         for r in ranges.ranges.values() {
             source.push(Source::Iter(r.build_iter().unwrap()));
@@ -636,9 +648,7 @@ mod tests {
         memtable.write_one(kv).unwrap();
         memtable.freeze().unwrap();
 
-        let ranges = memtable
-            .ranges(None, PredicateGroup::default(), None)
-            .unwrap();
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
         let mut source = vec![];
         for r in ranges.ranges.values() {
             source.push(Source::Iter(r.build_iter().unwrap()));
@@ -679,12 +689,10 @@ mod tests {
         memtable.write_one(kvs.iter().next().unwrap()).unwrap();
         memtable.freeze().unwrap();
 
-        let ranges = memtable
-            .ranges(None, PredicateGroup::default(), None)
-            .unwrap();
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
         assert_eq!(ranges.ranges.len(), 1);
         let range = ranges.ranges.into_values().next().unwrap();
-        let mut reader = range.context.builder.build().unwrap();
+        let mut reader = range.context.builder.build(None).unwrap();
 
         let mut num_rows = 0;
         while let Some(b) = reader.next().transpose().unwrap() {
@@ -708,8 +716,8 @@ mod tests {
         let part = BulkPart {
             batch: rb,
             sequence: 1,
-            min_ts: 1,
-            max_ts: 2,
+            min_timestamp: 1,
+            max_timestamp: 2,
             timestamp_index: 0,
             raw_data: None,
         };
@@ -823,7 +831,9 @@ mod tests {
             .unwrap();
 
         // Filter with sequence 0 should only return first write
-        let mut iter = memtable.iter(None, None, Some(0)).unwrap();
+        let mut iter = memtable
+            .iter(None, None, Some(SequenceRange::LtEq { max: 0 }))
+            .unwrap();
         let batch = iter.next().unwrap().unwrap();
         assert_eq!(1, batch.num_rows());
         assert_eq!(1.0, batch.fields()[0].data.get(0).as_f64_lossy().unwrap());
@@ -839,7 +849,7 @@ mod tests {
             schema,
             vec![
                 Arc::new(StringArray::from_iter_values(
-                    ["a".repeat(string_len as usize).to_string()].into_iter(),
+                    ["a".repeat(string_len as usize).clone()].into_iter(),
                 )) as ArrayRef,
                 Arc::new(TimestampMillisecondArray::from_iter_values(
                     [ts].into_iter(),
@@ -874,8 +884,8 @@ mod tests {
         memtable
             .write_bulk(BulkPart {
                 batch: rb_with_large_string(0, i32::MAX, &region_meta),
-                max_ts: 0,
-                min_ts: 0,
+                max_timestamp: 0,
+                min_timestamp: 0,
                 sequence: 0,
                 timestamp_index: 1,
                 raw_data: None,
@@ -886,16 +896,15 @@ mod tests {
         memtable
             .write_bulk(BulkPart {
                 batch: rb_with_large_string(1, 3, &region_meta),
-                max_ts: 1,
-                min_ts: 1,
+                max_timestamp: 1,
+                min_timestamp: 1,
                 sequence: 1,
                 timestamp_index: 1,
                 raw_data: None,
             })
             .unwrap();
-        let MemtableRanges { ranges, .. } = memtable
-            .ranges(None, PredicateGroup::default(), None)
-            .unwrap();
+        let MemtableRanges { ranges, .. } =
+            memtable.ranges(None, RangesOptions::default()).unwrap();
         let mut source = if ranges.len() == 1 {
             let only_range = ranges.into_values().next().unwrap();
             Source::Iter(only_range.build_iter().unwrap())

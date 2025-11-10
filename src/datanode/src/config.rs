@@ -16,10 +16,11 @@
 
 use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
+use common_options::memory::MemoryOptions;
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_wal::config::DatanodeWalConfig;
-use common_workload::{sanitize_workload_types, DatanodeWorkloadType};
+use common_workload::{DatanodeWorkloadType, sanitize_workload_types};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use metric_engine::config::EngineConfig as MetricEngineConfig;
@@ -31,8 +32,6 @@ use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
-
-pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(5);
 
 /// Storage engine config
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -67,6 +66,7 @@ impl Default for StorageConfig {
 #[serde(default)]
 pub struct DatanodeOptions {
     pub node_id: Option<u64>,
+    pub default_column_prefix: Option<String>,
     pub workload_types: Vec<DatanodeWorkloadType>,
     pub require_lease_before_startup: bool,
     pub init_regions_in_background: bool,
@@ -85,6 +85,7 @@ pub struct DatanodeOptions {
     pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
+    pub memory: MemoryOptions,
 
     /// Deprecated options, please use the new options instead.
     #[deprecated(note = "Please use `grpc.addr` instead.")]
@@ -103,6 +104,14 @@ impl DatanodeOptions {
     /// Sanitize the `DatanodeOptions` to ensure the config is valid.
     pub fn sanitize(&mut self) {
         sanitize_workload_types(&mut self.workload_types);
+
+        if self.storage.is_object_storage() {
+            self.storage
+                .store
+                .cache_config_mut()
+                .unwrap()
+                .sanitize(&self.storage.data_home);
+        }
     }
 }
 
@@ -111,6 +120,7 @@ impl Default for DatanodeOptions {
     fn default() -> Self {
         Self {
             node_id: None,
+            default_column_prefix: None,
             workload_types: vec![DatanodeWorkloadType::Hybrid],
             require_lease_before_startup: false,
             init_regions_in_background: false,
@@ -131,6 +141,7 @@ impl Default for DatanodeOptions {
             export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
+            memory: MemoryOptions::default(),
 
             // Deprecated options
             rpc_addr: None,
@@ -185,9 +196,12 @@ mod tests {
             ObjectStoreConfig::S3(cfg) => {
                 assert_eq!(
                     "SecretBox<alloc::string::String>([REDACTED])".to_string(),
-                    format!("{:?}", cfg.access_key_id)
+                    format!("{:?}", cfg.connection.access_key_id)
                 );
-                assert_eq!("access_key_id", cfg.access_key_id.expose_secret());
+                assert_eq!(
+                    "access_key_id",
+                    cfg.connection.access_key_id.expose_secret()
+                );
             }
             _ => unreachable!(),
         }
@@ -235,5 +249,23 @@ mod tests {
             }
             _ => panic!("Expected S3 config"),
         }
+    }
+
+    #[test]
+    fn test_cache_config() {
+        let toml_str = r#"
+            [storage]
+            data_home = "test_data_home"
+            type = "S3"
+            [storage.cache_config]
+            enable_read_cache = true
+        "#;
+        let mut opts: DatanodeOptions = toml::from_str(toml_str).unwrap();
+        opts.sanitize();
+        assert!(opts.storage.store.cache_config().unwrap().enable_read_cache);
+        assert_eq!(
+            opts.storage.store.cache_config().unwrap().cache_path,
+            "test_data_home"
+        );
     }
 }

@@ -35,7 +35,7 @@ use crate::vectors::{self, Helper, MutableVector, Validity, Vector, VectorRef};
 pub struct ListVector {
     array: ListArray,
     /// The datatype of the items in the list.
-    item_type: ConcreteDataType,
+    item_type: Arc<ConcreteDataType>,
 }
 
 impl ListVector {
@@ -49,11 +49,15 @@ impl ListVector {
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
     }
+
+    pub(crate) fn item_type(&self) -> Arc<ConcreteDataType> {
+        self.item_type.clone()
+    }
 }
 
 impl Vector for ListVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::List(ListType::new(self.item_type.clone()))
+        ConcreteDataType::List(ListType::new(self.item_type()))
     }
 
     fn vector_type_name(&self) -> String {
@@ -117,7 +121,7 @@ impl Vector for ListVector {
         Value::List(ListValue::new(values, self.item_type.clone()))
     }
 
-    fn get_ref(&self, index: usize) -> ValueRef {
+    fn get_ref(&self, index: usize) -> ValueRef<'_> {
         ValueRef::List(ListValueRef::Indexed {
             vector: self,
             idx: index,
@@ -141,10 +145,10 @@ impl Serializable for ListVector {
 
 impl From<ListArray> for ListVector {
     fn from(array: ListArray) -> Self {
-        let item_type = ConcreteDataType::from_arrow_type(match array.data_type() {
+        let item_type = Arc::new(ConcreteDataType::from_arrow_type(match array.data_type() {
             ArrowDataType::List(field) => field.data_type(),
             other => panic!("Try to create ListVector from an arrow array with type {other:?}"),
-        });
+        }));
         Self { array, item_type }
     }
 }
@@ -213,7 +217,7 @@ impl ScalarVector for ListVector {
 // See https://github.com/apache/arrow-rs/blob/94565bca99b5d9932a3e9a8e094aaf4e4384b1e5/arrow-array/src/builder/generic_list_builder.rs
 /// [ListVector] builder.
 pub struct ListVectorBuilder {
-    item_type: ConcreteDataType,
+    item_type: Arc<ConcreteDataType>,
     offsets_builder: Int32BufferBuilder,
     null_buffer_builder: NullBufferBuilder,
     values_builder: Box<dyn MutableVector>,
@@ -222,7 +226,10 @@ pub struct ListVectorBuilder {
 impl ListVectorBuilder {
     /// Creates a new [`ListVectorBuilder`]. `item_type` is the data type of the list item, `capacity`
     /// is the number of items to pre-allocate space for in this builder.
-    pub fn with_type_capacity(item_type: ConcreteDataType, capacity: usize) -> ListVectorBuilder {
+    pub fn with_type_capacity(
+        item_type: Arc<ConcreteDataType>,
+        capacity: usize,
+    ) -> ListVectorBuilder {
         let mut offsets_builder = Int32BufferBuilder::new(capacity + 1);
         offsets_builder.append(0);
         // The actual required capacity might be greater than the capacity of the `ListVector`
@@ -246,7 +253,7 @@ impl ListVectorBuilder {
 
     fn push_list_value(&mut self, list_value: &ListValue) -> Result<()> {
         for v in list_value.items() {
-            self.values_builder.try_push_value_ref(v.as_value_ref())?;
+            self.values_builder.try_push_value_ref(&v.as_value_ref())?;
         }
 
         self.finish_list(true);
@@ -279,14 +286,21 @@ impl MutableVector for ListVectorBuilder {
         Arc::new(self.finish_cloned())
     }
 
-    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
-        if let Some(list_ref) = value.as_list()? {
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
+        if let Some(list_ref) = value.try_into_list()? {
             match list_ref {
                 ListValueRef::Indexed { vector, idx } => match vector.get(idx).as_list()? {
                     Some(list_value) => self.push_list_value(list_value)?,
                     None => self.push_null(),
                 },
                 ListValueRef::Ref { val } => self.push_list_value(val)?,
+                ListValueRef::RefList { val, item_datatype } => {
+                    let list_value = ListValue::new(
+                        val.iter().map(|v| Value::from(v.clone())).collect(),
+                        item_datatype.clone(),
+                    );
+                    self.push_list_value(&list_value)?;
+                }
             }
         } else {
             self.push_null();
@@ -298,7 +312,7 @@ impl MutableVector for ListVectorBuilder {
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
         for idx in offset..offset + length {
             let value = vector.get_ref(idx);
-            self.try_push_value_ref(value)?;
+            self.try_push_value_ref(&value)?;
         }
 
         Ok(())
@@ -320,7 +334,7 @@ impl ScalarVectorBuilder for ListVectorBuilder {
         // We expect the input ListValue has the same inner type as the builder when using
         // push(), so just panic if `push_value_ref()` returns error, which indicate an
         // invalid input value type.
-        self.try_push_value_ref(value.into()).unwrap_or_else(|e| {
+        self.try_push_value_ref(&value.into()).unwrap_or_else(|e| {
             panic!(
                 "Failed to push value, expect value type {:?}, err:{}",
                 self.item_type, e
@@ -485,12 +499,12 @@ pub mod tests {
     use crate::vectors::Int32Vector;
 
     pub fn new_list_vector(data: &[Option<Vec<Option<i32>>>]) -> ListVector {
-        let mut builder =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 8);
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
+        let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 8);
         for vec_opt in data {
             if let Some(vec) = vec_opt {
                 let values = vec.iter().map(|v| Value::from(*v)).collect();
-                let list_value = ListValue::new(values, ConcreteDataType::int32_datatype());
+                let list_value = ListValue::new(values, item_type.clone());
 
                 builder.push(Some(ListValueRef::Ref { val: &list_value }));
             } else {
@@ -526,10 +540,11 @@ pub mod tests {
             Some(vec![Some(4), None, Some(6)]),
         ];
 
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
         let list_vector = new_list_vector(&data);
 
         assert_eq!(
-            ConcreteDataType::List(ListType::new(ConcreteDataType::int32_datatype())),
+            ConcreteDataType::List(ListType::new(item_type.clone())),
             list_vector.data_type()
         );
         assert_eq!("ListVector", list_vector.vector_type_name());
@@ -553,7 +568,7 @@ pub mod tests {
         assert!(validity.is_set(0));
         assert!(!validity.is_set(1));
         assert!(validity.is_set(2));
-        assert_eq!(256, list_vector.memory_size());
+        assert_eq!(224, list_vector.memory_size());
 
         let slice = list_vector.slice(0, 2).to_arrow_array();
         let sliced_array = slice.as_any().downcast_ref::<ListArray>().unwrap();
@@ -570,7 +585,7 @@ pub mod tests {
         assert_eq!(
             Value::List(ListValue::new(
                 vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)],
-                ConcreteDataType::int32_datatype()
+                item_type.clone()
             )),
             list_vector.get(0)
         );
@@ -589,7 +604,7 @@ pub mod tests {
         assert_eq!(
             Value::List(ListValue::new(
                 vec![Value::Int32(4), Value::Null, Value::Int32(6)],
-                ConcreteDataType::int32_datatype()
+                item_type.clone()
             )),
             list_vector.get(2)
         );
@@ -625,10 +640,11 @@ pub mod tests {
             Some(vec![Some(4), None, Some(6)]),
         ];
 
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
         let list_vector = new_list_vector(&data);
 
         assert_eq!(
-            ConcreteDataType::List(ListType::new(ConcreteDataType::int32_datatype())),
+            ConcreteDataType::List(ListType::new(item_type.clone())),
             list_vector.data_type()
         );
         let mut iter = list_vector.values_iter();
@@ -661,15 +677,15 @@ pub mod tests {
 
     #[test]
     fn test_list_vector_builder() {
-        let mut builder =
-            ListType::new(ConcreteDataType::int32_datatype()).create_mutable_vector(3);
-        builder.push_value_ref(ValueRef::List(ListValueRef::Ref {
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
+        let mut builder = ListType::new(item_type.clone()).create_mutable_vector(3);
+        builder.push_value_ref(&ValueRef::List(ListValueRef::Ref {
             val: &ListValue::new(
                 vec![Value::Int32(4), Value::Null, Value::Int32(6)],
-                ConcreteDataType::int32_datatype(),
+                item_type.clone(),
             ),
         }));
-        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
+        assert!(builder.try_push_value_ref(&ValueRef::Int32(123)).is_err());
 
         let data = vec![
             Some(vec![Some(1), Some(2), Some(3)]),
@@ -678,9 +694,11 @@ pub mod tests {
         ];
         let input = new_list_vector(&data);
         builder.extend_slice_of(&input, 1, 2).unwrap();
-        assert!(builder
-            .extend_slice_of(&crate::vectors::Int32Vector::from_slice([13]), 0, 1)
-            .is_err());
+        assert!(
+            builder
+                .extend_slice_of(&crate::vectors::Int32Vector::from_slice([13]), 0, 1)
+                .is_err()
+        );
         let vector = builder.to_vector();
 
         let expect: VectorRef = Arc::new(new_list_vector(&[
@@ -693,13 +711,13 @@ pub mod tests {
 
     #[test]
     fn test_list_vector_for_scalar() {
-        let mut builder =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 2);
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
+        let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 2);
         builder.push(None);
         builder.push(Some(ListValueRef::Ref {
             val: &ListValue::new(
                 vec![Value::Int32(4), Value::Null, Value::Int32(6)],
-                ConcreteDataType::int32_datatype(),
+                item_type.clone(),
             ),
         }));
         let vector = builder.finish();
@@ -744,13 +762,13 @@ pub mod tests {
 
     #[test]
     fn test_list_vector_builder_finish_cloned() {
-        let mut builder =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 2);
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
+        let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 2);
         builder.push(None);
         builder.push(Some(ListValueRef::Ref {
             val: &ListValue::new(
                 vec![Value::Int32(4), Value::Null, Value::Int32(6)],
-                ConcreteDataType::int32_datatype(),
+                item_type.clone(),
             ),
         }));
         let vector = builder.finish_cloned();

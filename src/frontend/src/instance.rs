@@ -32,30 +32,29 @@ use std::time::{Duration, SystemTime};
 use async_stream::stream;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
-use catalog::process_manager::ProcessManagerRef;
 use catalog::CatalogManagerRef;
+use catalog::process_manager::{
+    ProcessManagerRef, QueryStatement as CatalogQueryStatement, SlowQueryTimer,
+};
 use client::OutputData;
-use common_base::cancellation::CancellableFuture;
 use common_base::Plugins;
-use common_config::KvBackendConfig;
+use common_base::cancellation::CancellableFuture;
 use common_error::ext::{BoxedError, ErrorExt};
+use common_event_recorder::EventRecorderRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::ddl::ProcedureExecutorRef;
-use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::kv_backend::KvBackendRef;
+use common_meta::key::table_name::TableNameKey;
 use common_meta::node_manager::NodeManagerRef;
-use common_meta::state_store::KvStateStore;
-use common_procedure::local::{LocalManager, ManagerConfig};
-use common_procedure::options::ProcedureConfig;
-use common_procedure::ProcedureManagerRef;
+use common_meta::procedure_executor::ProcedureExecutorRef;
 use common_query::Output;
-use common_recordbatch::error::StreamTimeoutSnafu;
 use common_recordbatch::RecordBatchStreamWrapper;
-use common_telemetry::{debug, error, info, tracing};
+use common_recordbatch::error::StreamTimeoutSnafu;
+use common_telemetry::logging::SlowQueryOptions;
+use common_telemetry::{debug, error, tracing};
+use dashmap::DashMap;
 use datafusion_expr::LogicalPlan;
 use futures::{Stream, StreamExt};
-use log_store::raft_engine::RaftEngineBackend;
+use lazy_static::lazy_static;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::{StatementExecutor, StatementExecutorRef};
@@ -63,21 +62,25 @@ use partition::manager::PartitionRuleManagerRef;
 use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
 use promql_parser::label::Matcher;
+use query::QueryEngineRef;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
-use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
-use query::QueryEngineRef;
-use servers::error as server_error;
-use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
+use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
+use servers::error::{
+    self as server_error, AuthSnafu, CommonMetaSnafu, ExecuteQuerySnafu,
+    OtlpMetricModeIncompatibleSnafu, ParsePromQLSnafu, UnexpectedResultSnafu,
+};
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
+use servers::otlp::metrics::legacy_normalize_otlp_name;
 use servers::prometheus_handler::PrometheusHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
+use sql::ast::ObjectNamePartExt;
 use sql::dialect::Dialect;
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::copy::{CopyDatabase, CopyTable};
@@ -85,6 +88,7 @@ use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
+use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, InvalidSqlSnafu,
@@ -92,8 +96,11 @@ use crate::error::{
     StatementTimeoutSnafu, TableOperationSnafu,
 };
 use crate::limiter::LimiterRef;
-use crate::slow_query_recorder::SlowQueryRecorder;
 use crate::stream_wrapper::CancellableStreamWrapper;
+
+lazy_static! {
+    static ref OTLP_LEGACY_DEFAULT_VALUE: String = "legacy".to_string();
+}
 
 /// The frontend instance contains necessary components, and implements many
 /// traits, like [`servers::query_handler::grpc::GrpcQueryHandler`],
@@ -108,45 +115,19 @@ pub struct Instance {
     inserter: InserterRef,
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
-    slow_query_recorder: Option<SlowQueryRecorder>,
+    event_recorder: Option<EventRecorderRef>,
     limiter: Option<LimiterRef>,
     process_manager: ProcessManagerRef,
+    slow_query_options: SlowQueryOptions,
+
+    // cache for otlp metrics
+    // first layer key: db-string
+    // key: direct input metric name
+    // value: if runs in legacy mode
+    otlp_metrics_table_legacy_cache: DashMap<String, DashMap<String, bool>>,
 }
 
 impl Instance {
-    pub async fn try_build_standalone_components(
-        dir: String,
-        kv_backend_config: KvBackendConfig,
-        procedure_config: ProcedureConfig,
-    ) -> Result<(KvBackendRef, ProcedureManagerRef)> {
-        info!(
-            "Creating metadata kvbackend with config: {:?}",
-            kv_backend_config
-        );
-        let kv_backend = RaftEngineBackend::try_open_with_cfg(dir, &kv_backend_config)
-            .map_err(BoxedError::new)
-            .context(error::OpenRaftEngineBackendSnafu)?;
-
-        let kv_backend = Arc::new(kv_backend);
-        let kv_state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
-
-        let manager_config = ManagerConfig {
-            max_retry_times: procedure_config.max_retry_times,
-            retry_delay: procedure_config.retry_delay,
-            max_running_procedures: procedure_config.max_running_procedures,
-            ..Default::default()
-        };
-        let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
-        let procedure_manager = Arc::new(LocalManager::new(
-            manager_config,
-            kv_state_store.clone(),
-            kv_state_store,
-            Some(runtime_switch_manager),
-        ));
-
-        Ok((kv_backend, procedure_manager))
-    }
-
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
     }
@@ -203,36 +184,51 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
-            recorder.start(QueryStatement::Sql(stmt.clone()), query_ctx.clone())
+        if should_capture_statement(Some(&stmt)) {
+            let slow_query_timer = self
+                .slow_query_options
+                .enable
+                .then(|| self.event_recorder.clone())
+                .flatten()
+                .map(|event_recorder| {
+                    SlowQueryTimer::new(
+                        CatalogQueryStatement::Sql(stmt.clone()),
+                        self.slow_query_options.threshold,
+                        self.slow_query_options.sample_ratio,
+                        self.slow_query_options.record_type,
+                        event_recorder,
+                    )
+                });
+
+            let ticket = self.process_manager.register_query(
+                query_ctx.current_catalog().to_string(),
+                vec![query_ctx.current_schema()],
+                stmt.to_string(),
+                query_ctx.conn_info().to_string(),
+                Some(query_ctx.process_id()),
+                slow_query_timer,
+            );
+
+            let query_fut = self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor);
+
+            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                .await
+                .map_err(|_| error::CancelledSnafu.build())?
+                .map(|output| {
+                    let Output { meta, data } = output;
+
+                    let data = match data {
+                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
+                            CancellableStreamWrapper::new(stream, ticket),
+                        )),
+                        other => other,
+                    };
+                    Output { data, meta }
+                })
         } else {
-            None
-        };
-
-        let ticket = self.process_manager.register_query(
-            query_ctx.current_catalog().to_string(),
-            vec![query_ctx.current_schema()],
-            stmt.to_string(),
-            query_ctx.conn_info().to_string(),
-            Some(query_ctx.process_id()),
-        );
-
-        let query_fut = self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor);
-
-        CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
-            .await
-            .map_err(|_| error::CancelledSnafu.build())?
-            .map(|output| {
-                let Output { meta, data } = output;
-
-                let data = match data {
-                    OutputData::Stream(stream) => {
-                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
-                    }
-                    other => other,
-                };
-                Output { data, meta }
-            })
+            self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor)
+                .await
+        }
     }
 
     async fn exec_statement_with_timeout(
@@ -271,10 +267,10 @@ impl Instance {
         match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
                 // TODO: remove this when format is supported in datafusion
-                if let Statement::Explain(explain) = &stmt {
-                    if let Some(format) = explain.format() {
-                        query_ctx.set_explain_format(format.to_string());
-                    }
+                if let Statement::Explain(explain) = &stmt
+                    && let Some(format) = explain.format()
+                {
+                    query_ctx.set_explain_format(format.to_string());
                 }
 
                 self.plan_and_exec_sql(stmt, &query_ctx, query_interceptor)
@@ -330,6 +326,134 @@ impl Instance {
             .exec_plan(plan, query_ctx.clone())
             .await
             .context(TableOperationSnafu)
+    }
+
+    async fn check_otlp_legacy(
+        &self,
+        names: &[&String],
+        ctx: QueryContextRef,
+    ) -> server_error::Result<bool> {
+        let db_string = ctx.get_db_string();
+        // fast cache check
+        let cache = self
+            .otlp_metrics_table_legacy_cache
+            .entry(db_string.clone())
+            .or_default();
+        if let Some(flag) = fast_legacy_check(&cache, names)? {
+            return Ok(flag);
+        }
+        // release cache reference to avoid lock contention
+        drop(cache);
+
+        let catalog = ctx.current_catalog();
+        let schema = ctx.current_schema();
+
+        // query legacy table names
+        let normalized_names = names
+            .iter()
+            .map(|n| legacy_normalize_otlp_name(n))
+            .collect::<Vec<_>>();
+        let table_names = normalized_names
+            .iter()
+            .map(|n| TableNameKey::new(catalog, &schema, n))
+            .collect::<Vec<_>>();
+        let table_values = self
+            .table_metadata_manager()
+            .table_name_manager()
+            .batch_get(table_names)
+            .await
+            .context(CommonMetaSnafu)?;
+        let table_ids = table_values
+            .into_iter()
+            .filter_map(|v| v.map(|vi| vi.table_id()))
+            .collect::<Vec<_>>();
+
+        // means no existing table is found, use new mode
+        if table_ids.is_empty() {
+            let cache = self
+                .otlp_metrics_table_legacy_cache
+                .entry(db_string)
+                .or_default();
+            names.iter().for_each(|name| {
+                cache.insert((*name).clone(), false);
+            });
+            return Ok(false);
+        }
+
+        // has existing table, check table options
+        let table_infos = self
+            .table_metadata_manager()
+            .table_info_manager()
+            .batch_get(&table_ids)
+            .await
+            .context(CommonMetaSnafu)?;
+        let options = table_infos
+            .values()
+            .map(|info| {
+                info.table_info
+                    .meta
+                    .options
+                    .extra_options
+                    .get(OTLP_METRIC_COMPAT_KEY)
+                    .unwrap_or(&OTLP_LEGACY_DEFAULT_VALUE)
+            })
+            .collect::<Vec<_>>();
+        let cache = self
+            .otlp_metrics_table_legacy_cache
+            .entry(db_string)
+            .or_default();
+        if !options.is_empty() {
+            // check value consistency
+            let has_prom = options.iter().any(|opt| *opt == OTLP_METRIC_COMPAT_PROM);
+            let has_legacy = options
+                .iter()
+                .any(|opt| *opt == OTLP_LEGACY_DEFAULT_VALUE.as_str());
+            ensure!(!(has_prom && has_legacy), OtlpMetricModeIncompatibleSnafu);
+            let flag = has_legacy;
+            names.iter().for_each(|name| {
+                cache.insert((*name).clone(), flag);
+            });
+            Ok(flag)
+        } else {
+            // no table info, use new mode
+            names.iter().for_each(|name| {
+                cache.insert((*name).clone(), false);
+            });
+            Ok(false)
+        }
+    }
+}
+
+fn fast_legacy_check(
+    cache: &DashMap<String, bool>,
+    names: &[&String],
+) -> server_error::Result<Option<bool>> {
+    let hit_cache = names
+        .iter()
+        .filter_map(|name| cache.get(*name))
+        .collect::<Vec<_>>();
+    if !hit_cache.is_empty() {
+        let hit_legacy = hit_cache.iter().any(|en| *en.value());
+        let hit_prom = hit_cache.iter().any(|en| !*en.value());
+
+        // hit but have true and false, means both legacy and new mode are used
+        // we cannot handle this case, so return error
+        // add doc links in err msg later
+        ensure!(!(hit_legacy && hit_prom), OtlpMetricModeIncompatibleSnafu);
+
+        let flag = hit_legacy;
+        // drop hit_cache to release references before inserting to avoid deadlock
+        drop(hit_cache);
+
+        // set cache for all names
+        names.iter().for_each(|name| {
+            if !cache.contains_key(*name) {
+                cache.insert((*name).clone(), flag);
+            }
+        });
+        Ok(Some(flag))
+    } else {
+        Ok(None)
     }
 }
 
@@ -404,10 +528,12 @@ impl SqlQueryHandler for Instance {
         {
             Ok(stmts) => {
                 if stmts.is_empty() {
-                    return vec![InvalidSqlSnafu {
-                        err_msg: "empty statements",
-                    }
-                    .fail()];
+                    return vec![
+                        InvalidSqlSnafu {
+                            err_msg: "empty statements",
+                        }
+                        .fail(),
+                    ];
                 }
 
                 let mut results = Vec::with_capacity(stmts.len());
@@ -448,13 +574,65 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
-        // plan should be prepared before exec
-        // we'll do check there
-        self.query_engine
-            .execute(plan.clone(), query_ctx)
-            .await
-            .context(ExecLogicalPlanSnafu)
+    async fn do_exec_plan(
+        &self,
+        stmt: Option<Statement>,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        if should_capture_statement(stmt.as_ref()) {
+            // It's safe to unwrap here because we've already checked the type.
+            let stmt = stmt.unwrap();
+            let query = stmt.to_string();
+            let slow_query_timer = self
+                .slow_query_options
+                .enable
+                .then(|| self.event_recorder.clone())
+                .flatten()
+                .map(|event_recorder| {
+                    SlowQueryTimer::new(
+                        CatalogQueryStatement::Sql(stmt.clone()),
+                        self.slow_query_options.threshold,
+                        self.slow_query_options.sample_ratio,
+                        self.slow_query_options.record_type,
+                        event_recorder,
+                    )
+                });
+
+            let ticket = self.process_manager.register_query(
+                query_ctx.current_catalog().to_string(),
+                vec![query_ctx.current_schema()],
+                query,
+                query_ctx.conn_info().to_string(),
+                Some(query_ctx.process_id()),
+                slow_query_timer,
+            );
+
+            let query_fut = self.query_engine.execute(plan.clone(), query_ctx);
+
+            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                .await
+                .map_err(|_| error::CancelledSnafu.build())?
+                .map(|output| {
+                    let Output { meta, data } = output;
+
+                    let data = match data {
+                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
+                            CancellableStreamWrapper::new(stream, ticket),
+                        )),
+                        other => other,
+                    };
+                    Output { data, meta }
+                })
+                .context(ExecLogicalPlanSnafu)
+        } else {
+            // plan should be prepared before exec
+            // we'll do check there
+            self.query_engine
+                .execute(plan.clone(), query_ctx)
+                .await
+                .context(ExecLogicalPlanSnafu)
+        }
     }
 
     #[tracing::instrument(skip_all)]
@@ -548,12 +726,6 @@ impl PrometheusHandler for Instance {
             }
         })?;
 
-        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
-            recorder.start(stmt.clone(), query_ctx.clone())
-        } else {
-            None
-        };
-
         let plan = self
             .statement_executor
             .plan(&stmt, query_ctx.clone())
@@ -563,10 +735,57 @@ impl PrometheusHandler for Instance {
 
         interceptor.pre_execute(query, Some(&plan), query_ctx.clone())?;
 
-        let output = self
-            .statement_executor
-            .exec_plan(plan, query_ctx.clone())
+        // Take the EvalStmt from the original QueryStatement and use it to create the CatalogQueryStatement.
+        let query_statement = if let QueryStatement::Promql(eval_stmt, alias) = stmt {
+            CatalogQueryStatement::Promql(eval_stmt, alias)
+        } else {
+            // It should not happen since the query is already parsed successfully.
+            return UnexpectedResultSnafu {
+                reason: "The query should always be promql.".to_string(),
+            }
+            .fail();
+        };
+        let query = query_statement.to_string();
+
+        let slow_query_timer = self
+            .slow_query_options
+            .enable
+            .then(|| self.event_recorder.clone())
+            .flatten()
+            .map(|event_recorder| {
+                SlowQueryTimer::new(
+                    query_statement,
+                    self.slow_query_options.threshold,
+                    self.slow_query_options.sample_ratio,
+                    self.slow_query_options.record_type,
+                    event_recorder,
+                )
+            });
+
+        let ticket = self.process_manager.register_query(
+            query_ctx.current_catalog().to_string(),
+            vec![query_ctx.current_schema()],
+            query,
+            query_ctx.conn_info().to_string(),
+            Some(query_ctx.process_id()),
+            slow_query_timer,
+        );
+
+        let query_fut = self.statement_executor.exec_plan(plan, query_ctx.clone());
+
+        let output = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
             .await
+            .map_err(|_| servers::error::CancelledSnafu.build())?
+            .map(|output| {
+                let Output { meta, data } = output;
+                let data = match data {
+                    OutputData::Stream(stream) => {
+                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
+                    }
+                    other => other,
+                };
+                Output { data, meta }
+            })
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
 
@@ -658,6 +877,10 @@ pub fn check_permission(
         Statement::ShowCreateFlow(stmt) => {
             validate_param(&stmt.flow_name, query_ctx)?;
         }
+        #[cfg(feature = "enterprise")]
+        Statement::ShowCreateTrigger(stmt) => {
+            validate_param(&stmt.trigger_name, query_ctx)?;
+        }
         Statement::ShowCreateView(stmt) => {
             validate_param(&stmt.view_name, query_ctx)?;
         }
@@ -678,6 +901,8 @@ pub fn check_permission(
         Statement::AlterTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
         }
+        #[cfg(feature = "enterprise")]
+        Statement::AlterTrigger(_) => {}
         // set/show variable now only alter/show variable in session
         Statement::SetVariables(_) | Statement::ShowVariables(_) => {}
         // show charset and show collation won't be checked
@@ -772,9 +997,9 @@ fn validate_database(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<(
     let (catalog, schema) = match &name.0[..] {
         [schema] => (
             query_ctx.current_catalog().to_string(),
-            schema.value.clone(),
+            schema.to_string_unquoted(),
         ),
-        [catalog, schema] => (catalog.value.clone(), schema.value.clone()),
+        [catalog, schema] => (catalog.to_string_unquoted(), schema.to_string_unquoted()),
         _ => InvalidSqlSnafu {
             err_msg: format!(
                 "expect database name to be <catalog>.<schema> or <schema>, actual: {name}",
@@ -788,9 +1013,22 @@ fn validate_database(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<(
         .context(SqlExecInterceptedSnafu)
 }
 
+// Create a query ticket and slow query timer if the statement is a query or readonly statement.
+fn should_capture_statement(stmt: Option<&Statement>) -> bool {
+    if let Some(stmt) = stmt {
+        matches!(stmt, Statement::Query(_)) || stmt.is_readonly()
+    } else {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use common_base::Plugins;
     use query::query_engine::options::QueryOptions;
@@ -799,6 +1037,122 @@ mod tests {
     use strfmt::Format;
 
     use super::*;
+
+    #[test]
+    fn test_fast_legacy_check_deadlock_prevention() {
+        // Create a DashMap to simulate the cache
+        let cache = DashMap::new();
+
+        // Pre-populate cache with some entries
+        cache.insert("metric1".to_string(), true); // legacy mode
+        cache.insert("metric2".to_string(), false); // prom mode
+        cache.insert("metric3".to_string(), true); // legacy mode
+
+        // Test case 1: Normal operation with cache hits
+        let metric1 = "metric1".to_string();
+        let metric4 = "metric4".to_string();
+        let names1 = vec![&metric1, &metric4];
+        let result = fast_legacy_check(&cache, &names1);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(true)); // should return legacy mode
+
+        // Verify that metric4 was added to cache
+        assert!(cache.contains_key("metric4"));
+        assert!(*cache.get("metric4").unwrap().value());
+
+        // Test case 2: No cache hits
+        let metric5 = "metric5".to_string();
+        let metric6 = "metric6".to_string();
+        let names2 = vec![&metric5, &metric6];
+        let result = fast_legacy_check(&cache, &names2);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None); // should return None as no cache hits
+
+        // Test case 3: Incompatible modes should return error
+        let cache_incompatible = DashMap::new();
+        cache_incompatible.insert("metric1".to_string(), true); // legacy
+        cache_incompatible.insert("metric2".to_string(), false); // prom
+        let metric1_test = "metric1".to_string();
+        let metric2_test = "metric2".to_string();
+        let names3 = vec![&metric1_test, &metric2_test];
+        let result = fast_legacy_check(&cache_incompatible, &names3);
+        assert!(result.is_err()); // should error due to incompatible modes
+
+        // Test case 4: Intensive concurrent access to test deadlock prevention
+        // This test specifically targets the scenario where multiple threads
+        // access the same cache entries simultaneously
+        let cache_concurrent = Arc::new(DashMap::new());
+        cache_concurrent.insert("shared_metric".to_string(), true);
+
+        let num_threads = 8;
+        let operations_per_thread = 100;
+        let barrier = Arc::new(Barrier::new(num_threads));
+        let success_flag = Arc::new(AtomicBool::new(true));
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let cache_clone = Arc::clone(&cache_concurrent);
+                let barrier_clone = Arc::clone(&barrier);
+                let success_flag_clone = Arc::clone(&success_flag);
+
+                thread::spawn(move || {
+                    // Wait for all threads to be ready
+                    barrier_clone.wait();
+
+                    let start_time = Instant::now();
+                    for i in 0..operations_per_thread {
+                        // Each operation references existing cache entry and adds new ones
+                        let shared_metric = "shared_metric".to_string();
+                        let new_metric = format!("thread_{}_metric_{}", thread_id, i);
+                        let names = vec![&shared_metric, &new_metric];
+
+                        match fast_legacy_check(&cache_clone, &names) {
+                            Ok(_) => {}
+                            Err(_) => {
+                                success_flag_clone.store(false, Ordering::Relaxed);
+                                return;
+                            }
+                        }
+
+                        // If the test takes too long, it likely means deadlock
+                        if start_time.elapsed() > Duration::from_secs(10) {
+                            success_flag_clone.store(false, Ordering::Relaxed);
+                            return;
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        // Join all threads with timeout
+        let start_time = Instant::now();
+        for (i, handle) in handles.into_iter().enumerate() {
+            let join_result = handle.join();
+
+            // Check if we're taking too long (potential deadlock)
+            if start_time.elapsed() > Duration::from_secs(30) {
+                panic!("Test timed out - possible deadlock detected!");
+            }
+
+            if join_result.is_err() {
+                panic!("Thread {} panicked during execution", i);
+            }
+        }
+
+        // Verify all operations completed successfully
+        assert!(
+            success_flag.load(Ordering::Relaxed),
+            "Some operations failed"
+        );
+
+        // Verify that many new entries were added (proving operations completed)
+        let final_count = cache_concurrent.len();
+        assert!(
+            final_count > 1 + num_threads * operations_per_thread / 2,
+            "Expected more cache entries, got {}",
+            final_count
+        );
+    }
 
     #[test]
     fn test_exec_validation() {

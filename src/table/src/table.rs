@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::execution::FunctionRegistry;
-use datafusion::logical_expr::expr::ScalarFunction;
 use datafusion::logical_expr::Cast;
+use datafusion::logical_expr::expr::ScalarFunction;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::expr::Expr;
 use datatypes::data_type::DataType;
@@ -52,6 +52,16 @@ lazy_static! {
     };
 }
 
+/// Defines partition rules for a table.
+/// TODO(discord9): add the entire partition exprs rules here later
+pub struct PartitionRules {
+    /// The physical partition columns that are not in the logical table.
+    /// only used in kvbackend manager to store the physical partition columns that are not in the logical table.
+    /// This is used to avoid the partition columns in the physical table that are not in the logical table
+    /// to prevent certain optimizations, if table is not a logical table, this should be empty
+    pub extra_phy_cols_not_in_logical_table: Vec<String>,
+}
+
 pub type TableRef = Arc<Table>;
 
 /// Table handle.
@@ -61,6 +71,7 @@ pub struct Table {
     data_source: DataSourceRef,
     /// Columns default [`Expr`]
     column_defaults: HashMap<String, Expr>,
+    partition_rules: Option<PartitionRules>,
 }
 
 impl Table {
@@ -74,6 +85,22 @@ impl Table {
             table_info,
             filter_pushdown,
             data_source,
+            partition_rules: None,
+        }
+    }
+
+    pub fn new_partitioned(
+        table_info: TableInfoRef,
+        filter_pushdown: FilterPushDownType,
+        data_source: DataSourceRef,
+        partition_rules: Option<PartitionRules>,
+    ) -> Self {
+        Self {
+            column_defaults: collect_column_defaults(table_info.meta.schema.column_schemas()),
+            table_info,
+            filter_pushdown,
+            data_source,
+            partition_rules,
         }
     }
 
@@ -99,6 +126,10 @@ impl Table {
     /// Get the type of this table for metadata/catalog purposes.
     pub fn table_type(&self) -> TableType {
         self.table_info.table_type
+    }
+
+    pub fn partition_rules(&self) -> Option<&PartitionRules> {
+        self.partition_rules.as_ref()
     }
 
     pub async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
@@ -153,7 +184,7 @@ fn collect_column_defaults(column_schemas: &[ColumnSchema]) -> HashMap<String, E
                 column_schema.default_constraint()?,
                 &column_schema.data_type,
             )
-            .map(|expr| (column_schema.name.to_string(), expr))
+            .map(|expr| (column_schema.name.clone(), expr))
         })
         .collect()
 }
@@ -164,9 +195,10 @@ fn default_constraint_to_expr(
     target_type: &ConcreteDataType,
 ) -> Option<Expr> {
     match default_constraint {
-        ColumnDefaultConstraint::Value(v) => {
-            v.try_to_scalar_value(target_type).ok().map(Expr::Literal)
-        }
+        ColumnDefaultConstraint::Value(v) => v
+            .try_to_scalar_value(target_type)
+            .ok()
+            .map(|x| Expr::Literal(x, None)),
 
         ColumnDefaultConstraint::Function(name)
             if matches!(
@@ -194,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_collect_columns_defaults() {
-        let column_schemas = vec![
+        let column_schemas = [
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), false),
             ColumnSchema::new("col2", ConcreteDataType::string_datatype(), true)
                 .with_default_constraint(Some(ColumnDefaultConstraint::Value("test".into())))
@@ -214,7 +246,7 @@ mod tests {
 
         assert!(!column_defaults.contains_key("col1"));
         assert!(matches!(column_defaults.get("col2").unwrap(),
-                         Expr::Literal(ScalarValue::Utf8(Some(s))) if s == "test"));
+                         Expr::Literal(ScalarValue::Utf8(Some(s)), _) if s == "test"));
         assert!(matches!(
             column_defaults.get("ts").unwrap(),
             Expr::Cast(Cast {

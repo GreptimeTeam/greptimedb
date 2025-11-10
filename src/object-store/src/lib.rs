@@ -14,9 +14,8 @@
 
 pub use opendal::raw::{Access, HttpClient};
 pub use opendal::{
-    services, Buffer, Builder as ObjectStoreBuilder, Entry, EntryMode, Error, ErrorKind,
-    FuturesAsyncReader, FuturesAsyncWriter, Lister, Operator as ObjectStore, Reader, Result,
-    Writer,
+    Buffer, Builder as ObjectStoreBuilder, Entry, EntryMode, Error, ErrorKind, FuturesAsyncReader,
+    FuturesAsyncWriter, Lister, Operator as ObjectStore, Reader, Result, Scheme, Writer, services,
 };
 
 pub mod config;
@@ -27,6 +26,8 @@ pub mod manager;
 mod metrics;
 pub mod test_util;
 pub mod util;
+
+pub use config::{AzblobConnection, GcsConnection, OssConnection, S3Connection};
 
 /// The default object cache directory name.
 pub const OBJECT_CACHE_DIR: &str = "object_cache";

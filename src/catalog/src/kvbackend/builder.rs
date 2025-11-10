@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_meta::cache::LayeredCacheRegistryRef;
-use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
 use moka::sync::Cache;
@@ -26,9 +26,10 @@ use partition::manager::PartitionRuleManager;
 #[cfg(feature = "enterprise")]
 use crate::information_schema::InformationSchemaTableFactoryRef;
 use crate::information_schema::{InformationExtensionRef, InformationSchemaProvider};
-use crate::kvbackend::manager::{SystemCatalog, CATALOG_CACHE_MAX_CAPACITY};
 use crate::kvbackend::KvBackendCatalogManager;
+use crate::kvbackend::manager::{CATALOG_CACHE_MAX_CAPACITY, SystemCatalog};
 use crate::process_manager::ProcessManagerRef;
+use crate::system_schema::numbers_table_provider::NumbersTableProvider;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
 
 pub struct KvBackendCatalogManagerBuilder {
@@ -119,6 +120,7 @@ impl KvBackendCatalogManagerBuilder {
                     DEFAULT_CATALOG_NAME.to_string(),
                     me.clone(),
                 )),
+                numbers_table_provider: NumbersTableProvider,
                 backend,
                 process_manager,
                 #[cfg(feature = "enterprise")]

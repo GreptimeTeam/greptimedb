@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use api::helper::{
-    is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_proto_value,
-    ColumnDataTypeWrapper,
+    ColumnDataTypeWrapper, is_column_type_value_eq, is_semantic_type_eq, proto_value_type,
+    to_proto_value,
 };
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value, WriteHint};
@@ -29,29 +29,31 @@ use datatypes::prelude::DataType;
 use prometheus::HistogramTimer;
 use prost::Message;
 use smallvec::SmallVec;
-use snafu::{ensure, OptionExt, ResultExt};
-use store_api::codec::{infer_primary_key_encoding_from_hint, PrimaryKeyEncoding};
+use snafu::{OptionExt, ResultExt, ensure};
+use store_api::ManifestVersion;
+use store_api::codec::{PrimaryKeyEncoding, infer_primary_key_encoding_from_hint};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
-    AffectedRows, RegionAlterRequest, RegionBulkInsertsRequest, RegionCatchupRequest,
-    RegionCloseRequest, RegionCompactRequest, RegionCreateRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    AffectedRows, RegionAlterRequest, RegionBuildIndexRequest, RegionBulkInsertsRequest,
+    RegionCatchupRequest, RegionCloseRequest, RegionCompactRequest, RegionCreateRequest,
+    RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
-use store_api::storage::{RegionId, SequenceNumber};
-use store_api::ManifestVersion;
+use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::{
     CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
     FlushRegionSnafu, InvalidRequestSnafu, Result, UnexpectedSnafu,
 };
-use crate::manifest::action::RegionEdit;
-use crate::memtable::bulk::part::BulkPart;
+use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
+use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
-use crate::wal::entry_distributor::WalEntryReceiver;
+use crate::sst::file::FileMeta;
+use crate::sst::index::IndexBuildType;
 use crate::wal::EntryId;
+use crate::wal::entry_distributor::WalEntryReceiver;
 
 /// Request to write a region.
 #[derive(Debug)]
@@ -180,7 +182,7 @@ impl WriteRequest {
                 ensure!(
                     is_column_type_value_eq(
                         input_col.datatype,
-                        input_col.datatype_extension,
+                        input_col.datatype_extension.clone(),
                         &column.column_schema.data_type
                     ),
                     InvalidRequestSnafu {
@@ -382,7 +384,7 @@ impl WriteRequest {
                 if column.column_schema.is_default_impure() {
                     UnexpectedSnafu {
                         reason: format!(
-                            "unexpected impure default value with region_id: {}, column: {}, default_value: {:?}", 
+                            "unexpected impure default value with region_id: {}, column: {}, default_value: {:?}",
                             self.region_id,
                             column.column_schema.name,
                             column.column_schema.default_constraint(),
@@ -409,13 +411,7 @@ impl WriteRequest {
         };
 
         // Convert default value into proto's value.
-        to_proto_value(default_value).with_context(|| InvalidRequestSnafu {
-            region_id: self.region_id,
-            reason: format!(
-                "no protobuf type for default value of column {} ({:?})",
-                column.column_schema.name, column.column_schema.data_type
-            ),
-        })
+        Ok(to_proto_value(default_value))
     }
 }
 
@@ -606,6 +602,7 @@ pub(crate) enum WorkerRequest {
 }
 
 impl WorkerRequest {
+    /// Creates a new open region request.
     pub(crate) fn new_open_region_request(
         region_id: RegionId,
         request: RegionOpenRequest,
@@ -619,6 +616,21 @@ impl WorkerRequest {
             request: DdlRequest::Open((request, entry_receiver)),
         });
 
+        (worker_request, receiver)
+    }
+
+    /// Creates a new catchup region request.
+    pub(crate) fn new_catchup_region_request(
+        region_id: RegionId,
+        request: RegionCatchupRequest,
+        entry_receiver: Option<WalEntryReceiver>,
+    ) -> (WorkerRequest, Receiver<Result<AffectedRows>>) {
+        let (sender, receiver) = oneshot::channel();
+        let worker_request = WorkerRequest::Ddl(SenderDdlRequest {
+            region_id,
+            sender: sender.into(),
+            request: DdlRequest::Catchup((request, entry_receiver)),
+        });
         (worker_request, receiver)
     }
 
@@ -692,6 +704,11 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Compact(v),
             }),
+            RegionRequest::BuildIndex(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: sender.into(),
+                request: DdlRequest::BuildIndex(v),
+            }),
             RegionRequest::Truncate(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
@@ -700,7 +717,7 @@ impl WorkerRequest {
             RegionRequest::Catchup(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
-                request: DdlRequest::Catchup(v),
+                request: DdlRequest::Catchup((v, None)),
             }),
             RegionRequest::BulkInserts(region_bulk_inserts_request) => WorkerRequest::BulkInserts {
                 metadata: region_metadata,
@@ -754,8 +771,9 @@ pub(crate) enum DdlRequest {
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
+    BuildIndex(RegionBuildIndexRequest),
     Truncate(RegionTruncateRequest),
-    Catchup(RegionCatchupRequest),
+    Catchup((RegionCatchupRequest, Option<WalEntryReceiver>)),
 }
 
 /// Sender and Ddl request.
@@ -776,6 +794,12 @@ pub(crate) enum BackgroundNotify {
     FlushFinished(FlushFinished),
     /// Flush has failed.
     FlushFailed(FlushFailed),
+    /// Index build has finished.
+    IndexBuildFinished(IndexBuildFinished),
+    /// Index build has been stopped (aborted or succeeded).
+    IndexBuildStopped(IndexBuildStopped),
+    /// Index build has failed.
+    IndexBuildFailed(IndexBuildFailed),
     /// Compaction has finished.
     CompactionFinished(CompactionFinished),
     /// Compaction has failed.
@@ -829,6 +853,27 @@ impl OnFailure for FlushFinished {
 #[derive(Debug)]
 pub(crate) struct FlushFailed {
     /// The error source of the failure.
+    pub(crate) err: Arc<Error>,
+}
+
+#[derive(Debug)]
+pub(crate) struct IndexBuildFinished {
+    #[allow(dead_code)]
+    pub(crate) region_id: RegionId,
+    pub(crate) edit: RegionEdit,
+}
+
+/// Notifies an index build job has been stopped.
+#[derive(Debug)]
+pub(crate) struct IndexBuildStopped {
+    #[allow(dead_code)]
+    pub(crate) region_id: RegionId,
+    pub(crate) file_id: FileId,
+}
+
+/// Notifies an index build job has failed.
+#[derive(Debug)]
+pub(crate) struct IndexBuildFailed {
     pub(crate) err: Arc<Error>,
 }
 
@@ -886,10 +931,7 @@ pub(crate) struct TruncateResult {
     pub(crate) sender: OptionOutputTx,
     /// Truncate result.
     pub(crate) result: Result<()>,
-    /// Truncated entry id.
-    pub(crate) truncated_entry_id: EntryId,
-    /// Truncated sequence.
-    pub(crate) truncated_sequence: SequenceNumber,
+    pub(crate) kind: TruncateKind,
 }
 
 /// Notifies the region the result of writing region change action.
@@ -903,6 +945,8 @@ pub(crate) struct RegionChangeResult {
     pub(crate) sender: OptionOutputTx,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+    /// Used for index build in schema change.
+    pub(crate) need_index: bool,
 }
 
 /// Request to edit a region directly.
@@ -925,6 +969,14 @@ pub(crate) struct RegionEditResult {
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+}
+
+#[derive(Debug)]
+pub(crate) struct BuildIndexRequest {
+    pub(crate) region_id: RegionId,
+    pub(crate) build_type: IndexBuildType,
+    /// files need to build index, empty means all.
+    pub(crate) file_metas: Vec<FileMeta>,
 }
 
 #[derive(Debug)]
@@ -1083,7 +1135,10 @@ mod tests {
 
         let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
-        check_invalid_request(&err, "column ts expect type Timestamp(Millisecond(TimestampMillisecondType)), given: INT64(4)");
+        check_invalid_request(
+            &err,
+            "column ts expect type Timestamp(Millisecond(TimestampMillisecondType)), given: INT64(4)",
+        );
     }
 
     #[test]
@@ -1216,11 +1271,13 @@ mod tests {
         let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
         assert!(err.is_fill_default());
-        assert!(request
-            .fill_missing_columns(&metadata)
-            .unwrap_err()
-            .to_string()
-            .contains("unexpected impure default value with region_id"));
+        assert!(
+            request
+                .fill_missing_columns(&metadata)
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected impure default value with region_id")
+        );
     }
 
     #[test]

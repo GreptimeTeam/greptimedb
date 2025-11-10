@@ -42,8 +42,8 @@ pub struct LogQuery {
     // Filters
     /// Conjunction of filters to apply for the raw logs.
     ///
-    /// Filters here can only refer to the columns from the original log.
-    pub filters: Vec<ColumnFilters>,
+    /// Filters here can apply to any LogExpr.
+    pub filters: Filters,
     /// Adjacent lines to return. Applies to all filters above.
     ///
     /// TODO(ruihang): Do we need per-filter context?
@@ -52,6 +52,59 @@ pub struct LogQuery {
     // Processors
     /// Expressions to calculate after filter.
     pub exprs: Vec<LogExpr>,
+}
+
+/// Nested filter structure that supports and/or relationships
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Filters {
+    /// Single filter condition
+    Single(ColumnFilters),
+    /// Multiple filters with AND relationship
+    And(Vec<Filters>),
+    /// Multiple filters with OR relationship
+    Or(Vec<Filters>),
+    Not(Box<Filters>),
+}
+
+impl Default for Filters {
+    fn default() -> Self {
+        Filters::And(vec![])
+    }
+}
+
+impl From<ColumnFilters> for Filters {
+    fn from(filter: ColumnFilters) -> Self {
+        Filters::Single(filter)
+    }
+}
+
+impl Filters {
+    pub fn and<T: Into<Filters>>(other: Vec<T>) -> Filters {
+        Filters::And(other.into_iter().map(Into::into).collect())
+    }
+
+    pub fn or<T: Into<Filters>>(other: Vec<T>) -> Filters {
+        Filters::Or(other.into_iter().map(Into::into).collect())
+    }
+
+    pub fn single(filter: ColumnFilters) -> Filters {
+        Filters::Single(filter)
+    }
+}
+/// Aggregation function with optional range and alias.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggFunc {
+    /// Function name, e.g., "count", "sum", etc.
+    pub name: String,
+    /// Arguments to the function. e.g., column references or literals. LogExpr::NamedIdent("column1".to_string())
+    pub args: Vec<LogExpr>,
+    pub alias: Option<String>,
+}
+
+impl AggFunc {
+    pub fn new(name: String, args: Vec<LogExpr>, alias: Option<String>) -> Self {
+        Self { name, args, alias }
+    }
 }
 
 /// Expression to calculate on log after filtering.
@@ -65,13 +118,11 @@ pub enum LogExpr {
         args: Vec<LogExpr>,
         alias: Option<String>,
     },
+    /// Aggregation function with optional grouping.
     AggrFunc {
-        name: String,
-        args: Vec<LogExpr>,
-        /// Optional range function parameter. Stands for the time range for both step and align.
-        range: Option<String>,
+        /// Function name, arguments, and optional alias.
+        expr: Vec<AggFunc>,
         by: Vec<LogExpr>,
-        alias: Option<String>,
     },
     Decompose {
         expr: Box<LogExpr>,
@@ -82,7 +133,7 @@ pub enum LogExpr {
     },
     BinaryOp {
         left: Box<LogExpr>,
-        op: String,
+        op: BinaryOperator,
         right: Box<LogExpr>,
     },
     Alias {
@@ -90,8 +141,7 @@ pub enum LogExpr {
         alias: String,
     },
     Filter {
-        expr: Box<LogExpr>,
-        filter: ContentFilter,
+        filter: ColumnFilters,
     },
 }
 
@@ -100,7 +150,7 @@ impl Default for LogQuery {
         Self {
             table: TableName::new("", "", ""),
             time_filter: Default::default(),
-            filters: vec![],
+            filters: Filters::And(vec![]),
             limit: Limit::default(),
             context: Default::default(),
             columns: vec![],
@@ -203,14 +253,14 @@ impl TimeFilter {
         }
 
         // Validate that end is after start
-        if let (Some(start), Some(end)) = (&start_dt, &end_dt) {
-            if end <= start {
-                return Err(EndBeforeStartSnafu {
-                    start: start.to_rfc3339(),
-                    end: end.to_rfc3339(),
-                }
-                .build());
+        if let (Some(start), Some(end)) = (&start_dt, &end_dt)
+            && end <= start
+        {
+            return Err(EndBeforeStartSnafu {
+                start: start.to_rfc3339(),
+                end: end.to_rfc3339(),
             }
+            .build());
         }
 
         // Update the fields with canonicalized timestamps
@@ -282,13 +332,57 @@ impl TimeFilter {
     }
 }
 
-/// Represents a column with filters to query.
-#[derive(Debug, Serialize, Deserialize)]
+/// Represents an expression with filters to query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnFilters {
-    /// Case-sensitive column name to query.
-    pub column_name: String,
-    /// Filters to apply to the column. Can be empty.
+    /// Expression to apply filters to. Can be a column reference or any other LogExpr.
+    pub expr: Box<LogExpr>,
+    /// Filters to apply to the expression result. Can be empty.
     pub filters: Vec<ContentFilter>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum EqualValue {
+    /// Exact match with a string value.
+    String(String),
+    /// Exact match with a boolean value.
+    Boolean(bool),
+    /// Exact match with a number value.
+    Int(i64),
+    /// Exact match with an unsigned integer value.
+    UInt(u64),
+    /// Exact match with a float value.
+    Float(f64),
+}
+
+impl From<String> for EqualValue {
+    fn from(value: String) -> Self {
+        EqualValue::String(value)
+    }
+}
+
+impl From<bool> for EqualValue {
+    fn from(value: bool) -> Self {
+        EqualValue::Boolean(value)
+    }
+}
+
+impl From<i64> for EqualValue {
+    fn from(value: i64) -> Self {
+        EqualValue::Int(value)
+    }
+}
+
+impl From<f64> for EqualValue {
+    fn from(value: f64) -> Self {
+        EqualValue::Float(value)
+    }
+}
+
+impl From<u64> for EqualValue {
+    fn from(value: u64) -> Self {
+        EqualValue::UInt(value)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -327,14 +421,39 @@ pub enum ContentFilter {
         inclusive: bool,
     },
     In(Vec<String>),
-    // TODO(ruihang): arithmetic operations
+    IsTrue,
+    IsFalse,
+    Equal(EqualValue),
 
     // Compound filters
-    Compound(Vec<ContentFilter>, BinaryOperator),
+    Compound(Vec<ContentFilter>, ConjunctionOperator),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ConjunctionOperator {
+    And,
+    Or,
+}
+
+/// Binary operators for LogExpr::BinaryOp.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum BinaryOperator {
+    // Comparison operators
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+
+    // Arithmetic operators
+    Plus,
+    Minus,
+    Multiply,
+    Divide,
+    Modulo,
+
+    // Logical operators
     And,
     Or,
 }

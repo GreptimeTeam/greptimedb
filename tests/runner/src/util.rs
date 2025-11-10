@@ -27,10 +27,7 @@ use tokio_stream::StreamExt;
 /// Check port every 0.1 second.
 const PORT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
-#[cfg(not(windows))]
-pub const PROGRAM: &str = "./greptime";
-#[cfg(windows)]
-pub const PROGRAM: &str = "greptime.exe";
+pub const PROGRAM: &str = "greptime";
 
 fn http_proxy() -> Option<String> {
     for proxy in ["http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"] {
@@ -182,10 +179,14 @@ pub async fn pull_binary(version: &str) {
 /// Pull the binary if it does not exist and `pull_version_on_need` is true.
 pub async fn maybe_pull_binary(version: &str, pull_version_on_need: bool) {
     let exist = Path::new(version).join(PROGRAM).is_file();
-    match (exist, pull_version_on_need){
+    match (exist, pull_version_on_need) {
         (true, _) => println!("Binary {version} exists"),
-        (false, false) => panic!("Binary {version} does not exist, please run with --pull-version-on-need or manually download it"),
-        (false, true) => { pull_binary(version).await; },
+        (false, false) => panic!(
+            "Binary {version} does not exist, please run with --pull-version-on-need or manually download it"
+        ),
+        (false, true) => {
+            pull_binary(version).await;
+        }
     }
 }
 
@@ -363,9 +364,9 @@ pub fn setup_mysql(mysql_port: u16, mysql_version: Option<&str>) {
     }
 
     let mysql_image = if let Some(mysql_version) = mysql_version {
-        format!("bitnami/mysql:{mysql_version}")
+        format!("greptime/mysql:{mysql_version}")
     } else {
-        "bitnami/mysql:5.7".to_string()
+        "greptime/mysql:5.7".to_string()
     };
     let mysql_password = "admin";
     let mysql_user = "greptimedb";
@@ -531,4 +532,29 @@ pub fn get_random_port() -> u16 {
         .local_addr()
         .expect("Failed to get local address")
         .port()
+}
+
+/// Retry to execute the function until success or the maximum number of retries is reached.
+pub async fn retry_with_backoff<T, E, Fut, F>(
+    mut fut: F,
+    max_retry: usize,
+    init_backoff: Duration,
+) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let mut backoff = init_backoff;
+    for attempt in 0..max_retry {
+        match fut().await {
+            Ok(res) => return Ok(res),
+            Err(err) if attempt + 1 == max_retry => return Err(err),
+            Err(_) => {
+                tokio::time::sleep(backoff).await;
+                backoff *= 2;
+            }
+        }
+    }
+
+    unreachable!("loop should have returned before here")
 }

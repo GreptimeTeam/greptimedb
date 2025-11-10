@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use snafu::ResultExt;
-use sqlparser::ast::Statement as SpStatement;
+use sqlparser::ast::{Set, Statement as SpStatement};
 
 use crate::ast::{Ident, ObjectName};
 use crate::error::{self, Result};
@@ -27,21 +27,27 @@ impl ParserContext<'_> {
         let _ = self.parser.next_token();
         let spstatement = self.parser.parse_set().context(error::SyntaxSnafu)?;
         match spstatement {
-            SpStatement::SetVariable {
-                variables,
-                value,
-                hivevar,
-                ..
-            } if !hivevar => Ok(Statement::SetVariables(SetVariables {
-                variable: (*variables)[0].clone(),
-                value,
-            })),
+            SpStatement::Set(set) => match set {
+                Set::SingleAssignment {
+                    scope: _,
+                    hivevar,
+                    variable,
+                    values,
+                } if !hivevar => Ok(Statement::SetVariables(SetVariables {
+                    variable,
+                    value: values,
+                })),
 
-            SpStatement::SetTimeZone { value, .. } => Ok(Statement::SetVariables(SetVariables {
-                variable: ObjectName(vec![Ident::new("TIMEZONE")]),
-                value: vec![value],
-            })),
+                Set::SetTimeZone { local: _, value } => Ok(Statement::SetVariables(SetVariables {
+                    variable: ObjectName::from(vec![Ident::new("TIMEZONE")]),
+                    value: vec![value],
+                })),
 
+                set => error::UnsupportedSnafu {
+                    keyword: set.to_string(),
+                }
+                .fail(),
+            },
             unexp => error::UnsupportedSnafu {
                 keyword: unexp.to_string(),
             }
@@ -65,7 +71,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::SetVariables(SetVariables {
-                variable: ObjectName(vec![Ident::new(indent_str)]),
+                variable: ObjectName::from(vec![Ident::new(indent_str)]),
                 value: vec![expr]
             })
         );
@@ -78,7 +84,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::SetVariables(SetVariables {
-                variable: ObjectName(vec![Ident::new(indent)]),
+                variable: ObjectName::from(vec![Ident::new(indent)]),
                 value: vec![expr],
             })
         );
@@ -86,7 +92,7 @@ mod tests {
 
     #[test]
     pub fn test_set_timezone() {
-        let expected_utc_expr = Expr::Value(Value::SingleQuotedString("UTC".to_string()));
+        let expected_utc_expr = Expr::Value(Value::SingleQuotedString("UTC".to_string()).into());
         // mysql style
         let sql = "SET time_zone = 'UTC'";
         assert_mysql_parse_result(sql, "time_zone", expected_utc_expr.clone());
@@ -105,7 +111,8 @@ mod tests {
 
     #[test]
     pub fn test_set_query_timeout() {
-        let expected_query_timeout_expr = Expr::Value(Value::Number("5000".to_string(), false));
+        let expected_query_timeout_expr =
+            Expr::Value(Value::Number("5000".to_string(), false).into());
         // mysql style
         let sql = "SET MAX_EXECUTION_TIME = 5000";
         assert_mysql_parse_result(

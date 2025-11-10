@@ -19,12 +19,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use auth::UserProviderRef;
 use catalog::process_manager::ProcessManagerRef;
-use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
+use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
 use opensrv_mysql::{
-    plain_run_with_options, secure_run_with_options, AsyncMysqlIntermediary, IntermediaryOptions,
+    AsyncMysqlIntermediary, IntermediaryOptions, plain_run_with_options, secure_run_with_options,
 };
 use snafu::ensure;
 use tokio;
@@ -77,6 +77,8 @@ pub struct MysqlSpawnConfig {
     keep_alive_secs: u64,
     // other shim config
     reject_no_database: bool,
+    // prepared statement cache capacity
+    prepared_stmt_cache_size: usize,
 }
 
 impl MysqlSpawnConfig {
@@ -85,12 +87,14 @@ impl MysqlSpawnConfig {
         tls: Arc<ReloadableTlsServerConfig>,
         keep_alive_secs: u64,
         reject_no_database: bool,
+        prepared_stmt_cache_size: usize,
     ) -> MysqlSpawnConfig {
         MysqlSpawnConfig {
             force_tls,
             tls,
             keep_alive_secs,
             reject_no_database,
+            prepared_stmt_cache_size,
         }
     }
 
@@ -137,7 +141,7 @@ impl MysqlServer {
         io_runtime: Runtime,
         stream: AbortableStream,
         process_manager: Option<ProcessManagerRef>,
-    ) -> impl Future<Output = ()> {
+    ) -> impl Future<Output = ()> + use<> {
         let spawn_ref = self.spawn_ref.clone();
         let spawn_config = self.spawn_config.clone();
 
@@ -201,6 +205,7 @@ impl MysqlServer {
             spawn_ref.user_provider(),
             stream.peer_addr()?,
             process_id,
+            spawn_config.prepared_stmt_cache_size,
         );
         let (mut r, w) = stream.into_split();
         let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);

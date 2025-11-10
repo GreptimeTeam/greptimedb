@@ -13,31 +13,21 @@
 // limitations under the License.
 
 use api::v1::meta::{
-    cluster_server, BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse,
-    Error, MetasrvNodeInfo, MetasrvPeersRequest, MetasrvPeersResponse,
-    RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse, ResponseHeader,
+    BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse, MetasrvNodeInfo,
+    MetasrvPeersRequest, MetasrvPeersResponse, RangeRequest as PbRangeRequest,
+    RangeResponse as PbRangeResponse, cluster_server,
 };
-use common_telemetry::warn;
 use snafu::ResultExt;
-use tonic::{Request, Response};
+use tonic::Request;
 
 use crate::metasrv::Metasrv;
 use crate::service::GrpcResult;
-use crate::{error, metasrv};
+use crate::{check_leader, error, metasrv};
 
 #[async_trait::async_trait]
 impl cluster_server::Cluster for Metasrv {
     async fn batch_get(&self, req: Request<PbBatchGetRequest>) -> GrpcResult<PbBatchGetResponse> {
-        if !self.is_leader() {
-            let is_not_leader = ResponseHeader::failed(Error::is_not_leader());
-            let resp = PbBatchGetResponse {
-                header: Some(is_not_leader),
-                ..Default::default()
-            };
-
-            warn!("The current meta is not leader, but a `batch_get` request have reached the meta. Detail: {:?}.", req);
-            return Ok(Response::new(resp));
-        }
+        check_leader!(self, req, PbBatchGetResponse, "`batch_get`");
 
         let req = req.into_inner().into();
         let resp = self
@@ -51,16 +41,7 @@ impl cluster_server::Cluster for Metasrv {
     }
 
     async fn range(&self, req: Request<PbRangeRequest>) -> GrpcResult<PbRangeResponse> {
-        if !self.is_leader() {
-            let is_not_leader = ResponseHeader::failed(Error::is_not_leader());
-            let resp = PbRangeResponse {
-                header: Some(is_not_leader),
-                ..Default::default()
-            };
-
-            warn!("The current meta is not leader, but a `range` request have reached the meta. Detail: {:?}.", req);
-            return Ok(Response::new(resp));
-        }
+        check_leader!(self, req, PbRangeResponse, "`range`");
 
         let req = req.into_inner().into();
         let res = self
@@ -77,16 +58,7 @@ impl cluster_server::Cluster for Metasrv {
         &self,
         req: Request<MetasrvPeersRequest>,
     ) -> GrpcResult<MetasrvPeersResponse> {
-        if !self.is_leader() {
-            let is_not_leader = ResponseHeader::failed(Error::is_not_leader());
-            let resp = MetasrvPeersResponse {
-                header: Some(is_not_leader),
-                ..Default::default()
-            };
-
-            warn!("The current meta is not leader, but a `metasrv_peers` request have reached the meta. Detail: {:?}.", req);
-            return Ok(Response::new(resp));
-        }
+        check_leader!(self, req, MetasrvPeersResponse, "`metasrv_peers`");
 
         let leader_addr = &self.options().grpc.server_addr;
         let (leader, followers) = match self.election() {
@@ -125,6 +97,14 @@ impl Metasrv {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms: self.start_time_ms(),
+            total_cpu_millicores: self.resource_stat().get_total_cpu_millicores(),
+            total_memory_bytes: self.resource_stat().get_total_memory_bytes(),
+            cpu_usage_millicores: self.resource_stat().get_cpu_usage_millicores(),
+            memory_usage_bytes: self.resource_stat().get_memory_usage_bytes(),
+            hostname: hostname::get()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
         }
         .into()
     }

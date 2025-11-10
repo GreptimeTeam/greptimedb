@@ -31,7 +31,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
 use crate::error::Result;
-use crate::manifest::action::RegionEdit;
+use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::{MemtableBuilderRef, MemtableId};
@@ -69,6 +69,12 @@ impl VersionControl {
     /// Returns current copy of data.
     pub(crate) fn current(&self) -> VersionControlData {
         self.data.read().unwrap().clone()
+    }
+
+    /// Updates the `committed_sequence` of version.
+    pub(crate) fn set_committed_sequence(&self, seq: SequenceNumber) {
+        let mut data = self.data.write().unwrap();
+        data.committed_sequence = seq;
     }
 
     /// Updates committed sequence and entry id.
@@ -127,21 +133,30 @@ impl VersionControl {
     }
 
     /// Apply edit to current version.
+    ///
+    /// If `edit` is None, only removes the specified memtables.
     pub(crate) fn apply_edit(
         &self,
-        edit: RegionEdit,
+        edit: Option<RegionEdit>,
         memtables_to_remove: &[MemtableId],
         purger: FilePurgerRef,
     ) {
         let version = self.current().version;
-        let new_version = Arc::new(
-            VersionBuilder::from_version(version)
-                .apply_edit(edit, purger)
-                .remove_memtables(memtables_to_remove)
-                .build(),
-        );
+        let builder = VersionBuilder::from_version(version);
+        let committed_sequence = edit.as_ref().and_then(|e| e.committed_sequence);
+        let builder = if let Some(edit) = edit {
+            builder.apply_edit(edit, purger)
+        } else {
+            builder
+        };
+        let new_version = Arc::new(builder.remove_memtables(memtables_to_remove).build());
 
         let mut version_data = self.data.write().unwrap();
+        version_data.committed_sequence = if let Some(committed_in_edit) = committed_sequence {
+            version_data.committed_sequence.max(committed_in_edit)
+        } else {
+            version_data.committed_sequence
+        };
         version_data.version = new_version;
     }
 
@@ -196,8 +211,7 @@ impl VersionControl {
     /// Truncate current version.
     pub(crate) fn truncate(
         &self,
-        truncated_entry_id: EntryId,
-        truncated_sequence: SequenceNumber,
+        truncate_kind: TruncateKind,
         memtable_builder: &MemtableBuilderRef,
     ) {
         let version = self.current().version;
@@ -210,17 +224,35 @@ impl VersionControl {
             next_memtable_id,
             Some(part_duration),
         ));
-        let new_version = Arc::new(
-            VersionBuilder::new(version.metadata.clone(), new_mutable)
-                .flushed_entry_id(truncated_entry_id)
-                .flushed_sequence(truncated_sequence)
-                .truncated_entry_id(Some(truncated_entry_id))
-                .build(),
-        );
+        match truncate_kind {
+            TruncateKind::All {
+                truncated_entry_id,
+                truncated_sequence,
+            } => {
+                let new_version = Arc::new(
+                    VersionBuilder::new(version.metadata.clone(), new_mutable)
+                        .flushed_entry_id(truncated_entry_id)
+                        .flushed_sequence(truncated_sequence)
+                        .truncated_entry_id(Some(truncated_entry_id))
+                        .build(),
+                );
 
-        let mut version_data = self.data.write().unwrap();
-        version_data.version.ssts.mark_all_deleted();
-        version_data.version = new_version;
+                let mut version_data = self.data.write().unwrap();
+                version_data.version.ssts.mark_all_deleted();
+                version_data.version = new_version;
+            }
+            TruncateKind::Partial { files_to_remove } => {
+                let new_version = Arc::new(
+                    VersionBuilder::from_version(version)
+                        .remove_files(files_to_remove.into_iter())
+                        .build(),
+                );
+
+                let mut version_data = self.data.write().unwrap();
+                // notice since it's partial, no need to mark all files as deleted
+                version_data.version = new_version;
+            }
+        };
     }
 
     /// Overwrites the current version with a new version.
@@ -354,7 +386,7 @@ impl VersionBuilder {
         self
     }
 
-    /// Sets truncated entty id.
+    /// Sets truncated entry id.
     pub(crate) fn truncated_entry_id(mut self, entry_id: Option<EntryId>) -> Self {
         self.truncated_entry_id = entry_id;
         self
@@ -416,6 +448,14 @@ impl VersionBuilder {
         self
     }
 
+    pub(crate) fn remove_files(mut self, files: impl Iterator<Item = FileMeta>) -> Self {
+        let mut ssts = (*self.ssts).clone();
+        ssts.remove_files(files);
+        self.ssts = Arc::new(ssts);
+
+        self
+    }
+
     /// Builds a new [Version] from the builder.
     /// It overwrites the window size by compaction option.
     pub(crate) fn build(self) -> Version {
@@ -429,9 +469,7 @@ impl VersionBuilder {
         {
             info!(
                 "VersionBuilder overwrites region compaction time window from {:?} to {:?}, region: {}",
-                self.compaction_time_window,
-                compaction_time_window,
-                self.metadata.region_id
+                self.compaction_time_window, compaction_time_window, self.metadata.region_id
             );
         }
 

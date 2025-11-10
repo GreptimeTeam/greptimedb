@@ -23,7 +23,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{error, info};
 use object_store::ObjectStore;
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
@@ -115,8 +115,8 @@ impl RegionEngine for FileRegionEngine {
         None
     }
 
-    async fn get_last_seq_num(&self, _: RegionId) -> Result<Option<SequenceNumber>, BoxedError> {
-        Ok(None)
+    async fn get_committed_sequence(&self, _: RegionId) -> Result<SequenceNumber, BoxedError> {
+        Ok(Default::default())
     }
 
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError> {

@@ -13,33 +13,55 @@
 // limitations under the License.
 
 //! prom supply the prometheus HTTP API Server compliance
+
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use arrow::array::AsArray;
+use arrow::datatypes::{
+    Date32Type, Date64Type, Decimal128Type, DurationMicrosecondType, DurationMillisecondType,
+    DurationNanosecondType, DurationSecondType, Float32Type, Float64Type, Int8Type, Int16Type,
+    Int32Type, Int64Type, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType,
+    Time32MillisecondType, Time32SecondType, Time64MicrosecondType, Time64NanosecondType,
+    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+    TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+};
+use arrow_schema::{DataType, IntervalUnit, TimeUnit};
 use axum::extract::{Path, Query, State};
 use axum::{Extension, Form};
 use catalog::CatalogManagerRef;
 use common_catalog::parse_catalog_and_schema_from_db_string;
+use common_decimal::Decimal128;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
-use common_recordbatch::RecordBatches;
+use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::{debug, tracing};
+use common_time::time::Time;
 use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
+use common_time::{
+    Date, Duration, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp,
+};
 use common_version::OwnedBuildInfo;
+use datafusion_common::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
+use datatypes::schema::{ColumnSchema, SchemaRef};
+use datatypes::types::jsonb_to_string;
 use datatypes::vectors::Float64Vector;
-use futures::future::join_all;
 use futures::StreamExt;
+use futures::future::join_all;
 use itertools::Itertools;
-use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
+use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
+use promql_parser::parser::token::{self};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
-    UnaryExpr, VectorSelector,
+    AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, LabelModifier, MatrixSelector, ParenExpr,
+    SubqueryExpr, UnaryExpr, VectorSelector,
 };
-use query::parser::{PromQuery, QueryLanguageParser, DEFAULT_LOOKBACK_STRING};
+use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser};
 use query::promql::planner::normalize_matcher;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -47,16 +69,17 @@ use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{Location, OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
-    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, PHYSICAL_TABLE_METADATA_KEY,
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
 };
 
 pub use super::result::prometheus_resp::PrometheusJsonResponse;
 use crate::error::{
-    CatalogSnafu, CollectRecordbatchSnafu, Error, InvalidQuerySnafu, ParseTimestampSnafu, Result,
-    TableNotFoundSnafu, UnexpectedResultSnafu,
+    CatalogSnafu, CollectRecordbatchSnafu, ConvertScalarValueSnafu, DataFusionSnafu, Error,
+    InvalidQuerySnafu, NotSupportedSnafu, ParseTimestampSnafu, Result, TableNotFoundSnafu,
+    UnexpectedResultSnafu,
 };
 use crate::http::header::collect_plan_metrics;
-use crate::prom_store::{FIELD_NAME_LABEL, METRIC_NAME_LABEL};
+use crate::prom_store::{DATABASE_LABEL, FIELD_NAME_LABEL, METRIC_NAME_LABEL, SCHEMA_LABEL};
 use crate::prometheus_handler::PrometheusHandlerRef;
 
 /// For [ValueType::Vector] result type
@@ -97,12 +120,23 @@ pub struct PromData {
     pub result: PromQueryResult,
 }
 
+/// A "holder" for the reference([Arc]) to a column name,
+/// to help avoiding cloning [String]s when used as a [HashMap] key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Column(Arc<String>);
+
+impl From<&str> for Column {
+    fn from(s: &str) -> Self {
+        Self(Arc::new(s.to_string()))
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum PrometheusResponse {
     PromData(PromData),
     Labels(Vec<String>),
-    Series(Vec<HashMap<String, String>>),
+    Series(Vec<HashMap<Column, String>>),
     LabelValues(Vec<String>),
     FormatQuery(String),
     BuildInfo(OwnedBuildInfo),
@@ -244,6 +278,7 @@ pub async fn instant_query(
             .lookback
             .or(form_params.lookback)
             .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
+        alias: None,
     };
 
     let promql_expr = try_call_return_response!(promql_parser::parser::parse(&prom_query.query));
@@ -318,7 +353,7 @@ async fn do_instant_query(
 ) -> PrometheusJsonResponse {
     let result = handler.do_query(prom_query, query_ctx).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
-        Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
+        Ok((metric_name, result_type)) => (metric_name, result_type),
         Err(err) => return PrometheusJsonResponse::error(err.status_code(), err.output_msg()),
     };
     PrometheusJsonResponse::from_query_result(result, metric_name, result_type).await
@@ -355,6 +390,7 @@ pub async fn range_query(
             .lookback
             .or(form_params.lookback)
             .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
+        alias: None,
     };
 
     let promql_expr = try_call_return_response!(promql_parser::parser::parse(&prom_query.query));
@@ -428,7 +464,7 @@ async fn do_range_query(
     let result = handler.do_query(prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Err(err) => return PrometheusJsonResponse::error(err.status_code(), err.output_msg()),
-        Ok((metric_name, _)) => metric_name.unwrap_or_default(),
+        Ok((metric_name, _)) => metric_name,
     };
     PrometheusJsonResponse::from_query_result(result, metric_name, ValueType::Matrix).await
 }
@@ -567,6 +603,7 @@ pub async fn labels_query(
             end: end.clone(),
             step: DEFAULT_LOOKBACK_STRING.to_string(),
             lookback: lookback.clone(),
+            alias: None,
         };
 
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
@@ -618,7 +655,7 @@ async fn get_all_column_names(
 
 async fn retrieve_series_from_query_result(
     result: Result<Output>,
-    series: &mut Vec<HashMap<String, String>>,
+    series: &mut Vec<HashMap<Column, String>>,
     query_ctx: &QueryContext,
     table_name: &str,
     manager: &CatalogManagerRef,
@@ -696,7 +733,7 @@ async fn retrieve_labels_name_from_query_result(
 
 fn record_batches_to_series(
     batches: RecordBatches,
-    series: &mut Vec<HashMap<String, String>>,
+    series: &mut Vec<HashMap<Column, String>>,
     table_name: &str,
     tag_columns: &HashSet<String>,
 ) -> Result<()> {
@@ -719,20 +756,353 @@ fn record_batches_to_series(
             .try_project(&projection)
             .context(CollectRecordbatchSnafu)?;
 
-        for row in batch.rows() {
-            let mut element: HashMap<String, String> = row
-                .iter()
-                .enumerate()
-                .map(|(idx, column)| {
-                    let column_name = batch.schema.column_name_by_index(idx);
-                    (column_name.to_string(), column.to_string())
-                })
-                .collect();
-            let _ = element.insert("__name__".to_string(), table_name.to_string());
-            series.push(element);
-        }
+        let mut writer = RowWriter::new(&batch.schema, table_name);
+        writer.write(batch, series)?;
     }
     Ok(())
+}
+
+/// Writer from a row in the record batch to a Prometheus time series:
+///
+/// `{__name__="<metric name>", <label name>="<label value>", ...}`
+///
+/// The metrics name is the table name; label names are the column names and
+/// the label values are the corresponding row values (all are converted to strings).
+struct RowWriter {
+    /// The template that is to produce a Prometheus time series. It is pre-filled with metrics name
+    /// and label names, waiting to be filled by row values afterward.
+    template: HashMap<Column, Option<String>>,
+    /// The current filling row.
+    current: Option<HashMap<Column, Option<String>>>,
+}
+
+impl RowWriter {
+    fn new(schema: &SchemaRef, table: &str) -> Self {
+        let mut template = schema
+            .column_schemas()
+            .iter()
+            .map(|x| (x.name.as_str().into(), None))
+            .collect::<HashMap<Column, Option<String>>>();
+        template.insert("__name__".into(), Some(table.to_string()));
+        Self {
+            template,
+            current: None,
+        }
+    }
+
+    fn insert(&mut self, column: ColumnRef, value: impl ToString) {
+        let current = self.current.get_or_insert_with(|| self.template.clone());
+        match current.get_mut(&column as &dyn AsColumnRef) {
+            Some(x) => {
+                let _ = x.insert(value.to_string());
+            }
+            None => {
+                let _ = current.insert(column.0.into(), Some(value.to_string()));
+            }
+        }
+    }
+
+    fn insert_bytes(&mut self, column_schema: &ColumnSchema, bytes: &[u8]) -> Result<()> {
+        let column_name = column_schema.name.as_str().into();
+
+        if column_schema.data_type.is_json() {
+            let s = jsonb_to_string(bytes).context(ConvertScalarValueSnafu)?;
+            self.insert(column_name, s);
+        } else {
+            let hex = bytes
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<String>>()
+                .join("");
+            self.insert(column_name, hex);
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> HashMap<Column, String> {
+        let Some(current) = self.current.take() else {
+            return HashMap::new();
+        };
+        current
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (k, v)))
+            .collect()
+    }
+
+    fn write(
+        &mut self,
+        record_batch: RecordBatch,
+        series: &mut Vec<HashMap<Column, String>>,
+    ) -> Result<()> {
+        let schema = record_batch.schema.clone();
+        let record_batch = record_batch.into_df_record_batch();
+        for i in 0..record_batch.num_rows() {
+            for (j, array) in record_batch.columns().iter().enumerate() {
+                let column = schema.column_name_by_index(j).into();
+
+                if array.is_null(i) {
+                    self.insert(column, "Null");
+                    continue;
+                }
+
+                match array.data_type() {
+                    DataType::Null => {
+                        self.insert(column, "Null");
+                    }
+                    DataType::Boolean => {
+                        let array = array.as_boolean();
+                        let v = array.value(i);
+                        self.insert(column, v);
+                    }
+                    DataType::UInt8 => {
+                        let array = array.as_primitive::<UInt8Type>();
+                        let v = array.value(i);
+                        self.insert(column, v);
+                    }
+                    DataType::UInt16 => {
+                        let array = array.as_primitive::<UInt16Type>();
+                        let v = array.value(i);
+                        self.insert(column, v);
+                    }
+                    DataType::UInt32 => {
+                        let array = array.as_primitive::<UInt32Type>();
+                        let v = array.value(i);
+                        self.insert(column, v);
+                    }
+                    DataType::UInt64 => {
+                        let array = array.as_primitive::<UInt64Type>();
+                        let v = array.value(i);
+                        self.insert(column, v);
+                    }
+                    DataType::Int8 => {
+                        let array = array.as_primitive::<Int8Type>();
+                        let v = array.value(i);
+                        self.insert(column, v);
+                    }
+                    DataType::Int16 => {
+                        let array = array.as_primitive::<Int16Type>();
+                        let v = array.value(i);
+                        self.insert(column, v);
+                    }
+                    DataType::Int32 => {
+                        let array = array.as_primitive::<Int32Type>();
+                        let v = array.value(i);
+                        self.insert(column, v);
+                    }
+                    DataType::Int64 => {
+                        let array = array.as_primitive::<Int64Type>();
+                        let v = array.value(i);
+                        self.insert(column, v);
+                    }
+                    DataType::Float32 => {
+                        let array = array.as_primitive::<Float32Type>();
+                        let v = array.value(i);
+                        self.insert(column, v);
+                    }
+                    DataType::Float64 => {
+                        let array = array.as_primitive::<Float64Type>();
+                        let v = array.value(i);
+                        self.insert(column, v);
+                    }
+                    DataType::Utf8 => {
+                        let array = array.as_string::<i32>();
+                        let v = array.value(i);
+                        self.insert(column, v);
+                    }
+                    DataType::LargeUtf8 => {
+                        let array = array.as_string::<i64>();
+                        let v = array.value(i);
+                        self.insert(column, v);
+                    }
+                    DataType::Utf8View => {
+                        let array = array.as_string_view();
+                        let v = array.value(i);
+                        self.insert(column, v);
+                    }
+                    DataType::Binary => {
+                        let array = array.as_binary::<i32>();
+                        let v = array.value(i);
+                        let column_schema = &schema.column_schemas()[j];
+                        self.insert_bytes(column_schema, v)?;
+                    }
+                    DataType::LargeBinary => {
+                        let array = array.as_binary::<i64>();
+                        let v = array.value(i);
+                        let column_schema = &schema.column_schemas()[j];
+                        self.insert_bytes(column_schema, v)?;
+                    }
+                    DataType::BinaryView => {
+                        let array = array.as_binary_view();
+                        let v = array.value(i);
+                        let column_schema = &schema.column_schemas()[j];
+                        self.insert_bytes(column_schema, v)?;
+                    }
+                    DataType::Date32 => {
+                        let array = array.as_primitive::<Date32Type>();
+                        let v = Date::new(array.value(i));
+                        self.insert(column, v);
+                    }
+                    DataType::Date64 => {
+                        let array = array.as_primitive::<Date64Type>();
+                        // `Date64` values are milliseconds representation of `Date32` values,
+                        // according to its specification. So we convert the `Date64` value here to
+                        // the `Date32` value to process them unified.
+                        let v = Date::new((array.value(i) / 86_400_000) as i32);
+                        self.insert(column, v);
+                    }
+                    DataType::Timestamp(time_unit, _) => {
+                        let v = match time_unit {
+                            TimeUnit::Second => {
+                                let array = array.as_primitive::<TimestampSecondType>();
+                                array.value(i)
+                            }
+                            TimeUnit::Millisecond => {
+                                let array = array.as_primitive::<TimestampMillisecondType>();
+                                array.value(i)
+                            }
+                            TimeUnit::Microsecond => {
+                                let array = array.as_primitive::<TimestampMicrosecondType>();
+                                array.value(i)
+                            }
+                            TimeUnit::Nanosecond => {
+                                let array = array.as_primitive::<TimestampNanosecondType>();
+                                array.value(i)
+                            }
+                        };
+                        let v = Timestamp::new(v, time_unit.into());
+                        self.insert(column, v.to_iso8601_string());
+                    }
+                    DataType::Time32(time_unit) | DataType::Time64(time_unit) => {
+                        let v = match time_unit {
+                            TimeUnit::Second => {
+                                let array = array.as_primitive::<Time32SecondType>();
+                                Time::new_second(array.value(i) as i64)
+                            }
+                            TimeUnit::Millisecond => {
+                                let array = array.as_primitive::<Time32MillisecondType>();
+                                Time::new_millisecond(array.value(i) as i64)
+                            }
+                            TimeUnit::Microsecond => {
+                                let array = array.as_primitive::<Time64MicrosecondType>();
+                                Time::new_microsecond(array.value(i))
+                            }
+                            TimeUnit::Nanosecond => {
+                                let array = array.as_primitive::<Time64NanosecondType>();
+                                Time::new_nanosecond(array.value(i))
+                            }
+                        };
+                        self.insert(column, v.to_iso8601_string());
+                    }
+                    DataType::Interval(interval_unit) => match interval_unit {
+                        IntervalUnit::YearMonth => {
+                            let array = array.as_primitive::<IntervalYearMonthType>();
+                            let v: IntervalYearMonth = array.value(i).into();
+                            self.insert(column, v.to_iso8601_string());
+                        }
+                        IntervalUnit::DayTime => {
+                            let array = array.as_primitive::<IntervalDayTimeType>();
+                            let v: IntervalDayTime = array.value(i).into();
+                            self.insert(column, v.to_iso8601_string());
+                        }
+                        IntervalUnit::MonthDayNano => {
+                            let array = array.as_primitive::<IntervalMonthDayNanoType>();
+                            let v: IntervalMonthDayNano = array.value(i).into();
+                            self.insert(column, v.to_iso8601_string());
+                        }
+                    },
+                    DataType::Duration(time_unit) => {
+                        let v = match time_unit {
+                            TimeUnit::Second => {
+                                let array = array.as_primitive::<DurationSecondType>();
+                                array.value(i)
+                            }
+                            TimeUnit::Millisecond => {
+                                let array = array.as_primitive::<DurationMillisecondType>();
+                                array.value(i)
+                            }
+                            TimeUnit::Microsecond => {
+                                let array = array.as_primitive::<DurationMicrosecondType>();
+                                array.value(i)
+                            }
+                            TimeUnit::Nanosecond => {
+                                let array = array.as_primitive::<DurationNanosecondType>();
+                                array.value(i)
+                            }
+                        };
+                        let d = Duration::new(v, time_unit.into());
+                        self.insert(column, d);
+                    }
+                    DataType::List(_) => {
+                        let v = ScalarValue::try_from_array(array, i).context(DataFusionSnafu)?;
+                        self.insert(column, v);
+                    }
+                    DataType::Struct(_) => {
+                        let v = ScalarValue::try_from_array(array, i).context(DataFusionSnafu)?;
+                        self.insert(column, v);
+                    }
+                    DataType::Decimal128(precision, scale) => {
+                        let array = array.as_primitive::<Decimal128Type>();
+                        let v = Decimal128::new(array.value(i), *precision, *scale);
+                        self.insert(column, v);
+                    }
+                    _ => {
+                        return NotSupportedSnafu {
+                            feat: format!("convert {} to http value", array.data_type()),
+                        }
+                        .fail();
+                    }
+                }
+            }
+
+            series.push(self.finish())
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ColumnRef<'a>(&'a str);
+
+impl<'a> From<&'a str> for ColumnRef<'a> {
+    fn from(s: &'a str) -> Self {
+        Self(s)
+    }
+}
+
+trait AsColumnRef {
+    fn as_ref(&self) -> ColumnRef<'_>;
+}
+
+impl AsColumnRef for Column {
+    fn as_ref(&self) -> ColumnRef<'_> {
+        self.0.as_str().into()
+    }
+}
+
+impl AsColumnRef for ColumnRef<'_> {
+    fn as_ref(&self) -> ColumnRef<'_> {
+        *self
+    }
+}
+
+impl<'a> PartialEq for dyn AsColumnRef + 'a {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+impl<'a> Eq for dyn AsColumnRef + 'a {}
+
+impl<'a> Hash for dyn AsColumnRef + 'a {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_ref().0.hash(state);
+    }
+}
+
+impl<'a> Borrow<dyn AsColumnRef + 'a> for Column {
+    fn borrow(&self) -> &(dyn AsColumnRef + 'a) {
+        self
+    }
 }
 
 /// Retrieve labels name from record batches
@@ -783,7 +1153,7 @@ fn record_batches_to_labels_name(
 
             // if a field is not null, record the tag name and return
             names.iter().for_each(|name| {
-                let _ = labels.insert(name.to_string());
+                let _ = labels.insert(name.clone());
             });
             return Ok(());
         }
@@ -810,7 +1180,7 @@ pub(crate) fn get_catalog_schema(db: &Option<String>, ctx: &QueryContext) -> (St
     } else {
         (
             ctx.current_catalog().to_string(),
-            ctx.current_schema().to_string(),
+            ctx.current_schema().clone(),
         )
     }
 }
@@ -824,13 +1194,75 @@ pub(crate) fn try_update_catalog_schema(ctx: &mut QueryContext, catalog: &str, s
 }
 
 fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
-    find_metric_name_and_matchers(expr, |name, matchers| {
-        name.clone().or(matchers
-            .find_matchers(METRIC_NAME)
-            .into_iter()
-            .next()
-            .map(|m| m.value))
-    })
+    let mut metric_names = HashSet::new();
+    collect_metric_names(expr, &mut metric_names);
+
+    // Return the metric name only if there's exactly one unique metric name
+    if metric_names.len() == 1 {
+        metric_names.into_iter().next()
+    } else {
+        None
+    }
+}
+
+/// Recursively collect all metric names from a PromQL expression
+fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
+    match expr {
+        PromqlExpr::Aggregate(AggregateExpr { modifier, expr, .. }) => {
+            match modifier {
+                Some(LabelModifier::Include(labels)) => {
+                    if !labels.labels.contains(&METRIC_NAME.to_string()) {
+                        metric_names.clear();
+                        return;
+                    }
+                }
+                Some(LabelModifier::Exclude(labels)) => {
+                    if labels.labels.contains(&METRIC_NAME.to_string()) {
+                        metric_names.clear();
+                        return;
+                    }
+                }
+                _ => {}
+            }
+            collect_metric_names(expr, metric_names)
+        }
+        PromqlExpr::Unary(UnaryExpr { .. }) => metric_names.clear(),
+        PromqlExpr::Binary(BinaryExpr { lhs, op, .. }) => {
+            if matches!(
+                op.id(),
+                token::T_LAND // INTERSECT
+                    | token::T_LOR // UNION
+                    | token::T_LUNLESS // EXCEPT
+            ) {
+                collect_metric_names(lhs, metric_names)
+            } else {
+                metric_names.clear()
+            }
+        }
+        PromqlExpr::Paren(ParenExpr { expr }) => collect_metric_names(expr, metric_names),
+        PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => collect_metric_names(expr, metric_names),
+        PromqlExpr::VectorSelector(VectorSelector { name, matchers, .. }) => {
+            if let Some(name) = name {
+                metric_names.insert(name.clone());
+            } else if let Some(matcher) = matchers.find_matchers(METRIC_NAME).into_iter().next() {
+                metric_names.insert(matcher.value);
+            }
+        }
+        PromqlExpr::MatrixSelector(MatrixSelector { vs, .. }) => {
+            let VectorSelector { name, matchers, .. } = vs;
+            if let Some(name) = name {
+                metric_names.insert(name.clone());
+            } else if let Some(matcher) = matchers.find_matchers(METRIC_NAME).into_iter().next() {
+                metric_names.insert(matcher.value);
+            }
+        }
+        PromqlExpr::Call(Call { args, .. }) => {
+            args.args
+                .iter()
+                .for_each(|e| collect_metric_names(e, metric_names));
+        }
+        PromqlExpr::NumberLiteral(_) | PromqlExpr::StringLiteral(_) | PromqlExpr::Extension(_) => {}
+    }
 }
 
 fn find_metric_name_and_matchers<E, F>(expr: &PromqlExpr, f: F) -> Option<E>
@@ -939,6 +1371,7 @@ pub struct LabelValueQuery {
     #[serde(flatten)]
     matches: Matches,
     db: Option<String>,
+    limit: Option<usize>,
 }
 
 #[axum_macros::debug_handler]
@@ -962,30 +1395,12 @@ pub async fn label_values_query(
 
     if label_name == METRIC_NAME_LABEL {
         let catalog_manager = handler.catalog_manager();
-        let mut tables_stream = catalog_manager.tables(&catalog, &schema, Some(&query_ctx));
-        let mut table_names = Vec::new();
-        while let Some(table) = tables_stream.next().await {
-            // filter out physical tables
-            match table {
-                Ok(table) => {
-                    if table
-                        .table_info()
-                        .meta
-                        .options
-                        .extra_options
-                        .contains_key(PHYSICAL_TABLE_METADATA_KEY)
-                    {
-                        continue;
-                    }
 
-                    table_names.push(table.table_info().name.clone());
-                }
-                Err(e) => {
-                    return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
-                }
-            }
-        }
-        table_names.sort_unstable();
+        let mut table_names = try_call_return_response!(
+            retrieve_table_names(&query_ctx, catalog_manager, params.matches.0).await
+        );
+
+        truncate_results(&mut table_names, params.limit);
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(table_names));
     } else if label_name == FIELD_NAME_LABEL {
         let field_columns = handle_schema_err!(
@@ -994,7 +1409,16 @@ pub async fn label_values_query(
         .unwrap_or_default();
         let mut field_columns = field_columns.into_iter().collect::<Vec<_>>();
         field_columns.sort_unstable();
+        truncate_results(&mut field_columns, params.limit);
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(field_columns));
+    } else if label_name == SCHEMA_LABEL || label_name == DATABASE_LABEL {
+        let catalog_manager = handler.catalog_manager();
+
+        let mut schema_names = try_call_return_response!(
+            retrieve_schema_names(&query_ctx, catalog_manager, params.matches.0).await
+        );
+        truncate_results(&mut schema_names, params.limit);
+        return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(schema_names));
     }
 
     let queries = params.matches.0;
@@ -1009,10 +1433,14 @@ pub async fn label_values_query(
     let end = params.end.unwrap_or_else(current_time_rfc3339);
     let mut label_values = HashSet::new();
 
-    let start = try_call_return_response!(QueryLanguageParser::parse_promql_timestamp(&start)
-        .context(ParseTimestampSnafu { timestamp: &start }));
-    let end = try_call_return_response!(QueryLanguageParser::parse_promql_timestamp(&end)
-        .context(ParseTimestampSnafu { timestamp: &end }));
+    let start = try_call_return_response!(
+        QueryLanguageParser::parse_promql_timestamp(&start)
+            .context(ParseTimestampSnafu { timestamp: &start })
+    );
+    let end = try_call_return_response!(
+        QueryLanguageParser::parse_promql_timestamp(&end)
+            .context(ParseTimestampSnafu { timestamp: &end })
+    );
 
     for query in queries {
         let promql_expr = try_call_return_response!(promql_parser::parser::parse(&query));
@@ -1032,14 +1460,7 @@ pub async fn label_values_query(
         // Only use and filter matchers.
         let matchers = matchers.matchers;
         let result = handler
-            .query_label_values(
-                name,
-                label_name.to_string(),
-                matchers,
-                start,
-                end,
-                &query_ctx,
-            )
+            .query_label_values(name, label_name.clone(), matchers, start, end, &query_ctx)
             .await;
         if let Some(result) = handle_schema_err!(result) {
             label_values.extend(result.into_iter());
@@ -1048,7 +1469,18 @@ pub async fn label_values_query(
 
     let mut label_values: Vec<_> = label_values.into_iter().collect();
     label_values.sort_unstable();
+    truncate_results(&mut label_values, params.limit);
+
     PrometheusJsonResponse::success(PrometheusResponse::LabelValues(label_values))
+}
+
+fn truncate_results(label_values: &mut Vec<String>, limit: Option<usize>) {
+    if let Some(limit) = limit
+        && limit > 0
+        && label_values.len() >= limit
+    {
+        label_values.truncate(limit);
+    }
 }
 
 /// Take metric name from the [VectorSelector].
@@ -1068,6 +1500,78 @@ fn take_metric_name(selector: &mut VectorSelector) -> Option<String> {
     selector.matchers.matchers.remove(pos);
 
     Some(name)
+}
+
+async fn retrieve_table_names(
+    query_ctx: &QueryContext,
+    catalog_manager: CatalogManagerRef,
+    matches: Vec<String>,
+) -> Result<Vec<String>> {
+    let catalog = query_ctx.current_catalog();
+    let schema = query_ctx.current_schema();
+
+    let mut tables_stream = catalog_manager.tables(catalog, &schema, Some(query_ctx));
+    let mut table_names = Vec::new();
+
+    // we only provide very limited support for matcher against __name__
+    let name_matcher = matches
+        .first()
+        .and_then(|matcher| promql_parser::parser::parse(matcher).ok())
+        .and_then(|expr| {
+            if let PromqlExpr::VectorSelector(vector_selector) = expr {
+                let matchers = vector_selector.matchers.matchers;
+                for matcher in matchers {
+                    if matcher.name == METRIC_NAME_LABEL {
+                        return Some(matcher);
+                    }
+                }
+
+                None
+            } else {
+                None
+            }
+        });
+
+    while let Some(table) = tables_stream.next().await {
+        let table = table.context(CatalogSnafu)?;
+        if !table
+            .table_info()
+            .meta
+            .options
+            .extra_options
+            .contains_key(LOGICAL_TABLE_METADATA_KEY)
+        {
+            // skip non-prometheus (non-metricengine) tables for __name__ query
+            continue;
+        }
+
+        let table_name = &table.table_info().name;
+
+        if let Some(matcher) = &name_matcher {
+            match &matcher.op {
+                MatchOp::Equal => {
+                    if table_name == &matcher.value {
+                        table_names.push(table_name.clone());
+                    }
+                }
+                MatchOp::Re(reg) => {
+                    if reg.is_match(table_name) {
+                        table_names.push(table_name.clone());
+                    }
+                }
+                _ => {
+                    // != and !~ are not supported:
+                    // vector must contains at least one non-empty matcher
+                    table_names.push(table_name.clone());
+                }
+            }
+        } else {
+            table_names.push(table_name.clone());
+        }
+    }
+
+    table_names.sort_unstable();
+    Ok(table_names)
 }
 
 async fn retrieve_field_names(
@@ -1101,8 +1605,8 @@ async fn retrieve_field_names(
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
                 catalog: catalog.to_string(),
-                schema: schema.to_string(),
-                table: table_name.to_string(),
+                schema: schema.clone(),
+                table: table_name.clone(),
             })?;
 
         for column in table.field_columns() {
@@ -1112,53 +1616,51 @@ async fn retrieve_field_names(
     Ok(field_columns)
 }
 
-/// Try to parse and extract the name of referenced metric from the promql query.
-///
-/// Returns the metric name if a single metric is referenced, otherwise None.
-fn retrieve_metric_name_from_promql(query: &str) -> Option<String> {
-    let promql_expr = promql_parser::parser::parse(query).ok()?;
+async fn retrieve_schema_names(
+    query_ctx: &QueryContext,
+    catalog_manager: CatalogManagerRef,
+    matches: Vec<String>,
+) -> Result<Vec<String>> {
+    let mut schemas = Vec::new();
+    let catalog = query_ctx.current_catalog();
 
-    struct MetricNameVisitor {
-        metric_name: Option<String>,
-    }
+    let candidate_schemas = catalog_manager
+        .schema_names(catalog, Some(query_ctx))
+        .await
+        .context(CatalogSnafu)?;
 
-    impl promql_parser::util::ExprVisitor for MetricNameVisitor {
-        type Error = ();
-
-        fn pre_visit(&mut self, plan: &PromqlExpr) -> std::result::Result<bool, Self::Error> {
-            let query_metric_name = match plan {
-                PromqlExpr::VectorSelector(vs) => vs
-                    .matchers
-                    .find_matchers(METRIC_NAME)
-                    .into_iter()
-                    .next()
-                    .map(|m| m.value)
-                    .or_else(|| vs.name.clone()),
-                PromqlExpr::MatrixSelector(ms) => ms
-                    .vs
-                    .matchers
-                    .find_matchers(METRIC_NAME)
-                    .into_iter()
-                    .next()
-                    .map(|m| m.value)
-                    .or_else(|| ms.vs.name.clone()),
-                _ => return Ok(true),
-            };
-
-            // set it to empty string if multiple metrics are referenced.
-            if self.metric_name.is_some() && query_metric_name.is_some() {
-                self.metric_name = Some(String::new());
-            } else {
-                self.metric_name = query_metric_name.or_else(|| self.metric_name.clone());
+    for schema in candidate_schemas {
+        let mut found = true;
+        for match_item in &matches {
+            if let Some(table_name) = retrieve_metric_name_from_promql(match_item) {
+                let exists = catalog_manager
+                    .table_exists(catalog, &schema, &table_name, Some(query_ctx))
+                    .await
+                    .context(CatalogSnafu)?;
+                if !exists {
+                    found = false;
+                    break;
+                }
             }
+        }
 
-            Ok(true)
+        if found {
+            schemas.push(schema);
         }
     }
 
-    let mut visitor = MetricNameVisitor { metric_name: None };
-    promql_parser::util::walk_expr(&mut visitor, &promql_expr).ok()?;
-    visitor.metric_name
+    schemas.sort_unstable();
+
+    Ok(schemas)
+}
+
+/// Try to parse and extract the name of referenced metric from the promql query.
+///
+/// Returns the metric name if exactly one unique metric is referenced, otherwise None.
+/// Multiple references to the same metric are allowed.
+fn retrieve_metric_name_from_promql(query: &str) -> Option<String> {
+    let promql_expr = promql_parser::parser::parse(query).ok()?;
+    promql_expr_to_metric_name(&promql_expr)
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -1227,6 +1729,7 @@ pub async fn series_query(
             // TODO: find a better value for step
             step: DEFAULT_LOOKBACK_STRING.to_string(),
             lookback: lookback.clone(),
+            alias: None,
         };
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
 
@@ -1273,5 +1776,221 @@ pub async fn parse_query(
         PrometheusJsonResponse::success(PrometheusResponse::ParseResult(ast))
     } else {
         PrometheusJsonResponse::error(StatusCode::InvalidArguments, "query is required")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use promql_parser::parser::value::ValueType;
+
+    use super::*;
+
+    struct TestCase {
+        name: &'static str,
+        promql: &'static str,
+        expected_metric: Option<&'static str>,
+        expected_type: ValueType,
+        should_error: bool,
+    }
+
+    #[test]
+    fn test_retrieve_metric_name_and_result_type() {
+        let test_cases = &[
+            // Single metric cases
+            TestCase {
+                name: "simple metric",
+                promql: "cpu_usage",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "metric with selector",
+                promql: r#"cpu_usage{instance="localhost"}"#,
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "metric with range selector",
+                promql: "cpu_usage[5m]",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Matrix,
+                should_error: false,
+            },
+            TestCase {
+                name: "metric with __name__ matcher",
+                promql: r#"{__name__="cpu_usage"}"#,
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "metric with unary operator",
+                promql: "-cpu_usage",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            // Aggregation and function cases
+            TestCase {
+                name: "metric with aggregation",
+                promql: "sum(cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "complex aggregation",
+                promql: r#"sum by (instance) (cpu_usage{job="node"})"#,
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "complex aggregation",
+                promql: r#"sum by (__name__) (cpu_usage{job="node"})"#,
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "complex aggregation",
+                promql: r#"sum without (instance) (cpu_usage{job="node"})"#,
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            // Same metric binary operations
+            TestCase {
+                name: "same metric addition",
+                promql: "cpu_usage + cpu_usage",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "metric with scalar addition",
+                promql: r#"sum(rate(cpu_usage{job="node"}[5m])) + 100"#,
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            // Multiple metrics cases
+            TestCase {
+                name: "different metrics addition",
+                promql: "cpu_usage + memory_usage",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "different metrics subtraction",
+                promql: "network_in - network_out",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            // Unless operator cases
+            TestCase {
+                name: "unless with different metrics",
+                promql: "cpu_usage unless memory_usage",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "unless with same metric",
+                promql: "cpu_usage unless cpu_usage",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            // Subquery cases
+            TestCase {
+                name: "basic subquery",
+                promql: "cpu_usage[5m:1m]",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Matrix,
+                should_error: false,
+            },
+            TestCase {
+                name: "subquery with multiple metrics",
+                promql: "(cpu_usage + memory_usage)[5m:1m]",
+                expected_metric: None,
+                expected_type: ValueType::Matrix,
+                should_error: false,
+            },
+            // Literal values
+            TestCase {
+                name: "scalar value",
+                promql: "42",
+                expected_metric: None,
+                expected_type: ValueType::Scalar,
+                should_error: false,
+            },
+            TestCase {
+                name: "string literal",
+                promql: r#""hello world""#,
+                expected_metric: None,
+                expected_type: ValueType::String,
+                should_error: false,
+            },
+            // Error cases
+            TestCase {
+                name: "invalid syntax",
+                promql: "cpu_usage{invalid=",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: true,
+            },
+            TestCase {
+                name: "empty query",
+                promql: "",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: true,
+            },
+            TestCase {
+                name: "malformed brackets",
+                promql: "cpu_usage[5m",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: true,
+            },
+        ];
+
+        for test_case in test_cases {
+            let result = retrieve_metric_name_and_result_type(test_case.promql);
+
+            if test_case.should_error {
+                assert!(
+                    result.is_err(),
+                    "Test '{}' should have failed but succeeded with: {:?}",
+                    test_case.name,
+                    result
+                );
+            } else {
+                let (metric_name, value_type) = result.unwrap_or_else(|e| {
+                    panic!(
+                        "Test '{}' should have succeeded but failed with error: {}",
+                        test_case.name, e
+                    )
+                });
+
+                let expected_metric_name = test_case.expected_metric.map(|s| s.to_string());
+                assert_eq!(
+                    metric_name, expected_metric_name,
+                    "Test '{}': metric name mismatch. Expected: {:?}, Got: {:?}",
+                    test_case.name, expected_metric_name, metric_name
+                );
+
+                assert_eq!(
+                    value_type, test_case.expected_type,
+                    "Test '{}': value type mismatch. Expected: {:?}, Got: {:?}",
+                    test_case.name, test_case.expected_type, value_type
+                );
+            }
+        }
     }
 }

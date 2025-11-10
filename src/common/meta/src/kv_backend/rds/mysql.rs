@@ -23,17 +23,17 @@ use sqlx::{MySql, MySqlPool, Row, Transaction as MySqlTransaction};
 use strum::AsRefStr;
 
 use crate::error::{CreateMySqlPoolSnafu, MySqlExecutionSnafu, MySqlTransactionSnafu, Result};
-use crate::kv_backend::rds::{
-    Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RdsStore, Transaction,
-    RDS_STORE_OP_BATCH_DELETE, RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT,
-    RDS_STORE_OP_RANGE_DELETE, RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT,
-};
 use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::rds::{
+    Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_STORE_OP_BATCH_DELETE,
+    RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT, RDS_STORE_OP_RANGE_DELETE,
+    RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore, Transaction,
+};
+use crate::rpc::KeyValue;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, RangeRequest, RangeResponse,
 };
-use crate::rpc::KeyValue;
 
 const MYSQL_STORE_NAME: &str = "mysql_store";
 
@@ -555,8 +555,8 @@ impl MySqlStore {
         sqlx::query(&sql_template_set.create_table_statement)
             .execute(&pool)
             .await
-            .context(MySqlExecutionSnafu {
-                sql: sql_template_set.create_table_statement.to_string(),
+            .with_context(|_| MySqlExecutionSnafu {
+                sql: sql_template_set.create_table_statement.clone(),
             })?;
         Ok(Arc::new(MySqlStore {
             max_txn_ops,
@@ -573,6 +573,7 @@ impl MySqlStore {
 #[cfg(test)]
 mod tests {
     use common_telemetry::init_default_ut_logging;
+    use sqlx::mysql::{MySqlConnectOptions, MySqlSslMode};
 
     use super::*;
     use crate::kv_backend::test::{
@@ -584,6 +585,7 @@ mod tests {
         text_txn_multi_compare_op, unprepare_kv,
     };
     use crate::maybe_skip_mysql_integration_test;
+    use crate::test_util::test_certs_dir;
 
     async fn build_mysql_kv_backend(table_name: &str) -> Option<MySqlStore> {
         init_default_ut_logging();
@@ -710,5 +712,72 @@ mod tests {
         test_txn_compare_greater(&kv_backend).await;
         test_txn_compare_less(&kv_backend).await;
         test_txn_compare_not_equal(&kv_backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_with_tls() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_mysql_integration_test!();
+        let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
+
+        let opts = endpoint
+            .parse::<MySqlConnectOptions>()
+            .unwrap()
+            .ssl_mode(MySqlSslMode::Required);
+        let pool = MySqlPool::connect_with(opts).await.unwrap();
+        sqlx::query("SELECT 1").execute(&pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_mysql_with_mtls() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_mysql_integration_test!();
+        let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
+        let certs_dir = test_certs_dir();
+
+        let opts = endpoint
+            .parse::<MySqlConnectOptions>()
+            .unwrap()
+            .ssl_mode(MySqlSslMode::Required)
+            .ssl_client_cert(certs_dir.join("client.crt").to_string_lossy().to_string())
+            .ssl_client_key(certs_dir.join("client.key").to_string_lossy().to_string());
+        let pool = MySqlPool::connect_with(opts).await.unwrap();
+        sqlx::query("SELECT 1").execute(&pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_mysql_with_tls_verify_ca() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_mysql_integration_test!();
+        let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
+        let certs_dir = test_certs_dir();
+
+        let opts = endpoint
+            .parse::<MySqlConnectOptions>()
+            .unwrap()
+            .ssl_mode(MySqlSslMode::VerifyCa)
+            .ssl_ca(certs_dir.join("root.crt").to_string_lossy().to_string())
+            .ssl_client_cert(certs_dir.join("client.crt").to_string_lossy().to_string())
+            .ssl_client_key(certs_dir.join("client.key").to_string_lossy().to_string());
+        let pool = MySqlPool::connect_with(opts).await.unwrap();
+        sqlx::query("SELECT 1").execute(&pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_mysql_with_tls_verify_ident() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_mysql_integration_test!();
+        let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
+        let certs_dir = test_certs_dir();
+
+        let opts = endpoint
+            .parse::<MySqlConnectOptions>()
+            .unwrap()
+            .ssl_mode(MySqlSslMode::VerifyIdentity)
+            .ssl_ca(certs_dir.join("root.crt").to_string_lossy().to_string())
+            .ssl_client_cert(certs_dir.join("client.crt").to_string_lossy().to_string())
+            .ssl_client_key(certs_dir.join("client.key").to_string_lossy().to_string());
+        let pool = MySqlPool::connect_with(opts).await.unwrap();
+        sqlx::query("SELECT 1").execute(&pool).await.unwrap();
     }
 }

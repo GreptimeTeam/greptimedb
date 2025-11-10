@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-dashboard = []
+dashboard = ["dep:rust-embed"]
 mem-prof = ["dep:common-mem-prof"]
 pprof = ["dep:common-pprof"]
 testing = []
@@ -35,7 +35,7 @@ catalog.workspace = true
 chrono.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
-common-config.workspace = true
+common-decimal.workspace = true
 common-error.workspace = true
 common-frontend.workspace = true
 common-grpc.workspace = true
@@ -49,6 +49,7 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-session.workspace = true
 common-sql.workspace = true
+common-stat.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-version = { workspace = true, features = ["codec"] }
@@ -57,6 +58,7 @@ dashmap.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion-pg-catalog.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
@@ -64,7 +66,6 @@ futures-util.workspace = true
 headers = "0.4"
 hostname = "0.3"
 http.workspace = true
-http-body = "1"
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper = { workspace = true, features = ["full"] }
@@ -88,11 +89,12 @@ tracing-opentelemetry.workspace = true
 # 2. Use ring, instead of aws-lc-rs in https://github.com/databendlabs/opensrv/pull/72
 opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", rev = "a1fb4da215c8693c7e4f62be249a01b7fec52997" }
 opentelemetry-proto.workspace = true
+operator.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
-#pgwire = { version = "0.30", default-features = false, features = ["server-api-ring"] }
-pgwire = { git = "https://github.com/sunng87/pgwire", rev = "127573d997228cfb70c7699881c568eae8131270", default-features = false, features = [
+pgwire = { version = "0.34", default-features = false, features = [
     "server-api-ring",
+    "pg-ext-types",
 ] }
 pin-project = "1.0"
 pipeline.workspace = true
@@ -105,7 +107,7 @@ quoted-string = "0.6"
 rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
-rust-embed = { version = "6.6", features = ["debug-embed"] }
+rust-embed = { version = "6.6", optional = true, features = ["debug-embed"] }
 rustls = { workspace = true, default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
@@ -123,7 +125,7 @@ tokio-rustls.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 tonic.workspace = true
-tonic-reflection = "0.12"
+tonic-reflection = "0.13"
 tower = { workspace = true, features = ["full"] }
 tower-http = { version = "0.6", features = ["full"] }
 tracing.workspace = true

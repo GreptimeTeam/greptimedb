@@ -14,13 +14,15 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytes::Bytes;
+use common_telemetry::trace;
 use object_store::ObjectStore;
 use parquet::basic::ColumnOrder;
 use parquet::file::metadata::{FileMetaData, ParquetMetaData, RowGroupMetaData};
 use parquet::format;
-use parquet::schema::types::{from_thrift, SchemaDescriptor};
+use parquet::schema::types::{SchemaDescriptor, from_thrift};
 use snafu::ResultExt;
 
 use crate::error;
@@ -89,7 +91,7 @@ fn parse_column_orders(
 }
 
 const FETCH_PARALLELISM: usize = 8;
-const MERGE_GAP: usize = 512 * 1024;
+pub(crate) const MERGE_GAP: usize = 512 * 1024;
 
 /// Asynchronously fetches byte ranges from an object store.
 ///
@@ -100,7 +102,10 @@ pub async fn fetch_byte_ranges(
     object_store: ObjectStore,
     ranges: &[Range<u64>],
 ) -> object_store::Result<Vec<Bytes>> {
-    Ok(object_store
+    let total_size = ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+    let start = Instant::now();
+
+    let result = object_store
         .reader_with(file_path)
         .concurrent(FETCH_PARALLELISM)
         .gap(MERGE_GAP)
@@ -109,5 +114,14 @@ pub async fn fetch_byte_ranges(
         .await?
         .into_iter()
         .map(|buf| buf.to_bytes())
-        .collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+
+    trace!(
+        "Fetch {} bytes from '{}' in object store, cost: {:?}",
+        total_size,
+        file_path,
+        start.elapsed()
+    );
+
+    Ok(result)
 }

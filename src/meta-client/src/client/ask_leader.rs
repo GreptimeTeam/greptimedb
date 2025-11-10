@@ -106,7 +106,7 @@ impl AskLeader {
             let mut client = self.create_asker(addr)?;
             let tx_clone = tx.clone();
             let req = req.clone();
-            let addr = addr.to_string();
+            let addr = addr.clone();
             tokio::spawn(async move {
                 match client.ask_leader(req).await {
                     Ok(res) => {

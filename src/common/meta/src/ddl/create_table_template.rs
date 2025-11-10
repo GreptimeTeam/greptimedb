@@ -14,16 +14,59 @@
 
 use std::collections::HashMap;
 
+use api::v1::column_def::try_as_column_def;
+use api::v1::meta::Partition;
 use api::v1::region::{CreateRequest, RegionColumnDef};
 use api::v1::{ColumnDef, CreateTableExpr, SemanticType};
-use snafu::OptionExt;
-use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
+use common_telemetry::warn;
+use snafu::{OptionExt, ResultExt};
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use store_api::storage::{RegionId, RegionNumber};
-use table::metadata::TableId;
+use table::metadata::{RawTableInfo, TableId};
 
-use crate::error;
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::wal_options_allocator::prepare_wal_options;
+
+/// Builds a [CreateRequest] from a [RawTableInfo].
+///
+/// Note: **This method is only used for creating logical tables.**
+pub(crate) fn build_template_from_raw_table_info(
+    raw_table_info: &RawTableInfo,
+) -> Result<CreateRequest> {
+    let primary_key_indices = &raw_table_info.meta.primary_key_indices;
+    let column_defs = raw_table_info
+        .meta
+        .schema
+        .column_schemas
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let is_primary_key = primary_key_indices.contains(&i);
+            let column_def = try_as_column_def(c, is_primary_key)
+                .context(error::ConvertColumnDefSnafu { column: &c.name })?;
+
+            Ok(RegionColumnDef {
+                column_def: Some(column_def),
+                // The column id will be overridden by the metric engine.
+                // So we just use the index as the column id.
+                column_id: i as u32,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let options = HashMap::from(&raw_table_info.meta.options);
+    let template = CreateRequest {
+        region_id: 0,
+        engine: METRIC_ENGINE_NAME.to_string(),
+        column_defs,
+        primary_key: primary_key_indices.iter().map(|i| *i as u32).collect(),
+        path: String::new(),
+        options,
+        partition: None,
+    };
+
+    Ok(template)
+}
 
 pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<CreateRequest> {
     let column_defs = create_table_expr
@@ -47,7 +90,7 @@ pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<Crea
                     default_constraint: c.default_constraint.clone(),
                     semantic_type: semantic_type as i32,
                     comment: String::new(),
-                    datatype_extension: c.datatype_extension,
+                    datatype_extension: c.datatype_extension.clone(),
                     options: c.options.clone(),
                 }),
                 column_id: i as u32,
@@ -76,11 +119,12 @@ pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<Crea
 
     let template = CreateRequest {
         region_id: 0,
-        engine: create_table_expr.engine.to_string(),
+        engine: create_table_expr.engine.clone(),
         column_defs,
         primary_key,
         path: String::new(),
         options: create_table_expr.table_options.clone(),
+        partition: None,
     };
 
     Ok(template)
@@ -110,6 +154,7 @@ impl CreateRequestBuilder {
         region_id: RegionId,
         storage_path: String,
         region_wal_options: &HashMap<RegionNumber, String>,
+        partition_exprs: &HashMap<RegionNumber, String>,
     ) -> CreateRequest {
         let mut request = self.template.clone();
 
@@ -117,6 +162,7 @@ impl CreateRequestBuilder {
         request.path = storage_path;
         // Stores the encoded wal options into the request options.
         prepare_wal_options(&mut request.options, region_id, region_wal_options);
+        request.partition = Some(prepare_partition_expr(region_id, partition_exprs));
 
         if let Some(physical_table_id) = self.physical_table_id {
             // Logical table has the same region numbers with physical table, and they have a one-to-one mapping.
@@ -131,5 +177,57 @@ impl CreateRequestBuilder {
         }
 
         request
+    }
+}
+
+fn prepare_partition_expr(
+    region_id: RegionId,
+    partition_exprs: &HashMap<RegionNumber, String>,
+) -> Partition {
+    let expr = partition_exprs.get(&region_id.region_number()).cloned();
+    if expr.is_none() {
+        warn!("region {} has no partition expr", region_id);
+    }
+
+    Partition {
+        expression: expr.unwrap_or_default(),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use store_api::storage::{RegionId, RegionNumber};
+
+    use super::*;
+
+    #[test]
+    fn test_build_one_sets_partition_expr_per_region() {
+        // minimal template
+        let template = CreateRequest {
+            region_id: 0,
+            engine: "mito".to_string(),
+            column_defs: vec![],
+            primary_key: vec![],
+            path: String::new(),
+            options: Default::default(),
+            partition: None,
+        };
+        let builder = CreateRequestBuilder::new(template, None);
+
+        let mut partition_exprs: HashMap<RegionNumber, String> = HashMap::new();
+        let expr_a =
+            r#"{"Expr":{"lhs":{"Column":"a"},"op":"Eq","rhs":{"Value":{"UInt32":1}}}}"#.to_string();
+        partition_exprs.insert(0, expr_a.clone());
+
+        let r0 = builder.build_one(
+            RegionId::new(42, 0),
+            "/p".to_string(),
+            &Default::default(),
+            &partition_exprs,
+        );
+        assert_eq!(r0.partition.as_ref().unwrap().expression, expr_a);
     }
 }

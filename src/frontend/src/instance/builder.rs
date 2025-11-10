@@ -15,16 +15,18 @@
 use std::sync::Arc;
 
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
-use catalog::process_manager::ProcessManagerRef;
 use catalog::CatalogManagerRef;
+use catalog::process_manager::ProcessManagerRef;
 use common_base::Plugins;
+use common_event_recorder::EventRecorderImpl;
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
-use common_meta::ddl::ProcedureExecutorRef;
-use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
+use common_meta::procedure_executor::ProcedureExecutorRef;
+use dashmap::DashMap;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
@@ -34,16 +36,16 @@ use operator::statement::{StatementExecutor, StatementExecutorRef};
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
-use query::region_query::RegionQueryHandlerFactoryRef;
 use query::QueryEngineFactory;
+use query::region_query::RegionQueryHandlerFactoryRef;
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
+use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
-use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::instance::Instance;
+use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::limiter::Limiter;
-use crate::slow_query_recorder::SlowQueryRecorder;
 
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
@@ -143,7 +145,7 @@ impl FrontendBuilder {
         ));
         let requester = Arc::new(Requester::new(
             self.catalog_manager.clone(),
-            partition_manager,
+            partition_manager.clone(),
             node_manager.clone(),
         ));
         let table_mutation_handler = Arc::new(TableMutationOperator::new(
@@ -157,11 +159,13 @@ impl FrontendBuilder {
             self.catalog_manager.clone(),
         ));
 
-        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let flow_metadata_manager: Arc<FlowMetadataManager> =
+            Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let flow_service = FlowServiceOperator::new(flow_metadata_manager, node_manager.clone());
 
         let query_engine = QueryEngineFactory::new_with_plugins(
             self.catalog_manager.clone(),
+            Some(partition_manager.clone()),
             Some(region_query_handler.clone()),
             Some(table_mutation_handler),
             Some(procedure_service_handler),
@@ -172,7 +176,7 @@ impl FrontendBuilder {
         )
         .query_engine();
 
-        let statement_executor = Arc::new(StatementExecutor::new(
+        let statement_executor = StatementExecutor::new(
             self.catalog_manager.clone(),
             query_engine.clone(),
             self.procedure_executor,
@@ -181,7 +185,17 @@ impl FrontendBuilder {
             inserter.clone(),
             table_route_cache,
             Some(process_manager.clone()),
-        ));
+        );
+
+        #[cfg(feature = "enterprise")]
+        let statement_executor =
+            if let Some(factory) = plugins.get::<operator::statement::TriggerQuerierFactoryRef>() {
+                statement_executor.with_trigger_querier(factory.create(kv_backend.clone()))
+            } else {
+                statement_executor
+            };
+
+        let statement_executor = Arc::new(statement_executor);
 
         let pipeline_operator = Arc::new(PipelineOperator::new(
             inserter.clone(),
@@ -192,23 +206,18 @@ impl FrontendBuilder {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
-        let slow_query_recorder = self.options.slow_query.and_then(|opts| {
-            opts.enable.then(|| {
-                SlowQueryRecorder::new(
-                    opts.clone(),
-                    inserter.clone(),
-                    statement_executor.clone(),
-                    self.catalog_manager.clone(),
-                )
-            })
-        });
+        let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
+            statement_executor.clone(),
+            self.options.slow_query.ttl,
+            self.options.event_recorder.ttl,
+        ))));
 
         // Create the limiter if the max_in_flight_write_bytes is set.
         let limiter = self
             .options
             .max_in_flight_write_bytes
             .map(|max_in_flight_write_bytes| {
-                Arc::new(Limiter::new(max_in_flight_write_bytes.as_bytes()))
+                Arc::new(Limiter::new(max_in_flight_write_bytes.as_bytes() as usize))
             });
 
         Ok(Instance {
@@ -220,9 +229,11 @@ impl FrontendBuilder {
             inserter,
             deleter,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
-            slow_query_recorder,
+            event_recorder: Some(event_recorder),
             limiter,
             process_manager,
+            otlp_metrics_table_legacy_cache: DashMap::new(),
+            slow_query_options: self.options.slow_query.clone(),
         })
     }
 }

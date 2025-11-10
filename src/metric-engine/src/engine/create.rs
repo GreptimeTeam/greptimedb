@@ -18,12 +18,12 @@ use std::collections::{HashMap, HashSet};
 
 use api::v1::SemanticType;
 use common_telemetry::info;
-use common_time::{Timestamp, FOREVER};
+use common_time::{FOREVER, Timestamp};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::Value;
 use mito2::engine::MITO_ENGINE_NAME;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
     ALTER_PHYSICAL_EXTENSION_KEY, DATA_REGION_SUBDIR, DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
@@ -35,12 +35,12 @@ use store_api::metric_engine_consts::{
 use store_api::mito_engine_options::{TTL_KEY, WAL_OPTIONS_KEY};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, PathType, RegionCreateRequest, RegionRequest};
-use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
+use store_api::storage::consts::ReservedColumnId;
 
-use crate::engine::create::extract_new_columns::extract_new_columns;
-use crate::engine::options::{set_data_region_options, PhysicalRegionOptions};
 use crate::engine::MetricEngineInner;
+use crate::engine::create::extract_new_columns::extract_new_columns;
+use crate::engine::options::{PhysicalRegionOptions, set_data_region_options};
 use crate::error::{
     ColumnTypeMismatchSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
     InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingRegionOptionSnafu,
@@ -180,7 +180,9 @@ impl MetricEngineInner {
         )?;
         extension_return_value.extend(response.extensions);
 
-        info!("Created physical metric region {region_id}, primary key encoding={primary_key_encoding}, physical_region_options={physical_region_options:?}");
+        info!(
+            "Created physical metric region {region_id}, primary key encoding={primary_key_encoding}, physical_region_options={physical_region_options:?}"
+        );
         PHYSICAL_REGION_COUNT.inc();
 
         // remember this table
@@ -296,7 +298,7 @@ impl MetricEngineInner {
             .collect::<HashMap<_, _>>();
         let logical_regions = requests
             .iter()
-            .map(|(region_id, _)| (*region_id))
+            .map(|(region_id, _)| *region_id)
             .collect::<Vec<_>>();
         let logical_region_columns = requests.iter().map(|(region_id, request)| {
             (
@@ -396,9 +398,9 @@ impl MetricEngineInner {
                     }
                 ),
                 SemanticType::Field => {
-                    if field_col.is_some() {
+                    if let Some(field_col) = field_col {
                         MultipleFieldColumnSnafu {
-                            previous: field_col.unwrap().column_schema.name.clone(),
+                            previous: field_col.column_schema.name.clone(),
                             current: col.column_schema.name.clone(),
                         }
                         .fail()?;
@@ -486,6 +488,7 @@ impl MetricEngineInner {
             options,
             table_dir: request.table_dir.clone(),
             path_type: PathType::Metadata,
+            partition_expr_json: Some("".to_string()),
         }
     }
 
@@ -606,7 +609,7 @@ pub(crate) fn region_options_for_metadata_region(
     metadata_region_options.insert(TTL_KEY.to_string(), FOREVER.to_string());
 
     if let Some(wal_options) = original.get(WAL_OPTIONS_KEY) {
-        metadata_region_options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.to_string());
+        metadata_region_options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone());
     }
 
     metadata_region_options
@@ -616,13 +619,14 @@ pub(crate) fn region_options_for_metadata_region(
 mod test {
     use common_meta::ddl::test_util::assert_column_name_and_id;
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
+    use common_query::prelude::{greptime_timestamp, greptime_value};
     use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
     use store_api::region_request::BatchRegionDdlRequest;
 
     use super::*;
     use crate::config::EngineConfig;
     use crate::engine::MetricEngine;
-    use crate::test_util::{create_logical_region_request, TestEnv};
+    use crate::test_util::{TestEnv, create_logical_region_request};
 
     #[test]
     fn test_verify_region_create_request() {
@@ -653,6 +657,7 @@ mod test {
             engine: METRIC_ENGINE_NAME.to_string(),
             primary_key: vec![],
             options: HashMap::new(),
+            partition_expr_json: Some("".to_string()),
         };
         let result = MetricEngineInner::verify_region_create_request(&request);
         assert!(result.is_err());
@@ -699,6 +704,7 @@ mod test {
             options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
                 .into_iter()
                 .collect(),
+            partition_expr_json: Some("".to_string()),
         };
         MetricEngineInner::verify_region_create_request(&request).unwrap();
     }
@@ -731,6 +737,7 @@ mod test {
             engine: METRIC_ENGINE_NAME.to_string(),
             primary_key: vec![],
             options: HashMap::new(),
+            partition_expr_json: Some("".to_string()),
         };
         MetricEngineInner::verify_region_create_request(&request).unwrap_err();
 
@@ -783,6 +790,7 @@ mod test {
             options,
             table_dir: "/test_dir".to_string(),
             path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
         };
 
         // set up
@@ -820,9 +828,9 @@ mod test {
         let physical_region_id2 = RegionId::new(1024, 1);
         let logical_region_id1 = RegionId::new(1025, 0);
         let logical_region_id2 = RegionId::new(1025, 1);
-        env.create_physical_region(physical_region_id1, "/test_dir1")
+        env.create_physical_region(physical_region_id1, "/test_dir1", vec![])
             .await;
-        env.create_physical_region(physical_region_id2, "/test_dir2")
+        env.create_physical_region(physical_region_id2, "/test_dir2", vec![])
             .await;
 
         let region_create_request1 =
@@ -849,8 +857,8 @@ mod test {
         assert_column_name_and_id(
             &column_metadatas,
             &[
-                ("greptime_timestamp", 0),
-                ("greptime_value", 1),
+                (greptime_timestamp(), 0),
+                (greptime_value(), 1),
                 ("__table_id", ReservedColumnId::table_id()),
                 ("__tsid", ReservedColumnId::tsid()),
                 ("job", 2),

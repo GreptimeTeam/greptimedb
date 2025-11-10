@@ -28,6 +28,6 @@ pub(crate) struct ExpressionFunction;
 
 impl ExpressionFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_scalar(IsNullFunction);
+        registry.register_scalar(IsNullFunction::default());
     }
 }

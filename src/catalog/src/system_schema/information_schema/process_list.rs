@@ -135,7 +135,7 @@ async fn make_process_list(
 
     for process in queries {
         let display_id = DisplayProcessId {
-            server_addr: process.frontend.to_string(),
+            server_addr: process.frontend.clone(),
             id: process.id,
         }
         .to_string();

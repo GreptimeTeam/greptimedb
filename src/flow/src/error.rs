@@ -16,6 +16,7 @@
 
 use std::any::Any;
 
+use api::v1::CreateTableExpr;
 use arrow_schema::ArrowError;
 use common_error::ext::BoxedError;
 use common_error::{define_into_tonic_status, from_err_code_msg_to_header};
@@ -25,8 +26,8 @@ use common_telemetry::common_error::status_code::StatusCode;
 use snafu::{Location, ResultExt, Snafu};
 use tonic::metadata::MetadataMap;
 
-use crate::expr::EvalError;
 use crate::FlowId;
+use crate::expr::EvalError;
 
 /// This error is used to represent all possible errors that can occur in the flow module.
 #[derive(Snafu)]
@@ -60,6 +61,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Error encountered while creating sink table for flow: {create:?}"))]
+    CreateSinkTable {
+        create: CreateTableExpr,
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Time error"))]
     Time {
         source: common_time::error::Error,
@@ -67,9 +76,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "No available frontend found after timeout: {timeout:?}, context: {context}"
-    ))]
+    #[snafu(display("No available frontend found after timeout: {timeout:?}, context: {context}"))]
     NoAvailableFrontend {
         timeout: std::time::Duration,
         context: String,
@@ -290,6 +297,13 @@ pub enum Error {
         location: Location,
         source: operator::error::Error,
     },
+
+    #[snafu(display("Failed to create channel manager for gRPC client"))]
+    InvalidClientConfig {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_grpc::error::Error,
+    },
 }
 
 /// the outer message is the full error stack, and inner message in header is the last error message that can be show directly to user
@@ -324,9 +338,10 @@ impl ErrorExt for Error {
             | Self::ListFlows { .. } => StatusCode::TableNotFound,
             Self::FlowNotFound { .. } => StatusCode::FlowNotFound,
             Self::Plan { .. } | Self::Datatypes { .. } => StatusCode::PlanQuery,
-            Self::CreateFlow { .. } | Self::Arrow { .. } | Self::Time { .. } => {
-                StatusCode::EngineExecuteQuery
-            }
+            Self::CreateFlow { .. }
+            | Self::CreateSinkTable { .. }
+            | Self::Arrow { .. }
+            | Self::Time { .. } => StatusCode::EngineExecuteQuery,
             Self::Unexpected { .. }
             | Self::SyncCheckTask { .. }
             | Self::IllegalCheckTaskState { .. } => StatusCode::Unexpected,
@@ -343,7 +358,8 @@ impl ErrorExt for Error {
             Self::InvalidQuery { .. }
             | Self::InvalidRequest { .. }
             | Self::ParseAddr { .. }
-            | Self::IllegalAuthConfig { .. } => StatusCode::InvalidArguments,
+            | Self::IllegalAuthConfig { .. }
+            | Self::InvalidClientConfig { .. } => StatusCode::InvalidArguments,
 
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
 

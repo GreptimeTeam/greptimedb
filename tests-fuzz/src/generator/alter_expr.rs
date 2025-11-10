@@ -29,8 +29,8 @@ use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Generat
 use crate::ir::alter_expr::{AlterTableExpr, AlterTableOperation, AlterTableOption, Ttl};
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::{
-    droppable_columns, generate_columns, generate_random_value, modifiable_columns, Column,
-    ColumnTypeGenerator, Ident,
+    Column, ColumnTypeGenerator, Ident, droppable_columns, generate_columns, generate_random_value,
+    modifiable_columns,
 };
 
 fn add_column_options_generator<R: Rng>(
@@ -175,9 +175,9 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprModifyDataTypeGenerator<R
     fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
         let modifiable = modifiable_columns(&self.table_ctx.columns);
         let changed = modifiable[rng.random_range(0..modifiable.len())].clone();
-        let mut to_type = self.column_type_generator.gen(rng);
+        let mut to_type = self.column_type_generator.generate(rng);
         while !changed.column_type.can_arrow_type_cast_to(&to_type) {
-            to_type = self.column_type_generator.gen(rng);
+            to_type = self.column_type_generator.generate(rng);
         }
 
         Ok(AlterTableExpr {
@@ -219,16 +219,9 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprSetTableOptionsGenerator<
             .iter()
             .map(|idx| match all_options[*idx] {
                 AlterTableOption::Ttl(_) => {
-                    let ttl_type = rng.random_range(0..3);
-                    match ttl_type {
-                        0 => {
-                            let duration: u32 = rng.random();
-                            AlterTableOption::Ttl(Ttl::Duration((duration as i64).into()))
-                        }
-                        1 => AlterTableOption::Ttl(Ttl::Instant),
-                        2 => AlterTableOption::Ttl(Ttl::Forever),
-                        _ => unreachable!(),
-                    }
+                    // The database purges expired files in background so it's hard to check
+                    // non-forever TTL.
+                    AlterTableOption::Ttl(Ttl::Forever)
                 }
                 AlterTableOption::TwcsTimeWindow(_) => {
                     let time_window: u32 = rng.random();
@@ -292,8 +285,8 @@ mod tests {
 
     use super::*;
     use crate::context::TableContext;
-    use crate::generator::create_expr::CreateTableExprGeneratorBuilder;
     use crate::generator::Generator;
+    use crate::generator::create_expr::CreateTableExprGeneratorBuilder;
 
     #[test]
     fn test_alter_table_expr_generator_deterministic() {

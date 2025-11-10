@@ -23,16 +23,26 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
-    build_delete_rows_for_key, build_rows_with_fields, delete_rows, delete_rows_schema,
-    flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
+    CreateRequestBuilder, TestEnv, build_delete_rows_for_key, build_rows_with_fields, delete_rows,
+    delete_rows_schema, flush_region, put_rows, reopen_region, rows_schema,
 };
 
 #[tokio::test]
 async fn test_merge_mode_write_query() {
+    test_merge_mode_write_query_with_format(false).await;
+    test_merge_mode_write_query_with_format(true).await;
+}
+
+async fn test_merge_mode_write_query_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
@@ -87,11 +97,17 @@ async fn test_merge_mode_write_query() {
 
 #[tokio::test]
 async fn test_merge_mode_compaction() {
+    test_merge_mode_compaction_with_format(false).await;
+    test_merge_mode_compaction_with_format(true).await;
+}
+
+async fn test_merge_mode_compaction_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -204,6 +220,7 @@ async fn test_merge_mode_compaction() {
         .reopen_engine(
             engine,
             MitoConfig {
+                default_experimental_flat_format: flat_format,
                 ..Default::default()
             },
         )

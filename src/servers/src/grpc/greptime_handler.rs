@@ -18,47 +18,40 @@ use std::str::FromStr;
 use std::time::Instant;
 
 use api::helper::request_type;
-use api::v1::auth_header::AuthScheme;
-use api::v1::{AuthHeader, Basic, GreptimeRequest, RequestHeader};
-use auth::{Identity, Password, UserInfoRef, UserProviderRef};
-use base64::prelude::BASE64_STANDARD;
-use base64::Engine;
+use api::v1::{GreptimeRequest, RequestHeader};
+use auth::UserProviderRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_grpc::flight::do_put::DoPutResponse;
 use common_grpc::flight::FlightDecoder;
+use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
-use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
+use common_runtime::runtime::RuntimeTrait;
 use common_session::ReadPreference;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
-use session::context::{Channel, QueryContext, QueryContextBuilder, QueryContextRef};
+use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
-use crate::error::Error::UnsupportedAuthScheme;
-use crate::error::{
-    AuthSnafu, InvalidAuthHeaderInvalidUtf8ValueSnafu, InvalidBase64ValueSnafu, InvalidQuerySnafu,
-    JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result, UnknownHintSnafu,
-};
+use crate::error::{InvalidQuerySnafu, JoinTaskSnafu, Result, UnknownHintSnafu};
 use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
-use crate::grpc::{FlightCompression, TonicResult};
+use crate::grpc::{FlightCompression, TonicResult, context_auth};
 use crate::metrics;
-use crate::metrics::{METRIC_AUTH_FAILURE, METRIC_SERVER_GRPC_DB_REQUEST_TIMER};
+use crate::metrics::METRIC_SERVER_GRPC_DB_REQUEST_TIMER;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
 #[derive(Clone)]
 pub struct GreptimeRequestHandler {
     handler: ServerGrpcQueryHandlerRef,
-    user_provider: Option<UserProviderRef>,
+    pub(crate) user_provider: Option<UserProviderRef>,
     runtime: Option<Runtime>,
     pub(crate) flight_compression: FlightCompression,
 }
@@ -90,7 +83,7 @@ impl GreptimeRequestHandler {
 
         let header = request.header.as_ref();
         let query_ctx = create_query_context(Channel::Grpc, header, hints)?;
-        let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
+        let user_info = context_auth::auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 
         let handler = self.handler.clone();
@@ -143,6 +136,7 @@ impl GreptimeRequestHandler {
         &self,
         mut stream: PutRecordBatchRequestStream,
         result_sender: mpsc::Sender<TonicResult<DoPutResponse>>,
+        query_ctx: QueryContextRef,
     ) {
         let handler = self.handler.clone();
         let runtime = self
@@ -166,11 +160,12 @@ impl GreptimeRequestHandler {
                     table_name,
                     request_id,
                     data,
+                    _guard,
                 } = request;
 
                 let timer = metrics::GRPC_BULK_INSERT_ELAPSED.start_timer();
                 let result = handler
-                    .put_record_batch(&table_name, &mut table_ref, &mut decoder, data)
+                    .put_record_batch(&table_name, &mut table_ref, &mut decoder, data, query_ctx.clone())
                     .await
                     .inspect_err(|e| error!(e; "Failed to handle flight record batches"));
                 timer.observe_duration();
@@ -185,58 +180,6 @@ impl GreptimeRequestHandler {
             }
         });
     }
-
-    pub(crate) async fn validate_auth(
-        &self,
-        username_and_password: Option<&str>,
-        db: Option<&str>,
-    ) -> Result<bool> {
-        if self.user_provider.is_none() {
-            return Ok(true);
-        }
-
-        let username_and_password = username_and_password.context(NotFoundAuthHeaderSnafu)?;
-        let username_and_password = BASE64_STANDARD
-            .decode(username_and_password)
-            .context(InvalidBase64ValueSnafu)
-            .and_then(|x| String::from_utf8(x).context(InvalidAuthHeaderInvalidUtf8ValueSnafu))?;
-
-        let mut split = username_and_password.splitn(2, ':');
-        let (username, password) = match (split.next(), split.next()) {
-            (Some(username), Some(password)) => (username, password),
-            (Some(username), None) => (username, ""),
-            (None, None) => return Ok(false),
-            _ => unreachable!(), // because this iterator won't yield Some after None
-        };
-
-        let (catalog, schema) = if let Some(db) = db {
-            parse_catalog_and_schema_from_db_string(db)
-        } else {
-            (
-                DEFAULT_CATALOG_NAME.to_string(),
-                DEFAULT_SCHEMA_NAME.to_string(),
-            )
-        };
-        let header = RequestHeader {
-            authorization: Some(AuthHeader {
-                auth_scheme: Some(AuthScheme::Basic(Basic {
-                    username: username.to_string(),
-                    password: password.to_string(),
-                })),
-            }),
-            catalog,
-            schema,
-            ..Default::default()
-        };
-
-        Ok(auth(
-            self.user_provider.clone(),
-            Some(&header),
-            &QueryContext::arc(),
-        )
-        .await
-        .is_ok())
-    }
 }
 
 pub fn get_request_type(request: &GreptimeRequest) -> &'static str {
@@ -245,45 +188,6 @@ pub fn get_request_type(request: &GreptimeRequest) -> &'static str {
         .as_ref()
         .map(request_type)
         .unwrap_or_default()
-}
-
-pub(crate) async fn auth(
-    user_provider: Option<UserProviderRef>,
-    header: Option<&RequestHeader>,
-    query_ctx: &QueryContextRef,
-) -> Result<UserInfoRef> {
-    let Some(user_provider) = user_provider else {
-        return Ok(auth::userinfo_by_name(None));
-    };
-
-    let auth_scheme = header
-        .and_then(|header| {
-            header
-                .authorization
-                .as_ref()
-                .and_then(|x| x.auth_scheme.clone())
-        })
-        .context(NotFoundAuthHeaderSnafu)?;
-
-    match auth_scheme {
-        AuthScheme::Basic(Basic { username, password }) => user_provider
-            .auth(
-                Identity::UserId(&username, None),
-                Password::PlainText(password.into()),
-                query_ctx.current_catalog(),
-                &query_ctx.current_schema(),
-            )
-            .await
-            .context(AuthSnafu),
-        AuthScheme::Token(_) => Err(UnsupportedAuthScheme {
-            name: "Token AuthScheme".to_string(),
-        }),
-    }
-    .inspect_err(|e| {
-        METRIC_AUTH_FAILURE
-            .with_label_values(&[e.status_code().as_ref()])
-            .inc();
-    })
 }
 
 /// Creates a new `QueryContext` from the provided request header and extensions.

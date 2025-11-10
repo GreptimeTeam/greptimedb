@@ -28,13 +28,23 @@ use super::ScanRequest;
 use crate::config::MitoConfig;
 use crate::engine::listener::FlushTruncateListener;
 use crate::test_util::{
-    build_rows, put_rows, rows_schema, CreateRequestBuilder, MockWriteBufferManager, TestEnv,
+    CreateRequestBuilder, MockWriteBufferManager, TestEnv, build_rows, put_rows, rows_schema,
 };
 
 #[tokio::test]
 async fn test_engine_truncate_region_basic() {
+    test_engine_truncate_region_basic_with_format(false).await;
+    test_engine_truncate_region_basic_with_format(true).await;
+}
+
+async fn test_engine_truncate_region_basic_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("truncate-basic").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     // Create the region.
     let region_id = RegionId::new(1, 1);
@@ -69,7 +79,10 @@ async fn test_engine_truncate_region_basic() {
 
     // Truncate the region.
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )
         .await
         .unwrap();
 
@@ -83,8 +96,18 @@ async fn test_engine_truncate_region_basic() {
 
 #[tokio::test]
 async fn test_engine_put_data_after_truncate() {
+    test_engine_put_data_after_truncate_with_format(false).await;
+    test_engine_put_data_after_truncate_with_format(true).await;
+}
+
+async fn test_engine_put_data_after_truncate_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("truncate-put").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     // Create the region.
     let region_id = RegionId::new(1, 1);
@@ -118,7 +141,10 @@ async fn test_engine_put_data_after_truncate() {
 
     // Truncate the region.
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )
         .await
         .unwrap();
 
@@ -146,8 +172,18 @@ async fn test_engine_put_data_after_truncate() {
 
 #[tokio::test]
 async fn test_engine_truncate_after_flush() {
+    test_engine_truncate_after_flush_with_format(false).await;
+    test_engine_truncate_after_flush_with_format(true).await;
+}
+
+async fn test_engine_truncate_after_flush_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("truncate-flush").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     // Create the region.
     let region_id = RegionId::new(1, 1);
@@ -194,7 +230,10 @@ async fn test_engine_truncate_after_flush() {
 
     // Truncate the region.
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )
         .await
         .unwrap();
 
@@ -223,8 +262,18 @@ async fn test_engine_truncate_after_flush() {
 
 #[tokio::test]
 async fn test_engine_truncate_reopen() {
+    test_engine_truncate_reopen_with_format(false).await;
+    test_engine_truncate_reopen_with_format(true).await;
+}
+
+async fn test_engine_truncate_reopen_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("truncate-reopen").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     // Create the region.
     let region_id = RegionId::new(1, 1);
@@ -249,12 +298,23 @@ async fn test_engine_truncate_reopen() {
 
     // Truncate the region
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )
         .await
         .unwrap();
 
     // Reopen the region again.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     engine
         .handle_request(
             region_id,
@@ -264,6 +324,7 @@ async fn test_engine_truncate_reopen() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -282,15 +343,24 @@ async fn test_engine_truncate_reopen() {
 
 #[tokio::test]
 async fn test_engine_truncate_during_flush() {
+    test_engine_truncate_during_flush_with_format(false).await;
+    test_engine_truncate_during_flush_with_format(true).await;
+}
+
+async fn test_engine_truncate_during_flush_with_format(flat_format: bool) {
     init_default_ut_logging();
     let mut env = TestEnv::with_prefix("truncate-during-flush").await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let listener = Arc::new(FlushTruncateListener::default());
     let engine = env
         .create_engine_with(
-            MitoConfig::default(),
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
             Some(write_buffer_manager),
             Some(listener.clone()),
+            None,
         )
         .await;
 
@@ -337,7 +407,10 @@ async fn test_engine_truncate_during_flush() {
 
     // Truncate the region.
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )
         .await
         .unwrap();
 
@@ -359,7 +432,15 @@ async fn test_engine_truncate_during_flush() {
     assert_eq!(sequence, truncated_sequence);
 
     // Reopen the engine.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     engine
         .handle_request(
             region_id,
@@ -369,6 +450,7 @@ async fn test_engine_truncate_during_flush() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await

@@ -16,16 +16,16 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 
 use common_telemetry::info;
+use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
-use common_time::Timestamp;
 use store_api::storage::RegionId;
 
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
 use crate::compaction::picker::{Picker, PickerOutput};
-use crate::compaction::{get_expired_ssts, CompactionOutput};
+use crate::compaction::{CompactionOutput, get_expired_ssts};
 use crate::sst::file::FileHandle;
 
 /// Compaction picker that splits the time range of all involved files to windows, and merges
@@ -204,14 +204,14 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use common_time::range::TimestampRange;
     use common_time::Timestamp;
-    use store_api::storage::RegionId;
+    use common_time::range::TimestampRange;
+    use store_api::storage::{FileId, RegionId};
 
     use crate::compaction::compactor::CompactionVersion;
-    use crate::compaction::window::{file_time_bucket_span, WindowedCompactionPicker};
+    use crate::compaction::window::{WindowedCompactionPicker, file_time_bucket_span};
     use crate::region::options::RegionOptions;
-    use crate::sst::file::{FileId, FileMeta, Level};
+    use crate::sst::file::{FileMeta, Level};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::version::SstVersion;
     use crate::test_util::memtable_util::metadata_for_test;
@@ -250,6 +250,7 @@ mod tests {
                 index_options: Default::default(),
                 memtable: None,
                 merge_mode: None,
+                sst_format: None,
             },
             compaction_time_window: None,
         }

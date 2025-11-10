@@ -29,12 +29,12 @@ use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    hash_utils, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning,
-    PlanProperties, RecordBatchStream, SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
+    RecordBatchStream, SendableRecordBatchStream, hash_utils,
 };
 use datatypes::arrow::compute;
 use futures::future::BoxFuture;
-use futures::{ready, Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt, ready};
 
 /// A special kind of `UNION`(`OR` in PromQL) operator, for PromQL specific use case.
 ///
@@ -92,7 +92,7 @@ impl UnionDistinctOn {
         left_exec: Arc<dyn ExecutionPlan>,
         right_exec: Arc<dyn ExecutionPlan>,
     ) -> Arc<dyn ExecutionPlan> {
-        let output_schema: SchemaRef = Arc::new(self.output_schema.as_ref().into());
+        let output_schema: SchemaRef = self.output_schema.inner().clone();
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::UnknownPartitioning(1),
@@ -292,7 +292,9 @@ impl ExecutionPlan for UnionDistinctOnExec {
 impl DisplayAs for UnionDistinctOnExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(
                     f,
                     "UnionDistinctOnExec: on col=[{:?}], ts_col=[{}]",
@@ -507,7 +509,7 @@ fn interleave_batches(
 
     // assemble new record batch
     RecordBatch::try_new(schema, interleaved_arrays)
-        .map_err(|e| DataFusionError::ArrowError(e, None))
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
 }
 
 /// Utility function to take rows from a record batch. Based on [take](datafusion::arrow::compute::take)
@@ -525,10 +527,10 @@ fn take_batch(batch: &RecordBatch, indices: &[usize]) -> DataFusionResult<Record
         .iter()
         .map(|array| compute::take(array, &indices_array, None))
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| DataFusionError::ArrowError(e, None))?;
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
 
-    let result =
-        RecordBatch::try_new(schema, arrays).map_err(|e| DataFusionError::ArrowError(e, None))?;
+    let result = RecordBatch::try_new(schema, arrays)
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
     Ok(result)
 }
 

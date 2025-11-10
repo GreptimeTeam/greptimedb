@@ -27,12 +27,15 @@ common-base.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true
 common-error.workspace = true
+common-event-recorder.workspace = true
+common-frontend.workspace = true
 common-grpc.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-procedure.workspace = true
 common-query.workspace = true
 common-recordbatch.workspace = true
 common-runtime.workspace = true
+common-stat.workspace = true
 common-telemetry.workspace = true
 common-test-util.workspace = true
 common-time.workspace = true
@@ -45,6 +48,7 @@ flow.workspace = true
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
 futures-util.workspace = true
+http.workspace = true
 hyper-util = { workspace = true, features = ["tokio"] }
 log-query = { workspace = true }
 loki-proto.workspace = true
@@ -59,20 +63,22 @@ object-store.workspace = true
 operator = { workspace = true, features = ["testing"] }
 prost.workspace = true
 query.workspace = true
+rand.workspace = true
 rstest.workspace = true
 rstest_reuse.workspace = true
+sea-query.workspace = true
 serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
 session.workspace = true
 similar-asserts.workspace = true
 snafu.workspace = true
 sql.workspace = true
-sqlx = { version = "0.8", features = [
-    "runtime-tokio-rustls",
+sqlx = { workspace = true, features = [
     "mysql",
     "postgres",
     "chrono",
 ] }
+standalone.workspace = true
 substrait.workspace = true
 table.workspace = true
 tempfile.workspace = true
@@ -85,6 +91,7 @@ uuid.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+common-wal = { workspace = true, features = ["testing"] }
 datafusion.workspace = true
 datafusion-expr.workspace = true
 hex.workspace = true
@@ -92,6 +99,7 @@ http.workspace = true
 itertools.workspace = true
 jsonb.workspace = true
 opentelemetry-proto.workspace = true
+otel-arrow-rust.workspace = true
 partition.workspace = true
 paste.workspace = true
 pipeline.workspace = true
@@ -101,4 +109,5 @@ session = { workspace = true, features = ["testing"] }
 store-api.workspace = true
 tokio-postgres = { workspace = true }
 url = "2.3"
+urlencoding = "2.1"
 yaml-rust = "0.4"

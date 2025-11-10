@@ -27,25 +27,25 @@ use mito_codec::key_values::KeyValue;
 use mito_codec::primary_key_filter::is_partition_column;
 use mito_codec::row_converter::sparse::{FieldWithId, SparseEncoder};
 use mito_codec::row_converter::{PrimaryKeyCodec, SortField};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{
     EncodeSnafu, EncodeSparsePrimaryKeySnafu, PrimaryKeyLengthMismatchSnafu, Result,
 };
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::partition_tree::PartitionTreeConfig;
 use crate::memtable::partition_tree::partition::{
     Partition, PartitionKey, PartitionReader, PartitionRef, ReadPartitionContext,
 };
-use crate::memtable::partition_tree::PartitionTreeConfig;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
 use crate::metrics::{PARTITION_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
-use crate::read::dedup::LastNonNullIter;
 use crate::read::Batch;
+use crate::read::dedup::LastNonNullIter;
 use crate::region::options::MergeMode;
 
 /// The partition tree.
@@ -151,7 +151,12 @@ impl PartitionTree {
         for kv in kvs.iter() {
             self.verify_primary_key_length(&kv)?;
             // Safety: timestamp of kv must be both present and a valid timestamp value.
-            let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+            let ts = kv
+                .timestamp()
+                .try_into_timestamp()
+                .unwrap()
+                .unwrap()
+                .value();
             metrics.min_ts = metrics.min_ts.min(ts);
             metrics.max_ts = metrics.max_ts.max(ts);
             metrics.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();
@@ -196,7 +201,12 @@ impl PartitionTree {
 
         self.verify_primary_key_length(&kv)?;
         // Safety: timestamp of kv must be both present and a valid timestamp value.
-        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        let ts = kv
+            .timestamp()
+            .try_into_timestamp()
+            .unwrap()
+            .unwrap()
+            .value();
         metrics.min_ts = metrics.min_ts.min(ts);
         metrics.max_ts = metrics.max_ts.max(ts);
         metrics.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();
@@ -229,7 +239,8 @@ impl PartitionTree {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
+        mem_scan_metrics: Option<crate::memtable::MemScanMetrics>,
     ) -> Result<BoxedBatchIterator> {
         let start = Instant::now();
         // Creates the projection set.
@@ -257,6 +268,7 @@ impl PartitionTree {
             partitions,
             current_reader: None,
             metrics: tree_iter_metric,
+            mem_scan_metrics,
         };
         let context = ReadPartitionContext::new(
             self.metadata.clone(),
@@ -463,14 +475,32 @@ struct TreeIterMetrics {
 
 struct TreeIter {
     /// Optional Sequence number of the current reader which limit results batch to lower than this sequence number.
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
     partitions: VecDeque<PartitionRef>,
     current_reader: Option<PartitionReader>,
     metrics: TreeIterMetrics,
+    mem_scan_metrics: Option<crate::memtable::MemScanMetrics>,
+}
+
+impl TreeIter {
+    fn report_mem_scan_metrics(&mut self) {
+        if let Some(mem_scan_metrics) = self.mem_scan_metrics.take() {
+            let inner = crate::memtable::MemScanMetricsData {
+                total_series: 0, // This is unavailable.
+                num_rows: self.metrics.rows_fetched,
+                num_batches: self.metrics.batches_fetched,
+                scan_cost: self.metrics.iter_elapsed,
+            };
+            mem_scan_metrics.merge_inner(&inner);
+        }
+    }
 }
 
 impl Drop for TreeIter {
     fn drop(&mut self) {
+        // Report MemScanMetrics if not already reported
+        self.report_mem_scan_metrics();
+
         READ_ROWS_TOTAL
             .with_label_values(&["partition_tree_memtable"])
             .inc_by(self.metrics.rows_fetched as u64);
@@ -523,6 +553,8 @@ impl TreeIter {
     /// Fetches next batch.
     fn next_batch(&mut self) -> Result<Option<Batch>> {
         let Some(part_reader) = &mut self.current_reader else {
+            // Report MemScanMetrics before returning None
+            self.report_mem_scan_metrics();
             return Ok(None);
         };
 

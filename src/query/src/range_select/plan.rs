@@ -22,30 +22,29 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use ahash::RandomState;
-use arrow::compute::{self, cast_with_options, take_arrays, CastOptions};
+use arrow::compute::{self, CastOptions, cast_with_options, take_arrays};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, SortOptions, TimeUnit};
 use common_recordbatch::DfSendableRecordBatchStream;
-use datafusion::common::{Result as DataFusionResult, Statistics};
+use datafusion::common::Result as DataFusionResult;
 use datafusion::error::Result as DfResult;
-use datafusion::execution::context::SessionState;
 use datafusion::execution::TaskContext;
+use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
-use datafusion::physical_planner::create_physical_sort_expr;
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::{DFSchema, DFSchemaRef, DataFusionError, ScalarValue};
-use datafusion_expr::utils::{exprlist_to_fields, COUNT_STAR_EXPANSION};
+use datafusion_expr::utils::{COUNT_STAR_EXPANSION, exprlist_to_fields};
 use datafusion_expr::{
-    lit, Accumulator, Expr, ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore,
+    Accumulator, Expr, ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore, lit,
 };
 use datafusion_physical_expr::aggregate::{AggregateExprBuilder, AggregateFunctionExpr};
 use datafusion_physical_expr::{
-    create_physical_expr, Distribution, EquivalenceProperties, LexOrdering, Partitioning,
-    PhysicalExpr, PhysicalSortExpr,
+    Distribution, EquivalenceProperties, Partitioning, PhysicalExpr, PhysicalSortExpr,
+    create_physical_expr, create_physical_sort_expr,
 };
 use datatypes::arrow::array::{
     Array, ArrayRef, TimestampMillisecondArray, TimestampMillisecondBuilder, UInt32Builder,
@@ -53,7 +52,7 @@ use datatypes::arrow::array::{
 use datatypes::arrow::datatypes::{ArrowPrimitiveType, TimestampMillisecondType};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::arrow::row::{OwnedRow, RowConverter, SortField};
-use futures::{ready, Stream};
+use futures::{Stream, ready};
 use futures_util::StreamExt;
 use snafu::ensure;
 
@@ -545,6 +544,7 @@ impl RangeSelect {
                 // At this time, aggregate plan has been replaced by a custom range plan,
                 // so `CountWildcardRule` has not been applied.
                 // We manually modify it when creating the physical plan.
+                #[expect(deprecated)]
                 Expr::Wildcard { .. } if is_count_aggr => create_physical_expr(
                     &lit(COUNT_STAR_EXPANSION),
                     df_schema.as_ref(),
@@ -590,8 +590,9 @@ impl RangeSelect {
                         if (aggr.func.name() == "last_value"
                             || aggr.func.name() == "first_value") =>
                     {
-                        let order_by = if let Some(exprs) = &aggr.order_by {
-                            exprs
+                        let order_by = if !aggr.params.order_by.is_empty() {
+                            aggr.params
+                                .order_by
                                 .iter()
                                 .map(|x| {
                                     create_physical_sort_expr(
@@ -618,7 +619,7 @@ impl RangeSelect {
                         };
                         let arg = self.create_physical_expr_list(
                             false,
-                            &aggr.args,
+                            &aggr.params.args,
                             input_dfschema,
                             session_state,
                         )?;
@@ -627,13 +628,14 @@ impl RangeSelect {
                         // We can safely assume that there is only one element here.
                         AggregateExprBuilder::new(aggr.func.clone(), arg)
                             .schema(input_schema.clone())
-                            .order_by(LexOrdering::new(order_by))
+                            .order_by(order_by)
                             .alias(name)
                             .build()
                     }
                     Expr::AggregateFunction(aggr) => {
-                        let order_by = if let Some(exprs) = &aggr.order_by {
-                            exprs
+                        let order_by = if !aggr.params.order_by.is_empty() {
+                            aggr.params
+                                .order_by
                                 .iter()
                                 .map(|x| {
                                     create_physical_sort_expr(
@@ -646,18 +648,18 @@ impl RangeSelect {
                         } else {
                             vec![]
                         };
-                        let distinct = aggr.distinct;
+                        let distinct = aggr.params.distinct;
                         // TODO(discord9): add default null treatment?
 
                         let input_phy_exprs = self.create_physical_expr_list(
                             aggr.func.name() == "count",
-                            &aggr.args,
+                            &aggr.params.args,
                             input_dfschema,
                             session_state,
                         )?;
                         AggregateExprBuilder::new(aggr.func.clone(), input_phy_exprs)
                             .schema(input_schema.clone())
-                            .order_by(LexOrdering::new(order_by))
+                            .order_by(order_by)
                             .with_distinct(distinct)
                             .alias(name)
                             .build()
@@ -724,9 +726,7 @@ impl RangeFnExec {
     /// Order-sensitive aggregators, such as `FIRST_VALUE(x ORDER BY y)` requires this.
     fn expressions(&self) -> Vec<Arc<dyn PhysicalExpr>> {
         let mut exprs = self.expr.expressions();
-        if let Some(ordering) = self.expr.order_bys() {
-            exprs.extend(ordering.iter().map(|sort| sort.expr.clone()));
-        }
+        exprs.extend(self.expr.order_bys().iter().map(|sort| sort.expr.clone()));
         exprs
     }
 }
@@ -766,7 +766,9 @@ pub struct RangeSelectExec {
 impl DisplayAs for RangeSelectExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(f, "RangeSelectExec: ")?;
                 let range_expr_strs: Vec<String> =
                     self.range_exec.iter().map(RangeFnExec::to_string).collect();
@@ -871,10 +873,6 @@ impl ExecutionPlan for RangeSelectExec {
 
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metric.clone_inner())
-    }
-
-    fn statistics(&self) -> DataFusionResult<Statistics> {
-        Ok(Statistics::new_unknown(self.schema.as_ref()))
     }
 
     fn name(&self) -> &str {
@@ -1177,7 +1175,9 @@ impl Stream for RangeSelectStream {
                         Some(Ok(batch)) => {
                             if let Err(e) = self.update_range_context(batch) {
                                 common_telemetry::debug!(
-                                    "RangeSelectStream cannot update range context, schema: {:?}, err: {:?}", self.schema, e
+                                    "RangeSelectStream cannot update range context, schema: {:?}, err: {:?}",
+                                    self.schema,
+                                    e
                                 );
                                 return Poll::Ready(Some(Err(e)));
                             }
@@ -1244,12 +1244,13 @@ mod test {
     use datafusion::arrow::datatypes::{
         ArrowPrimitiveType, DataType, Field, Schema, TimestampMillisecondType,
     };
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
     use datafusion::functions_aggregate::min_max;
-    use datafusion::physical_plan::memory::MemoryExec;
     use datafusion::physical_plan::sorts::sort::SortExec;
     use datafusion::prelude::SessionContext;
-    use datafusion_physical_expr::expressions::Column;
     use datafusion_physical_expr::PhysicalSortExpr;
+    use datafusion_physical_expr::expressions::Column;
     use datatypes::arrow::array::TimestampMillisecondArray;
     use datatypes::arrow_array::StringArray;
 
@@ -1257,7 +1258,7 @@ mod test {
 
     const TIME_INDEX_COLUMN: &str = "timestamp";
 
-    fn prepare_test_data(is_float: bool, is_gap: bool) -> MemoryExec {
+    fn prepare_test_data(is_float: bool, is_gap: bool) -> DataSourceExec {
         let schema = Arc::new(Schema::new(vec![
             Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
             Field::new(
@@ -1307,7 +1308,9 @@ mod test {
         )
         .unwrap();
 
-        MemoryExec::try_new(&[vec![data]], schema, None).unwrap()
+        DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![data]], schema, None).unwrap(),
+        ))
     }
 
     async fn do_range_select_test(
@@ -1390,7 +1393,7 @@ mod test {
             cache,
         });
         let sort_exec = SortExec::new(
-            LexOrdering::new(vec![
+            [
                 PhysicalSortExpr {
                     expr: Arc::new(Column::new("host", 3)),
                     options: SortOptions {
@@ -1405,7 +1408,8 @@ mod test {
                         nulls_first: true,
                     },
                 },
-            ]),
+            ]
+            .into(),
             range_select_exec,
         );
         let session_context = SessionContext::default();
@@ -1710,13 +1714,13 @@ mod test {
             Fill::try_from_str("WHAT", &DataType::UInt8)
                 .unwrap_err()
                 .to_string(),
-                "Error during planning: WHAT is not a valid fill option, fail to convert to a const value. { Arrow error: Cast error: Cannot cast string 'WHAT' to value of UInt8 type }"
+            "Error during planning: WHAT is not a valid fill option, fail to convert to a const value. { Arrow error: Cast error: Cannot cast string 'WHAT' to value of UInt8 type }"
         );
         assert_eq!(
             Fill::try_from_str("8.0", &DataType::UInt8)
                 .unwrap_err()
                 .to_string(),
-                "Error during planning: 8.0 is not a valid fill option, fail to convert to a const value. { Arrow error: Cast error: Cannot cast string '8.0' to value of UInt8 type }"
+            "Error during planning: 8.0 is not a valid fill option, fail to convert to a const value. { Arrow error: Cast error: Cannot cast string '8.0' to value of UInt8 type }"
         );
         assert!(
             Fill::try_from_str("8", &DataType::UInt8).unwrap()

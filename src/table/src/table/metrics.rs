@@ -66,7 +66,7 @@ impl StreamMetrics {
     }
 
     /// Return a timer guard that records the time elapsed in poll
-    pub fn poll_timer(&self) -> ScopedTimerGuard {
+    pub fn poll_timer(&self) -> ScopedTimerGuard<'_> {
         self.poll_elapsed.timer()
     }
 

@@ -36,6 +36,7 @@ datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-functions-aggregate-common.workspace = true
+datafusion-pg-catalog.workspace = true
 datafusion-physical-expr.workspace = true
 datatypes.workspace = true
 derive_more = { version = "1", default-features = false, features = ["display"] }
@@ -49,15 +50,14 @@ memchr = "2.7"
 nalgebra.workspace = true
 num = "0.4"
 num-traits = "0.2"
-once_cell.workspace = true
 paste.workspace = true
+regex.workspace = true
 s2 = { version = "0.0.12", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 session.workspace = true
 snafu.workspace = true
 sql.workspace = true
-statrs = "0.16"
 store-api.workspace = true
 table.workspace = true
 uddsketch = { git = "https://github.com/GreptimeTeam/timescaledb-toolkit.git", rev = "84828fe8fb494a6a61412a3da96517fc80f7bb20" }
@@ -66,6 +66,6 @@ wkt = { version = "0.11", optional = true }
 [dev-dependencies]
 approx = "0.5"
 futures.workspace = true
-pretty_assertions = "1.4.0"
+pretty_assertions.workspace = true
 serde = { version = "1.0", features = ["derive"] }
 tokio.workspace = true

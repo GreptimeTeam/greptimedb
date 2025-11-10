@@ -13,19 +13,24 @@
 // limitations under the License.
 
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 
+use api::v1::helper::row;
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
+use api::v1::{ColumnDataType, ColumnSchema, Rows, SemanticType};
 use async_stream::try_stream;
-use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD_NO_PAD;
+use common_base::readable_size::ReadableSize;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::prelude::{col, lit};
-use futures_util::stream::BoxStream;
 use futures_util::TryStreamExt;
+use futures_util::stream::BoxStream;
 use mito2::engine::MitoEngine;
+use moka::future::Cache;
+use moka::policy::EvictionPolicy;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
@@ -39,9 +44,9 @@ use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use crate::error::{
-    CollectRecordBatchStreamSnafu, DecodeColumnValueSnafu, DeserializeColumnMetadataSnafu,
-    LogicalRegionNotFoundSnafu, MitoReadOperationSnafu, MitoWriteOperationSnafu,
-    ParseRegionIdSnafu, Result,
+    CacheGetSnafu, CollectRecordBatchStreamSnafu, DecodeColumnValueSnafu,
+    DeserializeColumnMetadataSnafu, LogicalRegionNotFoundSnafu, MitoReadOperationSnafu,
+    MitoWriteOperationSnafu, ParseRegionIdSnafu, Result,
 };
 use crate::utils;
 
@@ -62,6 +67,11 @@ const COLUMN_PREFIX: &str = "__column_";
 /// itself.
 pub struct MetadataRegion {
     pub(crate) mito: MitoEngine,
+    /// The cache for contents(key-value pairs) of region metadata.
+    ///
+    /// The cache should be invalidated when any new values are put into the metadata region or any
+    /// values are deleted from the metadata region.
+    cache: Cache<RegionId, RegionMetadataCacheEntry>,
     /// Logical lock for operations that need to be serialized. Like update & read region columns.
     ///
     /// Region entry will be registered on creating and opening logical region, and deregistered on
@@ -69,10 +79,30 @@ pub struct MetadataRegion {
     logical_region_lock: RwLock<HashMap<RegionId, Arc<RwLock<()>>>>,
 }
 
+#[derive(Clone)]
+struct RegionMetadataCacheEntry {
+    key_values: Arc<BTreeMap<String, String>>,
+    size: usize,
+}
+
+/// The max size of the region metadata cache.
+const MAX_CACHE_SIZE: u64 = ReadableSize::mb(128).as_bytes();
+/// The TTL of the region metadata cache.
+const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+
 impl MetadataRegion {
     pub fn new(mito: MitoEngine) -> Self {
+        let cache = Cache::builder()
+            .max_capacity(MAX_CACHE_SIZE)
+            // Use the LRU eviction policy to minimize frequent mito scans.
+            // Recently accessed items are retained longer in the cache.
+            .eviction_policy(EvictionPolicy::lru())
+            .time_to_live(CACHE_TTL)
+            .weigher(|_, v: &RegionMetadataCacheEntry| v.size as u32)
+            .build();
         Self {
             mito,
+            cache,
             logical_region_lock: RwLock::new(HashMap::new()),
         }
     }
@@ -294,7 +324,7 @@ fn decode_record_batch_to_key_and_value(batch: RecordBatch) -> Vec<(String, Stri
         .flat_map(move |row_index| {
             let key = key_col
                 .get_ref(row_index)
-                .as_string()
+                .try_into_string()
                 .unwrap()
                 .map(|s| s.to_string());
 
@@ -303,7 +333,7 @@ fn decode_record_batch_to_key_and_value(batch: RecordBatch) -> Vec<(String, Stri
                     k,
                     val_col
                         .get_ref(row_index)
-                        .as_string()
+                        .try_into_string()
                         .unwrap()
                         .map(|s| s.to_string())
                         .unwrap_or_default(),
@@ -319,12 +349,11 @@ fn decode_record_batch_to_key(batch: RecordBatch) -> Vec<String> {
 
     (0..batch.num_rows())
         .flat_map(move |row_index| {
-            let key = key_col
+            key_col
                 .get_ref(row_index)
-                .as_string()
+                .try_into_string()
                 .unwrap()
-                .map(|s| s.to_string());
-            key
+                .map(|s| s.to_string())
         })
         .collect()
 }
@@ -351,21 +380,60 @@ impl MetadataRegion {
         }
     }
 
-    pub async fn get_all_with_prefix(
-        &self,
-        region_id: RegionId,
-        prefix: &str,
-    ) -> Result<HashMap<String, String>> {
-        let scan_req = MetadataRegion::build_prefix_read_request(prefix, false);
+    fn build_read_request() -> ScanRequest {
+        let projection = vec![
+            METADATA_SCHEMA_KEY_COLUMN_INDEX,
+            METADATA_SCHEMA_VALUE_COLUMN_INDEX,
+        ];
+        ScanRequest {
+            projection: Some(projection),
+            ..Default::default()
+        }
+    }
+
+    async fn load_all(&self, metadata_region_id: RegionId) -> Result<RegionMetadataCacheEntry> {
+        let scan_req = MetadataRegion::build_read_request();
         let record_batch_stream = self
             .mito
-            .scan_to_stream(region_id, scan_req)
+            .scan_to_stream(metadata_region_id, scan_req)
             .await
             .context(MitoReadOperationSnafu)?;
 
-        decode_batch_stream(record_batch_stream, decode_record_batch_to_key_and_value)
-            .try_collect::<HashMap<_, _>>()
+        let kv = decode_batch_stream(record_batch_stream, decode_record_batch_to_key_and_value)
+            .try_collect::<BTreeMap<_, _>>()
+            .await?;
+        let mut size = 0;
+        for (k, v) in kv.iter() {
+            size += k.len();
+            size += v.len();
+        }
+        let kv = Arc::new(kv);
+        Ok(RegionMetadataCacheEntry {
+            key_values: kv,
+            size,
+        })
+    }
+
+    async fn get_all_with_prefix(
+        &self,
+        metadata_region_id: RegionId,
+        prefix: &str,
+    ) -> Result<HashMap<String, String>> {
+        let region_metadata = self
+            .cache
+            .try_get_with(metadata_region_id, self.load_all(metadata_region_id))
             .await
+            .context(CacheGetSnafu)?;
+
+        let range = region_metadata.key_values.range(prefix.to_string()..);
+        let mut result = HashMap::new();
+        for (k, v) in range {
+            if !k.starts_with(prefix) {
+                break;
+            }
+            result.insert(k.clone(), v.clone());
+        }
+        Ok(result)
     }
 
     pub async fn get_all_key_with_prefix(
@@ -387,15 +455,18 @@ impl MetadataRegion {
 
     /// Delete the given keys. For performance consideration, this method
     /// doesn't check if those keys exist or not.
-    async fn delete(&self, region_id: RegionId, keys: &[String]) -> Result<()> {
+    async fn delete(&self, metadata_region_id: RegionId, keys: &[String]) -> Result<()> {
         let delete_request = Self::build_delete_request(keys);
         self.mito
             .handle_request(
-                region_id,
+                metadata_region_id,
                 store_api::region_request::RegionRequest::Delete(delete_request),
             )
             .await
             .context(MitoWriteOperationSnafu)?;
+        // Invalidates the region metadata cache if any values are deleted from the metadata region.
+        self.cache.invalidate(&metadata_region_id).await;
+
         Ok(())
     }
 
@@ -426,18 +497,12 @@ impl MetadataRegion {
             schema: cols,
             rows: kv
                 .into_iter()
-                .map(|(key, value)| Row {
-                    values: vec![
-                        Value {
-                            value_data: Some(ValueData::TimestampMillisecondValue(0)),
-                        },
-                        Value {
-                            value_data: Some(ValueData::StringValue(key)),
-                        },
-                        Value {
-                            value_data: Some(ValueData::StringValue(value)),
-                        },
-                    ],
+                .map(|(key, value)| {
+                    row(vec![
+                        ValueData::TimestampMillisecondValue(0),
+                        ValueData::StringValue(key),
+                        ValueData::StringValue(value),
+                    ])
                 })
                 .collect(),
         };
@@ -462,15 +527,11 @@ impl MetadataRegion {
         ];
         let rows = keys
             .iter()
-            .map(|key| Row {
-                values: vec![
-                    Value {
-                        value_data: Some(ValueData::TimestampMillisecondValue(0)),
-                    },
-                    Value {
-                        value_data: Some(ValueData::StringValue(key.to_string())),
-                    },
-                ],
+            .map(|key| {
+                row(vec![
+                    ValueData::TimestampMillisecondValue(0),
+                    ValueData::StringValue(key.clone()),
+                ])
             })
             .collect();
         let rows = Rows { schema: cols, rows };
@@ -485,7 +546,7 @@ impl MetadataRegion {
         write_region_id: bool,
         logical_regions: impl Iterator<Item = (RegionId, HashMap<&str, &ColumnMetadata>)>,
     ) -> Result<()> {
-        let region_id = utils::to_metadata_region_id(physical_region_id);
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
         let iter = logical_regions
             .into_iter()
             .flat_map(|(logical_region_id, column_metadatas)| {
@@ -512,11 +573,13 @@ impl MetadataRegion {
         let put_request = MetadataRegion::build_put_request_from_iter(iter.into_iter());
         self.mito
             .handle_request(
-                region_id,
+                metadata_region_id,
                 store_api::region_request::RegionRequest::Put(put_request),
             )
             .await
             .context(MitoWriteOperationSnafu)?;
+        // Invalidates the region metadata cache if any new values are put into the metadata region.
+        self.cache.invalidate(&metadata_region_id).await;
 
         Ok(())
     }
@@ -551,7 +614,7 @@ impl MetadataRegion {
         let val = first_batch
             .column(0)
             .get_ref(0)
-            .as_string()
+            .try_into_string()
             .unwrap()
             .map(|s| s.to_string());
 
@@ -636,10 +699,20 @@ mod test {
             semantic_type,
             column_id: 5,
         };
-        let expected = "{\"column_schema\":{\"name\":\"blabla\",\"data_type\":{\"String\":null},\"is_nullable\":false,\"is_time_index\":false,\"default_constraint\":null,\"metadata\":{}},\"semantic_type\":\"Tag\",\"column_id\":5}".to_string();
+        let old_fmt = "{\"column_schema\":{\"name\":\"blabla\",\"data_type\":{\"String\":null},\"is_nullable\":false,\"is_time_index\":false,\"default_constraint\":null,\"metadata\":{}},\"semantic_type\":\"Tag\",\"column_id\":5}".to_string();
+        let new_fmt = "{\"column_schema\":{\"name\":\"blabla\",\"data_type\":{\"String\":{\"size_type\":\"Utf8\"}},\"is_nullable\":false,\"is_time_index\":false,\"default_constraint\":null,\"metadata\":{}},\"semantic_type\":\"Tag\",\"column_id\":5}".to_string();
         assert_eq!(
             MetadataRegion::serialize_column_metadata(&column_metadata),
-            expected
+            new_fmt
+        );
+        // Ensure both old and new formats can be deserialized.
+        assert_eq!(
+            MetadataRegion::deserialize_column_metadata(&old_fmt).unwrap(),
+            column_metadata
+        );
+        assert_eq!(
+            MetadataRegion::deserialize_column_metadata(&new_fmt).unwrap(),
+            column_metadata
         );
 
         let semantic_type = "\"Invalid Column Metadata\"";

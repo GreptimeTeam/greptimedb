@@ -21,7 +21,11 @@ mod append_mode_test;
 #[cfg(test)]
 mod basic_test;
 #[cfg(test)]
+mod batch_catchup_test;
+#[cfg(test)]
 mod batch_open_test;
+#[cfg(test)]
+mod bump_committed_sequence_test;
 #[cfg(test)]
 mod catchup_test;
 #[cfg(test)]
@@ -38,6 +42,8 @@ mod edit_region_test;
 mod filter_deleted_test;
 #[cfg(test)]
 mod flush_test;
+#[cfg(test)]
+mod index_build_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
 #[cfg(test)]
@@ -53,13 +59,19 @@ mod prune_test;
 #[cfg(test)]
 mod row_selector_test;
 #[cfg(test)]
+mod scan_corrupt;
+#[cfg(test)]
 mod scan_test;
 #[cfg(test)]
 mod set_role_state_test;
 #[cfg(test)]
+mod staging_test;
+#[cfg(test)]
 mod sync_test;
 #[cfg(test)]
 mod truncate_test;
+
+mod puffin_index;
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -72,14 +84,16 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::{info, tracing};
-use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
+use common_telemetry::{info, tracing, warn};
+use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use futures::future::{join_all, try_join_all};
+use futures::stream::{self, Stream, StreamExt};
 use object_store::manager::ObjectStoreManagerRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
+use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
+use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
@@ -88,29 +102,36 @@ use store_api::region_engine::{
     BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
     RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
 };
-use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
-use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
-use store_api::ManifestVersion;
-use tokio::sync::{oneshot, Semaphore};
+use store_api::region_request::{
+    AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+};
+use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
+use store_api::storage::{FileId, FileRefsManifest, RegionId, ScanRequest, SequenceNumber};
+use tokio::sync::{Semaphore, oneshot};
 
-use crate::cache::CacheStrategy;
+use crate::access_layer::RegionFilePathFactory;
+use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::MitoConfig;
+use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
     InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
     SerdeJsonSnafu, SerializeColumnMetadataSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
+use crate::gc::GcLimiterRef;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableStats;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
+use crate::region::opener::PartitionExprFetcherRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, RegionFileId};
+use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::wal::entry_distributor::{
-    build_wal_entry_distributor_and_receivers, DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
+    DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE, build_wal_entry_distributor_and_receivers,
 };
 use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RawEntryReader};
 use crate::worker::WorkerGroup;
@@ -123,18 +144,23 @@ pub struct MitoEngineBuilder<'a, S: LogStore> {
     log_store: Arc<S>,
     object_store_manager: ObjectStoreManagerRef,
     schema_metadata_manager: SchemaMetadataManagerRef,
+    file_ref_manager: FileReferenceManagerRef,
+    partition_expr_fetcher: PartitionExprFetcherRef,
     plugins: Plugins,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
 
 impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data_home: &'a str,
         config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
     ) -> Self {
         Self {
@@ -143,7 +169,9 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             log_store,
             object_store_manager,
             schema_metadata_manager,
+            file_ref_manager,
             plugins,
+            partition_expr_fetcher,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         }
@@ -170,6 +198,8 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             self.log_store.clone(),
             self.object_store_manager,
             self.schema_metadata_manager,
+            self.file_ref_manager,
+            self.partition_expr_fetcher.clone(),
             self.plugins,
         )
         .await?;
@@ -200,12 +230,15 @@ pub struct MitoEngine {
 
 impl MitoEngine {
     /// Returns a new [MitoEngine] with specific `config`, `log_store` and `object_store`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new<S: LogStore>(
         data_home: &str,
         config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
     ) -> Result<MitoEngine> {
         let builder = MitoEngineBuilder::new(
@@ -214,9 +247,50 @@ impl MitoEngine {
             log_store,
             object_store_manager,
             schema_metadata_manager,
+            file_ref_manager,
+            partition_expr_fetcher,
             plugins,
         );
         builder.try_build().await
+    }
+
+    pub fn mito_config(&self) -> &MitoConfig {
+        &self.inner.config
+    }
+
+    pub fn cache_manager(&self) -> CacheManagerRef {
+        self.inner.workers.cache_manager()
+    }
+
+    pub fn file_ref_manager(&self) -> FileReferenceManagerRef {
+        self.inner.workers.file_ref_manager()
+    }
+
+    pub fn gc_limiter(&self) -> GcLimiterRef {
+        self.inner.workers.gc_limiter()
+    }
+
+    /// Get all tmp ref files for given region ids, excluding files that's already in manifest.
+    pub async fn get_snapshot_of_unmanifested_refs(
+        &self,
+        region_ids: impl IntoIterator<Item = RegionId>,
+    ) -> Result<FileRefsManifest> {
+        let file_ref_mgr = self.file_ref_manager();
+
+        let region_ids = region_ids.into_iter().collect::<Vec<_>>();
+
+        // Convert region IDs to MitoRegionRef objects, error if any region doesn't exist
+        let regions: Vec<MitoRegionRef> = region_ids
+            .into_iter()
+            .map(|region_id| {
+                self.find_region(region_id)
+                    .with_context(|| RegionNotFoundSnafu { region_id })
+            })
+            .collect::<Result<_>>()?;
+
+        file_ref_mgr
+            .get_snapshot_of_unmanifested_refs(regions)
+            .await
     }
 
     /// Returns true if the specific region exists.
@@ -227,6 +301,11 @@ impl MitoEngine {
     /// Returns true if the specific region exists.
     pub fn is_region_opening(&self, region_id: RegionId) -> bool {
         self.inner.workers.is_region_opening(region_id)
+    }
+
+    /// Returns true if the specific region is catching up.
+    pub fn is_region_catching_up(&self, region_id: RegionId) -> bool {
+        self.inner.workers.is_region_catching_up(region_id)
     }
 
     /// Returns the region disk/memory statistic.
@@ -315,7 +394,7 @@ impl MitoEngine {
         self.find_region(id)
     }
 
-    fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
+    pub fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         self.inner.workers.get_region(region_id)
     }
 
@@ -380,6 +459,133 @@ impl MitoEngine {
             .collect::<Vec<_>>();
         Ok((memtable_stats, sst_stats))
     }
+
+    /// Lists all SSTs from the manifest of all regions in the engine.
+    pub async fn all_ssts_from_manifest(&self) -> Vec<ManifestSstEntry> {
+        let node_id = self.inner.workers.file_ref_manager().node_id();
+        let regions = self.inner.workers.all_regions();
+
+        let mut results = Vec::new();
+        for region in regions {
+            let mut entries = region.manifest_sst_entries().await;
+            for e in &mut entries {
+                e.node_id = node_id;
+            }
+            results.extend(entries);
+        }
+
+        results
+    }
+
+    /// Lists metadata about all puffin index targets stored in the engine.
+    pub async fn all_index_metas(&self) -> Vec<PuffinIndexMetaEntry> {
+        let node_id = self.inner.workers.file_ref_manager().node_id();
+        let cache_manager = self.inner.workers.cache_manager();
+        let puffin_metadata_cache = cache_manager.puffin_metadata_cache().cloned();
+        let bloom_filter_cache = cache_manager.bloom_filter_index_cache().cloned();
+        let inverted_index_cache = cache_manager.inverted_index_cache().cloned();
+
+        let mut results = Vec::new();
+
+        for region in self.inner.workers.all_regions() {
+            let manifest_entries = region.manifest_sst_entries().await;
+            let access_layer = region.access_layer.clone();
+            let table_dir = access_layer.table_dir().to_string();
+            let path_type = access_layer.path_type();
+            let object_store = access_layer.object_store().clone();
+            let puffin_factory = access_layer.puffin_manager_factory().clone();
+            let path_factory = RegionFilePathFactory::new(table_dir, path_type);
+
+            let entry_futures = manifest_entries.into_iter().map(|entry| {
+                let object_store = object_store.clone();
+                let path_factory = path_factory.clone();
+                let puffin_factory = puffin_factory.clone();
+                let puffin_metadata_cache = puffin_metadata_cache.clone();
+                let bloom_filter_cache = bloom_filter_cache.clone();
+                let inverted_index_cache = inverted_index_cache.clone();
+
+                async move {
+                    let Some(index_file_path) = entry.index_file_path.as_ref() else {
+                        return Vec::new();
+                    };
+
+                    let Some(index_file_id) = entry.index_file_id.as_ref() else {
+                        return Vec::new();
+                    };
+                    let file_id = match FileId::parse_str(index_file_id) {
+                        Ok(file_id) => file_id,
+                        Err(err) => {
+                            warn!(
+                                err;
+                                "Failed to parse puffin index file id, table_dir: {}, file_id: {}",
+                                entry.table_dir,
+                                index_file_id
+                            );
+                            return Vec::new();
+                        }
+                    };
+                    let region_file_id = RegionFileId::new(entry.region_id, file_id);
+                    let context = IndexEntryContext {
+                        table_dir: &entry.table_dir,
+                        index_file_path: index_file_path.as_str(),
+                        region_id: entry.region_id,
+                        table_id: entry.table_id,
+                        region_number: entry.region_number,
+                        region_group: entry.region_group,
+                        region_sequence: entry.region_sequence,
+                        file_id: index_file_id,
+                        index_file_size: entry.index_file_size,
+                        node_id,
+                    };
+
+                    let manager = puffin_factory
+                        .build(object_store, path_factory)
+                        .with_puffin_metadata_cache(puffin_metadata_cache);
+
+                    collect_index_entries_from_puffin(
+                        manager,
+                        region_file_id,
+                        context,
+                        bloom_filter_cache,
+                        inverted_index_cache,
+                    )
+                    .await
+                }
+            });
+
+            let mut meta_stream = stream::iter(entry_futures).buffer_unordered(8); // Parallelism is 8.
+            while let Some(mut metas) = meta_stream.next().await {
+                results.append(&mut metas);
+            }
+        }
+
+        results
+    }
+
+    /// Lists all SSTs from the storage layer of all regions in the engine.
+    pub fn all_ssts_from_storage(&self) -> impl Stream<Item = Result<StorageSstEntry>> {
+        let node_id = self.inner.workers.file_ref_manager().node_id();
+        let regions = self.inner.workers.all_regions();
+
+        let mut layers_distinct_table_dirs = HashMap::new();
+        for region in regions {
+            let table_dir = region.access_layer.table_dir();
+            if !layers_distinct_table_dirs.contains_key(table_dir) {
+                layers_distinct_table_dirs
+                    .insert(table_dir.to_string(), region.access_layer.clone());
+            }
+        }
+
+        stream::iter(layers_distinct_table_dirs)
+            .map(|(_, access_layer)| access_layer.storage_sst_entries())
+            .flatten()
+            .map(move |entry| {
+                entry.map(move |mut entry| {
+                    entry.node_id = node_id;
+                    entry
+                })
+            })
+    }
 }
 
 /// Check whether the region edit is valid. Only adding files to region is considered valid now.
@@ -391,9 +597,11 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
             RegionEdit {
                 files_to_add: _,
                 files_to_remove: _,
+                timestamp_ms: _,
                 compaction_time_window: None,
                 flushed_entry_id: None,
                 flushed_sequence: None,
+                ..
             }
         )
 }
@@ -481,13 +689,14 @@ impl EngineInner {
         topic: String,
         region_requests: Vec<(RegionId, RegionOpenRequest)>,
     ) -> Result<Vec<(RegionId, Result<AffectedRows>)>> {
+        let now = Instant::now();
         let region_ids = region_requests
             .iter()
             .map(|(region_id, _)| *region_id)
             .collect::<Vec<_>>();
         let provider = Provider::kafka_provider(topic);
         let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
-            provider,
+            provider.clone(),
             self.wal_raw_entry_reader.clone(),
             &region_ids,
             DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
@@ -508,8 +717,17 @@ impl EngineInner {
             common_runtime::spawn_global(async move { distributor.distribute().await });
         // Waits for worker returns.
         let responses = join_all(responses).await;
-
         distribution.await.context(JoinSnafu)??;
+
+        let num_failure = responses.iter().filter(|r| r.is_err()).count();
+        info!(
+            "Opened {} regions for topic '{}', failures: {}, elapsed: {:?}",
+            region_ids.len() - num_failure,
+            // Safety: provider is kafka provider.
+            provider.as_kafka_provider().unwrap(),
+            num_failure,
+            now.elapsed(),
+        );
         Ok(region_ids.into_iter().zip(responses).collect())
     }
 
@@ -563,6 +781,122 @@ impl EngineInner {
         Ok(responses)
     }
 
+    async fn catchup_topic_regions(
+        &self,
+        provider: Provider,
+        region_requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<Vec<(RegionId, Result<AffectedRows>)>> {
+        let now = Instant::now();
+        let region_ids = region_requests
+            .iter()
+            .map(|(region_id, _)| *region_id)
+            .collect::<Vec<_>>();
+        let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
+            provider.clone(),
+            self.wal_raw_entry_reader.clone(),
+            &region_ids,
+            DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
+        );
+
+        let mut responses = Vec::with_capacity(region_requests.len());
+        for ((region_id, request), entry_receiver) in
+            region_requests.into_iter().zip(entry_receivers)
+        {
+            let (request, receiver) =
+                WorkerRequest::new_catchup_region_request(region_id, request, Some(entry_receiver));
+            self.workers.submit_to_worker(region_id, request).await?;
+            responses.push(async move { receiver.await.context(RecvSnafu)? });
+        }
+
+        // Wait for entries distribution.
+        let distribution =
+            common_runtime::spawn_global(async move { distributor.distribute().await });
+        // Wait for worker returns.
+        let responses = join_all(responses).await;
+        distribution.await.context(JoinSnafu)??;
+
+        let num_failure = responses.iter().filter(|r| r.is_err()).count();
+        info!(
+            "Caught up {} regions for topic '{}', failures: {}, elapsed: {:?}",
+            region_ids.len() - num_failure,
+            // Safety: provider is kafka provider.
+            provider.as_kafka_provider().unwrap(),
+            num_failure,
+            now.elapsed(),
+        );
+
+        Ok(region_ids.into_iter().zip(responses).collect())
+    }
+
+    async fn handle_batch_catchup_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<Vec<(RegionId, Result<AffectedRows>)>> {
+        let mut responses = Vec::with_capacity(requests.len());
+        let mut topic_regions: HashMap<Arc<KafkaProvider>, Vec<_>> = HashMap::new();
+        let mut remaining_region_requests = vec![];
+
+        for (region_id, request) in requests {
+            match self.workers.get_region(region_id) {
+                Some(region) => match region.provider.as_kafka_provider() {
+                    Some(provider) => {
+                        topic_regions
+                            .entry(provider.clone())
+                            .or_default()
+                            .push((region_id, request));
+                    }
+                    None => {
+                        remaining_region_requests.push((region_id, request));
+                    }
+                },
+                None => responses.push((region_id, RegionNotFoundSnafu { region_id }.fail())),
+            }
+        }
+
+        let semaphore = Arc::new(Semaphore::new(parallelism));
+
+        if !topic_regions.is_empty() {
+            let mut tasks = Vec::with_capacity(topic_regions.len());
+            for (provider, region_requests) in topic_regions {
+                let semaphore_moved = semaphore.clone();
+                tasks.push(async move {
+                    // Safety: semaphore must exist
+                    let _permit = semaphore_moved.acquire().await.unwrap();
+                    self.catchup_topic_regions(Provider::Kafka(provider), region_requests)
+                        .await
+                })
+            }
+
+            let r = try_join_all(tasks).await?;
+            responses.extend(r.into_iter().flatten());
+        }
+
+        if !remaining_region_requests.is_empty() {
+            let mut tasks = Vec::with_capacity(remaining_region_requests.len());
+            let mut region_ids = Vec::with_capacity(remaining_region_requests.len());
+            for (region_id, request) in remaining_region_requests {
+                let semaphore_moved = semaphore.clone();
+                region_ids.push(region_id);
+                tasks.push(async move {
+                    // Safety: semaphore must exist
+                    let _permit = semaphore_moved.acquire().await.unwrap();
+                    let (request, receiver) =
+                        WorkerRequest::new_catchup_region_request(region_id, request, None);
+
+                    self.workers.submit_to_worker(region_id, request).await?;
+
+                    receiver.await.context(RecvSnafu)?
+                })
+            }
+
+            let results = join_all(tasks).await;
+            responses.extend(region_ids.into_iter().zip(results));
+        }
+
+        Ok(responses)
+    }
+
     /// Handles [RegionRequest] and return its executed result.
     async fn handle_request(
         &self,
@@ -577,10 +911,11 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)?
     }
 
-    fn get_last_seq_num(&self, region_id: RegionId) -> Result<Option<SequenceNumber>> {
+    /// Returns the sequence of latest committed data.
+    fn get_committed_sequence(&self, region_id: RegionId) -> Result<SequenceNumber> {
         // Reading a region doesn't need to go through the region worker thread.
-        let region = self.find_region(region_id)?;
-        Ok(Some(region.find_committed_sequence()))
+        self.find_region(region_id)
+            .map(|r| r.find_committed_sequence())
     }
 
     /// Handles the scan `request` and returns a [ScanRegion].
@@ -599,10 +934,12 @@ impl EngineInner {
             CacheStrategy::EnableAll(cache_manager),
         )
         .with_parallel_scan_channel_size(self.config.parallel_scan_channel_size)
+        .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
-        .with_start_time(query_start);
+        .with_start_time(query_start)
+        .with_flat_format(self.config.default_experimental_flat_format);
 
         #[cfg(feature = "enterprise")]
         let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);
@@ -703,6 +1040,29 @@ impl RegionEngine for MitoEngine {
     }
 
     #[tracing::instrument(skip_all)]
+    async fn handle_batch_catchup_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<BatchResponses, BoxedError> {
+        self.inner
+            .handle_batch_catchup_requests(parallelism, requests)
+            .await
+            .map(|responses| {
+                responses
+                    .into_iter()
+                    .map(|(region_id, response)| {
+                        (
+                            region_id,
+                            response.map(RegionResponse::new).map_err(BoxedError::new),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .map_err(BoxedError::new)
+    }
+
+    #[tracing::instrument(skip_all)]
     async fn handle_request(
         &self,
         region_id: RegionId,
@@ -745,12 +1105,12 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)
     }
 
-    async fn get_last_seq_num(
+    async fn get_committed_sequence(
         &self,
         region_id: RegionId,
-    ) -> Result<Option<SequenceNumber>, BoxedError> {
+    ) -> Result<SequenceNumber, BoxedError> {
         self.inner
-            .get_last_seq_num(region_id)
+            .get_committed_sequence(region_id)
             .map_err(BoxedError::new)
     }
 
@@ -882,6 +1242,8 @@ impl MitoEngine {
         listener: Option<crate::engine::listener::EventListenerRef>,
         time_provider: crate::time_provider::TimeProviderRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
@@ -896,7 +1258,9 @@ impl MitoEngine {
                     write_buffer_manager,
                     listener,
                     schema_metadata_manager,
+                    file_ref_manager,
                     time_provider,
+                    partition_expr_fetcher,
                 )
                 .await?,
                 config,
@@ -926,9 +1290,11 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -936,9 +1302,11 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -946,9 +1314,11 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![FileMeta::default()],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -956,25 +1326,31 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: Some(Duration::from_secs(1)),
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: Some(1),
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: Some(1),
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
     }

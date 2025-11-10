@@ -20,8 +20,11 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::compute;
 use arrow::compute::kernels::comparison;
-use arrow::datatypes::{DataType as ArrowDataType, Int64Type, TimeUnit};
-use arrow_array::DictionaryArray;
+use arrow::datatypes::{
+    DataType as ArrowDataType, Int8Type, Int16Type, Int32Type, Int64Type, TimeUnit, UInt8Type,
+    UInt16Type, UInt32Type, UInt64Type,
+};
+use arrow_array::{DictionaryArray, StructArray};
 use arrow_schema::IntervalUnit;
 use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
@@ -30,16 +33,18 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Result};
 use crate::prelude::DataType;
 use crate::scalars::{Scalar, ScalarVectorBuilder};
+use crate::types::StructType;
 use crate::value::{ListValue, ListValueRef, Value};
+use crate::vectors::struct_vector::StructVector;
 use crate::vectors::{
     BinaryVector, BooleanVector, ConstantVector, DateVector, Decimal128Vector, DictionaryVector,
     DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
-    DurationSecondVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
-    Int8Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
+    DurationSecondVector, Float32Vector, Float64Vector, Int8Vector, Int16Vector, Int32Vector,
+    Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
     ListVector, ListVectorBuilder, MutableVector, NullVector, StringVector, TimeMicrosecondVector,
     TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
-    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
-    UInt32Vector, UInt64Vector, UInt8Vector, Vector, VectorRef,
+    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt8Vector,
+    UInt16Vector, UInt32Vector, UInt64Vector, Vector, VectorRef,
 };
 
 /// Helper functions for `Vector`.
@@ -53,11 +58,11 @@ impl Helper {
     pub unsafe fn static_cast<T: Any>(vector: &VectorRef) -> &T {
         let object = vector.as_ref();
         debug_assert!(object.as_any().is::<T>());
-        &*(object as *const dyn Vector as *const T)
+        unsafe { &*(object as *const dyn Vector as *const T) }
     }
 
     pub fn check_get_scalar<T: Scalar>(vector: &VectorRef) -> Result<&<T as Scalar>::VectorType> {
-        let arr = vector
+        vector
             .as_any()
             .downcast_ref::<<T as Scalar>::VectorType>()
             .with_context(|| error::UnknownVectorSnafu {
@@ -66,12 +71,11 @@ impl Helper {
                     vector.vector_type_name(),
                     std::any::type_name::<T>(),
                 ),
-            });
-        arr
+            })
     }
 
     pub fn check_get<T: 'static + Vector>(vector: &VectorRef) -> Result<&T> {
-        let arr = vector
+        vector
             .as_any()
             .downcast_ref::<T>()
             .with_context(|| error::UnknownVectorSnafu {
@@ -80,15 +84,14 @@ impl Helper {
                     vector.vector_type_name(),
                     std::any::type_name::<T>(),
                 ),
-            });
-        arr
+            })
     }
 
     pub fn check_get_mutable_vector<T: 'static + MutableVector>(
         vector: &mut dyn MutableVector,
     ) -> Result<&mut T> {
         let ty = vector.data_type();
-        let arr = vector
+        vector
             .as_mut_any()
             .downcast_mut()
             .with_context(|| error::UnknownVectorSnafu {
@@ -97,14 +100,13 @@ impl Helper {
                     ty,
                     std::any::type_name::<T>(),
                 ),
-            });
-        arr
+            })
     }
 
     pub fn check_get_scalar_vector<T: Scalar>(
         vector: &VectorRef,
     ) -> Result<&<T as Scalar>::VectorType> {
-        let arr = vector
+        vector
             .as_any()
             .downcast_ref::<<T as Scalar>::VectorType>()
             .with_context(|| error::UnknownVectorSnafu {
@@ -113,8 +115,7 @@ impl Helper {
                     vector.vector_type_name(),
                     std::any::type_name::<T>(),
                 ),
-            });
-        arr
+            })
     }
 
     /// Try to cast an arrow scalar value into vector
@@ -124,6 +125,10 @@ impl Helper {
             ScalarValue::Boolean(v) => {
                 ConstantVector::new(Arc::new(BooleanVector::from(vec![v])), length)
             }
+            ScalarValue::Float16(v) => ConstantVector::new(
+                Arc::new(Float32Vector::from(vec![v.map(f32::from)])),
+                length,
+            ),
             ScalarValue::Float32(v) => {
                 ConstantVector::new(Arc::new(Float32Vector::from(vec![v])), length)
             }
@@ -163,7 +168,7 @@ impl Helper {
                 ConstantVector::new(Arc::new(BinaryVector::from(vec![v])), length)
             }
             ScalarValue::List(array) => {
-                let item_type = ConcreteDataType::try_from(&array.value_type())?;
+                let item_type = Arc::new(ConcreteDataType::try_from(&array.value_type())?);
                 let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 1);
                 let values = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
                     .context(ConvertArrowArrayToScalarsSnafu)?
@@ -233,13 +238,20 @@ impl Helper {
                 let vector = Decimal128Vector::from(vec![v]).with_precision_and_scale(p, s)?;
                 ConstantVector::new(Arc::new(vector), length)
             }
-            ScalarValue::Decimal256(_, _, _)
-            | ScalarValue::Struct(_)
+            ScalarValue::Struct(v) => {
+                let struct_type = StructType::try_from(v.fields())?;
+                ConstantVector::new(
+                    Arc::new(StructVector::try_new(struct_type, (*v).clone())?),
+                    length,
+                )
+            }
+            ScalarValue::Decimal32(_, _, _)
+            | ScalarValue::Decimal64(_, _, _)
+            | ScalarValue::Decimal256(_, _, _)
             | ScalarValue::FixedSizeList(_)
             | ScalarValue::LargeList(_)
             | ScalarValue::Dictionary(_, _)
             | ScalarValue::Union(_, _, _)
-            | ScalarValue::Float16(_)
             | ScalarValue::Utf8View(_)
             | ScalarValue::BinaryView(_)
             | ScalarValue::Map(_)
@@ -247,7 +259,7 @@ impl Helper {
                 return error::ConversionSnafu {
                     from: format!("Unsupported scalar value: {value}"),
                 }
-                .fail()
+                .fail();
             }
         };
 
@@ -263,7 +275,9 @@ impl Helper {
             ArrowDataType::Null => Arc::new(NullVector::try_from_arrow_array(array)?),
             ArrowDataType::Boolean => Arc::new(BooleanVector::try_from_arrow_array(array)?),
             ArrowDataType::Binary => Arc::new(BinaryVector::try_from_arrow_array(array)?),
-            ArrowDataType::LargeBinary | ArrowDataType::FixedSizeBinary(_) => {
+            ArrowDataType::LargeBinary
+            | ArrowDataType::FixedSizeBinary(_)
+            | ArrowDataType::BinaryView => {
                 let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Binary)
                     .context(crate::error::ArrowComputeSnafu)?;
                 Arc::new(BinaryVector::try_from_arrow_array(array)?)
@@ -279,7 +293,8 @@ impl Helper {
             ArrowDataType::Float32 => Arc::new(Float32Vector::try_from_arrow_array(array)?),
             ArrowDataType::Float64 => Arc::new(Float64Vector::try_from_arrow_array(array)?),
             ArrowDataType::Utf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
-            ArrowDataType::LargeUtf8 => {
+            ArrowDataType::LargeUtf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
+            ArrowDataType::Utf8View => {
                 let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Utf8)
                     .context(crate::error::ArrowComputeSnafu)?;
                 Arc::new(StringVector::try_from_arrow_array(array)?)
@@ -348,35 +363,66 @@ impl Helper {
             ArrowDataType::Decimal128(_, _) => {
                 Arc::new(Decimal128Vector::try_from_arrow_array(array)?)
             }
-            ArrowDataType::Dictionary(key, value) if matches!(&**key, ArrowDataType::Int64) => {
+            ArrowDataType::Dictionary(key, value) => {
+                macro_rules! handle_dictionary_key_type {
+                    ($key_type:ident) => {{
+                        let array = array
+                            .as_ref()
+                            .as_any()
+                            .downcast_ref::<DictionaryArray<$key_type>>()
+                            .unwrap(); // Safety: the type is guarded by match arm condition
+                        Arc::new(DictionaryVector::new(
+                            array.clone(),
+                            ConcreteDataType::try_from(value.as_ref())?,
+                        )?)
+                    }};
+                }
+
+                match key.as_ref() {
+                    ArrowDataType::Int8 => handle_dictionary_key_type!(Int8Type),
+                    ArrowDataType::Int16 => handle_dictionary_key_type!(Int16Type),
+                    ArrowDataType::Int32 => handle_dictionary_key_type!(Int32Type),
+                    ArrowDataType::Int64 => handle_dictionary_key_type!(Int64Type),
+                    ArrowDataType::UInt8 => handle_dictionary_key_type!(UInt8Type),
+                    ArrowDataType::UInt16 => handle_dictionary_key_type!(UInt16Type),
+                    ArrowDataType::UInt32 => handle_dictionary_key_type!(UInt32Type),
+                    ArrowDataType::UInt64 => handle_dictionary_key_type!(UInt64Type),
+                    _ => {
+                        return error::UnsupportedArrowTypeSnafu {
+                            arrow_type: array.as_ref().data_type().clone(),
+                        }
+                        .fail();
+                    }
+                }
+            }
+
+            ArrowDataType::Struct(fields) => {
                 let array = array
                     .as_ref()
                     .as_any()
-                    .downcast_ref::<DictionaryArray<Int64Type>>()
-                    .unwrap(); // Safety: the type is guarded by match arm condition
-                Arc::new(DictionaryVector::new(
+                    .downcast_ref::<StructArray>()
+                    .unwrap();
+                Arc::new(StructVector::try_new(
+                    StructType::try_from(fields)?,
                     array.clone(),
-                    ConcreteDataType::try_from(value.as_ref())?,
                 )?)
             }
             ArrowDataType::Float16
             | ArrowDataType::LargeList(_)
             | ArrowDataType::FixedSizeList(_, _)
-            | ArrowDataType::Struct(_)
             | ArrowDataType::Union(_, _)
-            | ArrowDataType::Dictionary(_, _)
             | ArrowDataType::Decimal256(_, _)
             | ArrowDataType::Map(_, _)
             | ArrowDataType::RunEndEncoded(_, _)
-            | ArrowDataType::BinaryView
-            | ArrowDataType::Utf8View
             | ArrowDataType::ListView(_)
             | ArrowDataType::LargeListView(_)
-            | ArrowDataType::Date64 => {
+            | ArrowDataType::Date64
+            | ArrowDataType::Decimal32(_, _)
+            | ArrowDataType::Decimal64(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: array.as_ref().data_type().clone(),
                 }
-                .fail()
+                .fail();
             }
         })
     }
@@ -385,7 +431,7 @@ impl Helper {
     pub fn try_from_row_into_vector(row: &[Value], dt: &ConcreteDataType) -> Result<VectorRef> {
         let mut builder = dt.create_mutable_vector(row.len());
         for val in row {
-            builder.try_push_value_ref(val.as_value_ref())?;
+            builder.try_push_value_ref(&val.as_value_ref())?;
         }
         let vector = builder.to_vector();
         Ok(vector)
@@ -419,13 +465,21 @@ impl Helper {
 }
 
 #[cfg(test)]
+pub(crate) fn pretty_print(vector: VectorRef) -> String {
+    let array = vector.to_arrow_array();
+    arrow::util::pretty::pretty_format_columns(&vector.vector_type_name(), &[array])
+        .map(|x| x.to_string())
+        .unwrap_or_else(|e| e.to_string())
+}
+
+#[cfg(test)]
 mod tests {
     use arrow::array::{
-        ArrayRef, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
-        Int64Array, Int8Array, LargeBinaryArray, ListArray, NullArray, Time32MillisecondArray,
+        ArrayRef, BooleanArray, Date32Array, Float32Array, Float64Array, Int8Array, Int16Array,
+        Int32Array, Int64Array, LargeBinaryArray, ListArray, NullArray, Time32MillisecondArray,
         Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
         TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-        TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+        TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     };
     use arrow::buffer::Buffer;
     use arrow::datatypes::{Int32Type, IntervalMonthDayNano};
@@ -516,7 +570,7 @@ mod tests {
         ));
         let vector = Helper::try_from_scalar_value(value, 3).unwrap();
         assert_eq!(
-            ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()),
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype())),
             vector.data_type()
         );
         assert_eq!(3, vector.len());
@@ -618,10 +672,55 @@ mod tests {
         check_try_into_vector(Time64MicrosecondArray::from(vec![1, 2, 3]));
         check_try_into_vector(Time64NanosecondArray::from(vec![1, 2, 3]));
 
+        // Test dictionary arrays with different key types
         let values = StringArray::from_iter_values(["a", "b", "c"]);
+
+        // Test Int8 keys
         let keys = Int8Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef =
+            Arc::new(DictionaryArray::try_new(keys, Arc::new(values.clone())).unwrap());
+        Helper::try_into_vector(array).unwrap();
+
+        // Test Int16 keys
+        let keys = Int16Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef =
+            Arc::new(DictionaryArray::try_new(keys, Arc::new(values.clone())).unwrap());
+        Helper::try_into_vector(array).unwrap();
+
+        // Test Int32 keys
+        let keys = Int32Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef =
+            Arc::new(DictionaryArray::try_new(keys, Arc::new(values.clone())).unwrap());
+        Helper::try_into_vector(array).unwrap();
+
+        // Test Int64 keys
+        let keys = Int64Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef =
+            Arc::new(DictionaryArray::try_new(keys, Arc::new(values.clone())).unwrap());
+        Helper::try_into_vector(array).unwrap();
+
+        // Test UInt8 keys
+        let keys = UInt8Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef =
+            Arc::new(DictionaryArray::try_new(keys, Arc::new(values.clone())).unwrap());
+        Helper::try_into_vector(array).unwrap();
+
+        // Test UInt16 keys
+        let keys = UInt16Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef =
+            Arc::new(DictionaryArray::try_new(keys, Arc::new(values.clone())).unwrap());
+        Helper::try_into_vector(array).unwrap();
+
+        // Test UInt32 keys
+        let keys = UInt32Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef =
+            Arc::new(DictionaryArray::try_new(keys, Arc::new(values.clone())).unwrap());
+        Helper::try_into_vector(array).unwrap();
+
+        // Test UInt64 keys
+        let keys = UInt64Array::from_iter_values([0, 0, 1, 2]);
         let array: ArrayRef = Arc::new(DictionaryArray::try_new(keys, Arc::new(values)).unwrap());
-        Helper::try_into_vector(array).unwrap_err();
+        Helper::try_into_vector(array).unwrap();
     }
 
     #[test]
@@ -654,17 +753,17 @@ mod tests {
     #[test]
     fn test_large_string_array_into_vector() {
         let input_vec = vec!["a", "b"];
-        let assertion_array = StringArray::from(input_vec.clone());
+        let assertion_array = LargeStringArray::from(input_vec.clone());
 
         let large_string_array: ArrayRef = Arc::new(LargeStringArray::from(input_vec));
         let vector = Helper::try_into_vector(large_string_array).unwrap();
         assert_eq!(2, vector.len());
         assert_eq!(0, vector.null_count());
 
-        let output_arrow_array: StringArray = vector
+        let output_arrow_array: LargeStringArray = vector
             .to_arrow_array()
             .as_any()
-            .downcast_ref::<StringArray>()
+            .downcast_ref::<LargeStringArray>()
             .unwrap()
             .clone();
         assert_eq!(&assertion_array, &output_arrow_array);

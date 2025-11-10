@@ -16,12 +16,18 @@ use std::collections::HashMap;
 
 use auth::user_provider_from_option;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
+use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
+use common_frontend::slow_query_event::{
+    SLOW_QUERY_TABLE_COST_COLUMN_NAME, SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME,
+    SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
+    SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME,
+};
 use sqlx::mysql::{MySqlConnection, MySqlDatabaseError, MySqlPoolOptions};
 use sqlx::postgres::{PgDatabaseError, PgPoolOptions};
 use sqlx::{Connection, Executor, Row};
 use tests_integration::test_util::{
-    setup_mysql_server, setup_mysql_server_with_user_provider, setup_pg_server,
-    setup_pg_server_with_user_provider, StorageType,
+    StorageType, setup_mysql_server, setup_mysql_server_with_user_provider, setup_pg_server,
+    setup_pg_server_with_user_provider,
 };
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
@@ -64,15 +70,18 @@ macro_rules! sql_tests {
                 test_mysql_crud,
                 test_mysql_timezone,
                 test_mysql_async_timestamp,
+                test_mysql_slow_query,
                 test_postgres_auth,
                 test_postgres_crud,
                 test_postgres_timezone,
                 test_postgres_bytea,
+                test_postgres_slow_query,
                 test_postgres_datestyle,
                 test_postgres_parameter_inference,
                 test_postgres_array_types,
                 test_mysql_prepare_stmt_insert_timestamp,
                 test_declare_fetch_close_cursor,
+                test_alter_update_on,
             );
         )*
     };
@@ -80,7 +89,7 @@ macro_rules! sql_tests {
 
 pub async fn test_mysql_auth(store_type: StorageType) {
     let user_provider = user_provider_from_option(
-        &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
+        "static_user_provider:cmd:greptime_user=greptime_pwd,readonly_user:ro=readonly_pwd,writeonly_user:wo=writeonly_pwd",
     )
     .unwrap();
 
@@ -132,6 +141,46 @@ pub async fn test_mysql_auth(store_type: StorageType) {
 
     assert!(conn_re.is_ok());
 
+    // 4. readonly user
+    let conn_re = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("mysql://readonly_user:readonly_pwd@{addr}/public"))
+        .await;
+    assert!(conn_re.is_ok());
+    let pool = conn_re.unwrap();
+    let _ = pool.execute("SELECT 1").await.unwrap();
+    let err = pool
+        .execute("CREATE TABLE test (ts timestamp time index)")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("(PermissionDenied): User is not authorized to perform this action"),
+        "{}",
+        err.to_string()
+    );
+
+    // 5. writeonly user
+    let conn_re = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!(
+            "mysql://writeonly_user:writeonly_pwd@{addr}/public"
+        ))
+        .await;
+    assert!(conn_re.is_ok());
+    let pool = conn_re.unwrap();
+    let _ = pool
+        .execute("CREATE TABLE test (ts timestamp time index)")
+        .await
+        .unwrap();
+    let err = pool.execute("SHOW TABLES").await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("(PermissionDenied): User is not authorized to perform this action"),
+        "{}",
+        err.to_string()
+    );
+
     let _ = fe_mysql_server.shutdown().await;
     guard.remove_all().await;
 }
@@ -153,9 +202,11 @@ pub async fn test_mysql_stmts(store_type: StorageType) {
     conn.execute("SET TRANSACTION READ ONLY").await.unwrap();
 
     // empty statements
-    let err = conn.execute("      -------  ;").await.unwrap_err();
+    // Only when "--" is followed by a whitespace is it considered a valid comment in MySQL,
+    // see https://dev.mysql.com/doc/refman/8.4/en/ansi-diff-comments.html
+    let err = conn.execute("      -- -----  ;").await.unwrap_err();
     assert!(err.to_string().contains("empty statements"));
-    let err = conn.execute("----------\n;").await.unwrap_err();
+    let err = conn.execute("-- --------\n;").await.unwrap_err();
     assert!(err.to_string().contains("empty statements"));
     let err = conn.execute("        ;").await.unwrap_err();
     assert!(err.to_string().contains("empty statements"));
@@ -413,10 +464,8 @@ pub async fn test_mysql_timezone(store_type: StorageType) {
 }
 
 pub async fn test_postgres_auth(store_type: StorageType) {
-    let user_provider = user_provider_from_option(
-        &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
-    )
-    .unwrap();
+    let user_provider =
+        user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
 
     let (mut guard, fe_pg_server) =
         setup_pg_server_with_user_provider(store_type, "sql_crud", Some(user_provider)).await;
@@ -467,6 +516,70 @@ pub async fn test_postgres_auth(store_type: StorageType) {
         .await;
 
     assert!(conn_re.is_ok());
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_alter_update_on(store_type: StorageType) {
+    let (mut guard, fe_pg_server) = setup_pg_server(store_type, "test_postgres_crud").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("postgres://{addr}/public"))
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "create table demo(i bigint, ts timestamp time index, d date, dt datetime, b blob)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let row_before_alter = sqlx::query(
+        "SELECT *
+         FROM information_schema.tables WHERE table_name = $1;",
+    )
+    .bind("demo")
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(row_before_alter.len(), 1);
+    let before_row = &row_before_alter[0];
+
+    let created_on: NaiveDateTime = before_row.get("create_time");
+    let updated_on_before: NaiveDateTime = before_row.get("update_time");
+    assert_eq!(created_on, updated_on_before);
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    sqlx::query("alter table demo add column j json;")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let row_after_alter = sqlx::query(
+        "SELECT *
+         FROM information_schema.tables WHERE table_name = $1;",
+    )
+    .bind("demo")
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(row_after_alter.len(), 1);
+    let after_row = &row_after_alter[0];
+
+    let updated_on_after: NaiveDateTime = after_row.get("update_time");
+    assert_ne!(updated_on_before, updated_on_after);
+
+    let _ = sqlx::query("delete from demo")
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
@@ -580,6 +693,56 @@ pub async fn test_postgres_crud(store_type: StorageType) {
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
 }
+
+pub async fn test_mysql_slow_query(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let (mut guard, fe_mysql_server) =
+        setup_mysql_server(store_type, "test_mysql_slow_query").await;
+    let addr = fe_mysql_server.bind_addr().unwrap().to_string();
+
+    let pool = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("mysql://{addr}/public"))
+        .await
+        .unwrap();
+
+    // The slow query will run at least longer than 1s.
+    let slow_query = "SELECT count(*) FROM generate_series(1, 1000000000)";
+
+    // Simulate a slow query.
+    sqlx::query(slow_query).fetch_all(&pool).await.unwrap();
+
+    // Wait for the slow query to be recorded.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    let table = format!("{}.{}", DEFAULT_PRIVATE_SCHEMA_NAME, SLOW_QUERY_TABLE_NAME);
+    let query = format!(
+        "SELECT {}, {}, {}, {} FROM {table}",
+        SLOW_QUERY_TABLE_COST_COLUMN_NAME,
+        SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME,
+        SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
+        SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME
+    );
+
+    let rows = sqlx::query(&query).fetch_all(&pool).await.unwrap();
+    assert_eq!(rows.len(), 1);
+
+    // Check the results.
+    let row = &rows[0];
+    let cost: u64 = row.get(0);
+    let threshold: u64 = row.get(1);
+    let query: String = row.get(2);
+    let is_promql: bool = row.get(3);
+
+    assert!(cost > 0 && threshold > 0 && cost > threshold);
+    assert_eq!(query, slow_query);
+    assert!(!is_promql);
+
+    let _ = fe_mysql_server.shutdown().await;
+    guard.remove_all().await;
+}
+
 pub async fn test_postgres_bytea(store_type: StorageType) {
     let (mut guard, fe_pg_server) = setup_pg_server(store_type, "test_postgres_bytea").await;
     let addr = fe_pg_server.bind_addr().unwrap().to_string();
@@ -645,6 +808,46 @@ pub async fn test_postgres_bytea(store_type: StorageType) {
 
     drop(client);
     rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_slow_query(store_type: StorageType) {
+    let (mut guard, fe_pg_server) = setup_pg_server(store_type, "test_postgres_slow_query").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("postgres://{addr}/public"))
+        .await
+        .unwrap();
+
+    let slow_query = "SELECT count(*) FROM generate_series(1, 1000000000)";
+    let _ = sqlx::query(slow_query).fetch_all(&pool).await.unwrap();
+
+    // Wait for the slow query to be recorded.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    let table = format!("{}.{}", DEFAULT_PRIVATE_SCHEMA_NAME, SLOW_QUERY_TABLE_NAME);
+    let query = format!(
+        "SELECT {}, {}, {}, {} FROM {table}",
+        SLOW_QUERY_TABLE_COST_COLUMN_NAME,
+        SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME,
+        SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
+        SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME
+    );
+    let rows = sqlx::query(&query).fetch_all(&pool).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    let cost: i64 = row.get(0);
+    let threshold: i64 = row.get(1);
+    let query: String = row.get(2);
+    let is_promql: bool = row.get(3);
+
+    assert!(cost > 0 && threshold > 0 && cost > threshold);
+    assert_eq!(query, slow_query);
+    assert!(!is_promql);
 
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
@@ -1045,7 +1248,7 @@ pub async fn test_mysql_async_timestamp(store_type: StorageType) {
     .await
     .expect("create table failure");
 
-    let metrics = vec![
+    let metrics = [
         CpuMetric::new(
             "host0".into(),
             "test".into(),
@@ -1276,10 +1479,12 @@ pub async fn test_declare_fetch_close_cursor(store_type: StorageType) {
         .expect("declare cursor");
 
     // duplicated cursor
-    assert!(client
-        .execute("DECLARE c1 CURSOR FOR SELECT 1", &[],)
-        .await
-        .is_err());
+    assert!(
+        client
+            .execute("DECLARE c1 CURSOR FOR SELECT 1", &[],)
+            .await
+            .is_err()
+    );
 
     let rows = client.query("FETCH 5 FROM c1", &[]).await.unwrap();
     assert_eq!(5, rows.len());

@@ -28,9 +28,9 @@ use datafusion_common::cast::as_list_array;
 use datafusion_common::error::Result;
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::utils::SingleRowListArrayBuilder;
-use datafusion_common::{internal_err, not_impl_err, ScalarValue};
+use datafusion_common::{ScalarValue, internal_err, not_impl_err};
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
-use datafusion_expr::utils::{format_state_name, AggregateOrderSensitivity};
+use datafusion_expr::utils::{AggregateOrderSensitivity, format_state_name};
 use datafusion_expr::{
     Accumulator, AggregateUDF, AggregateUDFImpl, EmitTo, GroupsAccumulator, ReversedUDAF,
     SetMonotonicity, Signature, TypeSignature, Volatility,
@@ -41,7 +41,7 @@ use datatypes::arrow::array::{
     Array, ArrayRef, AsArray, BooleanArray, Int64Array, ListArray, UInt64Array,
 };
 use datatypes::arrow::buffer::{OffsetBuffer, ScalarBuffer};
-use datatypes::arrow::datatypes::{DataType, Field};
+use datatypes::arrow::datatypes::{DataType, Field, FieldRef};
 
 use crate::function_registry::FunctionRegistry;
 
@@ -68,7 +68,7 @@ impl CountHash {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct CountHash {
     signature: Signature,
 }
@@ -94,14 +94,14 @@ impl AggregateUDFImpl for CountHash {
         false
     }
 
-    fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<Field>> {
-        Ok(vec![Field::new_list(
+    fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
+        Ok(vec![Arc::new(Field::new_list(
             format_state_name(args.name, "count_hash"),
             Field::new_list_field(DataType::UInt64, true),
             // For count_hash accumulator, null list item stands for an
             // empty value set (i.e., all NULL value so far for that group).
             true,
-        )])
+        ))])
     }
 
     fn accumulator(&self, acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {

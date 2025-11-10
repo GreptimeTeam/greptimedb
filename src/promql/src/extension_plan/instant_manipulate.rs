@@ -35,13 +35,15 @@ use datafusion::physical_plan::{
 };
 use datatypes::arrow::compute;
 use datatypes::arrow::error::Result as ArrowResult;
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::{Millisecond, METRIC_NUM_SERIES};
+use crate::extension_plan::{
+    METRIC_NUM_SERIES, Millisecond, resolve_column_name, serialize_column_index,
+};
 use crate::metrics::PROMQL_SERIES_COUNT;
 
 /// Manipulate the input record batch to make it suitable for Instant Operator.
@@ -59,6 +61,13 @@ pub struct InstantManipulate {
     /// A optional column for validating staleness
     field_column: Option<String>,
     input: LogicalPlan,
+    unfix: Option<UnfixIndices>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
+struct UnfixIndices {
+    pub time_index_idx: u64,
+    pub field_index_idx: u64,
 }
 
 impl UserDefinedLogicalNodeCore for InstantManipulate {
@@ -97,15 +106,51 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
             ));
         }
 
-        Ok(Self {
-            start: self.start,
-            end: self.end,
-            lookback_delta: self.lookback_delta,
-            interval: self.interval,
-            time_index_column: self.time_index_column.clone(),
-            field_column: self.field_column.clone(),
-            input: inputs.into_iter().next().unwrap(),
-        })
+        let input: LogicalPlan = inputs.into_iter().next().unwrap();
+        let input_schema = input.schema();
+
+        if let Some(unfix) = &self.unfix {
+            // transform indices to names
+            let time_index_column = resolve_column_name(
+                unfix.time_index_idx,
+                input_schema,
+                "InstantManipulate",
+                "time index",
+            )?;
+
+            let field_column = if unfix.field_index_idx == u64::MAX {
+                None
+            } else {
+                Some(resolve_column_name(
+                    unfix.field_index_idx,
+                    input_schema,
+                    "InstantManipulate",
+                    "field",
+                )?)
+            };
+
+            Ok(Self {
+                start: self.start,
+                end: self.end,
+                lookback_delta: self.lookback_delta,
+                interval: self.interval,
+                time_index_column,
+                field_column,
+                input,
+                unfix: None,
+            })
+        } else {
+            Ok(Self {
+                start: self.start,
+                end: self.end,
+                lookback_delta: self.lookback_delta,
+                interval: self.interval,
+                time_index_column: self.time_index_column.clone(),
+                field_column: self.field_column.clone(),
+                input,
+                unfix: None,
+            })
+        }
     }
 }
 
@@ -127,6 +172,7 @@ impl InstantManipulate {
             time_index_column,
             field_column,
             input,
+            unfix: None,
         }
     }
 
@@ -148,13 +194,22 @@ impl InstantManipulate {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
+        let time_index_idx = serialize_column_index(self.input.schema(), &self.time_index_column);
+
+        let field_index_idx = self
+            .field_column
+            .as_ref()
+            .map(|name| serialize_column_index(self.input.schema(), name))
+            .unwrap_or(u64::MAX);
+
         pb::InstantManipulate {
             start: self.start,
             end: self.end,
             interval: self.interval,
             lookback_delta: self.lookback_delta,
-            time_index: self.time_index_column.clone(),
-            field_index: self.field_column.clone().unwrap_or_default(),
+            time_index_idx,
+            field_index_idx,
+            ..Default::default()
         }
         .encode_to_vec()
     }
@@ -166,19 +221,21 @@ impl InstantManipulate {
             produce_one_row: false,
             schema: Arc::new(DFSchema::empty()),
         });
-        let field_column = if pb_instant_manipulate.field_index.is_empty() {
-            None
-        } else {
-            Some(pb_instant_manipulate.field_index)
+
+        let unfix = UnfixIndices {
+            time_index_idx: pb_instant_manipulate.time_index_idx,
+            field_index_idx: pb_instant_manipulate.field_index_idx,
         };
+
         Ok(Self {
             start: pb_instant_manipulate.start,
             end: pb_instant_manipulate.end,
             lookback_delta: pb_instant_manipulate.lookback_delta,
             interval: pb_instant_manipulate.interval,
-            time_index_column: pb_instant_manipulate.time_index,
-            field_column,
+            time_index_column: String::new(),
+            field_column: None,
             input: placeholder_plan,
+            unfix: Some(unfix),
         })
     }
 }
@@ -283,8 +340,8 @@ impl ExecutionPlan for InstantManipulateExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> DataFusionResult<Statistics> {
-        let input_stats = self.input.statistics()?;
+    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
+        let input_stats = self.input.partition_statistics(partition)?;
 
         let estimated_row_num = (self.end - self.start) as f64 / self.interval as f64;
         let estimated_total_bytes = input_stats
@@ -315,11 +372,17 @@ impl ExecutionPlan for InstantManipulateExec {
 impl DisplayAs for InstantManipulateExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(
                     f,
                     "PromInstantManipulateExec: range=[{}..{}], lookback=[{}], interval=[{}], time index=[{}]",
-                   self.start,self.end, self.lookback_delta, self.interval, self.time_index_column
+                    self.start,
+                    self.end,
+                    self.lookback_delta,
+                    self.interval,
+                    self.time_index_column
                 )
             }
         }
@@ -389,14 +452,30 @@ impl InstantManipulateStream {
                 )
             })?;
 
+        // Early return for empty input
+        if ts_column.is_empty() {
+            return Ok(input);
+        }
+
         // field column for staleness check
         let field_column = self
             .field_index
             .and_then(|index| input.column(index).as_any().downcast_ref::<Float64Array>());
 
+        // Optimize iteration range based on actual data bounds
+        let first_ts = ts_column.value(0);
+        let last_ts = ts_column.value(ts_column.len() - 1);
+        let last_useful = last_ts + self.lookback_delta;
+
+        let max_start = first_ts.max(self.start);
+        let min_end = last_useful.min(self.end);
+
+        let aligned_start = self.start + (max_start - self.start) / self.interval * self.interval;
+        let aligned_end = self.end - (self.end - min_end) / self.interval * self.interval;
+
         let mut cursor = 0;
 
-        let aligned_ts_iter = (self.start..=self.end).step_by(self.interval as usize);
+        let aligned_ts_iter = (aligned_start..=aligned_end).step_by(self.interval as usize);
         let mut aligned_ts = vec![];
 
         // calculate the offsets to take
@@ -484,7 +563,7 @@ impl InstantManipulateStream {
         arrays[self.time_index] = Arc::new(TimestampMillisecondArray::from(aligned_ts));
 
         let result = RecordBatch::try_new(record_batch.schema(), arrays)
-            .map_err(|e| DataFusionError::ArrowError(e, None))?;
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
         Ok(result)
     }
 }
@@ -495,7 +574,7 @@ mod test {
 
     use super::*;
     use crate::extension_plan::test_util::{
-        prepare_test_data, prepare_test_data_with_nan, TIME_INDEX_COLUMN,
+        TIME_INDEX_COLUMN, prepare_test_data, prepare_test_data_with_nan,
     };
 
     async fn do_normalize_test(
@@ -809,6 +888,14 @@ mod test {
             \n| 1970-01-01T00:02:00.001 | 12.0  |\
             \n+-------------------------+-------+",
         );
-        do_normalize_test(1, 900_000_000_000_000, 10_000, 10_000, expected, true).await;
+        do_normalize_test(
+            -900_000_000_000_000 + 1,
+            900_000_000_000_000,
+            10_000,
+            10_000,
+            expected,
+            true,
+        )
+        .await;
     }
 }

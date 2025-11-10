@@ -32,12 +32,12 @@ use std::sync::Arc;
 
 use ::auth::UserProviderRef;
 use derive_builder::Builder;
-use pgwire::api::auth::ServerParameterProvider;
-use pgwire::api::copy::NoopCopyHandler;
-use pgwire::api::{ClientInfo, PgWireServerHandlers};
+use pgwire::api::auth::{ServerParameterProvider, StartupHandler};
+use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
+use pgwire::api::{ClientInfo, ErrorHandler, PgWireServerHandlers};
 pub use server::PostgresServer;
-use session::context::Channel;
 use session::Session;
+use session::context::Channel;
 
 use self::auth_handler::PgLoginVerifier;
 use self::handler::DefaultQueryParser;
@@ -92,29 +92,19 @@ pub(crate) struct MakePostgresServerHandler {
 pub(crate) struct PostgresServerHandler(Arc<PostgresServerHandlerInner>);
 
 impl PgWireServerHandlers for PostgresServerHandler {
-    type StartupHandler = PostgresServerHandlerInner;
-    type SimpleQueryHandler = PostgresServerHandlerInner;
-    type ExtendedQueryHandler = PostgresServerHandlerInner;
-    type CopyHandler = NoopCopyHandler;
-    type ErrorHandler = PostgresServerHandlerInner;
-
-    fn simple_query_handler(&self) -> Arc<Self::SimpleQueryHandler> {
+    fn simple_query_handler(&self) -> Arc<impl SimpleQueryHandler> {
         self.0.clone()
     }
 
-    fn extended_query_handler(&self) -> Arc<Self::ExtendedQueryHandler> {
+    fn extended_query_handler(&self) -> Arc<impl ExtendedQueryHandler> {
         self.0.clone()
     }
 
-    fn startup_handler(&self) -> Arc<Self::StartupHandler> {
+    fn startup_handler(&self) -> Arc<impl StartupHandler> {
         self.0.clone()
     }
 
-    fn copy_handler(&self) -> Arc<Self::CopyHandler> {
-        Arc::new(NoopCopyHandler)
-    }
-
-    fn error_handler(&self) -> Arc<Self::ErrorHandler> {
+    fn error_handler(&self) -> Arc<impl ErrorHandler> {
         self.0.clone()
     }
 }

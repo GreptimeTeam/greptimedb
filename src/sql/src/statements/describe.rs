@@ -111,12 +111,10 @@ mod tests {
     #[test]
     pub fn test_describe_missing_table_name() {
         let sql = "DESCRIBE TABLE";
-        assert!(ParserContext::create_with_dialect(
-            sql,
-            &GreptimeDbDialect {},
-            ParseOptions::default()
-        )
-        .is_err());
+        assert!(
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .is_err()
+        );
     }
 
     #[test]

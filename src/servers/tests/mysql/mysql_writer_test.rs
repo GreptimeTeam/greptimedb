@@ -14,11 +14,10 @@
 
 use std::sync::Arc;
 
-use datatypes::prelude::*;
-use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::schema::Schema;
 use servers::mysql::writer::create_mysql_column_def;
 
-use crate::mysql::{all_datatype_testing_data, TestingData};
+use crate::mysql::{TestingData, all_datatype_testing_data};
 
 #[test]
 fn test_create_mysql_column_def() {
@@ -37,12 +36,4 @@ fn test_create_mysql_column_def() {
         let expected_coltype = mysql_columns_def[i];
         assert_eq!(column_def.coltype, expected_coltype);
     }
-
-    let column_schemas = vec![ColumnSchema::new(
-        "lists",
-        ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()),
-        true,
-    )];
-    let schema = Arc::new(Schema::new(column_schemas));
-    assert!(create_mysql_column_def(&schema).is_err());
 }

@@ -23,27 +23,26 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::error;
 use datafusion::execution::TaskContext;
+use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
-use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{
-    StringVectorBuilder, TimestampMicrosecondVectorBuilder, UInt32VectorBuilder,
-    UInt64VectorBuilder,
+    StringVectorBuilder, TimestampSecondVectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder,
 };
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, ScanRequest, TableId};
 use table::metadata::{TableInfo, TableType};
 
+use crate::CatalogManager;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::system_schema::information_schema::{InformationTable, Predicates, TABLES};
 use crate::system_schema::utils;
-use crate::CatalogManager;
 
 pub const TABLE_CATALOG: &str = "table_catalog";
 pub const TABLE_SCHEMA: &str = "table_schema";
@@ -107,17 +106,17 @@ impl InformationSchemaTables {
             ColumnSchema::new(AUTO_INCREMENT, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(
                 CREATE_TIME,
-                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_second_datatype(),
                 true,
             ),
             ColumnSchema::new(
                 UPDATE_TIME,
-                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_second_datatype(),
                 true,
             ),
             ColumnSchema::new(
                 CHECK_TIME,
-                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_second_datatype(),
                 true,
             ),
             ColumnSchema::new(TABLE_COLLATION, ConcreteDataType::string_datatype(), true),
@@ -194,9 +193,9 @@ struct InformationSchemaTablesBuilder {
     max_index_length: UInt64VectorBuilder,
     data_free: UInt64VectorBuilder,
     auto_increment: UInt64VectorBuilder,
-    create_time: TimestampMicrosecondVectorBuilder,
-    update_time: TimestampMicrosecondVectorBuilder,
-    check_time: TimestampMicrosecondVectorBuilder,
+    create_time: TimestampSecondVectorBuilder,
+    update_time: TimestampSecondVectorBuilder,
+    check_time: TimestampSecondVectorBuilder,
     table_collation: StringVectorBuilder,
     checksum: UInt64VectorBuilder,
     create_options: StringVectorBuilder,
@@ -231,9 +230,9 @@ impl InformationSchemaTablesBuilder {
             max_index_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             data_free: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             auto_increment: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
-            create_time: TimestampMicrosecondVectorBuilder::with_capacity(INIT_CAPACITY),
-            update_time: TimestampMicrosecondVectorBuilder::with_capacity(INIT_CAPACITY),
-            check_time: TimestampMicrosecondVectorBuilder::with_capacity(INIT_CAPACITY),
+            create_time: TimestampSecondVectorBuilder::with_capacity(INIT_CAPACITY),
+            update_time: TimestampSecondVectorBuilder::with_capacity(INIT_CAPACITY),
+            check_time: TimestampSecondVectorBuilder::with_capacity(INIT_CAPACITY),
             table_collation: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             checksum: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             create_options: StringVectorBuilder::with_capacity(INIT_CAPACITY),
@@ -372,7 +371,8 @@ impl InformationSchemaTablesBuilder {
         self.auto_increment.push(Some(0));
         self.row_format.push(Some("Fixed"));
         self.table_collation.push(Some("utf8_bin"));
-        self.update_time.push(None);
+        self.update_time
+            .push(Some(table_info.meta.updated_on.timestamp().into()));
         self.check_time.push(None);
         // use mariadb default table version number here
         self.version.push(Some(11));
@@ -380,7 +380,7 @@ impl InformationSchemaTablesBuilder {
         self.create_options
             .push(Some(table_info.meta.options.to_string().as_ref()));
         self.create_time
-            .push(Some(table_info.meta.created_on.timestamp_millis().into()));
+            .push(Some(table_info.meta.created_on.timestamp().into()));
 
         self.temporary
             .push(if matches!(table_type, TableType::Temporary) {

@@ -36,6 +36,11 @@ tql eval (0, 60, '30s') timestamp(timestamp_test) - time();
 -- Test timestamp() with other functions
 tql eval (0, 60, '30s') abs(timestamp(timestamp_test) - avg(timestamp(timestamp_test))) > 20;
 
+-- Test Issue 6707
+tql eval timestamp(demo_memory_usage_bytes * 1);
+
+tql eval timestamp(-demo_memory_usage_bytes);
+
 tql eval (0, 60, '30s') timestamp(timestamp_test) == 60;
 
 -- Test timestamp() with multiple metrics

@@ -17,30 +17,49 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use mito_codec::row_converter::{build_primary_key_codec, DensePrimaryKeyCodec};
+use mito_codec::row_converter::{DensePrimaryKeyCodec, build_primary_key_codec};
 use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::sst::parquet::file_range::RangeBase;
+use crate::error::Result;
+use crate::sst::parquet::file_range::{PreFilterMode, RangeBase};
+use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::SimpleFilterContext;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 
 pub(crate) type BulkIterContextRef = Arc<BulkIterContext>;
 
-pub(crate) struct BulkIterContext {
+pub struct BulkIterContext {
     pub(crate) base: RangeBase,
     pub(crate) predicate: Option<Predicate>,
 }
 
 impl BulkIterContext {
-    pub(crate) fn new(
+    pub fn new(
         region_metadata: RegionMetadataRef,
-        projection: &Option<&[ColumnId]>,
+        projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> Self {
+        skip_auto_convert: bool,
+    ) -> Result<Self> {
+        Self::new_with_pre_filter_mode(
+            region_metadata,
+            projection,
+            predicate,
+            skip_auto_convert,
+            PreFilterMode::All,
+        )
+    }
+
+    pub fn new_with_pre_filter_mode(
+        region_metadata: RegionMetadataRef,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
+        skip_auto_convert: bool,
+        pre_filter_mode: PreFilterMode,
+    ) -> Result<Self> {
         let codec = build_primary_key_codec(&region_metadata);
 
         let simple_filters = predicate
@@ -54,26 +73,39 @@ impl BulkIterContext {
             })
             .collect();
 
-        let read_format = build_read_format(region_metadata, projection);
+        let read_format = ReadFormat::new(
+            region_metadata,
+            projection,
+            true,
+            None,
+            "memtable",
+            skip_auto_convert,
+        )?;
 
-        Self {
+        Ok(Self {
             base: RangeBase {
                 filters: simple_filters,
                 read_format,
                 codec,
                 // we don't need to compat batch since all batch in memtable have the same schema.
                 compat_batch: None,
+                pre_filter_mode,
             },
             predicate,
-        }
+        })
     }
 
     /// Prunes row groups by stats.
-    pub(crate) fn row_groups_to_read(&self, file_meta: &Arc<ParquetMetaData>) -> VecDeque<usize> {
+    pub(crate) fn row_groups_to_read(
+        &self,
+        file_meta: &Arc<ParquetMetaData>,
+        skip_fields: bool,
+    ) -> VecDeque<usize> {
         let region_meta = self.base.read_format.metadata();
         let row_groups = file_meta.row_groups();
         // expected_metadata is set to None since we always expect region metadata of memtable is up-to-date.
-        let stats = RowGroupPruningStats::new(row_groups, &self.base.read_format, None);
+        let stats =
+            RowGroupPruningStats::new(row_groups, &self.base.read_format, None, skip_fields);
         if let Some(predicate) = self.predicate.as_ref() {
             predicate
                 .prune_with_stats(&stats, region_meta.schema.arrow_schema())
@@ -94,24 +126,14 @@ impl BulkIterContext {
     pub(crate) fn read_format(&self) -> &ReadFormat {
         &self.base.read_format
     }
-}
 
-fn build_read_format(
-    region_metadata: RegionMetadataRef,
-    projection: &Option<&[ColumnId]>,
-) -> ReadFormat {
-    let read_format = if let Some(column_ids) = &projection {
-        ReadFormat::new(region_metadata, column_ids.iter().copied())
-    } else {
-        // No projection, lists all column ids to read.
-        ReadFormat::new(
-            region_metadata.clone(),
-            region_metadata
-                .column_metadatas
-                .iter()
-                .map(|col| col.column_id),
-        )
-    };
+    /// Returns the pre-filter mode.
+    pub(crate) fn pre_filter_mode(&self) -> PreFilterMode {
+        self.base.pre_filter_mode
+    }
 
-    read_format
+    /// Returns the region id.
+    pub(crate) fn region_id(&self) -> store_api::storage::RegionId {
+        self.base.read_format.metadata().region_id
+    }
 }

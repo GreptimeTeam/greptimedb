@@ -35,15 +35,15 @@ use table::metadata::TableId;
 use table::table_reference::TableReference;
 
 use self::executor::DropTableExecutor;
-use crate::ddl::utils::map_to_procedure_error;
 use crate::ddl::DdlContext;
+use crate::ddl::utils::map_to_procedure_error;
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::DropTableTask;
-use crate::rpc::router::{operating_leader_regions, RegionRoute};
+use crate::rpc::router::{RegionRoute, operating_leader_regions};
 
 pub struct DropTableProcedure {
     /// The context of procedure runtime.
@@ -291,7 +291,7 @@ impl DropTableData {
         }
     }
 
-    fn table_ref(&self) -> TableReference {
+    fn table_ref(&self) -> TableReference<'_> {
         self.task.table_ref()
     }
 

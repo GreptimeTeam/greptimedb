@@ -51,12 +51,9 @@ pub struct DeltaEncodedRegionIndexes {
 impl DeltaEncodedRegionIndexes {
     /// Retrieves the original (decoded) index values for a given region.
     pub(crate) fn region(&self, region_id: RegionId) -> Option<BTreeSet<u64>> {
-        let decoded = self
-            .regions
+        self.regions
             .get(&region_id)
-            .map(|delta| delta.iter().copied().original().collect::<BTreeSet<_>>());
-
-        decoded
+            .map(|delta| delta.iter().copied().original().collect::<BTreeSet<_>>())
     }
 
     /// Retrieves the last index.
@@ -107,7 +104,7 @@ impl IndexEncoder for JsonIndexEncoder {
         self.buf
             .lock()
             .unwrap()
-            .insert(provider.topic.to_string(), region_index);
+            .insert(provider.topic.clone(), region_index);
     }
 
     fn finish(&self) -> Result<Vec<u8>> {
@@ -175,8 +172,10 @@ mod tests {
                 .unwrap(),
             region_2_indexes,
         );
-        assert!(datanode_index
-            .provider(&KafkaProvider::new("my_topic_3".to_string()))
-            .is_none());
+        assert!(
+            datanode_index
+                .provider(&KafkaProvider::new("my_topic_3".to_string()))
+                .is_none()
+        );
     }
 }

@@ -23,11 +23,11 @@ use axum::middleware::Next;
 use axum::response::IntoResponse;
 use lazy_static::lazy_static;
 use prometheus::{
-    register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
-    register_int_gauge, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, register_histogram,
+    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge,
 };
 use session::context::QueryContext;
-use tonic::body::BoxBody;
+use tonic::body::Body;
 use tower::{Layer, Service};
 
 pub(crate) const METRIC_DB_LABEL: &str = "db";
@@ -298,6 +298,26 @@ lazy_static! {
         "greptime_servers_bulk_insert_elapsed",
         "servers handle bulk insert elapsed",
     ).unwrap();
+
+    pub static ref METRIC_HTTP_MEMORY_USAGE_BYTES: IntGauge = register_int_gauge!(
+        "greptime_servers_http_memory_usage_bytes",
+        "current http request memory usage in bytes"
+    ).unwrap();
+
+    pub static ref METRIC_HTTP_REQUESTS_REJECTED_TOTAL: IntCounter = register_int_counter!(
+        "greptime_servers_http_requests_rejected_total",
+        "total number of http requests rejected due to memory limit"
+    ).unwrap();
+
+    pub static ref METRIC_GRPC_MEMORY_USAGE_BYTES: IntGauge = register_int_gauge!(
+        "greptime_servers_grpc_memory_usage_bytes",
+        "current grpc request memory usage in bytes"
+    ).unwrap();
+
+    pub static ref METRIC_GRPC_REQUESTS_REJECTED_TOTAL: IntCounter = register_int_counter!(
+        "greptime_servers_grpc_requests_rejected_total",
+        "total number of grpc requests rejected due to memory limit"
+    ).unwrap();
 }
 
 // Based on https://github.com/hyperium/tonic/blob/master/examples/src/tower/server.rs
@@ -319,9 +339,9 @@ pub(crate) struct MetricsMiddleware<S> {
     inner: S,
 }
 
-impl<S> Service<http::Request<BoxBody>> for MetricsMiddleware<S>
+impl<S> Service<http::Request<Body>> for MetricsMiddleware<S>
 where
-    S: Service<http::Request<BoxBody>, Response = http::Response<BoxBody>> + Clone + Send + 'static,
+    S: Service<http::Request<Body>, Response = http::Response<Body>> + Clone + Send + 'static,
     S::Future: Send + 'static,
 {
     type Response = S::Response;
@@ -332,7 +352,7 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: http::Request<BoxBody>) -> Self::Future {
+    fn call(&mut self, req: http::Request<Body>) -> Self::Future {
         // This is necessary because tonic internally uses `tower::buffer::Buffer`.
         // See https://github.com/tower-rs/tower/issues/547#issuecomment-767629149
         // for details on why this is necessary

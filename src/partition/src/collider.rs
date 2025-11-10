@@ -30,8 +30,8 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use datafusion_expr::Operator;
-use datafusion_physical_expr::expressions::{col, lit, BinaryExpr};
 use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::expressions::{BinaryExpr, col, lit};
 use datatypes::arrow::datatypes::Schema;
 use datatypes::value::{OrderedF64, OrderedFloat, Value};
 
@@ -46,12 +46,12 @@ pub(crate) const CHECK_STEP: OrderedF64 = OrderedFloat(0.5f64);
 /// Represents an "atomic" Expression, which isn't composed (OR-ed) of other expressions.
 #[allow(unused)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AtomicExpr {
+pub struct AtomicExpr {
     /// A (ordered) list of simplified expressions. They are [`RestrictedOp::And`]'ed together.
-    pub(crate) nucleons: Vec<NucleonExpr>,
+    pub nucleons: Vec<NucleonExpr>,
     /// Index to reference the [`PartitionExpr`] that this [`AtomicExpr`] is derived from.
     /// This index is used with `exprs` field in [`MultiDimPartitionRule`](crate::multi_dim::MultiDimPartitionRule).
-    pub(crate) source_expr_index: usize,
+    pub source_expr_index: usize,
 }
 
 impl AtomicExpr {
@@ -78,7 +78,7 @@ impl PartialOrd for AtomicExpr {
 ///
 /// This struct is used to compose [`AtomicExpr`], hence "nucleon".
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct NucleonExpr {
+pub struct NucleonExpr {
     column: String,
     op: GluonOp,
     /// Normalized [`Value`].
@@ -93,6 +93,29 @@ impl NucleonExpr {
             lit(*self.value.as_ref()),
         ))
     }
+
+    /// Get the column name
+    pub fn column(&self) -> &str {
+        &self.column
+    }
+
+    /// Get the normalized value
+    pub fn value(&self) -> OrderedF64 {
+        self.value
+    }
+
+    /// Get the operation
+    pub fn op(&self) -> &GluonOp {
+        &self.op
+    }
+
+    pub fn new(column: impl Into<String>, op: GluonOp, value: OrderedF64) -> Self {
+        Self {
+            column: column.into(),
+            op,
+            value,
+        }
+    }
 }
 
 /// Further restricted operation set.
@@ -100,7 +123,7 @@ impl NucleonExpr {
 /// Conjunction operations are removed from [`RestrictedOp`].
 /// This enumeration is used to bind elements in [`NucleonExpr`], hence "gluon".
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum GluonOp {
+pub enum GluonOp {
     Eq,
     NotEq,
     Lt,
@@ -129,11 +152,11 @@ impl GluonOp {
 pub struct Collider<'a> {
     source_exprs: &'a [PartitionExpr],
 
-    pub(crate) atomic_exprs: Vec<AtomicExpr>,
+    pub atomic_exprs: Vec<AtomicExpr>,
     /// A map of column name to a list of `(value, normalized value)` pairs.
     ///
     /// The normalized value is used for comparison. The normalization process keeps the order of the values.
-    pub(crate) normalized_values: HashMap<String, Vec<(Value, OrderedF64)>>,
+    pub normalized_values: HashMap<String, Vec<(Value, OrderedF64)>>,
 }
 
 impl<'a> Collider<'a> {
@@ -340,33 +363,33 @@ impl<'a> Collider<'a> {
 
         match (lhs, rhs) {
             (Operand::Column(col), Operand::Value(val)) => {
-                if let Some(column_values) = normalized_values.get(col) {
-                    if let Some(&normalized_val) = column_values.get(val) {
-                        return Ok(NucleonExpr {
-                            column: col.clone(),
-                            op: gluon_op,
-                            value: normalized_val,
-                        });
-                    }
+                if let Some(column_values) = normalized_values.get(col)
+                    && let Some(&normalized_val) = column_values.get(val)
+                {
+                    return Ok(NucleonExpr {
+                        column: col.clone(),
+                        op: gluon_op,
+                        value: normalized_val,
+                    });
                 }
             }
             (Operand::Value(val), Operand::Column(col)) => {
-                if let Some(column_values) = normalized_values.get(col) {
-                    if let Some(&normalized_val) = column_values.get(val) {
-                        // Flip the operation for value op column
-                        let flipped_op = match gluon_op {
-                            GluonOp::Lt => GluonOp::Gt,
-                            GluonOp::LtEq => GluonOp::GtEq,
-                            GluonOp::Gt => GluonOp::Lt,
-                            GluonOp::GtEq => GluonOp::LtEq,
-                            op => op, // Eq and NotEq remain the same
-                        };
-                        return Ok(NucleonExpr {
-                            column: col.clone(),
-                            op: flipped_op,
-                            value: normalized_val,
-                        });
-                    }
+                if let Some(column_values) = normalized_values.get(col)
+                    && let Some(&normalized_val) = column_values.get(val)
+                {
+                    // Flip the operation for value op column
+                    let flipped_op = match gluon_op {
+                        GluonOp::Lt => GluonOp::Gt,
+                        GluonOp::LtEq => GluonOp::GtEq,
+                        GluonOp::Gt => GluonOp::Lt,
+                        GluonOp::GtEq => GluonOp::LtEq,
+                        op => op, // Eq and NotEq remain the same
+                    };
+                    return Ok(NucleonExpr {
+                        column: col.clone(),
+                        op: flipped_op,
+                        value: normalized_val,
+                    });
                 }
             }
             _ => {}
@@ -465,9 +488,11 @@ mod test {
         assert_eq!(collider.atomic_exprs[0].source_expr_index, 0);
 
         // Test simple AND
-        let exprs = vec![col("id")
-            .eq(Value::UInt32(1))
-            .and(col("status").eq(Value::String("active".into())))];
+        let exprs = vec![
+            col("id")
+                .eq(Value::UInt32(1))
+                .and(col("status").eq(Value::String("active".into()))),
+        ];
 
         let collider = Collider::new(&exprs).unwrap();
         assert_eq!(collider.atomic_exprs.len(), 1);

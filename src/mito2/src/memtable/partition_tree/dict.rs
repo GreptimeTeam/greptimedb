@@ -100,10 +100,10 @@ impl KeyDictBuilder {
 
         // Since we store the key twice so the bytes usage doubled.
         metrics.key_bytes += full_primary_key.len() * 2 + sparse_key_len;
-        self.key_bytes_in_index += full_primary_key.len();
+        self.key_bytes_in_index += full_primary_key.len() + sparse_key_len;
 
         // Adds key size of index to the metrics.
-        MEMTABLE_DICT_BYTES.add((full_primary_key.len() + sparse_key_len) as i64);
+        MEMTABLE_DICT_BYTES.add(self.key_bytes_in_index as i64);
 
         pk_index
     }
@@ -450,7 +450,7 @@ mod tests {
         let key_bytes = num_keys as usize * 5;
         assert_eq!(key_bytes * 2, metrics.key_bytes);
         assert_eq!(key_bytes, builder.key_bytes_in_index);
-        assert_eq!(8850, builder.memory_size());
+        assert_eq!(8730, builder.memory_size());
 
         let (dict, _) = builder.finish().unwrap();
         assert_eq!(0, builder.key_bytes_in_index);

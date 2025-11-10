@@ -2,6 +2,10 @@
 ## @toml2docs:none-default
 node_id = 42
 
+## The default column prefix for auto-created time index and value columns.
+## @toml2docs:none-default
+default_column_prefix = "greptime"
+
 ## Start services after regions have obtained leases.
 ## It will block the datanode start if it can't receive leases in the heartbeat from metasrv.
 require_lease_before_startup = false
@@ -118,6 +122,7 @@ metadata_cache_tti = "5m"
 ## The provider of the WAL.
 ## - `raft_engine`: the wal is stored in the local file system by raft-engine.
 ## - `kafka`: it's remote wal that data is stored in Kafka.
+## - `noop`: it's a no-op WAL provider that does not store any WAL data.<br/>**Notes: any unflushed data will be lost when the datanode is shutdown.**
 provider = "raft_engine"
 
 ## The directory to store the WAL files.
@@ -274,6 +279,9 @@ type = "File"
 ## @toml2docs:none-default
 #+ cache_path = ""
 
+## Whether to enable read cache. If not set, the read cache will be enabled by default when using object storage.
+#+ enable_read_cache = true
+
 ## The local file cache capacity in bytes. If your disk space is sufficient, it is recommended to set it larger.
 ## @toml2docs:none-default
 cache_capacity = "5GiB"
@@ -409,6 +417,19 @@ worker_request_batch_size = 64
 ## Number of meta action updated to trigger a new checkpoint for the manifest.
 manifest_checkpoint_distance = 10
 
+
+## Number of removed files to keep in manifest's `removed_files` field before also
+## remove them from `removed_files`. Mostly for debugging purpose.
+## If set to 0, it will only use `keep_removed_file_ttl` to decide when to remove files
+## from `removed_files` field.
+experimental_manifest_keep_removed_file_count = 256
+
+## How long to keep removed files in the `removed_files` field of manifest
+## after they are removed from manifest.
+## files will only be removed from `removed_files` field
+## if both `keep_removed_file_count` and `keep_removed_file_ttl` is reached.
+experimental_manifest_keep_removed_file_ttl = "1h"
+
 ## Whether to compress manifest and checkpoint file by gzip (default false).
 compress_manifest = false
 
@@ -474,12 +495,18 @@ sst_write_buffer_size = "8MB"
 ## Capacity of the channel to send data from parallel scan tasks to the main task.
 parallel_scan_channel_size = 32
 
+## Maximum number of SST files to scan concurrently.
+max_concurrent_scan_files = 384
+
 ## Whether to allow stale WAL entries read during replay.
 allow_stale_entries = false
 
 ## Minimum time interval between two compactions.
 ## To align with the old behavior, the default value is 0 (no restrictions).
 min_compaction_interval = "0m"
+
+## Whether to enable experimental flat format as the default format.
+default_experimental_flat_format = false
 
 ## The options for index in Mito engine.
 [region_engine.mito.index]
@@ -629,7 +656,7 @@ level = "info"
 enable_otlp_tracing = false
 
 ## The OTLP tracing endpoint.
-otlp_endpoint = "http://localhost:4318"
+otlp_endpoint = "http://localhost:4318/v1/traces"
 
 ## Whether to append logs to stdout.
 append_stdout = true
@@ -642,6 +669,13 @@ max_log_files = 720
 
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.
 otlp_export_protocol = "http"
+
+## Additional OTLP headers, only valid when using OTLP http
+[logging.otlp_headers]
+## @toml2docs:none-default
+#Authorization = "Bearer my-token"
+## @toml2docs:none-default
+#Database = "My database"
 
 ## The percentage of tracing will be sampled and exported.
 ## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.
@@ -669,3 +703,11 @@ headers = { }
 ## The tokio console address.
 ## @toml2docs:none-default
 #+ tokio_console_addr = "127.0.0.1"
+
+## The memory options.
+[memory]
+## Whether to enable heap profiling activation during startup.
+## When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable
+## is set to "prof:true,prof_active:false". The official image adds this env variable.
+## Default is true.
+enable_heap_profiling = true

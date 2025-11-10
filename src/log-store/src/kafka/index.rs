@@ -20,7 +20,7 @@ pub use collector::GlobalIndexCollector;
 pub(crate) use collector::{IndexCollector, NoopCollector};
 pub(crate) use encoder::{IndexEncoder, JsonIndexEncoder};
 pub(crate) use iterator::{
-    build_region_wal_index_iterator, NextBatchHint, RegionWalIndexIterator, MIN_BATCH_WINDOW_SIZE,
+    MIN_BATCH_WINDOW_SIZE, NextBatchHint, RegionWalIndexIterator, build_region_wal_index_iterator,
 };
 #[cfg(test)]
 pub(crate) use iterator::{MultipleRegionWalIndexIterator, RegionWalRange, RegionWalVecIndex};

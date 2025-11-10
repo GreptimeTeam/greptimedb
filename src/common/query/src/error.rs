@@ -44,13 +44,6 @@ pub enum Error {
         source: DataTypeError,
     },
 
-    #[snafu(display("Failed to cast arrow array into vector"))]
-    FromArrowArray {
-        #[snafu(implicit)]
-        location: Location,
-        source: DataTypeError,
-    },
-
     #[snafu(display("Failed to cast arrow array into vector: {:?}", data_type))]
     IntoVector {
         #[snafu(implicit)]
@@ -59,18 +52,8 @@ pub enum Error {
         data_type: ArrowDatatype,
     },
 
-    #[snafu(display("Failed to create accumulator: {}", err_msg))]
-    CreateAccumulator { err_msg: String },
-
     #[snafu(display("Failed to downcast vector: {}", err_msg))]
     DowncastVector { err_msg: String },
-
-    #[snafu(display("Bad accumulator implementation: {}", err_msg))]
-    BadAccumulatorImpl {
-        err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
 
     #[snafu(display("Invalid input type: {}", err_msg))]
     InvalidInputType {
@@ -88,7 +71,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("General DataFusion error"))]
+    #[snafu(transparent)]
     GeneralDataFusion {
         #[snafu(source)]
         error: DataFusionError,
@@ -216,6 +199,9 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid character in prefix config: {}", prefix))]
+    InvalidColumnPrefix { prefix: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -223,10 +209,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::CreateAccumulator { .. }
-            | Error::DowncastVector { .. }
+            Error::DowncastVector { .. }
             | Error::InvalidInputState { .. }
-            | Error::BadAccumulatorImpl { .. }
             | Error::ToScalarValue { .. }
             | Error::GetScalarVector { .. }
             | Error::ArrowCompute { .. }
@@ -237,7 +221,6 @@ impl ErrorExt for Error {
             Error::InvalidInputType { source, .. }
             | Error::IntoVector { source, .. }
             | Error::FromScalarValue { source, .. }
-            | Error::FromArrowArray { source, .. }
             | Error::InvalidVectorString { source, .. } => source.status_code(),
 
             Error::MissingTableMutationHandler { .. }
@@ -247,7 +230,8 @@ impl ErrorExt for Error {
 
             Error::UnsupportedInputDataType { .. }
             | Error::TypeCast { .. }
-            | Error::InvalidFuncArgs { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidFuncArgs { .. }
+            | Error::InvalidColumnPrefix { .. } => StatusCode::InvalidArguments,
 
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
 

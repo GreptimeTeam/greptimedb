@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use common_query::{Output, OutputData};
-use common_recordbatch::cursor::RecordBatchStreamCursor;
 use common_recordbatch::RecordBatches;
+use common_recordbatch::cursor::RecordBatchStreamCursor;
 use common_telemetry::tracing;
 use query::parser::QueryStatement;
 use session::context::QueryContextRef;
@@ -36,7 +36,7 @@ impl StatementExecutor {
 
         if query_ctx.get_cursor(&cursor_name).is_some() {
             error::CursorExistsSnafu {
-                name: cursor_name.to_string(),
+                name: cursor_name.clone(),
             }
             .fail()?;
         }

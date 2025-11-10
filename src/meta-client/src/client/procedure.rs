@@ -20,19 +20,19 @@ use api::v1::meta::procedure_service_client::ProcedureServiceClient;
 use api::v1::meta::{
     DdlTaskRequest, DdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse,
     ProcedureDetailRequest, ProcedureDetailResponse, ProcedureId, ProcedureStateResponse,
-    QueryProcedureRequest, ResponseHeader, Role,
+    QueryProcedureRequest, ReconcileRequest, ReconcileResponse, ResponseHeader, Role,
 };
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use tokio::sync::RwLock;
+use tonic::Status;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
-use tonic::Status;
 
 use crate::client::ask_leader::AskLeader;
-use crate::client::{util, Id, LeaderProviderRef};
+use crate::client::{Id, LeaderProviderRef, util};
 use crate::error;
 use crate::error::Result;
 
@@ -96,6 +96,12 @@ impl Client {
         inner
             .migrate_region(region_id, from_peer, to_peer, timeout)
             .await
+    }
+
+    /// Reconcile the procedure state.
+    pub async fn reconcile(&self, request: ReconcileRequest) -> Result<ReconcileResponse> {
+        let inner = self.inner.read().await;
+        inner.reconcile(request).await
     }
 
     pub async fn list_procedures(&self) -> Result<ProcedureDetailResponse> {
@@ -249,6 +255,26 @@ impl Inner {
                 async move { client.migrate(req).await.map(|res| res.into_inner()) }
             },
             |resp: &MigrateRegionResponse| &resp.header,
+        )
+        .await
+    }
+
+    async fn reconcile(&self, request: ReconcileRequest) -> Result<ReconcileResponse> {
+        let mut req = request;
+        req.set_header(
+            self.id,
+            self.role,
+            TracingContext::from_current_span().to_w3c(),
+        );
+
+        self.with_retry(
+            "reconcile",
+            move |mut client| {
+                let req = req.clone();
+
+                async move { client.reconcile(req).await.map(|res| res.into_inner()) }
+            },
+            |resp: &ReconcileResponse| &resp.header,
         )
         .await
     }

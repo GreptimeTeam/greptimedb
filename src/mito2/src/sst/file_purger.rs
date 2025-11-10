@@ -15,25 +15,28 @@
 use std::fmt;
 use std::sync::Arc;
 
-use common_telemetry::{error, info};
+use common_telemetry::error;
 
 use crate::access_layer::AccessLayerRef;
-use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
+use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::FileMeta;
-
-/// Request to remove a file.
-#[derive(Debug)]
-pub struct PurgeRequest {
-    /// File meta.
-    pub file_meta: FileMeta,
-}
+use crate::sst::file::{FileMeta, delete_files};
+use crate::sst::file_ref::FileReferenceManagerRef;
 
 /// A worker to delete files in background.
 pub trait FilePurger: Send + Sync + fmt::Debug {
-    /// Send a purge request to the background worker.
-    fn send_request(&self, request: PurgeRequest);
+    /// Send a request to remove the file.
+    /// If `is_delete` is true, the file will be deleted from the storage.
+    /// Otherwise, only the reference will be removed.
+    fn remove_file(&self, file_meta: FileMeta, is_delete: bool);
+
+    /// Notify the purger of a new file created.
+    /// This is useful for object store based storage, where we need to track the file references
+    /// The default implementation is a no-op.
+    fn new_file(&self, _: &FileMeta) {
+        // noop
+    }
 }
 
 pub type FilePurgerRef = Arc<dyn FilePurger>;
@@ -43,7 +46,7 @@ pub type FilePurgerRef = Arc<dyn FilePurger>;
 pub struct NoopFilePurger;
 
 impl FilePurger for NoopFilePurger {
-    fn send_request(&self, _: PurgeRequest) {
+    fn remove_file(&self, _file_meta: FileMeta, _is_delete: bool) {
         // noop
     }
 }
@@ -63,6 +66,42 @@ impl fmt::Debug for LocalFilePurger {
     }
 }
 
+pub fn is_local_fs(sst_layer: &AccessLayerRef) -> bool {
+    sst_layer.object_store().info().scheme() == object_store::Scheme::Fs
+}
+
+/// Creates a file purger based on the storage type of the access layer.
+/// Should be use in combination with Gc Worker.
+///
+/// If the storage is local file system, a `LocalFilePurger` is created, which deletes
+/// the files from both the storage and the cache.
+///
+/// If the storage is an object store, an `ObjectStoreFilePurger` is created, which
+/// only manages the file references without deleting the actual files.
+///
+pub fn create_file_purger(
+    scheduler: SchedulerRef,
+    sst_layer: AccessLayerRef,
+    cache_manager: Option<CacheManagerRef>,
+    file_ref_manager: FileReferenceManagerRef,
+) -> FilePurgerRef {
+    if is_local_fs(&sst_layer) {
+        Arc::new(LocalFilePurger::new(scheduler, sst_layer, cache_manager))
+    } else {
+        Arc::new(ObjectStoreFilePurger { file_ref_manager })
+    }
+}
+
+/// Creates a local file purger that deletes files from both the storage and the cache.
+pub fn create_local_file_purger(
+    scheduler: SchedulerRef,
+    sst_layer: AccessLayerRef,
+    cache_manager: Option<CacheManagerRef>,
+    _file_ref_manager: FileReferenceManagerRef,
+) -> FilePurgerRef {
+    Arc::new(LocalFilePurger::new(scheduler, sst_layer, cache_manager))
+}
+
 impl LocalFilePurger {
     /// Creates a new purger.
     pub fn new(
@@ -76,64 +115,58 @@ impl LocalFilePurger {
             cache_manager,
         }
     }
-}
 
-impl FilePurger for LocalFilePurger {
-    fn send_request(&self, request: PurgeRequest) {
-        let file_meta = request.file_meta;
+    /// Stop the scheduler of the file purger.
+    pub async fn stop_scheduler(&self) -> Result<()> {
+        self.scheduler.stop(true).await
+    }
+
+    /// Deletes the file(and it's index, if any) from cache and storage.
+    fn delete_file(&self, file_meta: FileMeta) {
         let sst_layer = self.sst_layer.clone();
-
-        // Remove meta of the file from cache.
-        if let Some(cache) = &self.cache_manager {
-            cache.remove_parquet_meta_data(file_meta.file_id());
-        }
-
         let cache_manager = self.cache_manager.clone();
         if let Err(e) = self.scheduler.schedule(Box::pin(async move {
-            if let Err(e) = sst_layer.delete_sst(&file_meta).await {
-                error!(e; "Failed to delete SST file, file_id: {}, region: {}",
-                    file_meta.file_id, file_meta.region_id);
-            } else {
-                info!(
-                    "Successfully deleted SST file, file_id: {}, region: {}",
-                    file_meta.file_id, file_meta.region_id
-                );
-            }
-
-            if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache())
+            if let Err(e) = delete_files(
+                file_meta.region_id,
+                &[(file_meta.file_id, file_meta.index_file_id().file_id())],
+                file_meta.exists_index(),
+                &sst_layer,
+                &cache_manager,
+            )
+            .await
             {
-                // Removes index file from the cache.
-                if file_meta.exists_index() {
-                    write_cache
-                        .remove(IndexKey::new(
-                            file_meta.region_id,
-                            file_meta.file_id,
-                            FileType::Puffin,
-                        ))
-                        .await;
-                }
-                // Remove the SST file from the cache.
-                write_cache
-                    .remove(IndexKey::new(
-                        file_meta.region_id,
-                        file_meta.file_id,
-                        FileType::Parquet,
-                    ))
-                    .await;
-            }
-
-            // Purges index content in the stager.
-            if let Err(e) = sst_layer
-                .puffin_manager_factory()
-                .purge_stager(file_meta.file_id())
-                .await
-            {
-                error!(e; "Failed to purge stager with index file, file_id: {}, region: {}",
-                    file_meta.file_id(), file_meta.region_id);
+                error!(e; "Failed to delete file {:?} from storage", file_meta);
             }
         })) {
             error!(e; "Failed to schedule the file purge request");
         }
+    }
+}
+
+impl FilePurger for LocalFilePurger {
+    fn remove_file(&self, file_meta: FileMeta, is_delete: bool) {
+        if is_delete {
+            self.delete_file(file_meta);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ObjectStoreFilePurger {
+    file_ref_manager: FileReferenceManagerRef,
+}
+
+impl FilePurger for ObjectStoreFilePurger {
+    fn remove_file(&self, file_meta: FileMeta, _is_delete: bool) {
+        // if not on local file system, instead inform the global file purger to remove the file reference.
+        // notice that no matter whether the file is deleted or not, we need to remove the reference
+        // because the file is no longer in use nonetheless.
+        self.file_ref_manager.remove_file(&file_meta);
+        // TODO(discord9): consider impl a .tombstone file to reduce files needed to list
+    }
+
+    fn new_file(&self, file_meta: &FileMeta) {
+        self.file_ref_manager.add_file(file_meta);
     }
 }
 
@@ -142,16 +175,16 @@ mod tests {
     use std::num::NonZeroU64;
 
     use common_test_util::temp_dir::create_temp_dir;
-    use object_store::services::Fs;
     use object_store::ObjectStore;
+    use object_store::services::Fs;
     use smallvec::SmallVec;
     use store_api::region_request::PathType;
-    use store_api::storage::RegionId;
+    use store_api::storage::{FileId, RegionId};
 
     use super::*;
     use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
-    use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange, IndexType, RegionFileId};
+    use crate::sst::file::{FileHandle, FileMeta, FileTimeRange, IndexType, RegionFileId};
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
@@ -200,9 +233,12 @@ mod tests {
                     file_size: 4096,
                     available_indexes: Default::default(),
                     index_file_size: 0,
+                    index_file_id: None,
                     num_rows: 0,
                     num_row_groups: 0,
                     sequence: None,
+                    partition_expr: None,
+                    num_series: 0,
                 },
                 file_purger,
             );
@@ -265,9 +301,12 @@ mod tests {
                     file_size: 4096,
                     available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
                     index_file_size: 4096,
+                    index_file_id: None,
                     num_rows: 1024,
                     num_row_groups: 1,
                     sequence: NonZeroU64::new(4096),
+                    partition_expr: None,
+                    num_series: 0,
                 },
                 file_purger,
             );

@@ -12,35 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use api::region::RegionResponse;
-use api::v1::flow::{DirtyWindowRequest, FlowRequest, FlowResponse};
+use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
 use api::v1::region::{InsertRequests, RegionRequest};
 pub use common_base::AffectedRows;
 use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
-use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
 use common_wal::config::kafka::MetasrvKafkaConfig;
+use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
 
 use crate::cache_invalidator::DummyCacheInvalidator;
 use crate::ddl::flow_meta::FlowMetadataAllocator;
 use crate::ddl::table_meta::TableMetadataAllocator;
 use crate::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use crate::error::Result;
-use crate::key::flow::FlowMetadataManager;
 use crate::key::TableMetadataManager;
-use crate::kv_backend::memory::MemoryKvBackend;
+use crate::key::flow::FlowMetadataManager;
 use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::memory::MemoryKvBackend;
 use crate::node_manager::{
-    Datanode, DatanodeRef, Flownode, FlownodeRef, NodeManager, NodeManagerRef,
+    Datanode, DatanodeManager, DatanodeRef, Flownode, FlownodeManager, FlownodeRef, NodeManagerRef,
 };
-use crate::peer::{Peer, PeerLookupService};
+use crate::peer::{Peer, PeerResolver};
 use crate::region_keeper::MemoryRegionKeeper;
 use crate::region_registry::LeaderRegionRegistry;
 use crate::sequence::SequenceBuilder;
 use crate::wal_options_allocator::topic_pool::KafkaTopicPool;
-use crate::wal_options_allocator::{build_kafka_topic_creator, WalOptionsAllocator};
+use crate::wal_options_allocator::{WalOptionsAllocator, build_kafka_topic_creator};
 use crate::{DatanodeId, FlownodeId};
 
 #[async_trait::async_trait]
@@ -71,7 +72,7 @@ pub trait MockFlownodeHandler: Sync + Send + Clone {
     async fn handle_mark_window_dirty(
         &self,
         _peer: &Peer,
-        _req: DirtyWindowRequest,
+        _req: DirtyWindowRequests,
     ) -> Result<FlowResponse> {
         unimplemented!()
     }
@@ -120,15 +121,18 @@ impl<T: MockDatanodeHandler> Datanode for MockNode<T> {
 }
 
 #[async_trait::async_trait]
-impl<T: MockDatanodeHandler + 'static> NodeManager for MockDatanodeManager<T> {
+impl<T: MockDatanodeHandler + 'static> DatanodeManager for MockDatanodeManager<T> {
     async fn datanode(&self, peer: &Peer) -> DatanodeRef {
         Arc::new(MockNode {
             peer: peer.clone(),
             handler: self.handler.clone(),
         })
     }
+}
 
-    async fn flownode(&self, _node: &Peer) -> FlownodeRef {
+#[async_trait::async_trait]
+impl<T: 'static + Send + Sync> FlownodeManager for MockDatanodeManager<T> {
+    async fn flownode(&self, _peer: &Peer) -> FlownodeRef {
         unimplemented!()
     }
 }
@@ -143,22 +147,25 @@ impl<T: MockFlownodeHandler> Flownode for MockNode<T> {
         self.handler.handle_inserts(&self.peer, requests).await
     }
 
-    async fn handle_mark_window_dirty(&self, req: DirtyWindowRequest) -> Result<FlowResponse> {
+    async fn handle_mark_window_dirty(&self, req: DirtyWindowRequests) -> Result<FlowResponse> {
         self.handler.handle_mark_window_dirty(&self.peer, req).await
     }
 }
 
 #[async_trait::async_trait]
-impl<T: MockFlownodeHandler + 'static> NodeManager for MockFlownodeManager<T> {
-    async fn datanode(&self, _peer: &Peer) -> DatanodeRef {
-        unimplemented!()
-    }
-
+impl<T: MockFlownodeHandler + 'static> FlownodeManager for MockFlownodeManager<T> {
     async fn flownode(&self, peer: &Peer) -> FlownodeRef {
         Arc::new(MockNode {
             peer: peer.clone(),
             handler: self.handler.clone(),
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: 'static + Send + Sync> DatanodeManager for MockFlownodeManager<T> {
+    async fn datanode(&self, _peer: &Peer) -> DatanodeRef {
+        unimplemented!()
     }
 }
 
@@ -202,20 +209,16 @@ pub fn new_ddl_context_with_kv_backend(
     }
 }
 
-pub struct NoopPeerLookupService;
+pub struct NoopPeerResolver;
 
 #[async_trait::async_trait]
-impl PeerLookupService for NoopPeerLookupService {
+impl PeerResolver for NoopPeerResolver {
     async fn datanode(&self, id: DatanodeId) -> Result<Option<Peer>> {
         Ok(Some(Peer::empty(id)))
     }
 
     async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>> {
         Ok(Some(Peer::empty(id)))
-    }
-
-    async fn active_frontends(&self) -> Result<Vec<Peer>> {
-        Ok(vec![])
     }
 }
 
@@ -251,11 +254,11 @@ pub async fn test_kafka_topic_pool(
 }
 
 #[macro_export]
-/// Skip the test if the environment variable `GT_KAFKA_ENDPOINTS` is not set.
+/// Skip the test if the environment variable `GT_POSTGRES_ENDPOINTS` is not set.
 ///
 /// The format of the environment variable is:
-/// ```
-/// GT_KAFKA_ENDPOINTS=localhost:9092,localhost:9093
+/// ```text
+/// GT_POSTGRES_ENDPOINTS=localhost:9092,localhost:9093
 /// ```
 macro_rules! maybe_skip_postgres_integration_test {
     () => {
@@ -267,11 +270,11 @@ macro_rules! maybe_skip_postgres_integration_test {
 }
 
 #[macro_export]
-/// Skip the test if the environment variable `GT_KAFKA_ENDPOINTS` is not set.
+/// Skip the test if the environment variable `GT_MYSQL_ENDPOINTS` is not set.
 ///
 /// The format of the environment variable is:
-/// ```
-/// GT_KAFKA_ENDPOINTS=localhost:9092,localhost:9093
+/// ```text
+/// GT_MYSQL_ENDPOINTS=localhost:9092,localhost:9093
 /// ```
 macro_rules! maybe_skip_mysql_integration_test {
     () => {
@@ -280,4 +283,56 @@ macro_rules! maybe_skip_mysql_integration_test {
             return;
         }
     };
+}
+
+#[macro_export]
+/// Skip the test if the environment variable `GT_POSTGRES15_ENDPOINTS` is not set.
+///
+/// The format of the environment variable is:
+/// ```text
+/// GT_POSTGRES15_ENDPOINTS=postgres://user:password@127.0.0.1:5433/postgres
+/// ```
+macro_rules! maybe_skip_postgres15_integration_test {
+    () => {
+        if std::env::var("GT_POSTGRES15_ENDPOINTS").is_err() {
+            common_telemetry::warn!("The PG15 endpoints is empty, skipping the test");
+            return;
+        }
+    };
+}
+
+#[macro_export]
+/// Skip the test if the environment variable `GT_ETCD_TLS_ENDPOINTS` is not set.
+///
+/// The format of the environment variable is:
+/// ```text
+/// GT_ETCD_TLS_ENDPOINTS=localhost:9092,localhost:9093
+/// ```
+macro_rules! maybe_skip_etcd_tls_integration_test {
+    () => {
+        if std::env::var("GT_ETCD_TLS_ENDPOINTS").is_err() {
+            common_telemetry::warn!("The etcd with tls endpoints is empty, skipping the test");
+            return;
+        }
+    };
+}
+
+/// Returns the directory of the etcd TLS certs.
+pub fn etcd_certs_dir() -> PathBuf {
+    let project_path = env!("CARGO_MANIFEST_DIR");
+    let project_path = PathBuf::from(project_path);
+    let base = project_path.ancestors().nth(3).unwrap();
+    base.join("tests-integration")
+        .join("fixtures")
+        .join("etcd-tls-certs")
+}
+
+/// Returns the directory of the test certs.
+pub fn test_certs_dir() -> PathBuf {
+    let project_path = env!("CARGO_MANIFEST_DIR");
+    let project_path = PathBuf::from(project_path);
+    let base = project_path.ancestors().nth(3).unwrap();
+    base.join("tests-integration")
+        .join("fixtures")
+        .join("certs")
 }

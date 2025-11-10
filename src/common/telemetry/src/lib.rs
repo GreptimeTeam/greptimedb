@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(let_chains)]
+#![feature(duration_constructors)]
 
 pub mod logging;
 mod macros;
@@ -22,7 +22,7 @@ pub mod tracing_context;
 mod tracing_sampler;
 
 pub use logging::{
-    init_default_ut_logging, init_global_logging, LOG_RELOAD_HANDLE, TRACER, TRACE_RELOAD_HANDLE,
+    LOG_RELOAD_HANDLE, TRACE_RELOAD_HANDLE, TRACER, init_default_ut_logging, init_global_logging,
 };
 pub use metric::dump_metrics;
 pub use panic_hook::set_panic_hook;

@@ -13,18 +13,23 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
+use api::v1::SemanticType;
 use common_telemetry::{debug, warn};
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::SkippingIndexType;
+use datatypes::vectors::Helper;
 use index::bloom_filter::creator::BloomFilterCreator;
+use index::target::IndexTarget;
 use mito_codec::index::{IndexValueCodec, IndexValuesCodec};
-use mito_codec::row_converter::SortField;
+use mito_codec::row_converter::{CompositeValues, SortField};
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, FileId};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
@@ -32,14 +37,13 @@ use crate::error::{
     OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PushBloomFilterValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::sst::file::FileId;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
-use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
+use crate::sst::index::{TYPE_BLOOM_FILTER_INDEX, decode_primary_keys_with_counts};
 
 /// The buffer size for the pipe used to send index data to the puffin blob.
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
@@ -63,6 +67,9 @@ pub struct BloomFilterIndexer {
 
     /// The global memory usage.
     global_memory_usage: Arc<AtomicUsize>,
+
+    /// Region metadata for column lookups.
+    metadata: RegionMetadataRef,
 }
 
 impl BloomFilterIndexer {
@@ -120,6 +127,7 @@ impl BloomFilterIndexer {
             aborted: false,
             stats: Statistics::new(TYPE_BLOOM_FILTER_INDEX),
             global_memory_usage,
+            metadata: metadata.clone(),
         };
         Ok(Some(indexer))
     }
@@ -136,6 +144,29 @@ impl BloomFilterIndexer {
         }
 
         if let Err(update_err) = self.do_update(batch).await {
+            // clean up garbage if failed to update
+            if let Err(err) = self.do_cleanup().await {
+                if cfg!(any(test, feature = "test")) {
+                    panic!("Failed to clean up index creator, err: {err:?}",);
+                } else {
+                    warn!(err; "Failed to clean up index creator");
+                }
+            }
+            return Err(update_err);
+        }
+
+        Ok(())
+    }
+
+    /// Updates the bloom filter index with the given flat format RecordBatch.
+    pub async fn update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        ensure!(!self.aborted, OperateAbortedIndexSnafu);
+
+        if self.creators.is_empty() || batch.num_rows() == 0 {
+            return Ok(());
+        }
+
+        if let Err(update_err) = self.do_update_flat(batch).await {
             // clean up garbage if failed to update
             if let Err(err) = self.do_cleanup().await {
                 if cfg!(any(test, feature = "test")) {
@@ -254,6 +285,93 @@ impl BloomFilterIndexer {
         Ok(())
     }
 
+    async fn do_update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        let mut guard = self.stats.record_update();
+
+        let n = batch.num_rows();
+        guard.inc_row_count(n);
+
+        let is_sparse = self.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse;
+        let mut decoded_pks: Option<Vec<(CompositeValues, usize)>> = None;
+
+        for (col_id, creator) in &mut self.creators {
+            // Safety: `creators` are created from the metadata so it won't be None.
+            let column_meta = self.metadata.column_by_id(*col_id).unwrap();
+            let column_name = &column_meta.column_schema.name;
+            if let Some(column_array) = batch.column_by_name(column_name) {
+                // Convert Arrow array to VectorRef
+                let vector = Helper::try_into_vector(column_array.clone())
+                    .context(crate::error::ConvertVectorSnafu)?;
+                let sort_field = SortField::new(vector.data_type());
+
+                for i in 0..n {
+                    let value = vector.get_ref(i);
+                    let elems = (!value.is_null())
+                        .then(|| {
+                            let mut buf = vec![];
+                            IndexValueCodec::encode_nonnull_value(value, &sort_field, &mut buf)
+                                .context(EncodeSnafu)?;
+                            Ok(buf)
+                        })
+                        .transpose()?;
+
+                    creator
+                        .push_row_elems(elems)
+                        .await
+                        .context(PushBloomFilterValueSnafu)?;
+                }
+            } else if is_sparse && column_meta.semantic_type == SemanticType::Tag {
+                // Column not found in batch, tries to decode from primary keys for sparse encoding.
+                if decoded_pks.is_none() {
+                    decoded_pks = Some(decode_primary_keys_with_counts(batch, &self.codec)?);
+                }
+
+                let pk_values_with_counts = decoded_pks.as_ref().unwrap();
+                let Some(col_info) = self.codec.pk_col_info(*col_id) else {
+                    debug!(
+                        "Column {} not found in primary key during building bloom filter index",
+                        column_name
+                    );
+                    continue;
+                };
+                let pk_index = col_info.idx;
+                let field = &col_info.field;
+                for (decoded, count) in pk_values_with_counts {
+                    let value = match decoded {
+                        CompositeValues::Dense(dense) => dense.get(pk_index).map(|v| &v.1),
+                        CompositeValues::Sparse(sparse) => sparse.get(col_id),
+                    };
+
+                    let elems = value
+                        .filter(|v| !v.is_null())
+                        .map(|v| {
+                            let mut buf = vec![];
+                            IndexValueCodec::encode_nonnull_value(
+                                v.as_value_ref(),
+                                field,
+                                &mut buf,
+                            )
+                            .context(EncodeSnafu)?;
+                            Ok(buf)
+                        })
+                        .transpose()?;
+
+                    creator
+                        .push_n_row_elems(*count, elems)
+                        .await
+                        .context(PushBloomFilterValueSnafu)?;
+                }
+            } else {
+                debug!(
+                    "Column {} not found in the batch during building bloom filter index",
+                    column_name
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// TODO(zhongzc): duplicate with `mito2::sst::index::inverted_index::creator::InvertedIndexCreator`
     async fn do_finish(&mut self, puffin_writer: &mut SstPuffinWriter) -> Result<()> {
         let mut guard = self.stats.record_finish();
@@ -300,7 +418,8 @@ impl BloomFilterIndexer {
     ) -> Result<ByteCount> {
         let (tx, rx) = tokio::io::duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
 
-        let blob_name = format!("{}-{}", INDEX_BLOB_TYPE, col_id);
+        let target_key = IndexTarget::ColumnId(*col_id);
+        let blob_name = format!("{INDEX_BLOB_TYPE}-{target_key}");
         let (index_finish, puffin_add_blob) = futures::join!(
             creator.finish(tx.compat_write()),
             puffin_writer.put_blob(
@@ -350,11 +469,11 @@ pub(crate) mod tests {
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
     use datatypes::value::ValueRef;
-    use datatypes::vectors::{UInt64Vector, UInt8Vector};
+    use datatypes::vectors::{UInt8Vector, UInt64Vector};
     use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
     use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
-    use object_store::services::Memory;
     use object_store::ObjectStore;
+    use object_store::services::Memory;
     use puffin::puffin_manager::{PuffinManager, PuffinReader};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;

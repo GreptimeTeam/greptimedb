@@ -16,7 +16,9 @@
 
 use std::time::Duration;
 
+use common_grpc::channel_manager::ClientTlsOption;
 use serde::{Deserialize, Serialize};
+use session::ReadPreference;
 
 pub(crate) mod engine;
 pub(crate) mod frontend_client;
@@ -54,6 +56,10 @@ pub struct BatchingModeOptions {
     pub experimental_max_filter_num_per_query: usize,
     /// Time window merge distance
     pub experimental_time_window_merge_threshold: usize,
+    /// Read preference of the Frontend client.
+    pub read_preference: ReadPreference,
+    /// TLS option for client connections to frontends.
+    pub frontend_tls: Option<ClientTlsOption>,
 }
 
 impl Default for BatchingModeOptions {
@@ -68,6 +74,8 @@ impl Default for BatchingModeOptions {
             experimental_frontend_activity_timeout: Duration::from_secs(60),
             experimental_max_filter_num_per_query: 20,
             experimental_time_window_merge_threshold: 3,
+            read_preference: Default::default(),
+            frontend_tls: None,
         }
     }
 }

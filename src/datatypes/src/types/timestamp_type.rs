@@ -19,8 +19,8 @@ use arrow::datatypes::{
     TimestampNanosecondType as ArrowTimestampNanosecondType,
     TimestampSecondType as ArrowTimestampSecondType,
 };
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use enum_dispatch::enum_dispatch;
 use paste::paste;
 use serde::{Deserialize, Serialize};
@@ -166,14 +166,14 @@ macro_rules! impl_data_type_for_timestamp {
                         })
                 }
 
-                fn cast_value_ref(value: ValueRef) -> crate::Result<Option<Self::Wrapper>> {
+                fn cast_value_ref(value: &ValueRef) -> crate::Result<Option<Self::Wrapper>> {
                     match value {
                         ValueRef::Null => Ok(None),
                         ValueRef::Int64(v) =>{
-                            Ok(Some([<Timestamp $unit>]::from(v)))
+                            Ok(Some([<Timestamp $unit>]::from(*v)))
                         }
                         ValueRef::Timestamp(t) => match t.unit() {
-                            TimeUnit::$unit => Ok(Some([<Timestamp $unit>](t))),
+                            TimeUnit::$unit => Ok(Some([<Timestamp $unit>](*t))),
                             other => error::CastTypeSnafu {
                                 msg: format!(
                                     "Failed to cast Timestamp value with different unit {:?} to {}",
@@ -200,8 +200,8 @@ impl_data_type_for_timestamp!(Microsecond);
 
 #[cfg(test)]
 mod tests {
-    use common_time::timezone::set_default_timezone;
     use common_time::Date;
+    use common_time::timezone::set_default_timezone;
 
     use super::*;
 

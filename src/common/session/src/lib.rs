@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display, EnumString};
 
 /// Defines the read preference for frontend route operations,
 /// determining whether to read from the region leader or follower.
-#[derive(Debug, Clone, Copy, Default, EnumString, Display, AsRefStr, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, EnumString, Display, AsRefStr, PartialEq, Serialize, Deserialize,
+)]
 pub enum ReadPreference {
     #[default]
     // Reads all operations from the region leader. This is the default mode.

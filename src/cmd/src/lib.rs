@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches, let_chains)]
+#![feature(assert_matches)]
 
 use async_trait::async_trait;
-use common_telemetry::{error, info};
-use stat::{get_cpu_limit, get_memory_limit};
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
+use common_mem_prof::activate_heap_profile;
+use common_stat::{get_total_cpu_millicores, get_total_memory_bytes};
+use common_telemetry::{error, info, warn};
 
 use crate::error::Result;
 
@@ -43,7 +46,7 @@ lazy_static::lazy_static! {
 /// wait for the close signal, for unix platform it's SIGINT or SIGTERM
 #[cfg(unix)]
 async fn start_wait_for_close_signal() -> std::io::Result<()> {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
 
@@ -90,13 +93,13 @@ pub trait App: Send {
 
         self.start().await?;
 
-        if self.wait_signal() {
-            if let Err(e) = start_wait_for_close_signal().await {
-                error!(e; "Failed to listen for close signal");
-                // It's unusual to fail to listen for close signal, maybe there's something unexpected in
-                // the underlying system. So we stop the app instead of running nonetheless to let people
-                // investigate the issue.
-            }
+        if self.wait_signal()
+            && let Err(e) = start_wait_for_close_signal().await
+        {
+            error!(e; "Failed to listen for close signal");
+            // It's unusual to fail to listen for close signal, maybe there's something unexpected in
+            // the underlying system. So we stop the app instead of running nonetheless to let people
+            // investigate the issue.
         }
 
         self.stop().await?;
@@ -122,7 +125,8 @@ pub fn log_versions(version: &str, short_version: &str, app: &str) {
 }
 
 pub fn create_resource_limit_metrics(app: &str) {
-    if let Some(cpu_limit) = get_cpu_limit() {
+    let cpu_limit = get_total_cpu_millicores();
+    if cpu_limit > 0 {
         info!(
             "GreptimeDB start with cpu limit in millicores: {}",
             cpu_limit
@@ -130,7 +134,8 @@ pub fn create_resource_limit_metrics(app: &str) {
         CPU_LIMIT.with_label_values(&[app]).set(cpu_limit);
     }
 
-    if let Some(memory_limit) = get_memory_limit() {
+    let memory_limit = get_total_memory_bytes();
+    if memory_limit > 0 {
         info!(
             "GreptimeDB start with memory limit in bytes: {}",
             memory_limit
@@ -143,5 +148,22 @@ fn log_env_flags() {
     info!("command line arguments");
     for argument in std::env::args() {
         info!("argument: {}", argument);
+    }
+}
+
+pub fn maybe_activate_heap_profile(memory_options: &common_options::memory::MemoryOptions) {
+    if memory_options.enable_heap_profiling {
+        match activate_heap_profile() {
+            Ok(()) => {
+                info!("Heap profile is active");
+            }
+            Err(err) => {
+                if err.status_code() == StatusCode::Unsupported {
+                    info!("Heap profile is not supported");
+                } else {
+                    warn!(err; "Failed to activate heap profile");
+                }
+            }
+        }
     }
 }

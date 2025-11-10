@@ -16,7 +16,6 @@
 //! It can transform substrait plan into it's own plan and execute it.
 //! It also contains definition of expression, adapter and plan, and internal state management.
 
-#![feature(let_chains)]
 #![allow(dead_code)]
 #![warn(clippy::missing_docs_in_private_items)]
 #![warn(clippy::too_many_lines)]
@@ -49,8 +48,8 @@ pub use engine::FlowAuthHeader;
 pub(crate) use engine::{CreateFlowArgs, FlowId, TableName};
 pub use error::{Error, Result};
 pub use server::{
-    get_flow_auth_options, FlownodeBuilder, FlownodeInstance, FlownodeServer,
-    FlownodeServiceBuilder, FrontendInvoker,
+    FlownodeBuilder, FlownodeInstance, FlownodeServer, FlownodeServiceBuilder, FrontendInvoker,
+    get_flow_auth_options,
 };
 
 pub use crate::adapter::FlownodeOptions;

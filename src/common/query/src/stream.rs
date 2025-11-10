@@ -16,10 +16,10 @@ use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, Mutex};
 
-use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
-use datafusion::execution::context::TaskContext;
+use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use datafusion::execution::SendableRecordBatchStream as DfSendableRecordBatchStream;
+use datafusion::execution::context::TaskContext;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};

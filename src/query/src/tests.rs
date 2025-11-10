@@ -14,7 +14,7 @@
 
 use catalog::memory::MemoryCatalogManager;
 use common_query::OutputData;
-use common_recordbatch::{util, RecordBatch};
+use common_recordbatch::{RecordBatch, util};
 use session::context::QueryContext;
 use table::TableRef;
 
@@ -22,11 +22,11 @@ use crate::options::QueryOptions;
 use crate::parser::QueryLanguageParser;
 use crate::{QueryEngineFactory, QueryEngineRef};
 
-mod my_sum_udaf_example;
 mod query_engine_test;
 mod time_range_filter_test;
 
 mod function;
+mod vec_avg_test;
 mod vec_product_test;
 mod vec_sum_test;
 

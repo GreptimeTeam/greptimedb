@@ -17,27 +17,27 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use common_catalog::format_full_table_name;
-use common_query::logical_plan::{rename_logical_plan_columns, SubstraitPlanDecoderRef};
+use common_query::logical_plan::{SubstraitPlanDecoderRef, rename_logical_plan_columns};
 use datafusion::common::{ResolvedTableReference, TableReference};
 use datafusion::datasource::view::ViewTable;
-use datafusion::datasource::{provider_as_source, TableProvider};
+use datafusion::datasource::{TableProvider, provider_as_source};
 use datafusion::logical_expr::TableSource;
 use itertools::Itertools;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 pub mod dummy_catalog;
 use dummy_catalog::DummyCatalogList;
 use table::TableRef;
 
+use crate::CatalogManagerRef;
 use crate::error::{
-    CastManagerSnafu, DatafusionSnafu, DecodePlanSnafu, GetViewCacheSnafu, ProjectViewColumnsSnafu,
+    CastManagerSnafu, DecodePlanSnafu, GetViewCacheSnafu, ProjectViewColumnsSnafu,
     QueryAccessDeniedSnafu, Result, TableNotExistSnafu, ViewInfoNotFoundSnafu,
     ViewPlanColumnsChangedSnafu,
 };
 use crate::kvbackend::KvBackendCatalogManager;
-use crate::CatalogManagerRef;
 
 pub struct DfTableSourceProvider {
     catalog_manager: CatalogManagerRef,
@@ -68,6 +68,11 @@ impl DfTableSourceProvider {
             plan_decoder,
             enable_ident_normalization,
         }
+    }
+
+    /// Returns the query context.
+    pub fn query_ctx(&self) -> &QueryContextRef {
+        &self.query_ctx
     }
 
     pub fn resolve_table_ref(&self, table_ref: TableReference) -> Result<ResolvedTableReference> {
@@ -194,10 +199,10 @@ impl DfTableSourceProvider {
             logical_plan
         };
 
-        Ok(Arc::new(
-            ViewTable::try_new(logical_plan, Some(view_info.definition.to_string()))
-                .context(DatafusionSnafu)?,
-        ))
+        Ok(Arc::new(ViewTable::new(
+            logical_plan,
+            Some(view_info.definition.clone()),
+        )))
     }
 }
 
@@ -267,7 +272,7 @@ mod tests {
     use common_query::logical_plan::SubstraitPlanDecoder;
     use datafusion::catalog::CatalogProviderList;
     use datafusion::logical_expr::builder::LogicalTableSource;
-    use datafusion::logical_expr::{col, lit, LogicalPlan, LogicalPlanBuilder};
+    use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder, col, lit};
 
     use crate::information_schema::NoopInformationExtension;
 

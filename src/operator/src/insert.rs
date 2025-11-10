@@ -28,15 +28,16 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
-    default_engine, trace_services_table_name, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN,
-    TRACE_ID_COLUMN, TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY,
+    PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
+    TRACE_TABLE_NAME_SESSION_KEY, default_engine, trace_operations_table_name,
+    trace_services_table_name,
 };
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
 use datatypes::schema::SkippingIndexOptions;
@@ -44,23 +45,26 @@ use futures_util::future;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
-use snafu::prelude::*;
 use snafu::ResultExt;
+use snafu::prelude::*;
 use sql::partition::partition_rule_for_hexstring;
 use sql::statements::create::Partitions;
 use sql::statements::insert::Insert;
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
-use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
+use store_api::mito_engine_options::{
+    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TTL_KEY,
+    TWCS_TIME_WINDOW,
+};
 use store_api::storage::{RegionId, TableId};
+use table::TableRef;
 use table::metadata::TableInfo;
 use table::requests::{
-    InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TABLE_DATA_MODEL,
+    AUTO_CREATE_TABLE_KEY, InsertRequest as TableInsertRequest, TABLE_DATA_MODEL,
     TABLE_DATA_MODEL_TRACE_V1, VALID_TABLE_OPTION_KEYS,
 };
 use table::table_reference::TableReference;
-use table::TableRef;
 
 use crate::error::{
     CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, FindRegionLeaderSnafu,
@@ -70,7 +74,7 @@ use crate::expr_helper;
 use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::common::preprocess_row_insert_requests;
 use crate::req_convert::insert::{
-    fill_reqs_with_impure_default, ColumnToRow, RowToRegion, StatementToRegion, TableToRegion,
+    ColumnToRow, RowToRegion, StatementToRegion, TableToRegion, fill_reqs_with_impure_default,
 };
 use crate::statement::StatementExecutor;
 
@@ -304,7 +308,7 @@ impl Inserter {
             .create_or_alter_tables_on_demand(
                 &mut requests,
                 &ctx,
-                AutoCreateTableType::Logical(physical_table.to_string()),
+                AutoCreateTableType::Logical(physical_table.clone()),
                 statement_executor,
                 true,
                 true,
@@ -616,11 +620,16 @@ impl Inserter {
                 // note that auto create table shouldn't be ttl instant table
                 // for it's a very unexpected behavior and should be set by user explicitly
                 for mut create_table in create_tables {
-                    if create_table.table_name == trace_services_table_name(trace_table_name) {
-                        // Disable append mode for trace services table since it requires upsert behavior.
+                    if create_table.table_name == trace_services_table_name(trace_table_name)
+                        || create_table.table_name == trace_operations_table_name(trace_table_name)
+                    {
+                        // Disable append mode for auxiliary tables (services/operations) since they require upsert behavior.
                         create_table
                             .table_options
                             .insert(APPEND_MODE_KEY.to_string(), "false".to_string());
+                        // Remove `ttl` key from table options if it exists
+                        create_table.table_options.remove(TTL_KEY);
+
                         let table = self
                             .create_physical_table(create_table, None, ctx, statement_executor)
                             .await?;
@@ -716,14 +725,14 @@ impl Inserter {
         // schema with timestamp and field column
         let default_schema = vec![
             ColumnSchema {
-                column_name: GREPTIME_TIMESTAMP.to_string(),
+                column_name: greptime_timestamp().to_string(),
                 datatype: ColumnDataType::TimestampMillisecond as _,
                 semantic_type: SemanticType::Timestamp as _,
                 datatype_extension: None,
                 options: None,
             },
             ColumnSchema {
-                column_name: GREPTIME_VALUE.to_string(),
+                column_name: greptime_value().to_string(),
                 datatype: ColumnDataType::Float64 as _,
                 semantic_type: SemanticType::Field as _,
                 datatype_extension: None,
@@ -847,17 +856,17 @@ impl Inserter {
                 for col in &mut rows.schema {
                     match col.semantic_type {
                         x if x == SemanticType::Timestamp as i32 => {
-                            if let Some(ref ts_name) = ts_col_name {
-                                if col.column_name != *ts_name {
-                                    col.column_name = ts_name.clone();
-                                }
+                            if let Some(ref ts_name) = ts_col_name
+                                && col.column_name != *ts_name
+                            {
+                                col.column_name = ts_name.clone();
                             }
                         }
                         x if x == SemanticType::Field as i32 => {
-                            if let Some(ref field_name) = field_col_name {
-                                if col.column_name != *field_name {
-                                    col.column_name = field_name.clone();
-                                }
+                            if let Some(ref field_name) = field_col_name
+                                && col.column_name != *field_name
+                            {
+                                col.column_name = field_name.clone();
                             }
                         }
                         _ => {}
@@ -879,8 +888,8 @@ impl Inserter {
 
         Ok(Some(AlterTableExpr {
             catalog_name: catalog_name.to_string(),
-            schema_name: schema_name.to_string(),
-            table_name: table_name.to_string(),
+            schema_name: schema_name.clone(),
+            table_name: table_name.clone(),
             kind: Some(Kind::AddColumns(add_columns)),
         }))
     }
@@ -1008,7 +1017,7 @@ pub fn fill_table_options_for_create(
         AutoCreateTableType::Logical(physical_table) => {
             table_options.insert(
                 LOGICAL_TABLE_METADATA_KEY.to_string(),
-                physical_table.to_string(),
+                physical_table.clone(),
             );
         }
         AutoCreateTableType::Physical => {
@@ -1017,6 +1026,14 @@ pub fn fill_table_options_for_create(
             }
             if let Some(merge_mode) = ctx.extension(MERGE_MODE_KEY) {
                 table_options.insert(MERGE_MODE_KEY.to_string(), merge_mode.to_string());
+            }
+            if let Some(time_window) = ctx.extension(TWCS_TIME_WINDOW) {
+                table_options.insert(TWCS_TIME_WINDOW.to_string(), time_window.to_string());
+                // We need to set the compaction type explicitly.
+                table_options.insert(
+                    COMPACTION_TYPE.to_string(),
+                    COMPACTION_TYPE_TWCS.to_string(),
+                );
             }
         }
         // Set append_mode to true for log table.
@@ -1164,7 +1181,8 @@ impl FlowMirrorTask {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::{ColumnSchema as GrpcColumnSchema, RowInsertRequest, Rows, SemanticType, Value};
+    use api::v1::helper::{field_column_schema, time_index_column_schema};
+    use api::v1::{RowInsertRequest, Rows, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::cache::new_table_flownode_set_cache;
     use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
@@ -1173,9 +1191,9 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use moka::future::Cache;
     use session::context::QueryContext;
+    use table::TableRef;
     use table::dist_table::DummyDataSource;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
-    use table::TableRef;
 
     use super::*;
     use crate::tests::{create_partition_rule_manager, prepare_mocked_backend};
@@ -1235,18 +1253,8 @@ mod tests {
             table_name: "test_table".to_string(),
             rows: Some(Rows {
                 schema: vec![
-                    GrpcColumnSchema {
-                        column_name: "ts_wrong".to_string(),
-                        datatype: api::v1::ColumnDataType::TimestampMillisecond as i32,
-                        semantic_type: SemanticType::Timestamp as i32,
-                        ..Default::default()
-                    },
-                    GrpcColumnSchema {
-                        column_name: "field_wrong".to_string(),
-                        datatype: api::v1::ColumnDataType::Float64 as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        ..Default::default()
-                    },
+                    time_index_column_schema("ts_wrong", ColumnDataType::TimestampMillisecond),
+                    field_column_schema("field_wrong", ColumnDataType::Float64),
                 ],
                 rows: vec![api::v1::Row {
                     values: vec![Value::default(), Value::default()],

@@ -17,27 +17,34 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub use bulk::part::EncodedBulkPart;
+use bytes::Bytes;
 use common_time::Timestamp;
+use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::key_values::KeyValue;
 pub use mito_codec::key_values::KeyValues;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
 use crate::config::MitoConfig;
-use crate::error::Result;
+use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::bulk::{BulkMemtableBuilder, CompactDispatcher};
 use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
+use crate::read::Batch;
 use crate::read::prune::PruneTimeIterator;
 use crate::read::scan_region::PredicateGroup;
-use crate::read::Batch;
-use crate::region::options::{MemtableOptions, MergeMode};
+use crate::region::options::{MemtableOptions, MergeMode, RegionOptions};
+use crate::sst::FormatType;
 use crate::sst::file::FileTimeRange;
+use crate::sst::parquet::SstInfo;
+use crate::sst::parquet::file_range::PreFilterMode;
 
 mod builder;
 pub mod bulk;
@@ -59,16 +66,68 @@ pub use time_partition::filter_record_batch;
 pub type MemtableId = u32;
 
 /// Config for memtables.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MemtableConfig {
     PartitionTree(PartitionTreeConfig),
+    #[default]
     TimeSeries,
 }
 
-impl Default for MemtableConfig {
+/// Options for querying ranges from a memtable.
+#[derive(Clone)]
+pub struct RangesOptions {
+    /// Whether the ranges are being queried for flush.
+    pub for_flush: bool,
+    /// Mode to pre-filter columns in ranges.
+    pub pre_filter_mode: PreFilterMode,
+    /// Predicate to filter the data.
+    pub predicate: PredicateGroup,
+    /// Sequence range to filter the data.
+    pub sequence: Option<SequenceRange>,
+}
+
+impl Default for RangesOptions {
     fn default() -> Self {
-        Self::TimeSeries
+        Self {
+            for_flush: false,
+            pre_filter_mode: PreFilterMode::All,
+            predicate: PredicateGroup::default(),
+            sequence: None,
+        }
+    }
+}
+
+impl RangesOptions {
+    /// Creates a new [RangesOptions] for flushing.
+    pub fn for_flush() -> Self {
+        Self {
+            for_flush: true,
+            pre_filter_mode: PreFilterMode::All,
+            predicate: PredicateGroup::default(),
+            sequence: None,
+        }
+    }
+
+    /// Sets the pre-filter mode.
+    #[must_use]
+    pub fn with_pre_filter_mode(mut self, pre_filter_mode: PreFilterMode) -> Self {
+        self.pre_filter_mode = pre_filter_mode;
+        self
+    }
+
+    /// Sets the predicate.
+    #[must_use]
+    pub fn with_predicate(mut self, predicate: PredicateGroup) -> Self {
+        self.predicate = predicate;
+        self
+    }
+
+    /// Sets the sequence range.
+    #[must_use]
+    pub fn with_sequence(mut self, sequence: Option<SequenceRange>) -> Self {
+        self.sequence = sequence;
+        self
     }
 }
 
@@ -136,6 +195,8 @@ impl MemtableStats {
 
 pub type BoxedBatchIterator = Box<dyn Iterator<Item = Result<Batch>> + Send>;
 
+pub type BoxedRecordBatchIterator = Box<dyn Iterator<Item = Result<RecordBatch>> + Send>;
+
 /// Ranges in a memtable.
 #[derive(Default)]
 pub struct MemtableRanges {
@@ -143,6 +204,19 @@ pub struct MemtableRanges {
     pub ranges: BTreeMap<usize, MemtableRange>,
     /// Statistics of the memtable at the query time.
     pub stats: MemtableStats,
+}
+
+impl IterBuilder for MemtableRanges {
+    fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
+        UnsupportedOperationSnafu {
+            err_msg: "MemtableRanges does not support build iterator",
+        }
+        .fail()
+    }
+
+    fn is_record_batch(&self) -> bool {
+        self.ranges.values().all(|range| range.is_record_batch())
+    }
 }
 
 /// In memory write buffer.
@@ -170,16 +244,16 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<table::predicate::Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator>;
 
     /// Returns the ranges in the memtable.
+    ///
     /// The returned map contains the range id and the range after applying the predicate.
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
+        options: RangesOptions,
     ) -> Result<MemtableRanges>;
 
     /// Returns true if the memtable is empty.
@@ -195,6 +269,14 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     ///
     /// A region must freeze the memtable before invoking this method.
     fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
+
+    /// Compacts the memtable.
+    ///
+    /// The `for_flush` is true when the flush job calls this method.
+    fn compact(&self, for_flush: bool) -> Result<()> {
+        let _ = for_flush;
+        Ok(())
+    }
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
@@ -203,6 +285,12 @@ pub type MemtableRef = Arc<dyn Memtable>;
 pub trait MemtableBuilder: Send + Sync + fmt::Debug {
     /// Builds a new memtable instance.
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
+
+    /// Returns true if the memtable supports bulk insert and benefits from it.
+    fn use_bulk_insert(&self, metadata: &RegionMetadataRef) -> bool {
+        let _metadata = metadata;
+        false
+    }
 }
 
 pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
@@ -250,15 +338,13 @@ impl AllocTracker {
     ///
     /// The region MUST ensure that it calls this method inside the region writer's write lock.
     pub(crate) fn done_allocating(&self) {
-        if let Some(write_buffer_manager) = &self.write_buffer_manager {
-            if self
+        if let Some(write_buffer_manager) = &self.write_buffer_manager
+            && self
                 .is_done_allocating
                 .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
-            {
-                write_buffer_manager
-                    .schedule_free_mem(self.bytes_allocated.load(Ordering::Relaxed));
-            }
+        {
+            write_buffer_manager.schedule_free_mem(self.bytes_allocated.load(Ordering::Relaxed));
         }
     }
 
@@ -294,6 +380,7 @@ impl Drop for AllocTracker {
 pub(crate) struct MemtableBuilderProvider {
     write_buffer_manager: Option<WriteBufferManagerRef>,
     config: Arc<MitoConfig>,
+    compact_dispatcher: Arc<CompactDispatcher>,
 }
 
 impl MemtableBuilderProvider {
@@ -301,19 +388,41 @@ impl MemtableBuilderProvider {
         write_buffer_manager: Option<WriteBufferManagerRef>,
         config: Arc<MitoConfig>,
     ) -> Self {
+        let compact_dispatcher =
+            Arc::new(CompactDispatcher::new(config.max_background_compactions));
+
         Self {
             write_buffer_manager,
             config,
+            compact_dispatcher,
         }
     }
 
-    pub(crate) fn builder_for_options(
-        &self,
-        options: Option<&MemtableOptions>,
-        dedup: bool,
-        merge_mode: MergeMode,
-    ) -> MemtableBuilderRef {
-        match options {
+    pub(crate) fn builder_for_options(&self, options: &RegionOptions) -> MemtableBuilderRef {
+        let dedup = options.need_dedup();
+        let merge_mode = options.merge_mode();
+        let flat_format = options
+            .sst_format
+            .map(|format| format == FormatType::Flat)
+            .unwrap_or(self.config.default_experimental_flat_format);
+        if flat_format {
+            if options.memtable.is_some() {
+                common_telemetry::info!(
+                    "Overriding memtable config, use BulkMemtable under flat format"
+                );
+            }
+
+            return Arc::new(
+                BulkMemtableBuilder::new(
+                    self.write_buffer_manager.clone(),
+                    !dedup, // append_mode: true if not dedup, false if dedup
+                    merge_mode,
+                )
+                .with_compact_dispatcher(self.compact_dispatcher.clone()),
+            );
+        }
+
+        match &options.memtable {
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
                 dedup,
@@ -336,6 +445,17 @@ impl MemtableBuilderProvider {
     }
 
     fn default_memtable_builder(&self, dedup: bool, merge_mode: MergeMode) -> MemtableBuilderRef {
+        if self.config.default_experimental_flat_format {
+            return Arc::new(
+                BulkMemtableBuilder::new(
+                    self.write_buffer_manager.clone(),
+                    !dedup, // append_mode: true if not dedup, false if dedup
+                    merge_mode,
+                )
+                .with_compact_dispatcher(self.compact_dispatcher.clone()),
+            );
+        }
+
         match &self.config.memtable {
             MemtableConfig::PartitionTree(config) => {
                 let mut config = config.clone();
@@ -354,11 +474,73 @@ impl MemtableBuilderProvider {
     }
 }
 
+/// Metrics for scanning a memtable.
+#[derive(Clone, Default)]
+pub struct MemScanMetrics(Arc<Mutex<MemScanMetricsData>>);
+
+impl MemScanMetrics {
+    /// Merges the metrics.
+    pub(crate) fn merge_inner(&self, inner: &MemScanMetricsData) {
+        let mut metrics = self.0.lock().unwrap();
+        metrics.total_series += inner.total_series;
+        metrics.num_rows += inner.num_rows;
+        metrics.num_batches += inner.num_batches;
+        metrics.scan_cost += inner.scan_cost;
+    }
+
+    /// Gets the metrics data.
+    pub(crate) fn data(&self) -> MemScanMetricsData {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct MemScanMetricsData {
+    /// Total series in the memtable.
+    pub(crate) total_series: usize,
+    /// Number of rows read.
+    pub(crate) num_rows: usize,
+    /// Number of batch read.
+    pub(crate) num_batches: usize,
+    /// Duration to scan the memtable.
+    pub(crate) scan_cost: Duration,
+}
+
+/// Encoded range in the memtable.
+pub struct EncodedRange {
+    /// Encoded file data.
+    pub data: Bytes,
+    /// Metadata of the encoded range.
+    pub sst_info: SstInfo,
+}
+
 /// Builder to build an iterator to read the range.
 /// The builder should know the projection and the predicate to build the iterator.
 pub trait IterBuilder: Send + Sync {
     /// Returns the iterator to read the range.
-    fn build(&self) -> Result<BoxedBatchIterator>;
+    fn build(&self, metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator>;
+
+    /// Returns whether the iterator is a record batch iterator.
+    fn is_record_batch(&self) -> bool {
+        false
+    }
+
+    /// Returns the record batch iterator to read the range.
+    fn build_record_batch(
+        &self,
+        metrics: Option<MemScanMetrics>,
+    ) -> Result<BoxedRecordBatchIterator> {
+        let _metrics = metrics;
+        UnsupportedOperationSnafu {
+            err_msg: "Record batch iterator is not supported by this memtable",
+        }
+        .fail()
+    }
+
+    /// Returns the [EncodedRange] if the range is already encoded into SST.
+    fn encoded_range(&self) -> Option<EncodedRange> {
+        None
+    }
 }
 
 pub type BoxedIterBuilder = Box<dyn IterBuilder>;
@@ -410,8 +592,12 @@ impl MemtableRange {
     /// Builds an iterator to read the range.
     /// Filters the result by the specific time range, this ensures memtable won't return
     /// rows out of the time range when new rows are inserted.
-    pub fn build_prune_iter(&self, time_range: FileTimeRange) -> Result<BoxedBatchIterator> {
-        let iter = self.context.builder.build()?;
+    pub fn build_prune_iter(
+        &self,
+        time_range: FileTimeRange,
+        metrics: Option<MemScanMetrics>,
+    ) -> Result<BoxedBatchIterator> {
+        let iter = self.context.builder.build(metrics)?;
         let time_filters = self.context.predicate.time_filters();
         Ok(Box::new(PruneTimeIterator::new(
             iter,
@@ -422,11 +608,32 @@ impl MemtableRange {
 
     /// Builds an iterator to read all rows in range.
     pub fn build_iter(&self) -> Result<BoxedBatchIterator> {
-        self.context.builder.build()
+        self.context.builder.build(None)
+    }
+
+    /// Builds a record batch iterator to read all rows in range.
+    ///
+    /// This method doesn't take the optional time range because a bulk part is immutable
+    /// so we don't need to filter rows out of the time range.
+    pub fn build_record_batch_iter(
+        &self,
+        metrics: Option<MemScanMetrics>,
+    ) -> Result<BoxedRecordBatchIterator> {
+        self.context.builder.build_record_batch(metrics)
+    }
+
+    /// Returns whether the iterator is a record batch iterator.
+    pub fn is_record_batch(&self) -> bool {
+        self.context.builder.is_record_batch()
     }
 
     pub fn num_rows(&self) -> usize {
         self.num_rows
+    }
+
+    /// Returns the encoded range if available.
+    pub fn encoded(&self) -> Option<EncodedRange> {
+        self.context.builder.encoded_range()
     }
 }
 

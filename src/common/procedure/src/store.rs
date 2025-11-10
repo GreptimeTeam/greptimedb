@@ -20,9 +20,9 @@ use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
+use crate::ProcedureId;
 use crate::error::{Result, ToJsonSnafu};
 pub(crate) use crate::store::state_store::StateStoreRef;
-use crate::ProcedureId;
 
 pub mod poison_store;
 pub mod state_store;
@@ -37,6 +37,7 @@ macro_rules! proc_path {
     ($store: expr, $fmt:expr, $($args:tt)*) => { format!("{}{}", $store.proc_path(), format_args!($fmt, $($args)*)) };
 }
 
+#[cfg(test)]
 pub(crate) use proc_path;
 
 /// Serialized data of a procedure.
@@ -342,9 +343,9 @@ mod tests {
 
     use object_store::ObjectStore;
 
+    use crate::BoxedProcedure;
     use crate::procedure::PoisonKeys;
     use crate::store::state_store::ObjectStateStore;
-    use crate::BoxedProcedure;
 
     impl ProcedureStore {
         pub(crate) fn from_object_store(store: ObjectStore) -> ProcedureStore {
@@ -355,7 +356,7 @@ mod tests {
     }
 
     use async_trait::async_trait;
-    use common_test_util::temp_dir::{create_temp_dir, TempDir};
+    use common_test_util::temp_dir::{TempDir, create_temp_dir};
     use object_store::services::Fs as Builder;
 
     use super::*;
@@ -579,13 +580,7 @@ mod tests {
         let type_name = procedure.type_name().to_string();
         let data = procedure.dump().unwrap();
         store
-            .store_procedure(
-                procedure_id,
-                0,
-                type_name.to_string(),
-                data.to_string(),
-                None,
-            )
+            .store_procedure(procedure_id, 0, type_name.clone(), data.clone(), None)
             .await
             .unwrap();
         let message = ProcedureMessage {

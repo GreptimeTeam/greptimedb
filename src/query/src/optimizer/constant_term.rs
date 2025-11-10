@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::fmt;
+use std::fmt::Formatter;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -21,10 +22,10 @@ use common_function::scalars::matches_term::MatchesTermFinder;
 use datafusion::config::ConfigOptions;
 use datafusion::error::Result as DfResult;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion::physical_plan::filter::FilterExec;
 use datafusion_common::ScalarValue;
+use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::expressions::Literal;
 use datafusion_physical_expr::{PhysicalExpr, ScalarFunctionExpr};
@@ -129,6 +130,10 @@ impl PhysicalExpr for PreCompiledMatchesTermExpr {
             probes: self.probes.clone(),
         }))
     }
+
+    fn fmt_sql(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self)
+    }
 }
 
 /// Optimizer rule that pre-compiles constant term in `matches_term` function.
@@ -173,26 +178,26 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
                                 return Ok(Transformed::no(expr));
                             }
 
-                            if let Some(lit) = args[1].as_any().downcast_ref::<Literal>() {
-                                if let ScalarValue::Utf8(Some(term)) = lit.value() {
-                                    let finder = MatchesTermFinder::new(term);
+                            if let Some(lit) = args[1].as_any().downcast_ref::<Literal>()
+                                && let ScalarValue::Utf8(Some(term)) = lit.value()
+                            {
+                                let finder = MatchesTermFinder::new(term);
 
-                                    // For debugging purpose. Not really precise but enough for most cases.
-                                    let probes = term
-                                        .split(|c: char| !c.is_alphanumeric())
-                                        .filter(|s| !s.is_empty())
-                                        .map(|s| s.to_string())
-                                        .collect();
+                                // For debugging purpose. Not really precise but enough for most cases.
+                                let probes = term
+                                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| s.to_string())
+                                    .collect();
 
-                                    let expr = PreCompiledMatchesTermExpr {
-                                        text: args[0].clone(),
-                                        term: term.to_string(),
-                                        finder,
-                                        probes,
-                                    };
+                                let expr = PreCompiledMatchesTermExpr {
+                                    text: args[0].clone(),
+                                    term: term.clone(),
+                                    finder,
+                                    probes,
+                                };
 
-                                    return Ok(Transformed::yes(Arc::new(expr)));
-                                }
+                                return Ok(Transformed::yes(Arc::new(expr)));
                             }
                         }
 
@@ -230,20 +235,20 @@ mod tests {
     use arrow::array::{ArrayRef, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
+    use catalog::memory::MemoryCatalogManager;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_function::scalars::matches_term::MatchesTermFunction;
     use common_function::scalars::udf::create_udf;
-    use common_function::state::FunctionState;
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
     use datafusion::physical_optimizer::PhysicalOptimizerRule;
     use datafusion::physical_plan::filter::FilterExec;
     use datafusion::physical_plan::get_plan_string;
-    use datafusion::physical_plan::memory::MemoryExec;
-    use datafusion_common::{Column, DFSchema, ScalarValue};
+    use datafusion_common::{Column, DFSchema};
     use datafusion_expr::expr::ScalarFunction;
-    use datafusion_expr::{Expr, ScalarUDF};
-    use datafusion_physical_expr::{create_physical_expr, ScalarFunctionExpr};
+    use datafusion_expr::{Expr, Literal, ScalarUDF};
+    use datafusion_physical_expr::{ScalarFunctionExpr, create_physical_expr};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use session::context::QueryContext;
@@ -298,15 +303,17 @@ mod tests {
             .unwrap();
         let table = EmptyTable::from_table_info(&table_info);
         let catalog_list = MemoryCatalogManager::with_default_setup();
-        assert!(catalog_list
-            .register_table_sync(RegisterTableRequest {
-                catalog: DEFAULT_CATALOG_NAME.to_string(),
-                schema: DEFAULT_SCHEMA_NAME.to_string(),
-                table_name,
-                table_id: 1024,
-                table,
-            })
-            .is_ok());
+        assert!(
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name,
+                    table_id: 1024,
+                    table,
+                })
+                .is_ok()
+        );
         QueryEngineFactory::new(
             catalog_list,
             None,
@@ -320,11 +327,7 @@ mod tests {
     }
 
     fn matches_term_udf() -> Arc<ScalarUDF> {
-        Arc::new(create_udf(
-            Arc::new(MatchesTermFunction),
-            QueryContext::arc(),
-            Arc::new(FunctionState::default()),
-        ))
+        Arc::new(create_udf(Arc::new(MatchesTermFunction::default())))
     }
 
     #[test]
@@ -335,18 +338,16 @@ mod tests {
         let predicate = create_physical_expr(
             &Expr::ScalarFunction(ScalarFunction::new_udf(
                 matches_term_udf(),
-                vec![
-                    Expr::Column(Column::from_name("text")),
-                    Expr::Literal(ScalarValue::Utf8(Some("hello".to_string()))),
-                ],
+                vec![Expr::Column(Column::from_name("text")), "hello".lit()],
             )),
             &DFSchema::try_from(batch.schema().clone()).unwrap(),
             &Default::default(),
         )
         .unwrap();
 
-        let input =
-            Arc::new(MemoryExec::try_new(&[vec![batch.clone()]], batch.schema(), None).unwrap());
+        let input = DataSourceExec::from_data_source(
+            MemorySourceConfig::try_new(&[vec![batch.clone()]], batch.schema(), None).unwrap(),
+        );
         let filter = FilterExec::try_new(predicate, input).unwrap();
 
         // Apply the optimizer
@@ -385,8 +386,9 @@ mod tests {
         )
         .unwrap();
 
-        let input =
-            Arc::new(MemoryExec::try_new(&[vec![batch.clone()]], batch.schema(), None).unwrap());
+        let input = DataSourceExec::from_data_source(
+            MemorySourceConfig::try_new(&[vec![batch.clone()]], batch.schema(), None).unwrap(),
+        );
         let filter = FilterExec::try_new(predicate, input).unwrap();
 
         let optimizer = MatchesConstantTermOptimizer;
@@ -408,7 +410,7 @@ mod tests {
     async fn test_matches_term_optimization_from_sql() {
         let sql = "WITH base AS (
         SELECT text, timestamp FROM test 
-        WHERE MATCHES_TERM(text, 'hello world') 
+        WHERE MATCHES_TERM(text, 'hello wo_rld') 
         AND timestamp > '2025-01-01 00:00:00'
     ),
     subquery1 AS (
@@ -468,11 +470,13 @@ mod tests {
         let plan_str = get_plan_string(&physical_plan).join("\n");
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"foo\", probes: [\"foo\"]"));
         assert!(plan_str.contains(
-            "MatchesConstTerm(text@0, term: \"hello world\", probes: [\"hello\", \"world\"]"
+            "MatchesConstTerm(text@0, term: \"hello wo_rld\", probes: [\"hello\", \"wo_rld\"]"
         ));
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"world\", probes: [\"world\"]"));
-        assert!(plan_str
-            .contains("MatchesConstTerm(text@0, term: \"greeting\", probes: [\"greeting\"]"));
+        assert!(
+            plan_str
+                .contains("MatchesConstTerm(text@0, term: \"greeting\", probes: [\"greeting\"]")
+        );
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"there\", probes: [\"there\"]"));
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"42\", probes: [\"42\"]"));
         assert!(!plan_str.contains("matches_term"))

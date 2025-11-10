@@ -12,24 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use common_meta::key::{CANDIDATES_ROOT, ELECTION_KEY};
 use common_telemetry::{error, warn};
 use common_time::Timestamp;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sqlx::mysql::{MySqlArguments, MySqlRow};
 use sqlx::pool::PoolConnection;
 use sqlx::query::Query;
 use sqlx::{MySql, MySqlPool, MySqlTransaction, Row};
-use tokio::sync::{broadcast, Mutex, MutexGuard};
+use tokio::sync::{Mutex, MutexGuard, broadcast};
 use tokio::time::MissedTickBehavior;
 
-use crate::election::rds::{parse_value_and_expire_time, Lease, RdsLeaderKey, LEASE_SEP};
+use crate::election::rds::{LEASE_SEP, Lease, RdsLeaderKey, parse_value_and_expire_time};
 use crate::election::{
-    listen_leader_change, send_leader_change_and_set_flags, Election, LeaderChangeMessage,
-    CANDIDATES_ROOT, ELECTION_KEY,
+    Election, LeaderChangeMessage, listen_leader_change, send_leader_change_and_set_flags,
 };
 use crate::error::{
     AcquireMySqlClientSnafu, DecodeSqlValueSnafu, DeserializeFromJsonSnafu,
@@ -984,8 +984,8 @@ mod tests {
     use common_telemetry::init_default_ut_logging;
 
     use super::*;
-    use crate::bootstrap::create_mysql_pool;
     use crate::error;
+    use crate::utils::mysql::create_mysql_pool;
 
     async fn create_mysql_client(
         table_name: Option<&str>,
@@ -1000,7 +1000,7 @@ mod tests {
             }
             .fail();
         }
-        let pool = create_mysql_pool(&[endpoint]).await.unwrap();
+        let pool = create_mysql_pool(&[endpoint], None).await.unwrap();
         let mut client = ElectionMysqlClient::new(
             pool,
             execution_timeout,
@@ -1161,6 +1161,11 @@ mod tests {
             version: "test_version".to_string(),
             git_commit: "test_git_commit".to_string(),
             start_time_ms: 0,
+            total_cpu_millicores: 0,
+            total_memory_bytes: 0,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
+            hostname: "test_hostname".to_string(),
         };
         mysql_election.register_candidate(&node_info).await.unwrap();
     }
@@ -1190,7 +1195,7 @@ mod tests {
             ));
             handles.push(handle);
         }
-        // Wait for candidates to registrate themselves and renew their leases at least once.
+        // Wait for candidates to register themselves and renew their leases at least once.
         tokio::time::sleep(candidate_lease_ttl / 2 + Duration::from_secs(1)).await;
 
         let (tx, _) = broadcast::channel(100);

@@ -12,39 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode as HttpStatusCode};
 use axum::response::IntoResponse;
-use axum::Extension;
-use chrono::Utc;
 use common_catalog::consts::{PARENT_SPAN_ID_COLUMN, TRACE_TABLE_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::{debug, error, tracing, warn};
-use serde::{de, Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value as JsonValue;
 use session::context::{Channel, QueryContext};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    status_code_to_http_status, CollectRecordbatchSnafu, Error, InvalidJaegerQuerySnafu, Result,
+    CollectRecordbatchSnafu, Error, InvalidJaegerQuerySnafu, Result, status_code_to_http_status,
 };
-use crate::http::extractor::TraceTableName;
 use crate::http::HttpRecordsOutput;
+use crate::http::extractor::TraceTableName;
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::{
     DURATION_NANO_COLUMN, KEY_OTEL_SCOPE_NAME, KEY_OTEL_SCOPE_VERSION, KEY_OTEL_STATUS_CODE,
-    KEY_SERVICE_NAME, KEY_SPAN_KIND, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN,
-    SCOPE_VERSION_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN,
-    SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE,
-    SPAN_STATUS_PREFIX, SPAN_STATUS_UNSET, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    KEY_OTEL_STATUS_ERROR_KEY, KEY_OTEL_STATUS_MESSAGE, KEY_OTEL_TRACE_STATE, KEY_SERVICE_NAME,
+    KEY_SPAN_KIND, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN, SCOPE_VERSION_COLUMN,
+    SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_ERROR,
+    SPAN_STATUS_MESSAGE_COLUMN, SPAN_STATUS_PREFIX, SPAN_STATUS_UNSET, TIMESTAMP_COLUMN,
+    TRACE_ID_COLUMN, TRACE_STATE_COLUMN,
 };
 use crate::query_handler::JaegerQueryHandlerRef;
 
@@ -52,7 +53,6 @@ pub const JAEGER_QUERY_TABLE_NAME_KEY: &str = "jaeger_query_table_name";
 
 const REF_TYPE_CHILD_OF: &str = "CHILD_OF";
 const SPAN_KIND_TIME_FMTS: [&str; 2] = ["%Y-%m-%d %H:%M:%S%.6f%z", "%Y-%m-%d %H:%M:%S%.9f%z"];
-pub const JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER: &str = "x-greptime-jaeger-query-time-range";
 
 /// JaegerAPIResponse is the response of Jaeger HTTP API.
 /// The original version is `structuredResponse` which is defined in https://github.com/jaegertracing/jaeger/blob/main/cmd/query/app/http_handler.go.
@@ -528,13 +528,6 @@ pub async fn handle_get_operations(
         query_params, query_ctx, headers
     );
 
-    let (start, end) = match parse_jaeger_time_range_for_operations(&headers, &query_params) {
-        Ok((start, end)) => (start, end),
-        Err(e) => return error_response(e),
-    };
-
-    debug!("Get operations with start: {:?}, end: {:?}", start, end);
-
     if let Some(service_name) = &query_params.service_name {
         update_query_context(&mut query_ctx, table_name);
         let query_ctx = Arc::new(query_ctx);
@@ -546,13 +539,7 @@ pub async fn handle_get_operations(
             .start_timer();
 
         match handler
-            .get_operations(
-                query_ctx,
-                service_name,
-                query_params.span_kind.as_deref(),
-                start,
-                end,
-            )
+            .get_operations(query_ctx, service_name, query_params.span_kind.as_deref())
             .await
         {
             Ok(output) => match covert_to_records(output).await {
@@ -625,15 +612,7 @@ pub async fn handle_get_operations_by_service(
         .with_label_values(&[&db, "/api/services"])
         .start_timer();
 
-    let (start, end) = match parse_jaeger_time_range_for_operations(&headers, &query_params) {
-        Ok((start, end)) => (start, end),
-        Err(e) => return error_response(e),
-    };
-
-    match handler
-        .get_operations(query_ctx, &service_name, None, start, end)
-        .await
-    {
+    match handler.get_operations(query_ctx, &service_name, None).await {
         Ok(output) => match covert_to_records(output).await {
             Ok(Some(records)) => match operations_from_records(records, false) {
                 Ok(operations) => {
@@ -677,7 +656,10 @@ async fn covert_to_records(output: Output) -> Result<Option<HttpRecordsOutput>> 
                     .await
                     .context(CollectRecordbatchSnafu)?,
             )?;
-            debug!("The query records: {:?}", records);
+            debug!(
+                "The query records: {}",
+                serde_json::to_string(&records).unwrap()
+            );
             Ok(Some(records))
         }
         // It's unlikely to happen. However, if the output is not a stream, return None.
@@ -721,7 +703,8 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     // maintain the mapping: trace_id -> (process_id -> service_name).
     let mut trace_id_to_processes: HashMap<String, HashMap<String, String>> = HashMap::new();
     // maintain the mapping: trace_id -> spans.
-    let mut trace_id_to_spans: HashMap<String, Vec<Span>> = HashMap::new();
+    // use BTreeMap to retain order
+    let mut trace_id_to_spans: BTreeMap<String, Vec<Span>> = BTreeMap::new();
     // maintain the mapping: service.name -> resource.attributes.
     let mut service_to_resource_attributes: HashMap<String, Vec<KeyValue>> = HashMap::new();
 
@@ -789,14 +772,14 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     }
                 }
                 PARENT_SPAN_ID_COLUMN => {
-                    if let JsonValue::String(parent_span_id) = cell {
-                        if !parent_span_id.is_empty() {
-                            span.references.push(Reference {
-                                trace_id: span.trace_id.clone(),
-                                span_id: parent_span_id,
-                                ref_type: REF_TYPE_CHILD_OF.to_string(),
-                            });
-                        }
+                    if let JsonValue::String(parent_span_id) = cell
+                        && !parent_span_id.is_empty()
+                    {
+                        span.references.push(Reference {
+                            trace_id: span.trace_id.clone(),
+                            span_id: parent_span_id,
+                            ref_type: REF_TYPE_CHILD_OF.to_string(),
+                        });
                     }
                 }
                 SPAN_EVENTS_COLUMN => {
@@ -840,47 +823,80 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     }
                 }
                 SCOPE_NAME_COLUMN => {
-                    if let JsonValue::String(scope_name) = cell {
-                        if !scope_name.is_empty() {
-                            span.tags.push(KeyValue {
-                                key: KEY_OTEL_SCOPE_NAME.to_string(),
-                                value_type: ValueType::String,
-                                value: Value::String(scope_name),
-                            });
-                        }
+                    if let JsonValue::String(scope_name) = cell
+                        && !scope_name.is_empty()
+                    {
+                        span.tags.push(KeyValue {
+                            key: KEY_OTEL_SCOPE_NAME.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(scope_name),
+                        });
                     }
                 }
                 SCOPE_VERSION_COLUMN => {
-                    if let JsonValue::String(scope_version) = cell {
-                        if !scope_version.is_empty() {
-                            span.tags.push(KeyValue {
-                                key: KEY_OTEL_SCOPE_VERSION.to_string(),
-                                value_type: ValueType::String,
-                                value: Value::String(scope_version),
-                            });
-                        }
+                    if let JsonValue::String(scope_version) = cell
+                        && !scope_version.is_empty()
+                    {
+                        span.tags.push(KeyValue {
+                            key: KEY_OTEL_SCOPE_VERSION.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(scope_version),
+                        });
                     }
                 }
                 SPAN_KIND_COLUMN => {
-                    if let JsonValue::String(span_kind) = cell {
-                        if !span_kind.is_empty() {
+                    if let JsonValue::String(span_kind) = cell
+                        && !span_kind.is_empty()
+                    {
+                        span.tags.push(KeyValue {
+                            key: KEY_SPAN_KIND.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(normalize_span_kind(&span_kind)),
+                        });
+                    }
+                }
+                SPAN_STATUS_CODE => {
+                    if let JsonValue::String(span_status) = cell
+                        && span_status != SPAN_STATUS_UNSET
+                        && !span_status.is_empty()
+                    {
+                        span.tags.push(KeyValue {
+                            key: KEY_OTEL_STATUS_CODE.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(normalize_status_code(&span_status)),
+                        });
+                        // set error to comply with the Jaeger API
+                        if span_status == SPAN_STATUS_ERROR {
                             span.tags.push(KeyValue {
-                                key: KEY_SPAN_KIND.to_string(),
-                                value_type: ValueType::String,
-                                value: Value::String(normalize_span_kind(&span_kind)),
+                                key: KEY_OTEL_STATUS_ERROR_KEY.to_string(),
+                                value_type: ValueType::Boolean,
+                                value: Value::Boolean(true),
                             });
                         }
                     }
                 }
-                SPAN_STATUS_CODE => {
-                    if let JsonValue::String(span_status) = cell {
-                        if span_status != SPAN_STATUS_UNSET && !span_status.is_empty() {
-                            span.tags.push(KeyValue {
-                                key: KEY_OTEL_STATUS_CODE.to_string(),
-                                value_type: ValueType::String,
-                                value: Value::String(normalize_status_code(&span_status)),
-                            });
-                        }
+
+                SPAN_STATUS_MESSAGE_COLUMN => {
+                    if let JsonValue::String(span_status_message) = cell
+                        && !span_status_message.is_empty()
+                    {
+                        span.tags.push(KeyValue {
+                            key: KEY_OTEL_STATUS_MESSAGE.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(span_status_message),
+                        });
+                    }
+                }
+
+                TRACE_STATE_COLUMN => {
+                    if let JsonValue::String(trace_state) = cell
+                        && !trace_state.is_empty()
+                    {
+                        span.tags.push(KeyValue {
+                            key: KEY_OTEL_TRACE_STATE.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(trace_state),
+                        });
                     }
                 }
 
@@ -900,16 +916,16 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                             ) {
                                 span.tags.push(keyvalue);
                             }
-                        } else if column_name.starts_with(RESOURCE_ATTR_PREFIX) {
-                            if let Some(keyvalue) = to_keyvalue(
+                        } else if column_name.starts_with(RESOURCE_ATTR_PREFIX)
+                            && let Some(keyvalue) = to_keyvalue(
                                 column_name
                                     .strip_prefix(RESOURCE_ATTR_PREFIX)
                                     .unwrap_or_default()
                                     .to_string(),
                                 cell,
-                            ) {
-                                resource_tags.push(keyvalue);
-                            }
+                            )
+                        {
+                            resource_tags.push(keyvalue);
                         }
                     }
                 }
@@ -972,7 +988,7 @@ fn to_keyvalue(key: String, value: JsonValue) -> Option<KeyValue> {
         JsonValue::String(value) => Some(KeyValue {
             key,
             value_type: ValueType::String,
-            value: Value::String(value.to_string()),
+            value: Value::String(value.clone()),
         }),
         JsonValue::Number(value) => Some(KeyValue {
             key,
@@ -1093,10 +1109,10 @@ fn convert_string_to_number(input: &serde_json::Value) -> Option<serde_json::Val
         if let Ok(number) = data.parse::<i64>() {
             return Some(serde_json::Value::Number(serde_json::Number::from(number)));
         }
-        if let Ok(number) = data.parse::<f64>() {
-            if let Some(number) = serde_json::Number::from_f64(number) {
-                return Some(serde_json::Value::Number(number));
-            }
+        if let Ok(number) = data.parse::<f64>()
+            && let Some(number) = serde_json::Number::from_f64(number)
+        {
+            return Some(serde_json::Value::Number(number));
         }
     }
 
@@ -1116,45 +1132,9 @@ fn convert_string_to_boolean(input: &serde_json::Value) -> Option<serde_json::Va
     None
 }
 
-fn parse_jaeger_time_range_for_operations(
-    headers: &HeaderMap,
-    query_params: &JaegerQueryParams,
-) -> Result<(Option<i64>, Option<i64>)> {
-    if let Some(time_range) = headers.get(JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER) {
-        match time_range.to_str() {
-            Ok(time_range) => match humantime::parse_duration(time_range) {
-                Ok(duration) => {
-                    debug!(
-                        "Get operations with time range: {:?}, duration: {:?}",
-                        time_range, duration
-                    );
-                    let now = Utc::now().timestamp_micros();
-                    Ok((Some(now - duration.as_micros() as i64), Some(now)))
-                }
-                Err(e) => {
-                    error!("Failed to parse time range header: {:?}", e);
-                    Err(InvalidJaegerQuerySnafu {
-                        reason: format!("invalid time range header: {:?}", time_range),
-                    }
-                    .build())
-                }
-            },
-            Err(e) => {
-                error!("Failed to convert time range header to string: {:?}", e);
-                Err(InvalidJaegerQuerySnafu {
-                    reason: format!("invalid time range header: {:?}", time_range),
-                }
-                .build())
-            }
-        }
-    } else {
-        Ok((query_params.start, query_params.end))
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use serde_json::{json, Number, Value as JsonValue};
+    use serde_json::{Number, Value as JsonValue, json};
 
     use super::*;
     use crate::http::{ColumnSchema, HttpRecordsOutput, OutputSchema};

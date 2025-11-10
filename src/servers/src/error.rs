@@ -18,8 +18,9 @@ use std::string::FromUtf8Error;
 
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::{http, Json};
+use axum::{Json, http};
 use base64::DecodeError;
+use common_base::readable_size::ReadableSize;
 use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -108,12 +109,6 @@ pub enum Error {
         error: std::io::Error,
     },
 
-    #[snafu(display("Failed to convert to TcpIncoming"))]
-    TcpIncoming {
-        #[snafu(source)]
-        error: Box<dyn std::error::Error + Send + Sync>,
-    },
-
     #[snafu(display("Failed to execute query"))]
     ExecuteQuery {
         #[snafu(implicit)]
@@ -166,6 +161,18 @@ pub enum Error {
     #[snafu(display("Invalid request parameter: {}", reason))]
     InvalidParameter {
         reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Too many concurrent large requests, limit: {}, request size: {}",
+        ReadableSize(*limit as u64),
+        ReadableSize(*request_size as u64)
+    ))]
+    TooManyConcurrentRequests {
+        limit: usize,
+        request_size: usize,
         #[snafu(implicit)]
         location: Location,
     },
@@ -228,6 +235,22 @@ pub enum Error {
         location: Location,
         #[snafu(source)]
         error: prost::DecodeError,
+    },
+
+    #[snafu(display(
+        "OTLP metric input have incompatible existing tables, please refer to docs for details"
+    ))]
+    OtlpMetricModeIncompatible {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Common Meta error"))]
+    CommonMeta {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to decompress snappy prometheus remote request"))]
@@ -584,12 +607,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("In-flight write bytes exceeded the maximum limit"))]
-    InFlightWriteBytesExceeded {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid elasticsearch input, reason: {}", reason))]
     InvalidElasticsearchInput {
         reason: String,
@@ -624,6 +641,12 @@ pub enum Error {
 
     #[snafu(display("Unknown hint: {}", hint))]
     UnknownHint { hint: String },
+
+    #[snafu(display("Query has been cancelled"))]
+    Cancelled {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -639,14 +662,14 @@ impl ErrorExt for Error {
             | StartGrpc { .. }
             | TcpBind { .. }
             | SendPromRemoteRequest { .. }
-            | TcpIncoming { .. }
             | BuildHttpResponse { .. }
             | Arrow { .. }
             | FileWatch { .. } => StatusCode::Internal,
 
             AddressBind { .. }
             | AlreadyStarted { .. }
-            | InvalidPromRemoteReadQueryResult { .. } => StatusCode::IllegalState,
+            | InvalidPromRemoteReadQueryResult { .. }
+            | OtlpMetricModeIncompatible { .. } => StatusCode::IllegalState,
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
 
@@ -662,6 +685,7 @@ impl ErrorExt for Error {
             | CheckDatabaseValidity { source, .. } => source.status_code(),
 
             Pipeline { source, .. } => source.status_code(),
+            CommonMeta { source, .. } => source.status_code(),
 
             NotSupported { .. }
             | InvalidParameter { .. }
@@ -718,6 +742,8 @@ impl ErrorExt for Error {
 
             InvalidUtf8Value { .. } | InvalidHeaderValue { .. } => StatusCode::InvalidArguments,
 
+            TooManyConcurrentRequests { .. } => StatusCode::RuntimeResourcesExhausted,
+
             ParsePromQL { source, .. } => source.status_code(),
             Other { source, .. } => source.status_code(),
 
@@ -742,11 +768,11 @@ impl ErrorExt for Error {
 
             ConvertSqlValue { source, .. } => source.status_code(),
 
-            InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
-
             DurationOverflow { .. } => StatusCode::InvalidArguments,
 
             HandleOtelArrowRequest { .. } => StatusCode::Internal,
+
+            Cancelled { .. } => StatusCode::Cancelled,
         }
     }
 

@@ -36,7 +36,7 @@ use itertools::Itertools;
 pub(crate) use linear::{MapFilterProject, MfpPlan, SafeMfpPlan};
 pub(crate) use relation::{Accum, Accumulator, AggregateExpr, AggregateFunc};
 pub(crate) use scalar::{ScalarExpr, TypedExpr};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::expr::error::{ArrowSnafu, DataTypeSnafu};
 use crate::repr::Diff;
@@ -122,7 +122,7 @@ impl Batch {
             );
             for (idx, value) in row.iter().enumerate() {
                 builder[idx]
-                    .try_push_value_ref(value.as_value_ref())
+                    .try_push_value_ref(&value.as_value_ref())
                     .context(DataTypeSnafu {
                         msg: "Failed to convert rows to columns",
                     })?;

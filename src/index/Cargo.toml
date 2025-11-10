@@ -22,7 +22,7 @@ fst.workspace = true
 futures.workspace = true
 greptime-proto.workspace = true
 itertools.workspace = true
-jieba-rs = "0.7"
+jieba-rs = "0.8"
 lazy_static.workspace = true
 mockall.workspace = true
 pin-project.workspace = true
@@ -34,15 +34,26 @@ roaring = "0.10"
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
-tantivy = { version = "0.22", features = ["zstd-compression"] }
-tantivy-jieba = "0.11.0"
+store-api.workspace = true
+tantivy = { version = "0.24", features = ["zstd-compression"] }
+tantivy-jieba = "0.16"
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
+criterion = "0.4"
 rand.workspace = true
+rand_chacha = "0.9"
 tempfile.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+
+[[bench]]
+name = "tokenizer_bench"
+harness = false
+
+[[bench]]
+name = "bytes_to_u64_vec"
+harness = false

@@ -23,29 +23,29 @@ use libfuzzer_sys::arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlx::{Executor, MySql, Pool};
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
-    merge_two_word_map_fn, random_capitalize_map, uppercase_and_keyword_backtick_map,
-    MappedGenerator, WordGenerator,
+    MappedGenerator, WordGenerator, merge_two_word_map_fn, random_capitalize_map,
+    uppercase_and_keyword_backtick_map,
 };
+use tests_fuzz::generator::Generator;
 use tests_fuzz::generator::create_expr::{
     CreateLogicalTableExprGeneratorBuilder, CreatePhysicalTableExprGeneratorBuilder,
 };
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
-use tests_fuzz::generator::Generator;
 use tests_fuzz::ir::{
-    generate_random_value, generate_unique_timestamp_for_mysql, replace_default,
-    sort_by_primary_keys, CreateTableExpr, InsertIntoExpr,
+    CreateTableExpr, InsertIntoExpr, generate_random_value, generate_unique_timestamp_for_mysql,
+    replace_default, sort_by_primary_keys,
 };
+use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
-use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::{
-    compact_table, flush_memtable, get_gt_fuzz_input_max_rows, get_gt_fuzz_input_max_tables,
-    init_greptime_connections_via_env, Connections,
+    Connections, compact_table, flush_memtable, get_gt_fuzz_input_max_rows,
+    get_gt_fuzz_input_max_tables, init_greptime_connections_via_env,
 };
 use tests_fuzz::validator;
 struct FuzzContext {
@@ -174,16 +174,14 @@ async fn validate_values(
         .iter()
         .map(|&i| insert_expr.columns[i].name.to_string())
         .collect::<Vec<_>>()
-        .join(", ")
-        .to_string();
+        .join(", ");
 
     let column_list = insert_expr
         .columns
         .iter()
         .map(|c| c.name.to_string())
         .collect::<Vec<_>>()
-        .join(", ")
-        .to_string();
+        .join(", ");
 
     let select_sql = format!(
         "SELECT {} FROM {} ORDER BY {}",

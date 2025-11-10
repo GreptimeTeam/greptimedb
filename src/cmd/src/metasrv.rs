@@ -21,7 +21,7 @@ use clap::Parser;
 use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::info;
-use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
+use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_version::{short_version, verbose_version};
 use meta_srv::bootstrap::MetasrvInstance;
 use meta_srv::metasrv::BackendImpl;
@@ -30,7 +30,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, LoadLayeredConfigSnafu, Result, StartMetaServerSnafu};
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{create_resource_limit_metrics, log_versions, App};
+use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
 type MetasrvOptions = GreptimeOptions<meta_srv::metasrv::MetasrvOptions>;
 
@@ -325,6 +325,7 @@ impl StartCommand {
         );
 
         log_versions(verbose_version(), short_version(), APP_NAME);
+        maybe_activate_heap_profile(&opts.component.memory);
         create_resource_limit_metrics(APP_NAME);
 
         info!("Metasrv start command: {:#?}", self);
@@ -398,7 +399,6 @@ mod tests {
             threshold = 8.0
             min_std_deviation = "100ms"
             acceptable_heartbeat_pause = "3000ms"
-            first_heartbeat_estimate = "1000ms"
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -427,13 +427,6 @@ mod tests {
             options
                 .failure_detector
                 .acceptable_heartbeat_pause
-                .as_millis()
-        );
-        assert_eq!(
-            1000,
-            options
-                .failure_detector
-                .first_heartbeat_estimate
                 .as_millis()
         );
         assert_eq!(

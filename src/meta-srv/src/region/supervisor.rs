@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use common_meta::DatanodeId;
 use common_meta::datanode::Stat;
 use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
@@ -25,21 +26,21 @@ use common_meta::key::table_route::{TableRouteKey, TableRouteValue};
 use common_meta::key::{MetadataKey, MetadataValue};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::leadership_notifier::LeadershipChangeListener;
-use common_meta::peer::{Peer, PeerLookupServiceRef};
-use common_meta::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
+use common_meta::peer::{Peer, PeerResolverRef};
+use common_meta::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use common_meta::rpc::store::RangeRequest;
-use common_meta::DatanodeId;
 use common_runtime::JoinHandle;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use error::Error::{LeaderPeerChanged, MigrationRunning, RegionMigrated, TableRouteNotFound};
 use futures::{StreamExt, TryStreamExt};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
-use tokio::time::{interval, interval_at, MissedTickBehavior};
+use tokio::time::{MissedTickBehavior, interval, interval_at};
 
+use crate::discovery::utils::accept_ingest_workload;
 use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::metasrv::{RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef};
@@ -47,7 +48,7 @@ use crate::procedure::region_migration::manager::{
     RegionMigrationManagerRef, RegionMigrationTriggerReason,
 };
 use crate::procedure::region_migration::{
-    RegionMigrationProcedureTask, DEFAULT_REGION_MIGRATION_TIMEOUT,
+    DEFAULT_REGION_MIGRATION_TIMEOUT, RegionMigrationProcedureTask,
 };
 use crate::region::failure_detector::RegionFailureDetector;
 use crate::selector::SelectorOptions;
@@ -206,7 +207,9 @@ impl RegionSupervisorTicker {
                     initialization_interval.tick().await;
                     let (tx, rx) = oneshot::channel();
                     if sender.send(Event::InitializeAllRegions(tx)).await.is_err() {
-                        info!("EventReceiver is dropped, region failure detectors initialization loop is stopped");
+                        info!(
+                            "EventReceiver is dropped, region failure detectors initialization loop is stopped"
+                        );
                         break;
                     }
                     if rx.await.is_ok() {
@@ -283,8 +286,8 @@ pub struct RegionSupervisor {
     region_migration_manager: RegionMigrationManagerRef,
     /// The maintenance mode manager.
     runtime_switch_manager: RuntimeSwitchManagerRef,
-    /// Peer lookup service
-    peer_lookup: PeerLookupServiceRef,
+    /// Peer resolver
+    peer_resolver: PeerResolverRef,
     /// The kv backend.
     kv_backend: KvBackendRef,
 }
@@ -357,7 +360,7 @@ impl RegionSupervisor {
         selector: RegionSupervisorSelector,
         region_migration_manager: RegionMigrationManagerRef,
         runtime_switch_manager: RuntimeSwitchManagerRef,
-        peer_lookup: PeerLookupServiceRef,
+        peer_resolver: PeerResolverRef,
         kv_backend: KvBackendRef,
     ) -> Self {
         Self {
@@ -368,7 +371,7 @@ impl RegionSupervisor {
             selector,
             region_migration_manager,
             runtime_switch_manager,
-            peer_lookup,
+            peer_resolver,
             kv_backend,
         }
     }
@@ -381,7 +384,9 @@ impl RegionSupervisor {
                     match self.is_maintenance_mode_enabled().await {
                         Ok(false) => {}
                         Ok(true) => {
-                            warn!("Skipping initialize all regions since maintenance mode is enabled.");
+                            warn!(
+                                "Skipping initialize all regions since maintenance mode is enabled."
+                            );
                             continue;
                         }
                         Err(err) => {
@@ -449,10 +454,10 @@ impl RegionSupervisor {
                 .region_routes
                 .iter()
                 .for_each(|region_route| {
-                    if !regions.contains(&region_route.region.id) {
-                        if let Some(leader_peer) = &region_route.leader_peer {
-                            detecting_regions.push((leader_peer.id, region_route.region.id));
-                        }
+                    if !regions.contains(&region_route.region.id)
+                        && let Some(leader_peer) = &region_route.leader_peer
+                    {
+                        detecting_regions.push((leader_peer.id, region_route.region.id));
                     }
                 });
         }
@@ -580,6 +585,7 @@ impl RegionSupervisor {
                     min_required_items: regions.len(),
                     allow_duplication: true,
                     exclude_peer_ids,
+                    workload_filter: Some(accept_ingest_workload),
                 };
                 let peers = selector.select(&self.selector_context, opt).await?;
                 ensure!(
@@ -629,7 +635,7 @@ impl RegionSupervisor {
     ) -> Result<Vec<(RegionMigrationProcedureTask, u32)>> {
         let mut tasks = Vec::with_capacity(regions.len());
         let from_peer = self
-            .peer_lookup
+            .peer_resolver
             .datanode(from_peer_id)
             .await
             .ok()
@@ -764,17 +770,17 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use common_meta::ddl::RegionFailureDetectorController;
     use common_meta::ddl::test_util::{
         test_create_logical_table_task, test_create_physical_table_task,
     };
-    use common_meta::ddl::RegionFailureDetectorController;
     use common_meta::key::table_route::{
         LogicalTableRouteValue, PhysicalTableRouteValue, TableRouteValue,
     };
-    use common_meta::key::{runtime_switch, TableMetadataManager};
+    use common_meta::key::{TableMetadataManager, runtime_switch};
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
-    use common_meta::test_util::NoopPeerLookupService;
+    use common_meta::test_util::NoopPeerResolver;
     use common_telemetry::info;
     use common_time::util::current_time_millis;
     use rand::Rng;
@@ -790,7 +796,7 @@ pub(crate) mod tests {
         DatanodeHeartbeat, Event, RegionFailureDetectorControl, RegionSupervisor,
         RegionSupervisorTicker,
     };
-    use crate::selector::test_utils::{new_test_selector_context, RandomNodeSelector};
+    use crate::selector::test_utils::{RandomNodeSelector, new_test_selector_context};
 
     pub(crate) fn new_test_supervisor() -> (RegionSupervisor, Sender<Event>) {
         let env = TestingEnv::new();
@@ -803,7 +809,7 @@ pub(crate) mod tests {
         ));
         let runtime_switch_manager =
             Arc::new(runtime_switch::RuntimeSwitchManager::new(env.kv_backend()));
-        let peer_lookup = Arc::new(NoopPeerLookupService);
+        let peer_resolver = Arc::new(NoopPeerResolver);
         let (tx, rx) = RegionSupervisor::channel();
         let kv_backend = env.kv_backend();
 
@@ -815,7 +821,7 @@ pub(crate) mod tests {
                 RegionSupervisorSelector::NaiveSelector(selector),
                 region_migration_manager,
                 runtime_switch_manager,
-                peer_lookup,
+                peer_resolver,
                 kv_backend,
             ),
             tx,

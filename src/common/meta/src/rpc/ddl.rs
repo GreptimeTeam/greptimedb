@@ -18,6 +18,7 @@ pub mod trigger;
 use std::collections::{HashMap, HashSet};
 use std::result;
 
+use api::helper::{from_pb_time_ranges, to_pb_time_ranges};
 use api::v1::alter_database_expr::Kind as PbAlterDatabaseKind;
 use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::{
@@ -33,15 +34,16 @@ use api::v1::meta::{
 };
 use api::v1::{
     AlterDatabaseExpr, AlterTableExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr,
-    CreateViewExpr, DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, ExpireAfter,
-    Option as PbOption, QueryContext as PbQueryContext, TruncateTableExpr,
+    CreateViewExpr, DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, EvalInterval,
+    ExpireAfter, Option as PbOption, QueryContext as PbQueryContext, TruncateTableExpr,
 };
-use base64::engine::general_purpose;
 use base64::Engine as _;
-use common_time::{DatabaseTimeToLive, Timezone};
+use base64::engine::general_purpose;
+use common_error::ext::BoxedError;
+use common_time::{DatabaseTimeToLive, Timestamp, Timezone};
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DefaultOnNull};
+use serde_with::{DefaultOnNull, serde_as};
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::{RawTableInfo, TableId};
@@ -49,8 +51,8 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use crate::error::{
-    self, InvalidSetDatabaseOptionSnafu, InvalidTimeZoneSnafu, InvalidUnsetDatabaseOptionSnafu,
-    Result,
+    self, ConvertTimeRangesSnafu, ExternalSnafu, InvalidSetDatabaseOptionSnafu,
+    InvalidTimeZoneSnafu, InvalidUnsetDatabaseOptionSnafu, Result,
 };
 use crate::key::FlowId;
 
@@ -179,12 +181,14 @@ impl DdlTask {
         schema: String,
         table: String,
         table_id: TableId,
+        time_ranges: Vec<(Timestamp, Timestamp)>,
     ) -> Self {
         DdlTask::TruncateTable(TruncateTableTask {
             catalog,
             schema,
             table,
             table_id,
+            time_ranges,
         })
     }
 
@@ -324,7 +328,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             DdlTask::CreateView(task) => Task::CreateViewTask(task.try_into()?),
             DdlTask::DropView(task) => Task::DropViewTask(task.into()),
             #[cfg(feature = "enterprise")]
-            DdlTask::CreateTrigger(task) => Task::CreateTriggerTask(task.into()),
+            DdlTask::CreateTrigger(task) => Task::CreateTriggerTask(task.try_into()?),
             #[cfg(feature = "enterprise")]
             DdlTask::DropTrigger(task) => Task::DropTriggerTask(task.into()),
         };
@@ -379,7 +383,7 @@ pub struct CreateViewTask {
 
 impl CreateViewTask {
     /// Returns the [`TableReference`] of view.
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference {
             catalog: &self.create_view.catalog_name,
             schema: &self.create_view.schema_name,
@@ -492,7 +496,7 @@ pub struct DropViewTask {
 
 impl DropViewTask {
     /// Returns the [`TableReference`] of view.
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference {
             catalog: &self.catalog,
             schema: &self.schema,
@@ -549,7 +553,7 @@ pub struct DropTableTask {
 }
 
 impl DropTableTask {
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference {
             catalog: &self.catalog,
             schema: &self.schema,
@@ -559,9 +563,9 @@ impl DropTableTask {
 
     pub fn table_name(&self) -> TableName {
         TableName {
-            catalog_name: self.catalog.to_string(),
-            schema_name: self.schema.to_string(),
-            table_name: self.table.to_string(),
+            catalog_name: self.catalog.clone(),
+            schema_name: self.schema.clone(),
+            table_name: self.table.clone(),
         }
     }
 }
@@ -655,13 +659,13 @@ impl CreateTableTask {
         let table = &self.create_table;
 
         TableName {
-            catalog_name: table.catalog_name.to_string(),
-            schema_name: table.schema_name.to_string(),
-            table_name: table.table_name.to_string(),
+            catalog_name: table.catalog_name.clone(),
+            schema_name: table.schema_name.clone(),
+            table_name: table.table_name.clone(),
         }
     }
 
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         let table = &self.create_table;
 
         TableReference {
@@ -746,7 +750,7 @@ impl AlterTableTask {
         Ok(())
     }
 
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference {
             catalog: &self.alter_table.catalog_name,
             schema: &self.alter_table.schema_name,
@@ -758,9 +762,9 @@ impl AlterTableTask {
         let table = &self.alter_table;
 
         TableName {
-            catalog_name: table.catalog_name.to_string(),
-            schema_name: table.schema_name.to_string(),
-            table_name: table.table_name.to_string(),
+            catalog_name: table.catalog_name.clone(),
+            schema_name: table.schema_name.clone(),
+            table_name: table.table_name.clone(),
         }
     }
 }
@@ -826,10 +830,11 @@ pub struct TruncateTableTask {
     pub schema: String,
     pub table: String,
     pub table_id: TableId,
+    pub time_ranges: Vec<(Timestamp, Timestamp)>,
 }
 
 impl TruncateTableTask {
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference {
             catalog: &self.catalog,
             schema: &self.schema,
@@ -839,9 +844,9 @@ impl TruncateTableTask {
 
     pub fn table_name(&self) -> TableName {
         TableName {
-            catalog_name: self.catalog.to_string(),
-            schema_name: self.schema.to_string(),
-            table_name: self.table.to_string(),
+            catalog_name: self.catalog.clone(),
+            schema_name: self.schema.clone(),
+            table_name: self.table.clone(),
         }
     }
 }
@@ -864,6 +869,13 @@ impl TryFrom<PbTruncateTableTask> for TruncateTableTask {
                     err_msg: "expected table_id",
                 })?
                 .id,
+            time_ranges: truncate_table
+                .time_ranges
+                .map(from_pb_time_ranges)
+                .transpose()
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .unwrap_or_default(),
         })
     }
 }
@@ -878,6 +890,9 @@ impl TryFrom<TruncateTableTask> for PbTruncateTableTask {
                 schema_name: task.schema,
                 table_name: task.table,
                 table_id: Some(api::v1::TableId { id: task.table_id }),
+                time_ranges: Some(
+                    to_pb_time_ranges(&task.time_ranges).context(ConvertTimeRangesSnafu)?,
+                ),
             }),
         })
     }
@@ -1110,6 +1125,7 @@ pub struct CreateFlowTask {
     pub create_if_not_exists: bool,
     /// Duration in seconds. Data older than this duration will not be used.
     pub expire_after: Option<i64>,
+    pub eval_interval_secs: Option<i64>,
     pub comment: String,
     pub sql: String,
     pub flow_options: HashMap<String, String>,
@@ -1127,6 +1143,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             or_replace,
             create_if_not_exists,
             expire_after,
+            eval_interval,
             comment,
             sql,
             flow_options,
@@ -1146,6 +1163,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             or_replace,
             create_if_not_exists,
             expire_after: expire_after.map(|e| e.value),
+            eval_interval_secs: eval_interval.map(|e| e.seconds),
             comment,
             sql,
             flow_options,
@@ -1163,6 +1181,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
             or_replace,
             create_if_not_exists,
             expire_after,
+            eval_interval_secs: eval_interval,
             comment,
             sql,
             flow_options,
@@ -1177,6 +1196,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
                 or_replace,
                 create_if_not_exists,
                 expire_after: expire_after.map(|value| ExpireAfter { value }),
+                eval_interval: eval_interval.map(|seconds| EvalInterval { seconds }),
                 comment,
                 sql,
                 flow_options,
@@ -1242,18 +1262,89 @@ impl From<DropFlowTask> for PbDropFlowTask {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryContext {
-    current_catalog: String,
-    current_schema: String,
-    timezone: String,
-    extensions: HashMap<String, String>,
-    channel: u8,
+    pub(crate) current_catalog: String,
+    pub(crate) current_schema: String,
+    pub(crate) timezone: String,
+    pub(crate) extensions: HashMap<String, String>,
+    pub(crate) channel: u8,
+}
+
+impl QueryContext {
+    /// Get the current catalog
+    pub fn current_catalog(&self) -> &str {
+        &self.current_catalog
+    }
+
+    /// Get the current schema
+    pub fn current_schema(&self) -> &str {
+        &self.current_schema
+    }
+
+    /// Get the timezone
+    pub fn timezone(&self) -> &str {
+        &self.timezone
+    }
+
+    /// Get the extensions
+    pub fn extensions(&self) -> &HashMap<String, String> {
+        &self.extensions
+    }
+
+    /// Get the channel
+    pub fn channel(&self) -> u8 {
+        self.channel
+    }
+}
+
+/// Lightweight query context for flow operations containing only essential fields.
+/// This is a subset of QueryContext that includes only the fields actually needed
+/// for flow creation and execution.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FlowQueryContext {
+    /// Current catalog name - needed for flow metadata and recovery
+    pub(crate) catalog: String,
+    /// Current schema name - needed for table resolution during flow execution
+    pub(crate) schema: String,
+    /// Timezone for timestamp operations in the flow
+    pub(crate) timezone: String,
+}
+
+impl<'de> Deserialize<'de> for FlowQueryContext {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Support both QueryContext format and FlowQueryContext format
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ContextCompat {
+            Flow(FlowQueryContextHelper),
+            Full(QueryContext),
+        }
+
+        #[derive(Deserialize)]
+        struct FlowQueryContextHelper {
+            catalog: String,
+            schema: String,
+            timezone: String,
+        }
+
+        match ContextCompat::deserialize(deserializer)? {
+            ContextCompat::Flow(helper) => Ok(FlowQueryContext {
+                catalog: helper.catalog,
+                schema: helper.schema,
+                timezone: helper.timezone,
+            }),
+            ContextCompat::Full(full_ctx) => Ok(full_ctx.into()),
+        }
+    }
 }
 
 impl From<QueryContextRef> for QueryContext {
     fn from(query_context: QueryContextRef) -> Self {
         QueryContext {
             current_catalog: query_context.current_catalog().to_string(),
-            current_schema: query_context.current_schema().to_string(),
+            current_schema: query_context.current_schema().clone(),
             timezone: query_context.timezone().to_string(),
             extensions: query_context.extensions(),
             channel: query_context.channel() as u8,
@@ -1296,6 +1387,45 @@ impl From<QueryContext> for PbQueryContext {
     }
 }
 
+impl From<QueryContext> for FlowQueryContext {
+    fn from(ctx: QueryContext) -> Self {
+        Self {
+            catalog: ctx.current_catalog,
+            schema: ctx.current_schema,
+            timezone: ctx.timezone,
+        }
+    }
+}
+
+impl From<QueryContextRef> for FlowQueryContext {
+    fn from(ctx: QueryContextRef) -> Self {
+        Self {
+            catalog: ctx.current_catalog().to_string(),
+            schema: ctx.current_schema().clone(),
+            timezone: ctx.timezone().to_string(),
+        }
+    }
+}
+
+impl From<FlowQueryContext> for QueryContext {
+    fn from(flow_ctx: FlowQueryContext) -> Self {
+        Self {
+            current_catalog: flow_ctx.catalog,
+            current_schema: flow_ctx.schema,
+            timezone: flow_ctx.timezone,
+            extensions: HashMap::new(),
+            channel: 0, // Use default channel for flows
+        }
+    }
+}
+
+impl From<FlowQueryContext> for PbQueryContext {
+    fn from(flow_ctx: FlowQueryContext) -> Self {
+        let query_ctx: QueryContext = flow_ctx.into();
+        query_ctx.into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1307,7 +1437,7 @@ mod tests {
     use table::metadata::{RawTableInfo, RawTableMeta, TableType};
     use table::test_util::table_info::test_table_info;
 
-    use super::{AlterTableTask, CreateTableTask};
+    use super::{AlterTableTask, CreateTableTask, *};
 
     #[test]
     fn test_basic_ser_de_create_table_task() {
@@ -1373,6 +1503,7 @@ mod tests {
             region_numbers: vec![0],
             options: Default::default(),
             created_on: Default::default(),
+            updated_on: Default::default(),
             partition_key_indices: Default::default(),
             column_ids: Default::default(),
         };
@@ -1441,5 +1572,106 @@ mod tests {
             vec![2]
         );
         assert_eq!(create_table_task.table_info.meta.value_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_flow_query_context_conversion_from_query_context() {
+        use std::collections::HashMap;
+        let mut extensions = HashMap::new();
+        extensions.insert("key1".to_string(), "value1".to_string());
+        extensions.insert("key2".to_string(), "value2".to_string());
+
+        let query_ctx = QueryContext {
+            current_catalog: "test_catalog".to_string(),
+            current_schema: "test_schema".to_string(),
+            timezone: "UTC".to_string(),
+            extensions,
+            channel: 5,
+        };
+
+        let flow_ctx: FlowQueryContext = query_ctx.into();
+
+        assert_eq!(flow_ctx.catalog, "test_catalog");
+        assert_eq!(flow_ctx.schema, "test_schema");
+        assert_eq!(flow_ctx.timezone, "UTC");
+    }
+
+    #[test]
+    fn test_flow_query_context_conversion_to_query_context() {
+        let flow_ctx = FlowQueryContext {
+            catalog: "prod_catalog".to_string(),
+            schema: "public".to_string(),
+            timezone: "America/New_York".to_string(),
+        };
+
+        let query_ctx: QueryContext = flow_ctx.clone().into();
+
+        assert_eq!(query_ctx.current_catalog, "prod_catalog");
+        assert_eq!(query_ctx.current_schema, "public");
+        assert_eq!(query_ctx.timezone, "America/New_York");
+        assert!(query_ctx.extensions.is_empty());
+        assert_eq!(query_ctx.channel, 0);
+
+        // Test roundtrip conversion
+        let flow_ctx_roundtrip: FlowQueryContext = query_ctx.into();
+        assert_eq!(flow_ctx, flow_ctx_roundtrip);
+    }
+
+    #[test]
+    fn test_flow_query_context_conversion_from_query_context_ref() {
+        use common_time::Timezone;
+        use session::context::QueryContextBuilder;
+
+        let session_ctx = QueryContextBuilder::default()
+            .current_catalog("session_catalog".to_string())
+            .current_schema("session_schema".to_string())
+            .timezone(Timezone::from_tz_string("Europe/London").unwrap())
+            .build();
+
+        let session_ctx_ref = Arc::new(session_ctx);
+        let flow_ctx: FlowQueryContext = session_ctx_ref.into();
+
+        assert_eq!(flow_ctx.catalog, "session_catalog");
+        assert_eq!(flow_ctx.schema, "session_schema");
+        assert_eq!(flow_ctx.timezone, "Europe/London");
+    }
+
+    #[test]
+    fn test_flow_query_context_serialization() {
+        let flow_ctx = FlowQueryContext {
+            catalog: "test_catalog".to_string(),
+            schema: "test_schema".to_string(),
+            timezone: "UTC".to_string(),
+        };
+
+        let serialized = serde_json::to_string(&flow_ctx).unwrap();
+        let deserialized: FlowQueryContext = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(flow_ctx, deserialized);
+
+        // Verify JSON structure
+        let json_value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(json_value["catalog"], "test_catalog");
+        assert_eq!(json_value["schema"], "test_schema");
+        assert_eq!(json_value["timezone"], "UTC");
+    }
+
+    #[test]
+    fn test_flow_query_context_conversion_to_pb() {
+        let flow_ctx = FlowQueryContext {
+            catalog: "pb_catalog".to_string(),
+            schema: "pb_schema".to_string(),
+            timezone: "Asia/Tokyo".to_string(),
+        };
+
+        let pb_ctx: PbQueryContext = flow_ctx.into();
+
+        assert_eq!(pb_ctx.current_catalog, "pb_catalog");
+        assert_eq!(pb_ctx.current_schema, "pb_schema");
+        assert_eq!(pb_ctx.timezone, "Asia/Tokyo");
+        assert!(pb_ctx.extensions.is_empty());
+        assert_eq!(pb_ctx.channel, 0);
+        assert!(pb_ctx.snapshot_seqs.is_none());
+        assert!(pb_ctx.explain.is_none());
     }
 }

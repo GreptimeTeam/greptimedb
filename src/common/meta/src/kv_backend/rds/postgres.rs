@@ -12,31 +12,76 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fs::File;
+use std::io::BufReader;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 use common_telemetry::debug;
 use deadpool_postgres::{Config, Pool, Runtime};
+// TLS-related imports (feature-gated)
+use rustls::ClientConfig;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::server::ParsedCertificate;
+use rustls::{DigitallySignedStruct, Error as TlsError, SignatureScheme};
+use rustls_pemfile::{certs, private_key};
 use snafu::ResultExt;
 use strum::AsRefStr;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{IsolationLevel, NoTls, Row};
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::error::{
-    CreatePostgresPoolSnafu, GetPostgresConnectionSnafu, PostgresExecutionSnafu,
-    PostgresTransactionSnafu, Result,
-};
-use crate::kv_backend::rds::{
-    Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RdsStore, Transaction,
-    RDS_STORE_OP_BATCH_DELETE, RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT,
-    RDS_STORE_OP_RANGE_DELETE, RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT,
+    CreatePostgresPoolSnafu, GetPostgresConnectionSnafu, LoadTlsCertificateSnafu,
+    PostgresExecutionSnafu, PostgresTlsConfigSnafu, PostgresTransactionSnafu, Result,
 };
 use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::rds::{
+    Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_STORE_OP_BATCH_DELETE,
+    RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT, RDS_STORE_OP_RANGE_DELETE,
+    RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore, Transaction,
+};
+use crate::rpc::KeyValue;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, RangeRequest, RangeResponse,
 };
-use crate::rpc::KeyValue;
+
+/// TLS mode configuration for PostgreSQL connections.
+/// This mirrors the TlsMode from servers::tls to avoid circular dependencies.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum TlsMode {
+    Disable,
+    #[default]
+    Prefer,
+    Require,
+    VerifyCa,
+    VerifyFull,
+}
+
+/// TLS configuration for PostgreSQL connections.
+/// This mirrors the TlsOption from servers::tls to avoid circular dependencies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsOption {
+    pub mode: TlsMode,
+    pub cert_path: String,
+    pub key_path: String,
+    pub ca_cert_path: String,
+    pub watch: bool,
+}
+
+impl Default for TlsOption {
+    fn default() -> Self {
+        TlsOption {
+            mode: TlsMode::Prefer,
+            cert_path: String::new(),
+            key_path: String::new(),
+            ca_cert_path: String::new(),
+            watch: false,
+        }
+    }
+}
 
 const PG_STORE_NAME: &str = "pg_store";
 
@@ -147,42 +192,53 @@ fn pg_generate_in_placeholders(from: usize, to: usize) -> Vec<String> {
 
 /// Factory for building sql templates.
 struct PgSqlTemplateFactory<'a> {
+    schema_name: Option<&'a str>,
     table_name: &'a str,
 }
 
 impl<'a> PgSqlTemplateFactory<'a> {
-    /// Creates a new [`SqlTemplateFactory`] with the given table name.
-    fn new(table_name: &'a str) -> Self {
-        Self { table_name }
+    /// Creates a new factory with optional schema.
+    fn new(schema_name: Option<&'a str>, table_name: &'a str) -> Self {
+        Self {
+            schema_name,
+            table_name,
+        }
     }
 
     /// Builds the template set for the given table name.
     fn build(&self) -> PgSqlTemplateSet {
-        let table_name = self.table_name;
+        let table_ident = Self::format_table_ident(self.schema_name, self.table_name);
         // Some of queries don't end with `;`, because we need to add `LIMIT` clause.
         PgSqlTemplateSet {
-            table_name: table_name.to_string(),
+            table_ident: table_ident.clone(),
+            // Do not attempt to create schema implicitly to avoid extra privileges requirement.
             create_table_statement: format!(
-                "CREATE TABLE IF NOT EXISTS \"{table_name}\"(k bytea PRIMARY KEY, v bytea)",
+                "CREATE TABLE IF NOT EXISTS {table_ident}(k bytea PRIMARY KEY, v bytea)",
             ),
             range_template: RangeTemplate {
-                point: format!("SELECT k, v FROM \"{table_name}\" WHERE k = $1"),
+                point: format!("SELECT k, v FROM {table_ident} WHERE k = $1"),
                 range: format!(
-                    "SELECT k, v FROM \"{table_name}\" WHERE k >= $1 AND k < $2 ORDER BY k"
+                    "SELECT k, v FROM {table_ident} WHERE k >= $1 AND k < $2 ORDER BY k"
                 ),
-                full: format!("SELECT k, v FROM \"{table_name}\" ORDER BY k"),
-                left_bounded: format!("SELECT k, v FROM \"{table_name}\" WHERE k >= $1 ORDER BY k"),
-                prefix: format!("SELECT k, v FROM \"{table_name}\" WHERE k LIKE $1 ORDER BY k"),
+                full: format!("SELECT k, v FROM {table_ident} ORDER BY k"),
+                left_bounded: format!("SELECT k, v FROM {table_ident} WHERE k >= $1 ORDER BY k"),
+                prefix: format!("SELECT k, v FROM {table_ident} WHERE k LIKE $1 ORDER BY k"),
             },
             delete_template: RangeTemplate {
-                point: format!("DELETE FROM \"{table_name}\" WHERE k = $1 RETURNING k,v;"),
-                range: format!(
-                    "DELETE FROM \"{table_name}\" WHERE k >= $1 AND k < $2 RETURNING k,v;"
-                ),
-                full: format!("DELETE FROM \"{table_name}\" RETURNING k,v"),
-                left_bounded: format!("DELETE FROM \"{table_name}\" WHERE k >= $1 RETURNING k,v;"),
-                prefix: format!("DELETE FROM \"{table_name}\" WHERE k LIKE $1 RETURNING k,v;"),
+                point: format!("DELETE FROM {table_ident} WHERE k = $1 RETURNING k,v;"),
+                range: format!("DELETE FROM {table_ident} WHERE k >= $1 AND k < $2 RETURNING k,v;"),
+                full: format!("DELETE FROM {table_ident} RETURNING k,v"),
+                left_bounded: format!("DELETE FROM {table_ident} WHERE k >= $1 RETURNING k,v;"),
+                prefix: format!("DELETE FROM {table_ident} WHERE k LIKE $1 RETURNING k,v;"),
             },
+        }
+    }
+
+    /// Formats the table reference with schema if provided.
+    fn format_table_ident(schema_name: Option<&str>, table_name: &str) -> String {
+        match schema_name {
+            Some(s) if !s.is_empty() => format!("\"{}\".\"{}\"", s, table_name),
+            _ => format!("\"{}\"", table_name),
         }
     }
 }
@@ -190,7 +246,7 @@ impl<'a> PgSqlTemplateFactory<'a> {
 /// Templates for the given table name.
 #[derive(Debug, Clone)]
 pub struct PgSqlTemplateSet {
-    table_name: String,
+    table_ident: String,
     create_table_statement: String,
     range_template: RangeTemplate,
     delete_template: RangeTemplate,
@@ -199,27 +255,24 @@ pub struct PgSqlTemplateSet {
 impl PgSqlTemplateSet {
     /// Generates the sql for batch get.
     fn generate_batch_get_query(&self, key_len: usize) -> String {
-        let table_name = &self.table_name;
         let in_clause = pg_generate_in_placeholders(1, key_len).join(", ");
         format!(
-            "SELECT k, v FROM \"{table_name}\" WHERE k in ({});",
-            in_clause
+            "SELECT k, v FROM {} WHERE k in ({});",
+            self.table_ident, in_clause
         )
     }
 
     /// Generates the sql for batch delete.
     fn generate_batch_delete_query(&self, key_len: usize) -> String {
-        let table_name = &self.table_name;
         let in_clause = pg_generate_in_placeholders(1, key_len).join(", ");
         format!(
-            "DELETE FROM \"{table_name}\" WHERE k in ({}) RETURNING k,v;",
-            in_clause
+            "DELETE FROM {} WHERE k in ({}) RETURNING k,v;",
+            self.table_ident, in_clause
         )
     }
 
     /// Generates the sql for batch upsert.
     fn generate_batch_upsert_query(&self, kv_len: usize) -> String {
-        let table_name = &self.table_name;
         let in_placeholders: Vec<String> = (1..=kv_len).map(|i| format!("${}", i)).collect();
         let in_clause = in_placeholders.join(", ");
         let mut param_index = kv_len + 1;
@@ -233,9 +286,9 @@ impl PgSqlTemplateSet {
         format!(
             r#"
     WITH prev AS (
-        SELECT k,v FROM "{table_name}" WHERE k IN ({in_clause})
+        SELECT k,v FROM {table} WHERE k IN ({in_clause})
     ), update AS (
-    INSERT INTO "{table_name}" (k, v) VALUES
+    INSERT INTO {table} (k, v) VALUES
         {values_clause}
     ON CONFLICT (
         k
@@ -244,7 +297,10 @@ impl PgSqlTemplateSet {
     )
 
     SELECT k, v FROM prev;
-    "#
+    "#,
+            table = self.table_ident,
+            in_clause = in_clause,
+            values_clause = values_clause
         )
     }
 }
@@ -347,6 +403,265 @@ impl ExecutorFactory<PgClient> for PgExecutorFactory {
 /// A PostgreSQL-backed key-value store for metasrv.
 /// It uses [deadpool_postgres::Pool] as the connection pool for [RdsStore].
 pub type PgStore = RdsStore<PgClient, PgExecutorFactory, PgSqlTemplateSet>;
+
+/// Creates a PostgreSQL TLS connector based on the provided configuration.
+///
+/// This function creates a rustls-based TLS connector for PostgreSQL connections,
+/// following PostgreSQL's TLS mode specifications exactly:
+///
+/// # TLS Modes (PostgreSQL Specification)
+///
+/// - `Disable`: No TLS connection attempted
+/// - `Prefer`: Try TLS first, fallback to plaintext if TLS fails (handled by connection logic)
+/// - `Require`: Only TLS connections, but NO certificate verification (accept any cert)
+/// - `VerifyCa`: TLS + verify certificate is signed by trusted CA (no hostname verification)
+/// - `VerifyFull`: TLS + verify CA + verify hostname matches certificate SAN
+///
+pub fn create_postgres_tls_connector(tls_config: &TlsOption) -> Result<MakeRustlsConnect> {
+    common_telemetry::info!(
+        "Creating PostgreSQL TLS connector with mode: {:?}",
+        tls_config.mode
+    );
+
+    let config_builder = match tls_config.mode {
+        TlsMode::Disable => {
+            return PostgresTlsConfigSnafu {
+                reason: "Cannot create TLS connector for Disable mode".to_string(),
+            }
+            .fail();
+        }
+        TlsMode::Prefer | TlsMode::Require => {
+            // For Prefer/Require: Accept any certificate (no verification)
+            let verifier = Arc::new(AcceptAnyVerifier);
+            ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+        }
+        TlsMode::VerifyCa => {
+            // For VerifyCa: Verify server cert against CA store, but skip hostname verification
+            let ca_store = load_ca(&tls_config.ca_cert_path)?;
+            let verifier = Arc::new(NoHostnameVerification { roots: ca_store });
+            ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+        }
+        TlsMode::VerifyFull => {
+            let ca_store = load_ca(&tls_config.ca_cert_path)?;
+            ClientConfig::builder().with_root_certificates(ca_store)
+        }
+    };
+
+    // Create the TLS client configuration based on the mode and client cert requirements
+    let client_config = if !tls_config.cert_path.is_empty() && !tls_config.key_path.is_empty() {
+        // Client certificate authentication required
+        common_telemetry::info!("Loading client certificate for mutual TLS");
+        let cert_chain = load_certs(&tls_config.cert_path)?;
+        let private_key = load_private_key(&tls_config.key_path)?;
+
+        config_builder
+            .with_client_auth_cert(cert_chain, private_key)
+            .map_err(|e| {
+                PostgresTlsConfigSnafu {
+                    reason: format!("Failed to configure client authentication: {}", e),
+                }
+                .build()
+            })?
+    } else {
+        common_telemetry::info!("No client certificate provided, skip client authentication");
+        config_builder.with_no_client_auth()
+    };
+
+    common_telemetry::info!("Successfully created PostgreSQL TLS connector");
+    Ok(MakeRustlsConnect::new(client_config))
+}
+
+/// For Prefer/Require mode, we accept any server certificate without verification.
+#[derive(Debug)]
+struct AcceptAnyVerifier;
+
+impl ServerCertVerifier for AcceptAnyVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, TlsError> {
+        common_telemetry::debug!(
+            "Accepting server certificate without verification (Prefer/Require mode)"
+        );
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+        // Accept any signature without verification
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+        // Accept any signature without verification
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        // Support all signature schemes
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// For VerifyCa mode, we verify the server certificate against our CA store
+/// and skip verify server's HostName.
+#[derive(Debug)]
+struct NoHostnameVerification {
+    roots: Arc<rustls::RootCertStore>,
+}
+
+impl ServerCertVerifier for NoHostnameVerification {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, TlsError> {
+        let cert = ParsedCertificate::try_from(end_entity)?;
+        rustls::client::verify_server_cert_signed_by_trust_anchor(
+            &cert,
+            &self.roots,
+            intermediates,
+            now,
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .all,
+        )?;
+
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        // Support all signature schemes
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+fn load_certs(path: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let file = File::open(path).context(LoadTlsCertificateSnafu { path })?;
+    let mut reader = BufReader::new(file);
+    let certs = certs(&mut reader)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            PostgresTlsConfigSnafu {
+                reason: format!("Failed to parse certificates from {}: {}", path, e),
+            }
+            .build()
+        })?;
+    Ok(certs)
+}
+
+fn load_private_key(path: &str) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    let file = File::open(path).context(LoadTlsCertificateSnafu { path })?;
+    let mut reader = BufReader::new(file);
+    let key = private_key(&mut reader)
+        .map_err(|e| {
+            PostgresTlsConfigSnafu {
+                reason: format!("Failed to parse private key from {}: {}", path, e),
+            }
+            .build()
+        })?
+        .ok_or_else(|| {
+            PostgresTlsConfigSnafu {
+                reason: format!("No private key found in {}", path),
+            }
+            .build()
+        })?;
+    Ok(key)
+}
+
+fn load_ca(path: &str) -> Result<Arc<rustls::RootCertStore>> {
+    let mut root_store = rustls::RootCertStore::empty();
+
+    // Add system root certificates
+    match rustls_native_certs::load_native_certs() {
+        Ok(certs) => {
+            let num_certs = certs.len();
+            for cert in certs {
+                if let Err(e) = root_store.add(cert) {
+                    return PostgresTlsConfigSnafu {
+                        reason: format!("Failed to add root certificate: {}", e),
+                    }
+                    .fail();
+                }
+            }
+            common_telemetry::info!("Loaded {num_certs} system root certificates successfully");
+        }
+        Err(e) => {
+            return PostgresTlsConfigSnafu {
+                reason: format!("Failed to load system root certificates: {}", e),
+            }
+            .fail();
+        }
+    }
+
+    // Try add custom CA certificate if provided
+    if !path.is_empty() {
+        let ca_certs = load_certs(path)?;
+        for cert in ca_certs {
+            if let Err(e) = root_store.add(cert) {
+                return PostgresTlsConfigSnafu {
+                    reason: format!("Failed to add custom CA certificate: {}", e),
+                }
+                .fail();
+            }
+        }
+        common_telemetry::info!("Added custom CA certificate from {}", path);
+    }
+
+    Ok(Arc::new(root_store))
+}
 
 #[async_trait::async_trait]
 impl KvQueryExecutor<PgClient> for PgStore {
@@ -491,26 +806,64 @@ impl KvQueryExecutor<PgClient> for PgStore {
 }
 
 impl PgStore {
-    /// Create [PgStore] impl of [KvBackendRef] from url.
-    pub async fn with_url(url: &str, table_name: &str, max_txn_ops: usize) -> Result<KvBackendRef> {
+    /// Create [PgStore] impl of [KvBackendRef] from url with optional TLS support.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - PostgreSQL connection URL
+    /// * `table_name` - Name of the table to use for key-value storage
+    /// * `max_txn_ops` - Maximum number of operations per transaction
+    /// * `tls_config` - Optional TLS configuration. If None, uses plaintext connection.
+    pub async fn with_url_and_tls(
+        url: &str,
+        table_name: &str,
+        max_txn_ops: usize,
+        tls_config: Option<TlsOption>,
+    ) -> Result<KvBackendRef> {
         let mut cfg = Config::new();
         cfg.url = Some(url.to_string());
-        // TODO(weny, CookiePie): add tls support
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
-            .context(CreatePostgresPoolSnafu)?;
-        Self::with_pg_pool(pool, table_name, max_txn_ops).await
+
+        let pool = match tls_config {
+            Some(tls_config) if tls_config.mode != TlsMode::Disable => {
+                match create_postgres_tls_connector(&tls_config) {
+                    Ok(tls_connector) => cfg
+                        .create_pool(Some(Runtime::Tokio1), tls_connector)
+                        .context(CreatePostgresPoolSnafu)?,
+                    Err(e) => {
+                        if tls_config.mode == TlsMode::Prefer {
+                            // Fallback to insecure connection if TLS fails
+                            common_telemetry::info!(
+                                "Failed to create TLS connector, falling back to insecure connection"
+                            );
+                            cfg.create_pool(Some(Runtime::Tokio1), NoTls)
+                                .context(CreatePostgresPoolSnafu)?
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+            _ => cfg
+                .create_pool(Some(Runtime::Tokio1), NoTls)
+                .context(CreatePostgresPoolSnafu)?,
+        };
+
+        Self::with_pg_pool(pool, None, table_name, max_txn_ops).await
     }
 
-    /// Create [PgStore] impl of [KvBackendRef] from [deadpool_postgres::Pool].
+    /// Create [PgStore] impl of [KvBackendRef] from url (backward compatibility).
+    pub async fn with_url(url: &str, table_name: &str, max_txn_ops: usize) -> Result<KvBackendRef> {
+        Self::with_url_and_tls(url, table_name, max_txn_ops, None).await
+    }
+
+    /// Create [PgStore] impl of [KvBackendRef] from [deadpool_postgres::Pool] with optional schema.
     pub async fn with_pg_pool(
         pool: Pool,
+        schema_name: Option<&str>,
         table_name: &str,
         max_txn_ops: usize,
     ) -> Result<KvBackendRef> {
-        // This step ensures the postgres metadata backend is ready to use.
-        // We check if greptime_metakv table exists, and we will create a new table
-        // if it does not exist.
+        // Ensure the postgres metadata backend is ready to use.
         let client = match pool.get().await {
             Ok(client) => client,
             Err(e) => {
@@ -520,13 +873,14 @@ impl PgStore {
                 .fail();
             }
         };
-        let template_factory = PgSqlTemplateFactory::new(table_name);
+        let template_factory = PgSqlTemplateFactory::new(schema_name, table_name);
         let sql_template_set = template_factory.build();
+        // Do not attempt to create schema implicitly.
         client
             .execute(&sql_template_set.create_table_statement, &[])
             .await
             .with_context(|_| PostgresExecutionSnafu {
-                sql: sql_template_set.create_table_statement.to_string(),
+                sql: sql_template_set.create_table_statement.clone(),
             })?;
         Ok(Arc::new(Self {
             max_txn_ops,
@@ -549,7 +903,8 @@ mod tests {
         test_txn_compare_less, test_txn_compare_not_equal, test_txn_one_compare_op,
         text_txn_multi_compare_op, unprepare_kv,
     };
-    use crate::maybe_skip_postgres_integration_test;
+    use crate::test_util::test_certs_dir;
+    use crate::{maybe_skip_postgres_integration_test, maybe_skip_postgres15_integration_test};
 
     async fn build_pg_kv_backend(table_name: &str) -> Option<PgStore> {
         let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
@@ -564,13 +919,15 @@ mod tests {
             .context(CreatePostgresPoolSnafu)
             .unwrap();
         let client = pool.get().await.unwrap();
-        let template_factory = PgSqlTemplateFactory::new(table_name);
+        // use the default schema (i.e., public)
+        let template_factory = PgSqlTemplateFactory::new(None, table_name);
         let sql_templates = template_factory.build();
+        // Do not attempt to create schema implicitly.
         client
             .execute(&sql_templates.create_table_statement, &[])
             .await
-            .context(PostgresExecutionSnafu {
-                sql: sql_templates.create_table_statement.to_string(),
+            .with_context(|_| PostgresExecutionSnafu {
+                sql: sql_templates.create_table_statement.clone(),
             })
             .unwrap();
         Some(PgStore {
@@ -580,6 +937,152 @@ mod tests {
             executor_factory: PgExecutorFactory { pool },
             _phantom: PhantomData,
         })
+    }
+
+    async fn build_pg15_pool() -> Option<Pool> {
+        let url = std::env::var("GT_POSTGRES15_ENDPOINTS").unwrap_or_default();
+        if url.is_empty() {
+            return None;
+        }
+        let mut cfg = Config::new();
+        cfg.url = Some(url);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .context(CreatePostgresPoolSnafu)
+            .ok()?;
+        Some(pool)
+    }
+
+    #[tokio::test]
+    async fn test_pg15_create_table_in_public_should_fail() {
+        maybe_skip_postgres15_integration_test!();
+        let Some(pool) = build_pg15_pool().await else {
+            return;
+        };
+        let res = PgStore::with_pg_pool(pool, None, "pg15_public_should_fail", 128).await;
+        assert!(
+            res.is_err(),
+            "creating table in public should fail for test_user"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pg15_create_table_in_test_schema_and_crud_should_succeed() {
+        maybe_skip_postgres15_integration_test!();
+        let Some(pool) = build_pg15_pool().await else {
+            return;
+        };
+        let schema_name = std::env::var("GT_POSTGRES15_SCHEMA").unwrap();
+        let client = pool.get().await.unwrap();
+        let factory = PgSqlTemplateFactory::new(Some(&schema_name), "pg15_ok");
+        let templates = factory.build();
+        client
+            .execute(&templates.create_table_statement, &[])
+            .await
+            .unwrap();
+        let kv = PgStore {
+            max_txn_ops: 128,
+            sql_template_set: templates,
+            txn_retry_count: RDS_STORE_TXN_RETRY_COUNT,
+            executor_factory: PgExecutorFactory { pool },
+            _phantom: PhantomData,
+        };
+        let prefix = b"pg15_crud/";
+        prepare_kv_with_prefix(&kv, prefix.to_vec()).await;
+        test_kv_put_with_prefix(&kv, prefix.to_vec()).await;
+        test_kv_batch_get_with_prefix(&kv, prefix.to_vec()).await;
+        unprepare_kv(&kv, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg_with_tls() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_postgres_integration_test!();
+        let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
+        let tls_connector = create_postgres_tls_connector(&TlsOption {
+            mode: TlsMode::Require,
+            cert_path: String::new(),
+            key_path: String::new(),
+            ca_cert_path: String::new(),
+            watch: false,
+        })
+        .unwrap();
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoints);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), tls_connector)
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        client.execute("SELECT 1", &[]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pg_with_mtls() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_postgres_integration_test!();
+        let certs_dir = test_certs_dir();
+        let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
+        let tls_connector = create_postgres_tls_connector(&TlsOption {
+            mode: TlsMode::Require,
+            cert_path: certs_dir.join("client.crt").display().to_string(),
+            key_path: certs_dir.join("client.key").display().to_string(),
+            ca_cert_path: String::new(),
+            watch: false,
+        })
+        .unwrap();
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoints);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), tls_connector)
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        client.execute("SELECT 1", &[]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pg_verify_ca() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_postgres_integration_test!();
+        let certs_dir = test_certs_dir();
+        let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
+        let tls_connector = create_postgres_tls_connector(&TlsOption {
+            mode: TlsMode::VerifyCa,
+            cert_path: certs_dir.join("client.crt").display().to_string(),
+            key_path: certs_dir.join("client.key").display().to_string(),
+            ca_cert_path: certs_dir.join("root.crt").display().to_string(),
+            watch: false,
+        })
+        .unwrap();
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoints);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), tls_connector)
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        client.execute("SELECT 1", &[]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pg_verify_full() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_postgres_integration_test!();
+        let certs_dir = test_certs_dir();
+        let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
+        let tls_connector = create_postgres_tls_connector(&TlsOption {
+            mode: TlsMode::VerifyFull,
+            cert_path: certs_dir.join("client.crt").display().to_string(),
+            key_path: certs_dir.join("client.key").display().to_string(),
+            ca_cert_path: certs_dir.join("root.crt").display().to_string(),
+            watch: false,
+        })
+        .unwrap();
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoints);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), tls_connector)
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        client.execute("SELECT 1", &[]).await.unwrap();
     }
 
     #[tokio::test]
@@ -682,5 +1185,33 @@ mod tests {
         test_txn_compare_greater(&kv_backend).await;
         test_txn_compare_less(&kv_backend).await;
         test_txn_compare_not_equal(&kv_backend).await;
+    }
+
+    #[test]
+    fn test_pg_template_with_schema() {
+        let factory = PgSqlTemplateFactory::new(Some("test_schema"), "greptime_metakv");
+        let t = factory.build();
+        assert!(
+            t.create_table_statement
+                .contains("\"test_schema\".\"greptime_metakv\"")
+        );
+        let upsert = t.generate_batch_upsert_query(1);
+        assert!(upsert.contains("\"test_schema\".\"greptime_metakv\""));
+        let get = t.generate_batch_get_query(1);
+        assert!(get.contains("\"test_schema\".\"greptime_metakv\""));
+        let del = t.generate_batch_delete_query(1);
+        assert!(del.contains("\"test_schema\".\"greptime_metakv\""));
+    }
+
+    #[test]
+    fn test_format_table_ident() {
+        let t = PgSqlTemplateFactory::format_table_ident(None, "test_table");
+        assert_eq!(t, "\"test_table\"");
+
+        let t = PgSqlTemplateFactory::format_table_ident(Some("test_schema"), "test_table");
+        assert_eq!(t, "\"test_schema\".\"test_table\"");
+
+        let t = PgSqlTemplateFactory::format_table_ident(Some(""), "test_table");
+        assert_eq!(t, "\"test_table\"");
     }
 }

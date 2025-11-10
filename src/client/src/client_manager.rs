@@ -17,13 +17,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::node_manager::{DatanodeRef, FlownodeRef, NodeManager};
+use common_meta::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef};
 use common_meta::peer::Peer;
 use moka::future::{Cache, CacheBuilder};
 
+use crate::Client;
 use crate::flow::FlowRequester;
 use crate::region::RegionRequester;
-use crate::Client;
 
 pub struct NodeClients {
     channel_manager: ChannelManager,
@@ -45,7 +45,7 @@ impl Debug for NodeClients {
 }
 
 #[async_trait::async_trait]
-impl NodeManager for NodeClients {
+impl DatanodeManager for NodeClients {
     async fn datanode(&self, datanode: &Peer) -> DatanodeRef {
         let client = self.get_client(datanode).await;
 
@@ -60,7 +60,10 @@ impl NodeManager for NodeClients {
             *accept_compression,
         ))
     }
+}
 
+#[async_trait::async_trait]
+impl FlownodeManager for NodeClients {
     async fn flownode(&self, flownode: &Peer) -> FlownodeRef {
         let client = self.get_client(flownode).await;
 
@@ -71,7 +74,7 @@ impl NodeManager for NodeClients {
 impl NodeClients {
     pub fn new(config: ChannelConfig) -> Self {
         Self {
-            channel_manager: ChannelManager::with_config(config),
+            channel_manager: ChannelManager::with_config(config, None),
             clients: CacheBuilder::new(1024)
                 .time_to_live(Duration::from_secs(30 * 60))
                 .time_to_idle(Duration::from_secs(5 * 60))

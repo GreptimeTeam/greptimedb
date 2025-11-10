@@ -54,6 +54,33 @@ pub enum Error {
         peer_id: u64,
     },
 
+    #[snafu(display("Failed to list active frontends"))]
+    ListActiveFrontends {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to list active datanodes"))]
+    ListActiveDatanodes {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to list active flownodes"))]
+    ListActiveFlownodes {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("No available frontend"))]
+    NoAvailableFrontend {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Another migration procedure is running for region: {}", region_id))]
     MigrationRunning {
         #[snafu(implicit)]
@@ -99,6 +126,13 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to init reconciliation manager"))]
+    InitReconciliationManager {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to create default catalog and schema"))]
     InitMetadata {
         #[snafu(implicit)]
@@ -113,6 +147,20 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to set next sequence number"))]
+    SetNextSequence {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to peek sequence number"))]
+    PeekSequence {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to start telemetry task"))]
     StartTelemetryTask {
         #[snafu(implicit)]
@@ -122,6 +170,13 @@ pub enum Error {
 
     #[snafu(display("Failed to submit ddl task"))]
     SubmitDdlTask {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to submit reconcile procedure"))]
+    SubmitReconcileProcedure {
         #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
@@ -216,6 +271,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to read file: {}", path))]
+    FileIo {
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+        path: String,
+    },
+
     #[snafu(display("Failed to bind address {}", addr))]
     TcpBind {
         addr: String,
@@ -223,12 +287,6 @@ pub enum Error {
         error: std::io::Error,
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Failed to convert to TcpIncoming"))]
-    TcpIncoming {
-        #[snafu(source)]
-        error: Box<dyn std::error::Error + Send + Sync>,
     },
 
     #[snafu(display("Failed to start gRPC server"))]
@@ -752,6 +810,13 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Invalid node info format"))]
+    InvalidNodeInfoFormat {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to serialize options to TOML"))]
     TomlFormat {
         #[snafu(implicit)]
@@ -854,6 +919,13 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to parse wal options"))]
+    ParseWalOptions {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to build kafka client."))]
     BuildKafkaClient {
         #[snafu(implicit)]
@@ -892,9 +964,26 @@ pub enum Error {
         offset: u64,
     },
 
+    #[snafu(display("Failed to get offset from Kafka, topic: {}", topic))]
+    GetOffset {
+        topic: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
     #[snafu(display("Failed to update the TopicNameValue in kvbackend, topic: {}", topic))]
     UpdateTopicNameValue {
         topic: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to build tls options"))]
+    BuildTlsOptions {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
@@ -919,8 +1008,8 @@ impl ErrorExt for Error {
         match self {
             Error::EtcdFailed { .. }
             | Error::ConnectEtcd { .. }
+            | Error::FileIo { .. }
             | Error::TcpBind { .. }
-            | Error::TcpIncoming { .. }
             | Error::SerializeToJson { .. }
             | Error::DeserializeFromJson { .. }
             | Error::NoLeader { .. }
@@ -930,30 +1019,31 @@ impl ErrorExt for Error {
             | Error::BatchGet { .. }
             | Error::Range { .. }
             | Error::ResponseHeaderNotFound { .. }
-            | Error::IsNotLeader { .. }
             | Error::InvalidHttpBody { .. }
             | Error::ExceededRetryLimit { .. }
             | Error::SendShutdownSignal { .. }
-            | Error::PusherNotFound { .. }
             | Error::PushMessage { .. }
             | Error::MailboxClosed { .. }
-            | Error::MailboxTimeout { .. }
             | Error::MailboxReceiver { .. }
-            | Error::MailboxChannelClosed { .. }
-            | Error::RetryLater { .. }
-            | Error::RetryLaterWithSource { .. }
             | Error::StartGrpc { .. }
             | Error::PublishMessage { .. }
             | Error::Join { .. }
-            | Error::PeerUnavailable { .. }
-            | Error::ExceededDeadline { .. }
             | Error::ChooseItems { .. }
             | Error::FlowStateHandler { .. }
             | Error::BuildWalOptionsAllocator { .. }
             | Error::BuildPartitionClient { .. }
-            | Error::BuildKafkaClient { .. }
-            | Error::DeleteRecords { .. }
-            | Error::PruneTaskAlreadyRunning { .. } => StatusCode::Internal,
+            | Error::BuildKafkaClient { .. } => StatusCode::Internal,
+
+            Error::DeleteRecords { .. }
+            | Error::GetOffset { .. }
+            | Error::PeerUnavailable { .. }
+            | Error::PusherNotFound { .. } => StatusCode::Unexpected,
+            Error::MailboxTimeout { .. } | Error::ExceededDeadline { .. } => StatusCode::Cancelled,
+            Error::PruneTaskAlreadyRunning { .. }
+            | Error::RetryLater { .. }
+            | Error::MailboxChannelClosed { .. }
+            | Error::IsNotLeader { .. } => StatusCode::IllegalState,
+            Error::RetryLaterWithSource { source, .. } => source.status_code(),
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
@@ -994,7 +1084,8 @@ impl ErrorExt for Error {
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SaveClusterInfo { source, .. }
             | Error::InvalidClusterInfoFormat { source, .. }
-            | Error::InvalidDatanodeStatFormat { source, .. } => source.status_code(),
+            | Error::InvalidDatanodeStatFormat { source, .. }
+            | Error::InvalidNodeInfoFormat { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::SubmitProcedure { source, .. }
             | Error::WaitProcedure { source, .. }
@@ -1010,21 +1101,30 @@ impl ErrorExt for Error {
             | Error::ListTables { source, .. } => source.status_code(),
             Error::StartTelemetryTask { source, .. } => source.status_code(),
 
-            Error::NextSequence { source, .. } => source.status_code(),
+            Error::NextSequence { source, .. }
+            | Error::SetNextSequence { source, .. }
+            | Error::PeekSequence { source, .. } => source.status_code(),
             Error::DowngradeLeader { source, .. } => source.status_code(),
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
-            Error::SubmitDdlTask { source, .. } => source.status_code(),
+            Error::SubmitDdlTask { source, .. }
+            | Error::SubmitReconcileProcedure { source, .. } => source.status_code(),
             Error::ConvertProtoData { source, .. }
             | Error::TableMetadataManager { source, .. }
             | Error::RuntimeSwitchManager { source, .. }
             | Error::KvBackend { source, .. }
             | Error::UnexpectedLogicalRouteTable { source, .. }
-            | Error::UpdateTopicNameValue { source, .. } => source.status_code(),
+            | Error::UpdateTopicNameValue { source, .. }
+            | Error::ParseWalOptions { source, .. } => source.status_code(),
+            Error::ListActiveFrontends { source, .. }
+            | Error::ListActiveDatanodes { source, .. }
+            | Error::ListActiveFlownodes { source, .. } => source.status_code(),
+            Error::NoAvailableFrontend { .. } => StatusCode::IllegalState,
 
-            Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
-                source.status_code()
-            }
+            Error::InitMetadata { source, .. }
+            | Error::InitDdlManager { source, .. }
+            | Error::InitReconciliationManager { source, .. } => source.status_code(),
 
+            Error::BuildTlsOptions { source, .. } => source.status_code(),
             Error::Other { source, .. } => source.status_code(),
             Error::NoEnoughAvailableNode { .. } => StatusCode::RuntimeResourcesExhausted,
 
@@ -1060,10 +1160,10 @@ pub(crate) fn match_for_io_error(err_status: &tonic::Status) -> Option<&std::io:
 
         // h2::Error do not expose std::io::Error with `source()`
         // https://github.com/hyperium/h2/pull/462
-        if let Some(h2_err) = err.downcast_ref::<h2::Error>() {
-            if let Some(io_err) = h2_err.get_io() {
-                return Some(io_err);
-            }
+        if let Some(h2_err) = err.downcast_ref::<h2::Error>()
+            && let Some(io_err) = h2_err.get_io()
+        {
+            return Some(io_err);
         }
 
         err = err.source()?;

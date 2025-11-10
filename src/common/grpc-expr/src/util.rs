@@ -21,7 +21,7 @@ use api::v1::{
     ColumnOptions, ColumnSchema, CreateTableExpr, JsonTypeExtension, SemanticType,
 };
 use datatypes::schema::Schema;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use table::metadata::TableId;
 use table::table_reference::TableReference;
 
@@ -81,15 +81,15 @@ fn infer_column_datatype(
     let column_type =
         ColumnDataType::try_from(datatype).context(UnknownColumnDataTypeSnafu { datatype })?;
 
-    if matches!(&column_type, ColumnDataType::Binary) {
-        if let Some(ext) = datatype_extension {
-            let type_ext = ext
-                .type_ext
-                .as_ref()
-                .context(error::MissingFieldSnafu { field: "type_ext" })?;
-            if *type_ext == TypeExt::JsonType(JsonTypeExtension::JsonBinary.into()) {
-                return Ok(ColumnDataType::Json);
-            }
+    if matches!(&column_type, ColumnDataType::Binary)
+        && let Some(ext) = datatype_extension
+    {
+        let type_ext = ext
+            .type_ext
+            .as_ref()
+            .context(error::MissingFieldSnafu { field: "type_ext" })?;
+        if *type_ext == TypeExt::JsonType(JsonTypeExtension::JsonBinary.into()) {
+            return Ok(ColumnDataType::Json);
         }
     }
 
@@ -167,7 +167,7 @@ pub fn build_create_table_expr(
             default_constraint: vec![],
             semantic_type,
             comment: String::new(),
-            datatype_extension: *datatype_extension,
+            datatype_extension: datatype_extension.clone(),
             options: options.clone(),
         });
     }
@@ -209,7 +209,7 @@ pub fn extract_new_columns(
                 default_constraint: vec![],
                 semantic_type: expr.semantic_type,
                 comment: String::new(),
-                datatype_extension: *expr.datatype_extension,
+                datatype_extension: expr.datatype_extension.clone(),
                 options: expr.options.clone(),
             });
             AddColumn {
@@ -425,7 +425,7 @@ mod tests {
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
                     decimal_column.data_type,
-                    decimal_column.datatype_extension,
+                    decimal_column.datatype_extension.clone(),
                 )
                 .unwrap()
             )
@@ -444,9 +444,11 @@ mod tests {
 
         let schema = Arc::new(SchemaBuilder::try_from(columns).unwrap().build().unwrap());
 
-        assert!(extract_new_columns(&schema, ColumnExpr::from_columns(&[]))
-            .unwrap()
-            .is_none());
+        assert!(
+            extract_new_columns(&schema, ColumnExpr::from_columns(&[]))
+                .unwrap()
+                .is_none()
+        );
 
         let insert_batch = mock_insert_batch();
 
@@ -518,6 +520,7 @@ mod tests {
                         .as_ref()
                         .unwrap()
                         .datatype_extension
+                        .clone()
                 )
                 .unwrap()
             )

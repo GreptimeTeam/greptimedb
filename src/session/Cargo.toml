@@ -11,6 +11,7 @@ testing = []
 workspace = true
 
 [dependencies]
+ahash.workspace = true
 api.workspace = true
 arc-swap = "1.5"
 auth.workspace = true
@@ -21,6 +22,7 @@ common-recordbatch.workspace = true
 common-session.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+datafusion-common.workspace = true
 derive_builder.workspace = true
 derive_more = { version = "1", default-features = false, features = ["debug"] }
 snafu.workspace = true

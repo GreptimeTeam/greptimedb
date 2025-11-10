@@ -26,7 +26,7 @@ use common_plugins::GREPTIME_EXEC_WRITE_COST;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::tracing;
-use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
+use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -176,6 +176,49 @@ pub async fn sql_parse(
     Ok(stmts.into())
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SqlFormatResponse {
+    pub formatted: String,
+}
+
+/// Handler to format sql string
+#[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "http", request_type = "sql_format"))]
+pub async fn sql_format(
+    Query(query_params): Query<SqlQuery>,
+    Form(form_params): Form<SqlQuery>,
+) -> axum::response::Response {
+    let Some(sql) = query_params.sql.or(form_params.sql) else {
+        let resp = ErrorResponse::from_error_message(
+            StatusCode::InvalidArguments,
+            "sql parameter is required.".to_string(),
+        );
+        return HttpResponse::Error(resp).into_response();
+    };
+
+    // Parse using GreptimeDB dialect then reconstruct statements via Display
+    let stmts = match ParserContext::create_with_dialect(
+        &sql,
+        &GreptimeDbDialect {},
+        ParseOptions::default(),
+    ) {
+        Ok(v) => v,
+        Err(e) => return HttpResponse::Error(ErrorResponse::from_error(e)).into_response(),
+    };
+
+    let mut parts: Vec<String> = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        let mut s = format!("{stmt}");
+        if !s.trim_end().ends_with(';') {
+            s.push(';');
+        }
+        parts.push(s);
+    }
+
+    let formatted = parts.join("\n");
+    Json(SqlFormatResponse { formatted }).into_response()
+}
+
 /// Create a response from query result
 pub async fn from_output(
     outputs: Vec<crate::error::Result<Output>>,
@@ -284,6 +327,8 @@ impl From<PromqlQuery> for PromQuery {
             lookback: query
                 .lookback
                 .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
+            // TODO(dennis): support alias from http params or parse from query.query
+            alias: None,
         }
     }
 }
@@ -357,10 +402,10 @@ pub async fn metrics(
     // But ProcessCollector only support on linux.
 
     #[cfg(not(windows))]
-    if let Some(c) = crate::metrics::jemalloc::JEMALLOC_COLLECTOR.as_ref() {
-        if let Err(e) = c.update() {
-            common_telemetry::error!(e; "Failed to update jemalloc metrics");
-        }
+    if let Some(c) = crate::metrics::jemalloc::JEMALLOC_COLLECTOR.as_ref()
+        && let Err(e) = c.update()
+    {
+        common_telemetry::error!(e; "Failed to update jemalloc metrics");
     }
     state.render()
 }

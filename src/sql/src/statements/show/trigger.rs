@@ -3,6 +3,7 @@ use std::fmt::{self, Display};
 use serde::Serialize;
 use sqlparser_derive::{Visit, VisitMut};
 
+use crate::ast::ObjectName;
 use crate::statements::show::ShowKind;
 
 /// SQL structure for `SHOW TRIGGERS`.
@@ -19,12 +20,24 @@ impl Display for ShowTriggers {
     }
 }
 
+/// SQL structure for `SHOW CREATE TRIGGER`.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct ShowCreateTrigger {
+    pub trigger_name: ObjectName,
+}
+
+impl Display for ShowCreateTrigger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SHOW CREATE TRIGGER {}", self.trigger_name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::{ParseOptions, ParserContext};
-    use crate::statements::show::trigger::ShowTriggers;
     use crate::statements::show::ShowKind;
+    use crate::statements::show::trigger::ShowTriggers;
     use crate::statements::statement::Statement;
 
     #[test]
@@ -55,5 +68,30 @@ mod tests {
         };
         let expected = "SHOW TRIGGERS WHERE name = 'test_trigger'";
         assert_eq!(show_triggers.to_string(), expected);
+    }
+
+    #[test]
+    fn test_show_create_trigger_display() {
+        let sql = "SHOW CREATE TRIGGER test_trigger";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        let Statement::ShowCreateTrigger(show_create_trigger) = &result[0] else {
+            panic!("Expected ShowCreateTrigger statement");
+        };
+        let expected = "SHOW CREATE TRIGGER test_trigger";
+        assert_eq!(show_create_trigger.to_string(), expected);
+
+        let sql = "SHOW CREATE TRIGGER greptime.Test_Trigger";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        let Statement::ShowCreateTrigger(show_create_trigger) = &result[0] else {
+            panic!("Expected ShowCreateTrigger statement");
+        };
+        let expected = "SHOW CREATE TRIGGER greptime.test_trigger";
+        assert_eq!(show_create_trigger.to_string(), expected);
     }
 }

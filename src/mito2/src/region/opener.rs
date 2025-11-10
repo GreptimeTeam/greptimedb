@@ -16,20 +16,22 @@
 
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64};
+use std::time::Instant;
 
 use common_telemetry::{debug, error, info, warn};
 use common_wal::options::WalOptions;
-use futures::future::BoxFuture;
 use futures::StreamExt;
+use futures::future::BoxFuture;
 use log_store::kafka::log_store::KafkaLogStore;
+use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::{join_dir, normalize_dir};
-use snafu::{ensure, OptionExt, ResultExt};
-use store_api::logstore::provider::Provider;
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::LogStore;
+use store_api::logstore::provider::Provider;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
@@ -46,11 +48,11 @@ use crate::error::{
     Result, StaleLogEntrySnafu,
 };
 use crate::manifest::action::RegionManifest;
-use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
+use crate::memtable::MemtableBuilderProvider;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
-use crate::memtable::MemtableBuilderProvider;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
@@ -59,13 +61,27 @@ use crate::region::{
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file_purger::LocalFilePurger;
+use crate::sst::FormatType;
+use crate::sst::file_purger::create_local_file_purger;
+use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
+
+/// A fetcher to retrieve partition expr for a region.
+///
+/// Compatibility: older regions didn't persist `partition_expr` in engine metadata,
+/// while newer ones do. On open, we backfill it via this fetcher and persist it
+/// to the manifest so future opens don't need refetching.
+#[async_trait::async_trait]
+pub trait PartitionExprFetcher {
+    async fn fetch_expr(&self, region_id: RegionId) -> Option<String>;
+}
+
+pub type PartitionExprFetcherRef = Arc<dyn PartitionExprFetcher + Send + Sync>;
 
 /// Builder to create a new [MitoRegion] or open an existing one.
 pub(crate) struct RegionOpener {
@@ -84,6 +100,9 @@ pub(crate) struct RegionOpener {
     time_provider: TimeProviderRef,
     stats: ManifestStats,
     wal_entry_reader: Option<Box<dyn WalEntryReader>>,
+    replay_checkpoint: Option<u64>,
+    file_ref_manager: FileReferenceManagerRef,
+    partition_expr_fetcher: PartitionExprFetcherRef,
 }
 
 impl RegionOpener {
@@ -100,6 +119,8 @@ impl RegionOpener {
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
         time_provider: TimeProviderRef,
+        file_ref_manager: FileReferenceManagerRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> RegionOpener {
         RegionOpener {
             region_id,
@@ -117,6 +138,9 @@ impl RegionOpener {
             time_provider,
             stats: Default::default(),
             wal_entry_reader: None,
+            replay_checkpoint: None,
+            file_ref_manager,
+            partition_expr_fetcher,
         }
     }
 
@@ -146,6 +170,12 @@ impl RegionOpener {
     /// Parses and sets options for the region.
     pub(crate) fn parse_options(self, options: HashMap<String, String>) -> Result<Self> {
         self.options(RegionOptions::try_from(&options)?)
+    }
+
+    /// Sets the replay checkpoint for the region.
+    pub(crate) fn replay_checkpoint(mut self, replay_checkpoint: Option<u64>) -> Self {
+        self.replay_checkpoint = replay_checkpoint;
+        self
     }
 
     /// If a [WalEntryReader] is set, the [RegionOpener] will use [WalEntryReader] instead of
@@ -203,8 +233,9 @@ impl RegionOpener {
                     &expect.column_metadatas,
                     &expect.primary_key,
                 )?;
-                // To keep consistence with Create behavior, set the opened Region to RegionRole::Leader.
+                // To keep consistency with Create behavior, set the opened Region to RegionRole::Leader.
                 region.set_role(RegionRole::Leader);
+
                 return Ok(region);
             }
             Ok(None) => {
@@ -225,22 +256,31 @@ impl RegionOpener {
         let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
         let provider = self.provider::<S>(&options.wal_options)?;
         let metadata = Arc::new(metadata);
+        // Set the sst_format based on options or flat_format flag
+        let sst_format = if let Some(format) = options.sst_format {
+            format
+        } else if config.default_experimental_flat_format {
+            FormatType::Flat
+        } else {
+            // Default to PrimaryKeyParquet for newly created regions
+            FormatType::PrimaryKey
+        };
         // Create a manifest manager for this region and writes regions to the manifest file.
         let region_manifest_options =
             Self::manifest_options(config, &options, &region_dir, &self.object_store_manager)?;
+        // For remote WAL, we need to set flushed_entry_id to current topic's latest entry id.
+        let flushed_entry_id = provider.initial_flushed_entry_id::<S>(wal.store());
         let manifest_manager = RegionManifestManager::new(
             metadata.clone(),
+            flushed_entry_id,
             region_manifest_options,
             self.stats.total_manifest_size.clone(),
             self.stats.manifest_version.clone(),
+            sst_format,
         )
         .await?;
 
-        let memtable_builder = self.memtable_builder_provider.builder_for_options(
-            options.memtable.as_ref(),
-            options.need_dedup(),
-            options.merge_mode(),
-        );
+        let memtable_builder = self.memtable_builder_provider.builder_for_options(&options);
         let part_duration = options.compaction.time_window();
         // Initial memtable id is 0.
         let mutable = Arc::new(TimePartitions::new(
@@ -274,17 +314,20 @@ impl RegionOpener {
                 manifest_manager,
                 RegionRoleState::Leader(RegionLeaderState::Writable),
             )),
-            file_purger: Arc::new(LocalFilePurger::new(
+            file_purger: create_local_file_purger(
                 self.purge_scheduler,
                 access_layer,
                 self.cache_manager,
-            )),
+                self.file_ref_manager.clone(),
+            ),
             provider,
             last_flush_millis: AtomicI64::new(now),
             last_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(0),
             memtable_builder,
+            written_bytes: Arc::new(AtomicU64::new(0)),
+            sst_format,
             stats: self.stats,
         })
     }
@@ -325,7 +368,8 @@ impl RegionOpener {
         match wal_options {
             WalOptions::RaftEngine => {
                 ensure!(
-                    TypeId::of::<RaftEngineLogStore>() == TypeId::of::<S>(),
+                    TypeId::of::<RaftEngineLogStore>() == TypeId::of::<S>()
+                        || TypeId::of::<NoopLogStore>() == TypeId::of::<S>(),
                     error::IncompatibleWalProviderChangeSnafu {
                         global: "`kafka`",
                         region: "`raft_engine`",
@@ -335,13 +379,14 @@ impl RegionOpener {
             }
             WalOptions::Kafka(options) => {
                 ensure!(
-                    TypeId::of::<KafkaLogStore>() == TypeId::of::<S>(),
+                    TypeId::of::<KafkaLogStore>() == TypeId::of::<S>()
+                        || TypeId::of::<NoopLogStore>() == TypeId::of::<S>(),
                     error::IncompatibleWalProviderChangeSnafu {
                         global: "`raft_engine`",
                         region: "`kafka`",
                     }
                 );
-                Ok(Provider::kafka_provider(options.topic.to_string()))
+                Ok(Provider::kafka_provider(options.topic.clone()))
             }
             WalOptions::Noop => Ok(Provider::noop_provider()),
         }
@@ -371,8 +416,18 @@ impl RegionOpener {
             return Ok(None);
         };
 
+        // Backfill `partition_expr` if missing. Use the backfilled metadata in-memory during this open.
         let manifest = manifest_manager.manifest();
-        let metadata = manifest.metadata.clone();
+        let metadata = if manifest.metadata.partition_expr.is_none()
+            && let Some(expr_json) = self.partition_expr_fetcher.fetch_expr(self.region_id).await
+        {
+            let metadata = manifest.metadata.as_ref().clone();
+            let mut builder = RegionMetadataBuilder::from_existing(metadata);
+            builder.partition_expr_json(Some(expr_json));
+            Arc::new(builder.build().context(InvalidMetadataSnafu)?)
+        } else {
+            manifest.metadata.clone()
+        };
 
         let region_id = self.region_id;
         let provider = self.provider::<S>(&region_options.wal_options)?;
@@ -395,16 +450,15 @@ impl RegionOpener {
             self.puffin_manager_factory.clone(),
             self.intermediate_manager.clone(),
         ));
-        let file_purger = Arc::new(LocalFilePurger::new(
+        let file_purger = create_local_file_purger(
             self.purge_scheduler.clone(),
             access_layer.clone(),
             self.cache_manager.clone(),
-        ));
-        let memtable_builder = self.memtable_builder_provider.builder_for_options(
-            region_options.memtable.as_ref(),
-            region_options.need_dedup(),
-            region_options.merge_mode(),
+            self.file_ref_manager.clone(),
         );
+        let memtable_builder = self
+            .memtable_builder_provider
+            .builder_for_options(&region_options);
         // Use compaction time window in the manifest if region doesn't provide
         // the time window option.
         let part_duration = region_options
@@ -428,30 +482,60 @@ impl RegionOpener {
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
-        if !self.skip_wal_replay {
+
+        let topic_latest_entry_id = if !self.skip_wal_replay {
+            let replay_from_entry_id = self
+                .replay_checkpoint
+                .unwrap_or_default()
+                .max(flushed_entry_id);
             info!(
-                "Start replaying memtable at flushed_entry_id + 1: {} for region {}, manifest version: {}",
-                flushed_entry_id + 1,
-                region_id,
-                manifest.manifest_version
+                "Start replaying memtable at replay_from_entry_id: {} for region {}, manifest version: {}, flushed entry id: {}",
+                replay_from_entry_id, region_id, manifest.manifest_version, flushed_entry_id
             );
             replay_memtable(
                 &provider,
                 wal_entry_reader,
                 region_id,
-                flushed_entry_id,
+                replay_from_entry_id,
                 &version_control,
                 config.allow_stale_entries,
                 on_region_opened,
             )
             .await?;
+            // For remote WAL, we need to set topic_latest_entry_id to current topic's latest entry id.
+            // Only set after the WAL replay is completed.
+
+            if provider.is_remote_wal() && version_control.current().version.memtables.is_empty() {
+                wal.store().latest_entry_id(&provider).unwrap_or(0)
+            } else {
+                0
+            }
         } else {
             info!(
                 "Skip the WAL replay for region: {}, manifest version: {}, flushed_entry_id: {}",
                 region_id, manifest.manifest_version, flushed_entry_id
             );
+
+            0
+        };
+
+        if let Some(committed_in_manifest) = manifest.committed_sequence {
+            let committed_after_replay = version_control.committed_sequence();
+            if committed_in_manifest > committed_after_replay {
+                info!(
+                    "Overriding committed sequence, region: {}, flushed_sequence: {}, committed_sequence: {} -> {}",
+                    self.region_id,
+                    version_control.current().version.flushed_sequence,
+                    version_control.committed_sequence(),
+                    committed_in_manifest
+                );
+                version_control.set_committed_sequence(committed_in_manifest);
+            }
         }
+
         let now = self.time_provider.current_time_millis();
+        // Read sst_format from manifest
+        let sst_format = manifest.sst_format;
 
         let region = MitoRegion {
             region_id: self.region_id,
@@ -467,8 +551,10 @@ impl RegionOpener {
             last_flush_millis: AtomicI64::new(now),
             last_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
-            topic_latest_entry_id: AtomicU64::new(0),
+            topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
+            written_bytes: Arc::new(AtomicU64::new(0)),
             memtable_builder,
+            sst_format,
             stats: self.stats.clone(),
         };
         Ok(Some(region))
@@ -489,6 +575,10 @@ impl RegionOpener {
             // Currently, the manifest storage doesn't have good support for changing compression algorithms.
             compress_type: manifest_compress_type(config.compress_manifest),
             checkpoint_distance: config.manifest_checkpoint_distance,
+            remove_file_options: RemoveFileOptions {
+                keep_count: config.experimental_manifest_keep_removed_file_count,
+                keep_ttl: config.experimental_manifest_keep_removed_file_ttl,
+            },
         })
     }
 }
@@ -502,7 +592,7 @@ pub fn get_object_store(
         Ok(object_store_manager
             .find(name)
             .with_context(|| ObjectStoreNotFoundSnafu {
-                object_store: name.to_string(),
+                object_store: name.clone(),
             })?
             .clone())
     } else {
@@ -624,6 +714,7 @@ pub(crate) async fn replay_memtable<F>(
 where
     F: FnOnce(RegionId, EntryId, &Provider) -> BoxFuture<Result<()>> + Send,
 {
+    let now = Instant::now();
     let mut rows_replayed = 0;
     // Last entry id should start from flushed entry id since there might be no
     // data in the WAL.
@@ -634,7 +725,10 @@ where
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
         if entry_id <= flushed_entry_id {
-            warn!("Stale WAL entries read during replay, region id: {}, flushed entry id: {}, entry id read: {}", region_id, flushed_entry_id, entry_id);
+            warn!(
+                "Stale WAL entries read during replay, region id: {}, flushed entry id: {}, entry id read: {}",
+                region_id, flushed_entry_id, entry_id
+            );
             ensure!(
                 allow_stale_entries,
                 StaleLogEntrySnafu {
@@ -646,8 +740,13 @@ where
         }
         last_entry_id = last_entry_id.max(entry_id);
 
-        let mut region_write_ctx =
-            RegionWriteCtx::new(region_id, version_control, provider.clone());
+        let mut region_write_ctx = RegionWriteCtx::new(
+            region_id,
+            version_control,
+            provider.clone(),
+            // For WAL replay, we don't need to track the write bytes rate.
+            None,
+        );
         for mutation in entry.mutations {
             rows_replayed += mutation
                 .rows
@@ -659,14 +758,22 @@ where
                 mutation.rows,
                 mutation.write_hint,
                 OptionOutputTx::none(),
+                // We should respect the sequence in WAL during replay.
+                Some(mutation.sequence),
             );
         }
 
         for bulk_entry in entry.bulk_entries {
             let part = BulkPart::try_from(bulk_entry)?;
             rows_replayed += part.num_rows();
+            // During replay, we should adopt the sequence from WAL.
+            let bulk_sequence_from_wal = part.sequence;
             ensure!(
-                region_write_ctx.push_bulk(OptionOutputTx::none(), part),
+                region_write_ctx.push_bulk(
+                    OptionOutputTx::none(),
+                    part,
+                    Some(bulk_sequence_from_wal)
+                ),
                 RegionCorruptedSnafu {
                     region_id,
                     reason: "unable to replay memtable with bulk entries",
@@ -686,8 +793,14 @@ where
 
     let series_count = version_control.current().series_count();
     info!(
-        "Replay WAL for region: {}, rows recovered: {}, last entry id: {}, total timeseries replayed: {}",
-        region_id, rows_replayed, last_entry_id, series_count
+        "Replay WAL for region: {}, provider: {:?}, rows recovered: {}, replay from entry id: {}, last entry id: {}, total timeseries replayed: {}, elapsed: {:?}",
+        region_id,
+        provider,
+        rows_replayed,
+        replay_from_entry_id,
+        last_entry_id,
+        series_count,
+        now.elapsed()
     );
     Ok(last_entry_id)
 }

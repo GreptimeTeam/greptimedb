@@ -121,6 +121,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use bytes::Bytes;
+use common_base::regex_pattern::NAME_PATTERN;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME,
 };
@@ -134,7 +135,7 @@ use regex::Regex;
 pub use schema_metadata_manager::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::RegionNumber;
 use table::metadata::{RawTableInfo, TableId};
 use table::table_name::TableName;
@@ -151,19 +152,20 @@ use self::flow::flow_name::FlowNameValue;
 use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use self::tombstone::TombstoneManager;
+use crate::DatanodeId;
 use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::key::flow::flow_state::FlowStateValue;
 use crate::key::node_address::NodeAddressValue;
 use crate::key::table_route::TableRouteKey;
+use crate::key::topic_region::TopicRegionValue;
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::router::{region_distribution, LeaderState, RegionRoute};
+use crate::kv_backend::txn::{Txn, TxnOp};
+use crate::rpc::router::{LeaderState, RegionRoute, region_distribution};
 use crate::rpc::store::BatchDeleteRequest;
 use crate::state_store::PoisonValue;
-use crate::DatanodeId;
 
-pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*";
+pub const TOPIC_NAME_PATTERN: &str = r"[a-zA-Z0-9_:-][a-zA-Z0-9_:\-\.@#]*";
 pub const LEGACY_MAINTENANCE_KEY: &str = "__maintenance";
 pub const MAINTENANCE_KEY: &str = "__switches/maintenance";
 pub const PAUSE_PROCEDURE_KEY: &str = "__switches/pause_procedure";
@@ -181,6 +183,11 @@ pub const KAFKA_TOPIC_KEY_PREFIX: &str = "__topic_name/kafka";
 // The legacy topic key prefix is used to store the topic name in previous versions.
 pub const LEGACY_TOPIC_KEY_PREFIX: &str = "__created_wal_topics/kafka";
 pub const TOPIC_REGION_PREFIX: &str = "__topic_region";
+
+/// The election key.
+pub const ELECTION_KEY: &str = "__metasrv_election";
+/// The root key of metasrv election candidates.
+pub const CANDIDATES_ROOT: &str = "__metasrv_election_candidates/";
 
 /// The keys with these prefixes will be loaded into the cache when the leader starts.
 pub const CACHE_KEY_PREFIXES: [&str; 5] = [
@@ -263,7 +270,7 @@ pub type FlowId = u32;
 pub type FlowPartitionId = u32;
 
 lazy_static! {
-    pub static ref NAME_PATTERN_REGEX: Regex = Regex::new(NAME_PATTERN).unwrap();
+    pub static ref TOPIC_NAME_PATTERN_REGEX: Regex = Regex::new(TOPIC_NAME_PATTERN).unwrap();
 }
 
 lazy_static! {
@@ -321,7 +328,7 @@ lazy_static! {
 
 lazy_static! {
     pub static ref TOPIC_REGION_PATTERN: Regex = Regex::new(&format!(
-        "^{TOPIC_REGION_PREFIX}/({NAME_PATTERN})/([0-9]+)$"
+        "^{TOPIC_REGION_PREFIX}/({TOPIC_NAME_PATTERN})/([0-9]+)$"
     ))
     .unwrap();
 }
@@ -617,7 +624,6 @@ impl TableMetadataManager {
         &self.topic_region_manager
     }
 
-    #[cfg(feature = "testing")]
     pub fn kv_backend(&self) -> &KvBackendRef {
         &self.kv_backend
     }
@@ -1311,10 +1317,10 @@ impl TableMetadataManager {
 
         let mut updated = 0;
         for route in &mut new_region_routes {
-            if let Some(state) = next_region_route_status(route) {
-                if route.set_leader_state(state) {
-                    updated += 1;
-                }
+            if let Some(state) = next_region_route_status(route)
+                && route.set_leader_state(state)
+            {
+                updated += 1;
             }
         }
 
@@ -1429,7 +1435,8 @@ impl_metadata_value! {
     NodeAddressValue,
     SchemaNameValue,
     FlowStateValue,
-    PoisonValue
+    PoisonValue,
+    TopicRegionValue
 }
 
 impl_optional_metadata_value! {
@@ -1461,15 +1468,15 @@ mod tests {
     use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
     use crate::key::{
-        DeserializedValueWithBytes, RegionDistribution, RegionRoleSet, TableMetadataManager,
-        ViewInfoValue, TOPIC_REGION_PREFIX,
+        DeserializedValueWithBytes, RegionDistribution, RegionRoleSet, TOPIC_REGION_PREFIX,
+        TableMetadataManager, ViewInfoValue,
     };
-    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::KvBackend;
+    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
-    use crate::rpc::router::{region_distribution, LeaderState, Region, RegionRoute};
+    use crate::rpc::router::{LeaderState, Region, RegionRoute, region_distribution};
     use crate::rpc::store::RangeRequest;
-    use crate::wal_options_allocator::{allocate_region_wal_options, WalOptionsAllocator};
+    use crate::wal_options_allocator::{WalOptionsAllocator, allocate_region_wal_options};
 
     #[test]
     fn test_deserialized_value_with_bytes() {
@@ -1624,26 +1631,30 @@ mod tests {
         .unwrap();
 
         // if metadata was already created, it should be ok.
-        assert!(create_physical_table_metadata(
-            &table_metadata_manager,
-            table_info.clone(),
-            region_routes.clone(),
-            region_wal_options.clone(),
-        )
-        .await
-        .is_ok());
+        assert!(
+            create_physical_table_metadata(
+                &table_metadata_manager,
+                table_info.clone(),
+                region_routes.clone(),
+                region_wal_options.clone(),
+            )
+            .await
+            .is_ok()
+        );
 
         let mut modified_region_routes = region_routes.clone();
         modified_region_routes.push(region_route.clone());
         // if remote metadata was exists, it should return an error.
-        assert!(create_physical_table_metadata(
-            &table_metadata_manager,
-            table_info.clone(),
-            modified_region_routes,
-            region_wal_options.clone(),
-        )
-        .await
-        .is_err());
+        assert!(
+            create_physical_table_metadata(
+                &table_metadata_manager,
+                table_info.clone(),
+                modified_region_routes,
+                region_wal_options.clone(),
+            )
+            .await
+            .is_err()
+        );
 
         let (remote_table_info, remote_table_route) = table_metadata_manager
             .get_full_table_info(10)
@@ -1671,9 +1682,11 @@ mod tests {
                 .topic_region_manager
                 .regions(&topic)
                 .await
-                .unwrap();
+                .unwrap()
+                .into_keys()
+                .collect::<Vec<_>>();
             assert_eq!(regions.len(), 8);
-            assert_eq!(regions[0], region_id);
+            assert!(regions.contains(&region_id));
         }
     }
 
@@ -1696,20 +1709,24 @@ mod tests {
             .unwrap();
 
         // if metadata was already created, it should be ok.
-        assert!(table_metadata_manager
-            .create_logical_tables_metadata(tables_data)
-            .await
-            .is_ok());
+        assert!(
+            table_metadata_manager
+                .create_logical_tables_metadata(tables_data)
+                .await
+                .is_ok()
+        );
 
         let mut modified_region_routes = region_routes.clone();
         modified_region_routes.push(new_region_route(2, 3));
         let modified_table_route_value = TableRouteValue::physical(modified_region_routes.clone());
         let modified_tables_data = vec![(table_info.clone(), modified_table_route_value)];
         // if remote metadata was exists, it should return an error.
-        assert!(table_metadata_manager
-            .create_logical_tables_metadata(modified_tables_data)
-            .await
-            .is_err());
+        assert!(
+            table_metadata_manager
+                .create_logical_tables_metadata(modified_tables_data)
+                .await
+                .is_err()
+        );
 
         let (remote_table_info, remote_table_route) = table_metadata_manager
             .get_full_table_info(table_id)
@@ -1812,26 +1829,32 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(table_metadata_manager
-            .table_info_manager()
-            .get(table_id)
-            .await
-            .unwrap()
-            .is_none());
-        assert!(table_metadata_manager
-            .table_route_manager()
-            .table_route_storage()
-            .get(table_id)
-            .await
-            .unwrap()
-            .is_none());
-        assert!(table_metadata_manager
-            .datanode_table_manager()
-            .tables(datanode_id)
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            table_metadata_manager
+                .table_info_manager()
+                .get(table_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            table_metadata_manager
+                .table_route_manager()
+                .table_route_storage()
+                .get(table_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            table_metadata_manager
+                .datanode_table_manager()
+                .tables(datanode_id)
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+                .is_empty()
+        );
         // Checks removed values
         let table_info = table_metadata_manager
             .table_info_manager()
@@ -1899,10 +1922,12 @@ mod tests {
             DeserializedValueWithBytes::from_inner(table_info_value.update(modified_table_info));
         // if the table_info_value is wrong, it should return an error.
         // The ABA problem.
-        assert!(table_metadata_manager
-            .rename_table(&modified_table_info_value, new_table_name.clone())
-            .await
-            .is_err());
+        assert!(
+            table_metadata_manager
+                .rename_table(&modified_table_info_value, new_table_name.clone())
+                .await
+                .is_err()
+        );
 
         let old_table_name = TableNameKey::new(
             &table_info.catalog_name,
@@ -1915,12 +1940,14 @@ mod tests {
             &new_table_name,
         );
 
-        assert!(table_metadata_manager
-            .table_name_manager()
-            .get(old_table_name)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            table_metadata_manager
+                .table_name_manager()
+                .get(old_table_name)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         assert_eq!(
             table_metadata_manager
@@ -1985,10 +2012,12 @@ mod tests {
         );
         // if the current_table_info_value is wrong, it should return an error.
         // The ABA problem.
-        assert!(table_metadata_manager
-            .update_table_info(&wrong_table_info_value, None, new_table_info)
-            .await
-            .is_err())
+        assert!(
+            table_metadata_manager
+                .update_table_info(&wrong_table_info_value, None, new_table_info)
+                .await
+                .is_err()
+        )
     }
 
     #[tokio::test]
@@ -2065,17 +2094,21 @@ mod tests {
             Some(LeaderState::Downgrading)
         );
 
-        assert!(updated_route_value.region_routes().unwrap()[0]
-            .leader_down_since
-            .is_some());
+        assert!(
+            updated_route_value.region_routes().unwrap()[0]
+                .leader_down_since
+                .is_some()
+        );
 
         assert_eq!(
             updated_route_value.region_routes().unwrap()[1].leader_state,
             Some(LeaderState::Downgrading)
         );
-        assert!(updated_route_value.region_routes().unwrap()[1]
-            .leader_down_since
-            .is_some());
+        assert!(
+            updated_route_value.region_routes().unwrap()[1]
+                .leader_down_since
+                .is_some()
+        );
     }
 
     async fn assert_datanode_table(
@@ -2135,7 +2168,7 @@ mod tests {
                 table_id,
                 RegionInfo {
                     engine: engine.to_string(),
-                    region_storage_path: region_storage_path.to_string(),
+                    region_storage_path: region_storage_path.clone(),
                     region_options: HashMap::new(),
                     region_wal_options: HashMap::new(),
                 },
@@ -2154,7 +2187,7 @@ mod tests {
                 table_id,
                 RegionInfo {
                     engine: engine.to_string(),
-                    region_storage_path: region_storage_path.to_string(),
+                    region_storage_path: region_storage_path.clone(),
                     region_options: HashMap::new(),
                     region_wal_options: HashMap::new(),
                 },
@@ -2179,7 +2212,7 @@ mod tests {
                 table_id,
                 RegionInfo {
                     engine: engine.to_string(),
-                    region_storage_path: region_storage_path.to_string(),
+                    region_storage_path: region_storage_path.clone(),
                     region_options: HashMap::new(),
                     region_wal_options: HashMap::new(),
                 },
@@ -2204,22 +2237,24 @@ mod tests {
                 ])
                 .unwrap(),
         );
-        assert!(table_metadata_manager
-            .update_table_route(
-                table_id,
-                RegionInfo {
-                    engine: engine.to_string(),
-                    region_storage_path: region_storage_path.to_string(),
-                    region_options: HashMap::new(),
-                    region_wal_options: HashMap::new(),
-                },
-                &wrong_table_route_value,
-                new_region_routes,
-                &HashMap::new(),
-                &HashMap::new(),
-            )
-            .await
-            .is_err());
+        assert!(
+            table_metadata_manager
+                .update_table_route(
+                    table_id,
+                    RegionInfo {
+                        engine: engine.to_string(),
+                        region_storage_path: region_storage_path.clone(),
+                        region_options: HashMap::new(),
+                        region_wal_options: HashMap::new(),
+                    },
+                    &wrong_table_route_value,
+                    new_region_routes,
+                    &HashMap::new(),
+                    &HashMap::new(),
+                )
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -2483,18 +2518,20 @@ mod tests {
             ));
         // if the current_view_info_value is wrong, it should return an error.
         // The ABA problem.
-        assert!(table_metadata_manager
-            .update_view_info(
-                view_id,
-                &wrong_view_info_value,
-                new_logical_plan.clone(),
-                new_table_names.clone(),
-                vec!["c".to_string()],
-                vec!["number3".to_string()],
-                wrong_definition.to_string(),
-            )
-            .await
-            .is_err());
+        assert!(
+            table_metadata_manager
+                .update_view_info(
+                    view_id,
+                    &wrong_view_info_value,
+                    new_logical_plan.clone(),
+                    new_table_names.clone(),
+                    vec!["c".to_string()],
+                    vec!["number3".to_string()],
+                    wrong_definition.to_string(),
+                )
+                .await
+                .is_err()
+        );
 
         // The view_info is not changed.
         let current_view_info = table_metadata_manager

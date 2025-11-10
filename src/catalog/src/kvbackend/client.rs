@@ -24,12 +24,12 @@ use common_meta::error::Error::CacheNotGet;
 use common_meta::error::{CacheNotGetSnafu, Error, ExternalSnafu, GetKvCacheSnafu, Result};
 use common_meta::kv_backend::txn::{Txn, TxnResponse};
 use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
+use common_meta::rpc::KeyValue;
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
-use common_meta::rpc::KeyValue;
 use common_telemetry::debug;
 use meta_client::client::MetaClient;
 use moka::future::{Cache, CacheBuilder};
@@ -461,17 +461,17 @@ impl KvBackend for MetaKvBackend {
 #[cfg(test)]
 mod tests {
     use std::any::Any;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use async_trait::async_trait;
     use common_meta::kv_backend::{KvBackend, TxnService};
+    use common_meta::rpc::KeyValue;
     use common_meta::rpc::store::{
         BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
         BatchPutRequest, BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
         PutResponse, RangeRequest, RangeResponse,
     };
-    use common_meta::rpc::KeyValue;
     use dashmap::DashMap;
 
     use super::CachedKvBackend;

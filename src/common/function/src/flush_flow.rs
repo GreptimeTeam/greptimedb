@@ -12,28 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use arrow::datatypes::DataType as ArrowDataType;
 use common_error::ext::BoxedError;
 use common_macro::admin_fn;
 use common_query::error::{
     ExecuteSnafu, InvalidFuncArgsSnafu, MissingFlowServiceHandlerSnafu, Result,
     UnsupportedInputDataTypeSnafu,
 };
-use common_query::prelude::Signature;
-use datafusion::logical_expr::Volatility;
+use datafusion_expr::{Signature, Volatility};
 use datatypes::value::{Value, ValueRef};
 use session::context::QueryContextRef;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
+use sql::ast::ObjectNamePartExt;
 use sql::parser::ParserContext;
-use store_api::storage::ConcreteDataType;
 
 use crate::handlers::FlowServiceHandlerRef;
 
 fn flush_signature() -> Signature {
-    Signature::uniform(
-        1,
-        vec![ConcreteDataType::string_datatype()],
-        Volatility::Immutable,
-    )
+    Signature::uniform(1, vec![ArrowDataType::Utf8], Volatility::Immutable)
 }
 
 #[admin_fn(
@@ -85,9 +81,9 @@ fn parse_flush_flow(
     let (catalog_name, flow_name) = match &obj_name.0[..] {
         [flow_name] => (
             query_ctx.current_catalog().to_string(),
-            flow_name.value.clone(),
+            flow_name.to_string_unquoted(),
         ),
-        [catalog, flow_name] => (catalog.value.clone(), flow_name.value.clone()),
+        [catalog, flow_name] => (catalog.to_string_unquoted(), flow_name.to_string_unquoted()),
         _ => {
             return InvalidFuncArgsSnafu {
                 err_msg: format!(
@@ -95,7 +91,7 @@ fn parse_flush_flow(
                     obj_name
                 ),
             }
-            .fail()
+            .fail();
         }
     };
     Ok((catalog_name, flow_name))
@@ -105,44 +101,55 @@ fn parse_flush_flow(
 mod test {
     use std::sync::Arc;
 
-    use datatypes::scalars::ScalarVector;
-    use datatypes::vectors::StringVector;
     use session::context::QueryContext;
 
     use super::*;
-    use crate::function::{AsyncFunction, FunctionContext};
+    use crate::function::FunctionContext;
+    use crate::function_factory::ScalarFunctionFactory;
 
     #[test]
     fn test_flush_flow_metadata() {
-        let f = FlushFlowFunction;
+        let factory: ScalarFunctionFactory = FlushFlowFunction::factory().into();
+        let f = factory.provide(FunctionContext::mock());
         assert_eq!("flush_flow", f.name());
-        assert_eq!(
-            ConcreteDataType::uint64_datatype(),
-            f.return_type(&[]).unwrap()
+        assert_eq!(ArrowDataType::UInt64, f.return_type(&[]).unwrap());
+        let expected_signature = datafusion_expr::Signature::uniform(
+            1,
+            vec![ArrowDataType::Utf8],
+            datafusion_expr::Volatility::Immutable,
         );
-        assert_eq!(
-            f.signature(),
-            Signature::uniform(
-                1,
-                vec![ConcreteDataType::string_datatype()],
-                Volatility::Immutable,
-            )
-        );
+        assert_eq!(*f.signature(), expected_signature);
     }
 
     #[tokio::test]
     async fn test_missing_flow_service() {
-        let f = FlushFlowFunction;
+        let factory: ScalarFunctionFactory = FlushFlowFunction::factory().into();
+        let binding = factory.provide(FunctionContext::default());
+        let f = binding.as_async().unwrap();
 
-        let args = vec!["flow_name"];
-        let args = args
-            .into_iter()
-            .map(|arg| Arc::new(StringVector::from_slice(&[arg])) as _)
-            .collect::<Vec<_>>();
+        let flow_name_array = Arc::new(arrow::array::StringArray::from(vec!["flow_name"]));
 
-        let result = f.eval(FunctionContext::default(), &args).await.unwrap_err();
+        let columnar_args = vec![datafusion_expr::ColumnarValue::Array(flow_name_array as _)];
+
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: columnar_args,
+            arg_fields: vec![Arc::new(arrow::datatypes::Field::new(
+                "arg_0",
+                ArrowDataType::Utf8,
+                false,
+            ))],
+            return_field: Arc::new(arrow::datatypes::Field::new(
+                "result",
+                ArrowDataType::UInt64,
+                true,
+            )),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+
+        let result = f.invoke_async_with_args(func_args).await.unwrap_err();
         assert_eq!(
-            "Missing FlowServiceHandler, not expected",
+            "Execution error: Handler error: Missing FlowServiceHandler, not expected",
             result.to_string()
         );
     }

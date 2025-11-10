@@ -29,11 +29,11 @@ use session::context::QueryContextBuilder;
 use snafu::{OptionExt, ResultExt};
 use table::table_reference::TableReference;
 
+use crate::StreamingEngine;
 use crate::adapter::table_source::TableDesc;
-use crate::adapter::{TableName, WorkerHandle, AUTO_CREATED_PLACEHOLDER_TS_COL};
+use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, TableName, WorkerHandle};
 use crate::error::{Error, ExternalSnafu, UnexpectedSnafu};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
-use crate::StreamingEngine;
 impl StreamingEngine {
     /// Get a worker handle for creating flow, using round robin to select a worker
     pub(crate) async fn get_worker_handle_for_create_flow(&self) -> &WorkerHandle {
@@ -193,10 +193,12 @@ pub fn table_info_value_to_relation_desc(
 pub fn from_proto_to_data_type(
     column_schema: &api::v1::ColumnSchema,
 ) -> Result<ConcreteDataType, Error> {
-    let wrapper =
-        ColumnDataTypeWrapper::try_new(column_schema.datatype, column_schema.datatype_extension)
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
+    let wrapper = ColumnDataTypeWrapper::try_new(
+        column_schema.datatype,
+        column_schema.datatype_extension.clone(),
+    )
+    .map_err(BoxedError::new)
+    .context(ExternalSnafu)?;
     let cdt = ConcreteDataType::from(wrapper);
 
     Ok(cdt)

@@ -16,18 +16,16 @@
 
 use std::fmt;
 use std::fmt::Display;
+use std::sync::Arc;
 
-use common_query::error::{DowncastVectorSnafu, InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, Volatility};
-use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::Vector;
-use datatypes::scalars::{ScalarVector, ScalarVectorBuilder};
-use datatypes::vectors::{BinaryVector, MutableVector, UInt64VectorBuilder, VectorRef};
+use datafusion_common::DataFusionError;
+use datafusion_common::arrow::array::{Array, AsArray, UInt64Builder};
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use hyperloglogplus::HyperLogLog;
-use snafu::OptionExt;
 
 use crate::aggrs::approximate::hll::HllStateType;
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
 use crate::function_registry::FunctionRegistry;
 
 const NAME: &str = "hll_count";
@@ -38,12 +36,22 @@ const NAME: &str = "hll_count";
 /// 1. The serialized HyperLogLogPlus state, as produced by the aggregator (binary).
 ///
 /// For each row, it deserializes the sketch and returns the estimated cardinality.
-#[derive(Debug, Default)]
-pub struct HllCalcFunction;
+#[derive(Debug)]
+pub(crate) struct HllCalcFunction {
+    signature: Signature,
+}
 
 impl HllCalcFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_scalar(HllCalcFunction);
+        registry.register_scalar(HllCalcFunction::default());
+    }
+}
+
+impl Default for HllCalcFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::exact(vec![DataType::Binary], Volatility::Immutable),
+        }
     }
 }
 
@@ -58,40 +66,35 @@ impl Function for HllCalcFunction {
         NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
-    fn signature(&self) -> Signature {
-        // Only argument: HyperLogLogPlus state (binary)
-        Signature::exact(
-            vec![ConcreteDataType::binary_datatype()],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        if columns.len() != 1 {
-            return InvalidFuncArgsSnafu {
-                err_msg: format!("hll_count expects 1 argument, got {}", columns.len()),
-            }
-            .fail();
-        }
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0] = extract_args(self.name(), &args)?;
 
-        let hll_vec = columns[0]
-            .as_any()
-            .downcast_ref::<BinaryVector>()
-            .with_context(|| DowncastVectorSnafu {
-                err_msg: format!("expect BinaryVector, got {}", columns[0].vector_type_name()),
-            })?;
+        let Some(hll_vec) = arg0.as_binary_opt::<i32>() else {
+            return Err(DataFusionError::Execution(format!(
+                "'{}' expects argument to be Binary datatype, got {}",
+                self.name(),
+                arg0.data_type()
+            )));
+        };
         let len = hll_vec.len();
-        let mut builder = UInt64VectorBuilder::with_capacity(len);
+        let mut builder = UInt64Builder::with_capacity(len);
 
         for i in 0..len {
-            let hll_opt = hll_vec.get_data(i);
+            let hll_opt = hll_vec.is_valid(i).then(|| hll_vec.value(i));
 
             if hll_opt.is_none() {
-                builder.push_null();
+                builder.append_null();
                 continue;
             }
 
@@ -102,15 +105,15 @@ impl Function for HllCalcFunction {
                 Ok(h) => h,
                 Err(e) => {
                     common_telemetry::trace!("Failed to deserialize HyperLogLogPlus: {}", e);
-                    builder.push_null();
+                    builder.append_null();
                     continue;
                 }
             };
 
-            builder.push(Some(hll.count().round() as u64));
+            builder.append_value(hll.count().round() as u64);
         }
 
-        Ok(builder.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -118,20 +121,20 @@ impl Function for HllCalcFunction {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::vectors::BinaryVector;
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::BinaryArray;
+    use datafusion_common::arrow::datatypes::UInt64Type;
 
     use super::*;
     use crate::utils::FixedRandomState;
 
     #[test]
     fn test_hll_count_function() {
-        let function = HllCalcFunction;
+        let function = HllCalcFunction::default();
         assert_eq!("hll_count", function.name());
         assert_eq!(
-            ConcreteDataType::uint64_datatype(),
-            function
-                .return_type(&[ConcreteDataType::uint64_datatype()])
-                .unwrap()
+            DataType::UInt64,
+            function.return_type(&[DataType::UInt64]).unwrap()
         );
 
         // Create a test HLL
@@ -141,36 +144,66 @@ mod tests {
         }
 
         let serialized_bytes = bincode::serialize(&hll).unwrap();
-        let args: Vec<VectorRef> = vec![Arc::new(BinaryVector::from(vec![Some(serialized_bytes)]))];
+        let args = vec![ColumnarValue::Array(Arc::new(BinaryArray::from_iter(
+            vec![Some(serialized_bytes)],
+        )))];
 
-        let result = function.eval(&FunctionContext::default(), &args).unwrap();
+        let result = function
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields: vec![],
+                number_rows: 1,
+                return_field: Arc::new(Field::new("x", DataType::UInt64, false)),
+                config_options: Arc::new(Default::default()),
+            })
+            .unwrap();
+        let ColumnarValue::Array(result) = result else {
+            unreachable!()
+        };
+        let result = result.as_primitive::<UInt64Type>();
         assert_eq!(result.len(), 1);
 
         // Test cardinality estimate
-        if let datatypes::value::Value::UInt64(v) = result.get(0) {
-            assert_eq!(v, 10);
-        } else {
-            panic!("Expected uint64 value");
-        }
+        assert_eq!(result.value(0), 10);
     }
 
     #[test]
     fn test_hll_count_function_errors() {
-        let function = HllCalcFunction;
+        let function = HllCalcFunction::default();
 
         // Test with invalid number of arguments
-        let args: Vec<VectorRef> = vec![];
-        let result = function.eval(&FunctionContext::default(), &args);
+        let result = function.invoke_with_args(ScalarFunctionArgs {
+            args: vec![],
+            arg_fields: vec![],
+            number_rows: 0,
+            return_field: Arc::new(Field::new("x", DataType::UInt64, false)),
+            config_options: Arc::new(Default::default()),
+        });
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("hll_count expects 1 argument"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Execution error: hll_count function requires 1 argument, got 0")
+        );
 
         // Test with invalid binary data
-        let args: Vec<VectorRef> = vec![Arc::new(BinaryVector::from(vec![Some(vec![1, 2, 3])]))]; // Invalid binary data
-        let result = function.eval(&FunctionContext::default(), &args).unwrap();
+        let result = function
+            .invoke_with_args(ScalarFunctionArgs {
+                args: vec![ColumnarValue::Array(Arc::new(BinaryArray::from_iter(
+                    vec![Some(vec![1, 2, 3])],
+                )))],
+                arg_fields: vec![],
+                number_rows: 0,
+                return_field: Arc::new(Field::new("x", DataType::UInt64, false)),
+                config_options: Arc::new(Default::default()),
+            })
+            .unwrap();
+        let ColumnarValue::Array(result) = result else {
+            unreachable!()
+        };
+        let result = result.as_primitive::<UInt64Type>();
         assert_eq!(result.len(), 1);
-        assert!(matches!(result.get(0), datatypes::value::Value::Null));
+        assert!(result.is_null(0));
     }
 }

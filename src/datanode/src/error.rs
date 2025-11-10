@@ -79,13 +79,6 @@ pub enum Error {
         source: common_query::error::Error,
     },
 
-    #[snafu(display("Catalog not found: {}", name))]
-    CatalogNotFound {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Schema not found: {}", name))]
     SchemaNotFound {
         name: String,
@@ -159,13 +152,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to access catalog"))]
-    Catalog {
-        #[snafu(implicit)]
-        location: Location,
-        source: catalog::error::Error,
-    },
-
     #[snafu(display("Failed to initialize meta client"))]
     MetaClientInit {
         #[snafu(implicit)]
@@ -177,6 +163,13 @@ pub enum Error {
     MissingNodeId {
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Failed to build datanode"))]
+    BuildDatanode {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
     },
 
     #[snafu(display("Failed to build http client"))]
@@ -329,6 +322,28 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to run gc for region {}", region_id))]
+    GcMitoEngine {
+        region_id: RegionId,
+        source: mito2::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid arguments for GC: {}", msg))]
+    InvalidGcArgs {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to list SST entries from storage"))]
+    ListStorageSsts {
+        #[snafu(implicit)]
+        location: Location,
+        source: mito2::error::Error,
+    },
+
     #[snafu(display("Failed to serialize options to TOML"))]
     TomlFormat {
         #[snafu(implicit)]
@@ -429,16 +444,15 @@ impl ErrorExt for Error {
             InvalidSql { .. }
             | IllegalPrimaryKeysDef { .. }
             | MissingTimestampColumn { .. }
-            | CatalogNotFound { .. }
             | SchemaNotFound { .. }
             | SchemaExists { .. }
             | MissingNodeId { .. }
             | ColumnNoneDefaultValue { .. }
-            | Catalog { .. }
             | MissingRequiredField { .. }
             | RegionEngineNotFound { .. }
             | ParseAddr { .. }
-            | TomlFormat { .. } => StatusCode::InvalidArguments,
+            | TomlFormat { .. }
+            | BuildDatanode { .. } => StatusCode::InvalidArguments,
 
             PayloadNotExist { .. }
             | Unexpected { .. }
@@ -447,9 +461,11 @@ impl ErrorExt for Error {
 
             AsyncTaskExecute { source, .. } => source.status_code(),
 
-            CreateDir { .. } | RemoveDir { .. } | ShutdownInstance { .. } | DataFusion { .. } => {
-                StatusCode::Internal
-            }
+            CreateDir { .. }
+            | RemoveDir { .. }
+            | ShutdownInstance { .. }
+            | DataFusion { .. }
+            | InvalidGcArgs { .. } => StatusCode::Internal,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             RegionNotReady { .. } => StatusCode::RegionNotReady,
@@ -467,8 +483,9 @@ impl ErrorExt for Error {
             StopRegionEngine { source, .. } => source.status_code(),
 
             FindLogicalRegions { source, .. } => source.status_code(),
-            BuildMitoEngine { source, .. } => source.status_code(),
+            BuildMitoEngine { source, .. } | GcMitoEngine { source, .. } => source.status_code(),
             BuildMetricEngine { source, .. } => source.status_code(),
+            ListStorageSsts { source, .. } => source.status_code(),
             ConcurrentQueryLimiterClosed { .. } | ConcurrentQueryLimiterTimeout { .. } => {
                 StatusCode::RegionBusy
             }

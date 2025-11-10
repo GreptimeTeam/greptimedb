@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use client::api::v1::alter_table_expr::Kind;
-use client::api::v1::region::{region_request, AlterRequests, RegionRequest, RegionRequestHeader};
+use client::api::v1::region::{AlterRequests, RegionRequest, RegionRequestHeader, region_request};
 use client::api::v1::{AddColumn, AddColumns, AlterTableExpr};
 use common_meta::ddl::alter_logical_tables::make_alter_region_request;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::{find_leader_regions, RegionRoute};
+use common_meta::rpc::router::{RegionRoute, find_leader_regions};
 use operator::expr_helper::column_schemas_to_defs;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};
@@ -32,9 +32,9 @@ pub fn generate_alter_table_expr_for_all_columns(
     let schema = &table_info.meta.schema;
 
     let mut alter_table_expr = AlterTableExpr {
-        catalog_name: table_info.catalog_name.to_string(),
-        schema_name: table_info.schema_name.to_string(),
-        table_name: table_info.name.to_string(),
+        catalog_name: table_info.catalog_name.clone(),
+        schema_name: table_info.schema_name.clone(),
+        table_name: table_info.name.clone(),
         ..Default::default()
     };
 

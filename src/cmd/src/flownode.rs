@@ -25,20 +25,21 @@ use common_base::Plugins;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
-use common_meta::heartbeat::handler::HandlerGroupExecutor;
-use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
+use common_meta::key::flow::FlowMetadataManager;
+use common_stat::ResourceStatImpl;
 use common_telemetry::info;
-use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
+use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_version::{short_version, verbose_version};
 use flow::{
-    get_flow_auth_options, FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder,
-    FrontendClient, FrontendInvoker,
+    FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder, FrontendClient, FrontendInvoker,
+    get_flow_auth_options,
 };
 use meta_client::{MetaClientOptions, MetaClientType};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
@@ -46,7 +47,7 @@ use crate::error::{
     MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{create_resource_limit_metrics, log_versions, App};
+use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-flownode";
 
@@ -280,6 +281,7 @@ impl StartCommand {
         );
 
         log_versions(verbose_version(), short_version(), APP_NAME);
+        maybe_activate_heap_profile(&opts.component.memory);
         create_resource_limit_metrics(APP_NAME);
 
         info!("Flownode start command: {:#?}", self);
@@ -340,8 +342,18 @@ impl StartCommand {
             .build(),
         );
 
-        let information_extension =
-            Arc::new(DistributedInformationExtension::new(meta_client.clone()));
+        // flownode's frontend to datanode need not timeout.
+        // Some queries are expected to take long time.
+        let channel_config = ChannelConfig {
+            timeout: None,
+            ..Default::default()
+        };
+        let client = Arc::new(NodeClients::new(channel_config));
+
+        let information_extension = Arc::new(DistributedInformationExtension::new(
+            meta_client.clone(),
+            client.clone(),
+        ));
         let catalog_manager = KvBackendCatalogManagerBuilder::new(
             information_extension,
             cached_meta_backend.clone(),
@@ -361,11 +373,15 @@ impl StartCommand {
             Arc::new(InvalidateCacheHandler::new(layered_cache_registry.clone())),
         ]);
 
+        let mut resource_stat = ResourceStatImpl::default();
+        resource_stat.start_collect_cpu_usage();
+
         let heartbeat_task = flow::heartbeat::HeartbeatTask::new(
             &opts,
             meta_client.clone(),
             opts.heartbeat.clone(),
             Arc::new(executor),
+            Arc::new(resource_stat),
         );
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(cached_meta_backend.clone()));
@@ -375,7 +391,8 @@ impl StartCommand {
             flow_auth_header,
             opts.query.clone(),
             opts.flow.batching_mode.clone(),
-        );
+        )
+        .context(StartFlownodeSnafu)?;
         let frontend_client = Arc::new(frontend_client);
         let flownode_builder = FlownodeBuilder::new(
             opts.clone(),
@@ -395,14 +412,6 @@ impl StartCommand {
             .context(StartFlownodeSnafu)?;
         flownode.setup_services(services);
         let flownode = flownode;
-
-        // flownode's frontend to datanode need not timeout.
-        // Some queries are expected to take long time.
-        let channel_config = ChannelConfig {
-            timeout: None,
-            ..Default::default()
-        };
-        let client = Arc::new(NodeClients::new(channel_config));
 
         let invoker = FrontendInvoker::build_from(
             flownode.flow_engine().streaming_engine(),

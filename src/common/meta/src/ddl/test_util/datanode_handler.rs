@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::region::RegionResponse;
-use api::v1::region::region_request::Body;
 use api::v1::region::RegionRequest;
+use api::v1::region::region_request::Body;
 use common_error::ext::{BoxedError, ErrorExt, StackError};
 use common_error::status_code::StatusCode;
 use common_query::request::QueryRequest;
@@ -218,7 +218,7 @@ pub struct PartialSuccessDatanodeHandler {
 #[async_trait::async_trait]
 impl MockDatanodeHandler for PartialSuccessDatanodeHandler {
     async fn handle(&self, peer: &Peer, _request: RegionRequest) -> Result<RegionResponse> {
-        let success = peer.id % 2 == 0;
+        let success = peer.id.is_multiple_of(2);
         if success {
             Ok(RegionResponse::new(0))
         } else if self.retryable {

@@ -20,22 +20,28 @@ use std::collections::{HashMap, HashSet};
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_database_expr::Kind as AlterDatabaseKind;
 use api::v1::alter_table_expr::Kind as AlterTableKind;
-use api::v1::column_def::options_from_column_schema;
+use api::v1::column_def::{options_from_column_schema, try_as_column_schema};
 use api::v1::{
-    set_index, unset_index, AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer,
-    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    DropColumn, DropColumns, DropDefaults, ExpireAfter, FulltextBackend as PbFulltextBackend,
-    ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions,
-    SetFulltext, SetIndex, SetIndexes, SetInverted, SetSkipping, SetTableOptions,
+    AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer, ColumnDataType,
+    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
+    DropColumns, DropDefaults, ExpireAfter, FulltextBackend as PbFulltextBackend, ModifyColumnType,
+    ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions, SetDefaults, SetFulltext,
+    SetIndex, SetIndexes, SetInverted, SetSkipping, SetTableOptions,
     SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions, UnsetFulltext,
-    UnsetIndex, UnsetIndexes, UnsetInverted, UnsetSkipping, UnsetTableOptions,
+    UnsetIndex, UnsetIndexes, UnsetInverted, UnsetSkipping, UnsetTableOptions, set_index,
+    unset_index,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
 use datatypes::schema::{
-    ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema, SkippingIndexType, COMMENT_KEY,
+    COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
+    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
+    COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
+    COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY,
+    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema,
+    SkippingIndexType,
 };
 use file_engine::FileOptions;
 use query::sql::{
@@ -44,19 +50,25 @@ use query::sql::{
 };
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
-use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::{ColumnOption, ObjectName};
+use snafu::{OptionExt, ResultExt, ensure};
+use sql::ast::{
+    ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName, ObjectNamePartExt,
+};
+use sql::dialect::GreptimeDbDialect;
+use sql::parser::ParserContext;
 use sql::statements::alter::{
     AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
 };
 use sql::statements::create::{
-    Column as SqlColumn, CreateExternalTable, CreateFlow, CreateTable, CreateView, TableConstraint,
+    Column as SqlColumn, ColumnExtensions, CreateExternalTable, CreateFlow, CreateTable,
+    CreateView, TableConstraint,
 };
 use sql::statements::{
-    column_to_schema, sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type,
+    OptionMap, column_to_schema, concrete_data_type_to_sql_data_type,
+    sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type, value_to_sql_value,
 };
 use sql::util::extract_tables_from_query;
-use table::requests::{TableOptions, FILE_TABLE_META_KEY};
+use table::requests::{FILE_TABLE_META_KEY, TableOptions};
 use table::table_reference::TableReference;
 #[cfg(feature = "enterprise")]
 pub use trigger::to_create_trigger_task_expr;
@@ -64,9 +76,9 @@ pub use trigger::to_create_trigger_task_expr;
 use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
     ConvertIdentifierSnafu, EncodeJsonSnafu, ExternalSnafu, FindNewColumnsOnInsertionSnafu,
-    IllegalPrimaryKeysDefSnafu, InferFileTableSchemaSnafu, InvalidFlowNameSnafu, InvalidSqlSnafu,
-    NotSupportedSnafu, ParseSqlSnafu, PrepareFileTableSnafu, Result, SchemaIncompatibleSnafu,
-    UnrecognizedTableOptionSnafu,
+    IllegalPrimaryKeysDefSnafu, InferFileTableSchemaSnafu, InvalidColumnDefSnafu,
+    InvalidFlowNameSnafu, InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu, ParseSqlValueSnafu,
+    PrepareFileTableSnafu, Result, SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
 };
 
 pub fn create_table_expr_by_column_schemas(
@@ -182,7 +194,7 @@ pub(crate) async fn create_external_expr(
         create_if_not_exists: create.if_not_exists,
         table_options,
         table_id: None,
-        engine: create.engine.to_string(),
+        engine: create.engine.clone(),
     };
 
     Ok(expr)
@@ -222,11 +234,186 @@ pub fn create_to_expr(
         create_if_not_exists: create.if_not_exists,
         table_options,
         table_id: None,
-        engine: create.engine.to_string(),
+        engine: create.engine.clone(),
     };
 
     validate_create_expr(&expr)?;
     Ok(expr)
+}
+
+/// Convert gRPC's [`CreateTableExpr`] back to `CreateTable` statement.
+/// You can use `create_table_expr_by_column_schemas` to create a `CreateTableExpr` from column schemas.
+///
+/// # Parameters
+///
+/// * `expr` - The `CreateTableExpr` to convert
+/// * `quote_style` - Optional quote style for identifiers (defaults to MySQL style ` backtick)
+pub fn expr_to_create(expr: &CreateTableExpr, quote_style: Option<char>) -> Result<CreateTable> {
+    let quote_style = quote_style.unwrap_or('`');
+
+    // Convert table name
+    let table_name = ObjectName(vec![sql::ast::ObjectNamePart::Identifier(
+        sql::ast::Ident::with_quote(quote_style, &expr.table_name),
+    )]);
+
+    // Convert columns
+    let mut columns = Vec::with_capacity(expr.column_defs.len());
+    for column_def in &expr.column_defs {
+        let column_schema = try_as_column_schema(column_def).context(InvalidColumnDefSnafu {
+            column: &column_def.name,
+        })?;
+
+        let mut options = Vec::new();
+
+        // Add NULL/NOT NULL constraint
+        if column_def.is_nullable {
+            options.push(ColumnOptionDef {
+                name: None,
+                option: ColumnOption::Null,
+            });
+        } else {
+            options.push(ColumnOptionDef {
+                name: None,
+                option: ColumnOption::NotNull,
+            });
+        }
+
+        // Add DEFAULT constraint if present
+        if let Some(default_constraint) = column_schema.default_constraint() {
+            let expr = match default_constraint {
+                ColumnDefaultConstraint::Value(v) => {
+                    Expr::Value(value_to_sql_value(v).context(ParseSqlValueSnafu)?.into())
+                }
+                ColumnDefaultConstraint::Function(func_expr) => {
+                    ParserContext::parse_function(func_expr, &GreptimeDbDialect {})
+                        .context(ParseSqlSnafu)?
+                }
+            };
+            options.push(ColumnOptionDef {
+                name: None,
+                option: ColumnOption::Default(expr),
+            });
+        }
+
+        // Add COMMENT if present
+        if !column_def.comment.is_empty() {
+            options.push(ColumnOptionDef {
+                name: None,
+                option: ColumnOption::Comment(column_def.comment.clone()),
+            });
+        }
+
+        // Note: We don't add inline PRIMARY KEY options here,
+        // we'll handle all primary keys as constraints instead for consistency
+
+        // Handle column extensions (fulltext, inverted index, skipping index)
+        let mut extensions = ColumnExtensions::default();
+
+        // Add fulltext index options if present
+        if let Ok(Some(opt)) = column_schema.fulltext_options()
+            && opt.enable
+        {
+            let mut map = HashMap::from([
+                (
+                    COLUMN_FULLTEXT_OPT_KEY_ANALYZER.to_string(),
+                    opt.analyzer.to_string(),
+                ),
+                (
+                    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE.to_string(),
+                    opt.case_sensitive.to_string(),
+                ),
+                (
+                    COLUMN_FULLTEXT_OPT_KEY_BACKEND.to_string(),
+                    opt.backend.to_string(),
+                ),
+            ]);
+            if opt.backend == FulltextBackend::Bloom {
+                map.insert(
+                    COLUMN_FULLTEXT_OPT_KEY_GRANULARITY.to_string(),
+                    opt.granularity.to_string(),
+                );
+                map.insert(
+                    COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE.to_string(),
+                    opt.false_positive_rate().to_string(),
+                );
+            }
+            extensions.fulltext_index_options = Some(map.into());
+        }
+
+        // Add skipping index options if present
+        if let Ok(Some(opt)) = column_schema.skipping_index_options() {
+            let map = HashMap::from([
+                (
+                    COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY.to_string(),
+                    opt.granularity.to_string(),
+                ),
+                (
+                    COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE.to_string(),
+                    opt.false_positive_rate().to_string(),
+                ),
+                (
+                    COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE.to_string(),
+                    opt.index_type.to_string(),
+                ),
+            ]);
+            extensions.skipping_index_options = Some(map.into());
+        }
+
+        // Add inverted index options if present
+        if column_schema.is_inverted_indexed() {
+            extensions.inverted_index_options = Some(HashMap::new().into());
+        }
+
+        let sql_column = SqlColumn {
+            column_def: ColumnDef {
+                name: Ident::with_quote(quote_style, &column_def.name),
+                data_type: concrete_data_type_to_sql_data_type(&column_schema.data_type)
+                    .context(ParseSqlSnafu)?,
+                options,
+            },
+            extensions,
+        };
+
+        columns.push(sql_column);
+    }
+
+    // Convert constraints
+    let mut constraints = Vec::new();
+
+    // Add TIME INDEX constraint
+    constraints.push(TableConstraint::TimeIndex {
+        column: Ident::with_quote(quote_style, &expr.time_index),
+    });
+
+    // Add PRIMARY KEY constraint (always add as constraint for consistency)
+    if !expr.primary_keys.is_empty() {
+        let primary_key_columns: Vec<Ident> = expr
+            .primary_keys
+            .iter()
+            .map(|pk| Ident::with_quote(quote_style, pk))
+            .collect();
+
+        constraints.push(TableConstraint::PrimaryKey {
+            columns: primary_key_columns,
+        });
+    }
+
+    // Convert table options
+    let mut options = OptionMap::default();
+    for (key, value) in &expr.table_options {
+        options.insert(key.clone(), value.clone());
+    }
+
+    Ok(CreateTable {
+        if_not_exists: expr.create_if_not_exists,
+        table_id: expr.table_id.as_ref().map(|tid| tid.id).unwrap_or(0),
+        name: table_name,
+        columns,
+        engine: expr.engine.clone(),
+        constraints,
+        options,
+        partitions: None,
+    })
 }
 
 /// Validate the [`CreateTableExpr`] request.
@@ -417,7 +604,7 @@ pub fn find_time_index(constraints: &[TableConstraint]) -> Result<String> {
             err_msg: "must have one and only one TimeIndex columns",
         }
     );
-    Ok(time_index.first().unwrap().to_string())
+    Ok(time_index[0].clone())
 }
 
 fn columns_to_expr(
@@ -441,6 +628,7 @@ fn columns_to_column_schemas(
         .collect::<Result<Vec<ColumnSchema>>>()
 }
 
+// TODO(weny): refactor this function to use `try_as_column_def`
 pub fn column_schemas_to_defs(
     column_schemas: Vec<ColumnSchema>,
     primary_keys: &[String],
@@ -492,6 +680,40 @@ pub fn column_schemas_to_defs(
             })
         })
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepartitionRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub from_exprs: Vec<Expr>,
+    pub into_exprs: Vec<Expr>,
+}
+
+pub(crate) fn to_repartition_request(
+    alter_table: AlterTable,
+    query_ctx: &QueryContextRef,
+) -> Result<RepartitionRequest> {
+    let (catalog_name, schema_name, table_name) =
+        table_idents_to_full_name(alter_table.table_name(), query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+    let AlterTableOperation::Repartition { operation } = alter_table.alter_operation else {
+        return InvalidSqlSnafu {
+            err_msg: "expected REPARTITION operation",
+        }
+        .fail();
+    };
+
+    Ok(RepartitionRequest {
+        catalog_name,
+        schema_name,
+        table_name,
+        from_exprs: operation.from_exprs,
+        into_exprs: operation.into_exprs,
+    })
 }
 
 /// Converts a SQL alter table statement into a gRPC alter table expression.
@@ -560,12 +782,12 @@ pub(crate) fn to_alter_table_expr(
         }
         AlterTableOperation::DropColumn { name } => AlterTableKind::DropColumns(DropColumns {
             drop_columns: vec![DropColumn {
-                name: name.value.to_string(),
+                name: name.value.clone(),
             }],
         }),
         AlterTableOperation::RenameTable { new_table_name } => {
             AlterTableKind::RenameTable(RenameTable {
-                new_table_name: new_table_name.to_string(),
+                new_table_name: new_table_name.clone(),
             })
         }
         AlterTableOperation::SetTableOptions { options } => {
@@ -575,6 +797,12 @@ pub(crate) fn to_alter_table_expr(
         }
         AlterTableOperation::UnsetTableOptions { keys } => {
             AlterTableKind::UnsetTableOptions(UnsetTableOptions { keys })
+        }
+        AlterTableOperation::Repartition { .. } => {
+            return NotSupportedSnafu {
+                feat: "ALTER TABLE ... REPARTITION",
+            }
+            .fail();
         }
         AlterTableOperation::SetIndex { options } => {
             let option = match options {
@@ -664,6 +892,21 @@ pub(crate) fn to_alter_table_expr(
                     .collect::<Result<Vec<_>>>()?,
             })
         }
+        AlterTableOperation::SetDefaults { defaults } => AlterTableKind::SetDefaults(SetDefaults {
+            set_defaults: defaults
+                .into_iter()
+                .map(|col| {
+                    let column_name = col.column_name.to_string();
+                    let default_constraint = serde_json::to_string(&col.default_constraint)
+                        .context(EncodeJsonSnafu)?
+                        .into_bytes();
+                    Ok(api::v1::SetDefault {
+                        column_name,
+                        default_constraint,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+        }),
     };
 
     Ok(AlterTableExpr {
@@ -736,11 +979,10 @@ pub fn to_create_flow_task_expr(
     query_ctx: &QueryContextRef,
 ) -> Result<CreateFlowExpr> {
     // retrieve sink table name
-    let sink_table_ref =
-        object_name_to_table_reference(create_flow.sink_table_name.clone().into(), true)
-            .with_context(|_| ConvertIdentifierSnafu {
-                ident: create_flow.sink_table_name.to_string(),
-            })?;
+    let sink_table_ref = object_name_to_table_reference(create_flow.sink_table_name.clone(), true)
+        .with_context(|_| ConvertIdentifierSnafu {
+            ident: create_flow.sink_table_name.to_string(),
+        })?;
     let catalog = sink_table_ref
         .catalog()
         .unwrap_or(query_ctx.current_catalog())
@@ -758,9 +1000,11 @@ pub fn to_create_flow_task_expr(
 
     let source_table_names = extract_tables_from_query(&create_flow.query)
         .map(|name| {
-            let reference = object_name_to_table_reference(name.clone().into(), true)
-                .with_context(|_| ConvertIdentifierSnafu {
-                    ident: name.to_string(),
+            let reference =
+                object_name_to_table_reference(name.clone(), true).with_context(|_| {
+                    ConvertIdentifierSnafu {
+                        ident: name.to_string(),
+                    }
                 })?;
             let catalog = reference
                 .catalog()
@@ -780,6 +1024,8 @@ pub fn to_create_flow_task_expr(
         })
         .collect::<Result<Vec<_>>>()?;
 
+    let eval_interval = create_flow.eval_interval;
+
     Ok(CreateFlowExpr {
         catalog_name: query_ctx.current_catalog().to_string(),
         flow_name: sanitize_flow_name(create_flow.flow_name)?,
@@ -788,9 +1034,10 @@ pub fn to_create_flow_task_expr(
         or_replace: create_flow.or_replace,
         create_if_not_exists: create_flow.if_not_exists,
         expire_after: create_flow.expire_after.map(|value| ExpireAfter { value }),
+        eval_interval: eval_interval.map(|seconds| api::v1::EvalInterval { seconds }),
         comment: create_flow.comment.unwrap_or_default(),
         sql: create_flow.query.to_string(),
-        flow_options: HashMap::new(),
+        flow_options: Default::default(),
     })
 }
 
@@ -803,7 +1050,7 @@ fn sanitize_flow_name(mut flow_name: ObjectName) -> Result<String> {
         }
     );
     // safety: we've checked flow_name.0 has exactly one element.
-    Ok(flow_name.0.swap_remove(0).value)
+    Ok(flow_name.0.swap_remove(0).to_string_unquoted())
 }
 
 #[cfg(test)]
@@ -823,6 +1070,18 @@ mod tests {
         let sql = r#"
 CREATE FLOW calc_reqs SINK TO cnt_reqs AS
 TQL EVAL (0, 15, '5s') count_values("status_code", http_requests);"#;
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        assert!(
+            stmt.is_err(),
+            "Expected error for invalid TQL EVAL parameters: {:#?}",
+            stmt
+        );
+
+        let sql = r#"
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests);"#;
         let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap()
@@ -844,7 +1103,7 @@ TQL EVAL (0, 15, '5s') count_values("status_code", http_requests);"#;
         );
         assert!(expr.source_table_names.is_empty());
         assert_eq!(
-            r#"TQL EVAL (0, 15, '5s') count_values("status_code", http_requests)"#,
+            r#"TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests)"#,
             expr.sql
         );
     }
@@ -937,10 +1196,11 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         let res = to_create_flow_task_expr(create_flow, &QueryContext::arc());
 
         assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid flow name: abc.`task_2`"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Invalid flow name: abc.`task_2`")
+        );
     }
 
     #[test]
@@ -971,7 +1231,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             // duplicate primary key
             "CREATE TABLE monitor (host STRING, ts TIMESTAMP TIME INDEX, some_column STRING, PRIMARY KEY (some_column, host, some_column));",
             // time index is primary key
-            "CREATE TABLE monitor (host STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY (host, ts));"
+            "CREATE TABLE monitor (host STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY (host, ts));",
         ];
 
         for sql in cases {
@@ -1172,6 +1432,50 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         assert!(modify_column_type.target_type_extension.is_none());
     }
 
+    #[test]
+    fn test_to_repartition_request() {
+        let sql = r#"
+ALTER TABLE metrics REPARTITION (
+  device_id < 100
+) INTO (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+);"#;
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::AlterTable(alter_table) = stmt else {
+            unreachable!()
+        };
+
+        let request = to_repartition_request(alter_table, &QueryContext::arc()).unwrap();
+        assert_eq!("greptime", request.catalog_name);
+        assert_eq!("public", request.schema_name);
+        assert_eq!("metrics", request.table_name);
+        assert_eq!(
+            request
+                .from_exprs
+                .into_iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>(),
+            vec!["device_id < 100".to_string()]
+        );
+        assert_eq!(
+            request
+                .into_exprs
+                .into_iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "device_id < 100 AND area < 'South'".to_string(),
+                "device_id < 100 AND area >= 'South'".to_string()
+            ]
+        );
+    }
+
     fn new_test_table_names() -> Vec<TableName> {
         vec![
             TableName {
@@ -1267,5 +1571,42 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         assert_eq!(sql, expr.definition);
         assert_eq!(columns, expr.columns);
         assert_eq!(plan_columns, expr.plan_columns);
+    }
+
+    #[test]
+    fn test_expr_to_create() {
+        let sql = r#"CREATE TABLE IF NOT EXISTS `tt` (
+  `timestamp` TIMESTAMP(9) NOT NULL,
+  `ip_address` STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),
+  `username` STRING NULL,
+  `http_method` STRING NULL INVERTED INDEX,
+  `request_line` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false', false_positive_rate = '0.01', granularity = '10240'),
+  `protocol` STRING NULL,
+  `status_code` INT NULL INVERTED INDEX,
+  `response_size` BIGINT NULL,
+  `message` STRING NULL,
+  TIME INDEX (`timestamp`),
+  PRIMARY KEY (`username`, `status_code`)
+)
+ENGINE=mito
+WITH(
+  append_mode = 'true'
+)"#;
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateTable(original_create) = stmt else {
+            unreachable!()
+        };
+
+        // Convert CreateTable -> CreateTableExpr -> CreateTable
+        let expr = create_to_expr(&original_create, &QueryContext::arc()).unwrap();
+
+        let create_table = expr_to_create(&expr, Some('`')).unwrap();
+        let new_sql = format!("{:#}", create_table);
+        assert_eq!(sql, new_sql);
     }
 }

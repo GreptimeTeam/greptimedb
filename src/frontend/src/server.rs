@@ -18,12 +18,15 @@ use std::sync::Arc;
 use auth::UserProviderRef;
 use common_base::Plugins;
 use common_config::Configurable;
+use common_telemetry::info;
+use meta_client::MetaClientOptions;
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::frontend_grpc_handler::FrontendGrpcHandler;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{GrpcOptions, GrpcServer};
 use servers::http::event::LogValidatorRef;
+use servers::http::utils::router::RouterConfigurator;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
@@ -33,7 +36,7 @@ use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
 use servers::server::{Server, ServerHandlers};
-use servers::tls::{maybe_watch_tls_config, ReloadableTlsServerConfig};
+use servers::tls::{ReloadableTlsServerConfig, maybe_watch_tls_config};
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartServerSnafu, TomlFormatSnafu};
@@ -106,11 +109,17 @@ where
         }
 
         if opts.otlp.enable {
-            builder = builder.with_otlp_handler(self.instance.clone());
+            builder = builder
+                .with_otlp_handler(self.instance.clone(), opts.prom_store.with_metric_engine);
         }
 
         if opts.jaeger.enable {
             builder = builder.with_jaeger_handler(self.instance.clone());
+        }
+
+        if let Some(configurator) = self.plugins.get::<RouterConfigurator>() {
+            info!("Adding extra router from plugins");
+            builder = builder.with_extra_router(configurator.router());
         }
 
         builder
@@ -130,17 +139,28 @@ where
         }
     }
 
-    fn build_grpc_server(&mut self, opts: &FrontendOptions) -> Result<GrpcServer> {
+    fn build_grpc_server(
+        &mut self,
+        grpc: &GrpcOptions,
+        meta_client: &Option<MetaClientOptions>,
+        name: Option<String>,
+        external: bool,
+    ) -> Result<GrpcServer> {
         let builder = if let Some(builder) = self.grpc_server_builder.take() {
             builder
         } else {
-            self.grpc_server_builder(&opts.grpc)?
+            self.grpc_server_builder(grpc)?
         };
 
-        let user_provider = self.plugins.get::<UserProviderRef>();
+        let user_provider = if external {
+            self.plugins.get::<UserProviderRef>()
+        } else {
+            // skip authentication for internal grpc port
+            None
+        };
 
         // Determine whether it is Standalone or Distributed mode based on whether the meta client is configured.
-        let runtime = if opts.meta_client.is_none() {
+        let runtime = if meta_client.is_none() {
             Some(builder.runtime().clone())
         } else {
             None
@@ -150,18 +170,28 @@ where
             ServerGrpcQueryHandlerAdapter::arc(self.instance.clone()),
             user_provider.clone(),
             runtime,
-            opts.grpc.flight_compression,
+            grpc.flight_compression,
         );
 
-        let frontend_grpc_handler =
-            FrontendGrpcHandler::new(self.instance.process_manager().clone());
         let grpc_server = builder
+            .name(name)
             .database_handler(greptime_request_handler.clone())
             .prometheus_handler(self.instance.clone(), user_provider.clone())
-            .otel_arrow_handler(OtelArrowServiceHandler(self.instance.clone()))
-            .flight_handler(Arc::new(greptime_request_handler))
-            .frontend_grpc_handler(frontend_grpc_handler)
-            .build();
+            .otel_arrow_handler(OtelArrowServiceHandler::new(
+                self.instance.clone(),
+                user_provider.clone(),
+            ))
+            .flight_handler(Arc::new(greptime_request_handler));
+
+        let grpc_server = if !external {
+            let frontend_grpc_handler =
+                FrontendGrpcHandler::new(self.instance.process_manager().clone());
+            grpc_server.frontend_grpc_handler(frontend_grpc_handler)
+        } else {
+            grpc_server
+        }
+        .build();
+
         Ok(grpc_server)
     }
 
@@ -194,7 +224,19 @@ where
         {
             // Always init GRPC server
             let grpc_addr = parse_addr(&opts.grpc.bind_addr)?;
-            let grpc_server = self.build_grpc_server(&opts)?;
+            let grpc_server = self.build_grpc_server(&opts.grpc, &opts.meta_client, None, true)?;
+            handlers.insert((Box::new(grpc_server), grpc_addr));
+        }
+
+        if let Some(internal_grpc) = &opts.internal_grpc {
+            // Always init Internal GRPC server
+            let grpc_addr = parse_addr(&internal_grpc.bind_addr)?;
+            let grpc_server = self.build_grpc_server(
+                internal_grpc,
+                &opts.meta_client,
+                Some("INTERNAL_GRPC_SERVER".to_string()),
+                false,
+            )?;
             handlers.insert((Box::new(grpc_server), grpc_addr));
         }
 
@@ -229,6 +271,7 @@ where
                     tls_server_config,
                     opts.keep_alive.as_secs(),
                     opts.reject_no_database.unwrap_or(false),
+                    opts.prepared_stmt_cache_size,
                 )),
                 Some(instance.process_manager().clone()),
             );

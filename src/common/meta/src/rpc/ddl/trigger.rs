@@ -10,10 +10,9 @@ use api::v1::{
     NotifyChannel as PbNotifyChannel, WebhookOptions as PbWebhookOptions,
 };
 use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error;
-use crate::error::Result;
+use crate::error::{self, Result, TooLargeDurationSnafu};
 use crate::rpc::ddl::DdlTask;
 
 // Create trigger
@@ -27,6 +26,11 @@ pub struct CreateTriggerTask {
     pub labels: HashMap<String, String>,
     pub annotations: HashMap<String, String>,
     pub interval: Duration,
+    pub raw_interval_expr: Option<String>,
+    pub r#for: Option<Duration>,
+    pub for_raw_expr: Option<String>,
+    pub keep_firing_for: Option<Duration>,
+    pub keep_firing_for_raw_expr: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,13 +55,30 @@ pub struct WebhookOptions {
     pub opts: HashMap<String, String>,
 }
 
-impl From<CreateTriggerTask> for PbCreateTriggerTask {
-    fn from(task: CreateTriggerTask) -> Self {
+impl TryFrom<CreateTriggerTask> for PbCreateTriggerTask {
+    type Error = error::Error;
+
+    fn try_from(task: CreateTriggerTask) -> Result<Self> {
         let channels = task
             .channels
             .into_iter()
             .map(PbNotifyChannel::from)
             .collect();
+
+        let interval = task.interval.try_into().context(TooLargeDurationSnafu)?;
+        let raw_interval_expr = task.raw_interval_expr.unwrap_or_default();
+
+        let r#for = task
+            .r#for
+            .map(|d| d.try_into().context(TooLargeDurationSnafu))
+            .transpose()?;
+        let for_raw_expr = task.for_raw_expr.unwrap_or_default();
+
+        let keep_firing_for = task
+            .keep_firing_for
+            .map(|d| d.try_into().context(TooLargeDurationSnafu))
+            .transpose()?;
+        let keep_firing_for_raw_expr = task.keep_firing_for_raw_expr.unwrap_or_default();
 
         let expr = PbCreateTriggerExpr {
             catalog_name: task.catalog_name,
@@ -67,12 +88,17 @@ impl From<CreateTriggerTask> for PbCreateTriggerTask {
             channels,
             labels: task.labels,
             annotations: task.annotations,
-            interval: task.interval.as_secs(),
+            interval: Some(interval),
+            raw_interval_expr,
+            r#for,
+            for_raw_expr,
+            keep_firing_for,
+            keep_firing_for_raw_expr,
         };
 
-        PbCreateTriggerTask {
+        Ok(PbCreateTriggerTask {
             create_trigger: Some(expr),
-        }
+        })
     }
 }
 
@@ -90,6 +116,29 @@ impl TryFrom<PbCreateTriggerTask> for CreateTriggerTask {
             .map(NotifyChannel::try_from)
             .collect::<Result<Vec<_>>>()?;
 
+        let interval = expr.interval.context(error::MissingIntervalSnafu)?;
+        let interval = interval.try_into().context(error::NegativeDurationSnafu)?;
+
+        let r#for = expr
+            .r#for
+            .map(Duration::try_from)
+            .transpose()
+            .context(error::NegativeDurationSnafu)?;
+
+        let keep_firing_for = expr
+            .keep_firing_for
+            .map(Duration::try_from)
+            .transpose()
+            .context(error::NegativeDurationSnafu)?;
+
+        let raw_interval_expr =
+            (!expr.raw_interval_expr.is_empty()).then_some(expr.raw_interval_expr);
+
+        let for_raw_expr = (!expr.for_raw_expr.is_empty()).then_some(expr.for_raw_expr);
+
+        let keep_firing_for_raw_expr =
+            (!expr.keep_firing_for_raw_expr.is_empty()).then_some(expr.keep_firing_for_raw_expr);
+
         let task = CreateTriggerTask {
             catalog_name: expr.catalog_name,
             trigger_name: expr.trigger_name,
@@ -98,7 +147,12 @@ impl TryFrom<PbCreateTriggerTask> for CreateTriggerTask {
             channels,
             labels: expr.labels,
             annotations: expr.annotations,
-            interval: Duration::from_secs(expr.interval),
+            interval,
+            raw_interval_expr,
+            r#for,
+            for_raw_expr,
+            keep_firing_for,
+            keep_firing_for_raw_expr,
         };
         Ok(task)
     }
@@ -258,9 +312,14 @@ mod tests {
             .into_iter()
             .collect(),
             interval: Duration::from_secs(60),
+            raw_interval_expr: Some("'1 minute'::INTERVAL".to_string()),
+            r#for: Duration::from_secs(300).into(),
+            for_raw_expr: Some("'5 minute'::INTERVAL".to_string()),
+            keep_firing_for: Duration::from_secs(600).into(),
+            keep_firing_for_raw_expr: Some("'10 minute'::INTERVAL".to_string()),
         };
 
-        let pb_task: PbCreateTriggerTask = original.clone().into();
+        let pb_task: PbCreateTriggerTask = original.clone().try_into().unwrap();
 
         let expr = pb_task.create_trigger.as_ref().unwrap();
         assert_eq!(expr.catalog_name, "test_catalog");
@@ -277,7 +336,8 @@ mod tests {
             expr.annotations.get("description").unwrap(),
             "This is a test"
         );
-        assert_eq!(expr.interval, 60);
+        let expected: prost_types::Duration = Duration::from_secs(60).try_into().unwrap();
+        assert_eq!(expr.interval, Some(expected));
 
         let round_tripped = CreateTriggerTask::try_from(pb_task).unwrap();
 
@@ -291,6 +351,14 @@ mod tests {
         assert_eq!(original.labels, round_tripped.labels);
         assert_eq!(original.annotations, round_tripped.annotations);
         assert_eq!(original.interval, round_tripped.interval);
+        assert_eq!(original.raw_interval_expr, round_tripped.raw_interval_expr);
+        assert_eq!(original.r#for, round_tripped.r#for);
+        assert_eq!(original.for_raw_expr, round_tripped.for_raw_expr);
+        assert_eq!(original.keep_firing_for, round_tripped.keep_firing_for);
+        assert_eq!(
+            original.keep_firing_for_raw_expr,
+            round_tripped.keep_firing_for_raw_expr
+        );
 
         // Invalid, since create_trigger is None and it's required.
         let invalid_task = PbCreateTriggerTask {

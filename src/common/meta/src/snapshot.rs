@@ -16,24 +16,25 @@ pub mod file;
 
 use std::borrow::Cow;
 use std::fmt::{Display, Formatter};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use common_telemetry::info;
 use file::{Metadata, MetadataContent};
-use futures::TryStreamExt;
+use futures::{TryStreamExt, future};
 use object_store::ObjectStore;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use strum::Display;
 
 use crate::error::{
     Error, InvalidFileExtensionSnafu, InvalidFileNameSnafu, InvalidFilePathSnafu, ReadObjectSnafu,
-    Result, WriteObjectSnafu,
+    Result, UnexpectedSnafu, WriteObjectSnafu,
 };
+use crate::key::{CANDIDATES_ROOT, ELECTION_KEY};
 use crate::kv_backend::KvBackendRef;
-use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
-use crate::rpc::store::{BatchPutRequest, RangeRequest};
+use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use crate::rpc::KeyValue;
+use crate::rpc::store::{BatchPutRequest, RangeRequest};
 use crate::snapshot::file::{Document, KeyValue as FileKeyValue};
 
 /// The format of the backup file.
@@ -162,6 +163,11 @@ pub struct MetadataSnapshotManager {
 /// The maximum size of the request to put metadata, use 1MiB by default.
 const MAX_REQUEST_SIZE: usize = 1024 * 1024;
 
+/// Returns true if the key is an internal key.
+fn is_internal_key(kv: &FileKeyValue) -> bool {
+    kv.key.starts_with(ELECTION_KEY.as_bytes()) || kv.key.starts_with(CANDIDATES_ROOT.as_bytes())
+}
+
 impl MetadataSnapshotManager {
     pub fn new(kv_backend: KvBackendRef, object_store: ObjectStore) -> Self {
         Self {
@@ -226,21 +232,48 @@ impl MetadataSnapshotManager {
     }
 
     /// Dumps the metadata to the backup file.
-    pub async fn dump(&self, path: &str, filename_str: &str) -> Result<(String, u64)> {
+    pub async fn dump(&self, file_path_str: &str) -> Result<(String, u64)> {
         let format = FileFormat::FlexBuffers;
-        let filename = FileName::new(
-            filename_str.to_string(),
-            FileExtension {
-                format,
-                data_type: DataType::Metadata,
-            },
-        );
-        let file_path_buf = [path, filename.to_string().as_str()]
-            .iter()
-            .collect::<PathBuf>();
-        let file_path = file_path_buf.to_str().context(InvalidFileNameSnafu {
-            reason: format!("Invalid file path: {}, filename: {}", path, filename_str),
+
+        let path = Path::new(file_path_str)
+            .parent()
+            .context(InvalidFilePathSnafu {
+                file_path: file_path_str,
+            })?;
+        let raw_file_name = Path::new(file_path_str)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .context(InvalidFilePathSnafu {
+                file_path: file_path_str,
+            })?;
+        let parsed_file_name = FileName::try_from(raw_file_name).unwrap_or_else(|_| {
+            FileName::new(
+                raw_file_name.to_string(),
+                FileExtension {
+                    format,
+                    data_type: DataType::Metadata,
+                },
+            )
+        });
+        let file_path = path.join(parsed_file_name.to_string());
+        let file_path = file_path.to_str().context(InvalidFilePathSnafu {
+            file_path: file_path_str,
         })?;
+
+        // Ensure the file does not exist
+        ensure!(
+            !self
+                .object_store
+                .exists(file_path)
+                .await
+                .context(ReadObjectSnafu { file_path })?,
+            UnexpectedSnafu {
+                err_msg: format!(
+                    "The file '{}' already exists. Please choose a different name or remove the existing file before proceeding.",
+                    file_path
+                ),
+            }
+        );
         let now = Instant::now();
         let req = RangeRequest::new().with_range(vec![0], vec![0]);
         let stream = PaginationStream::new(self.kv_backend.clone(), req, DEFAULT_PAGE_SIZE, |kv| {
@@ -250,7 +283,10 @@ impl MetadataSnapshotManager {
             })
         })
         .into_stream();
-        let keyvalues = stream.try_collect::<Vec<_>>().await?;
+        let keyvalues = stream
+            .try_filter(|f| future::ready(!is_internal_key(f)))
+            .try_collect::<Vec<_>>()
+            .await?;
         let num_keyvalues = keyvalues.len();
         let document = Document::new(
             Metadata::new(),
@@ -270,7 +306,7 @@ impl MetadataSnapshotManager {
             now.elapsed()
         );
 
-        Ok((filename.to_string(), num_keyvalues as u64))
+        Ok((parsed_file_name.to_string(), num_keyvalues as u64))
     }
 
     fn format_output(key: Cow<'_, str>, value: Cow<'_, str>) -> String {
@@ -322,12 +358,12 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::sync::Arc;
 
-    use common_test_util::temp_dir::{create_temp_dir, TempDir};
+    use common_test_util::temp_dir::{TempDir, create_temp_dir};
     use object_store::services::Fs;
 
     use super::*;
-    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::KvBackend;
+    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::rpc::store::PutRequest;
 
     #[test]
@@ -386,14 +422,23 @@ mod tests {
         }
         let dump_path = temp_path.join("snapshot");
         manager
-            .dump(
-                &dump_path.as_path().display().to_string(),
-                "metadata_snapshot",
-            )
+            .dump(&format!(
+                "{}/metadata_snapshot",
+                &dump_path.as_path().display().to_string()
+            ))
             .await
             .unwrap();
         // Clean up the kv backend
         kv_backend.clear();
+        let err = manager
+            .dump(&format!(
+                "{}/metadata_snapshot.metadata.fb",
+                &dump_path.as_path().display().to_string()
+            ))
+            .await
+            .unwrap_err();
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(err.to_string().contains("already exists"));
 
         let restore_path = dump_path
             .join("metadata_snapshot.metadata.fb")

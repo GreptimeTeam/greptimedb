@@ -18,8 +18,8 @@ use std::sync::Arc;
 use common_telemetry::debug;
 use datafusion::config::ConfigOptions;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{DataFusionError, Result};
 use store_api::region_engine::PartitionRange;
@@ -57,7 +57,7 @@ impl ParallelizeScan {
             .transform_down(|plan| {
                 if let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() {
                     // save the first order expr
-                    first_order_expr = sort_exec.expr().first().cloned();
+                    first_order_expr = Some(sort_exec.expr().first()).cloned();
                 } else if let Some(region_scan_exec) =
                     plan.as_any().downcast_ref::<RegionScanExec>()
                 {
@@ -172,8 +172,8 @@ impl ParallelizeScan {
 
 #[cfg(test)]
 mod test {
-    use common_time::timestamp::TimeUnit;
     use common_time::Timestamp;
+    use common_time::timestamp::TimeUnit;
 
     use super::*;
 

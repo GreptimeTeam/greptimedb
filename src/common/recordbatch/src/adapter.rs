@@ -20,17 +20,19 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use common_base::readable_size::ReadableSize;
+use common_time::util::format_nanoseconds_human_readable;
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::ExecutionProps;
-use datafusion::logical_expr::utils::conjunction;
 use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::utils::conjunction;
 use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, MetricValue};
 use datafusion::physical_plan::{
-    accept, DisplayFormatType, ExecutionPlan, ExecutionPlanVisitor, PhysicalExpr,
-    RecordBatchStream as DfRecordBatchStream,
+    DisplayFormatType, ExecutionPlan, ExecutionPlanVisitor, PhysicalExpr,
+    RecordBatchStream as DfRecordBatchStream, accept,
 };
 use datafusion_common::arrow::error::ArrowError;
 use datafusion_common::{DataFusionError, ToDFSchema};
@@ -134,11 +136,11 @@ where
             b.and_then(|b| {
                 let projected_column = b.project(&projection)?;
                 if projected_column.schema().fields.len() != projected_schema.fields.len() {
-                   return Err(DataFusionError::ArrowError(ArrowError::SchemaError(format!(
+                   return Err(DataFusionError::ArrowError(Box::new(ArrowError::SchemaError(format!(
                         "Trying to cast a RecordBatch into an incompatible schema. RecordBatch: {}, Target: {}",
                         projected_column.schema(),
                         projected_schema,
-                    )), None));
+                    ))), None));
                 }
 
                 let mut columns = Vec::with_capacity(projected_schema.fields.len());
@@ -360,7 +362,7 @@ impl ExecutionPlanVisitor for MetricCollector {
         // skip if no metric available
         let Some(metric) = plan.metrics() else {
             self.record_batch_metrics.plan_metrics.push(PlanMetrics {
-                plan: std::any::type_name::<Self>().to_string(),
+                plan: plan.name().to_string(),
                 level: self.current_level,
                 metrics: vec![],
             });
@@ -443,6 +445,20 @@ pub struct RecordBatchMetrics {
     pub plan_metrics: Vec<PlanMetrics>,
 }
 
+/// Determines if a metric name represents a time measurement that should be formatted.
+fn is_time_metric(metric_name: &str) -> bool {
+    metric_name.contains("elapsed") || metric_name.contains("time") || metric_name.contains("cost")
+}
+
+/// Determines if a metric name represents a bytes measurement that should be formatted.
+fn is_bytes_metric(metric_name: &str) -> bool {
+    metric_name.contains("bytes") || metric_name.contains("mem")
+}
+
+fn format_bytes_human_readable(bytes: usize) -> String {
+    format!("{}", ReadableSize(bytes as u64))
+}
+
 /// Only display `plan_metrics` with indent `  ` (2 spaces).
 impl Display for RecordBatchMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -455,7 +471,18 @@ impl Display for RecordBatchMetrics {
                 indent = metric.level * 2,
             )?;
             for (label, value) in &metric.metrics {
-                write!(f, "{}: {}, ", label, value)?;
+                if is_time_metric(label) {
+                    write!(
+                        f,
+                        "{}: {}, ",
+                        label,
+                        format_nanoseconds_human_readable(*value),
+                    )?;
+                } else if is_bytes_metric(label) {
+                    write!(f, "{}: {}, ", label, format_bytes_human_readable(*value),)?;
+                } else {
+                    write!(f, "{}: {}, ", label, value)?;
+                }
             }
             writeln!(f, "]")?;
         }
@@ -528,7 +555,7 @@ impl Stream for AsyncRecordBatchStreamAdapter {
                     };
                 }
                 AsyncRecordBatchStreamAdapterState::Ready(stream) => {
-                    return Poll::Ready(ready!(Pin::new(stream).poll_next(cx)))
+                    return Poll::Ready(ready!(Pin::new(stream).poll_next(cx)));
                 }
                 AsyncRecordBatchStreamAdapterState::Failed => return Poll::Ready(None),
             }
@@ -548,10 +575,10 @@ fn custom_cast(
     target_type: &ArrowDataType,
     extype: Option<ColumnExtType>,
 ) -> std::result::Result<Arc<dyn Array>, ArrowError> {
-    if let ArrowDataType::Map(_, _) = array.data_type() {
-        if let ArrowDataType::Binary = target_type {
-            return convert_map_to_json_binary(array, extype);
-        }
+    if let ArrowDataType::Map(_, _) = array.data_type()
+        && let ArrowDataType::Binary = target_type
+    {
+        return convert_map_to_json_binary(array, extype);
     }
 
     cast(array, target_type)
@@ -634,7 +661,7 @@ fn convert_map_to_json_binary(
                             return Err(ArrowError::CastError(format!(
                                 "Failed to serialize JSON: {}",
                                 e
-                            )))
+                            )));
                         }
                     };
                     match jsonb::parse_value(json_string.as_bytes()) {
@@ -643,7 +670,7 @@ fn convert_map_to_json_binary(
                             return Err(ArrowError::CastError(format!(
                                 "Failed to serialize JSONB: {}",
                                 e
-                            )))
+                            )));
                         }
                     }
                 }
@@ -653,7 +680,7 @@ fn convert_map_to_json_binary(
                         return Err(ArrowError::CastError(format!(
                             "Failed to serialize JSON: {}",
                             e
-                        )))
+                        )));
                     }
                 },
             };
@@ -679,8 +706,8 @@ mod test {
     use snafu::IntoError;
 
     use super::*;
-    use crate::error::Error;
     use crate::RecordBatches;
+    use crate::error::Error;
 
     #[tokio::test]
     async fn test_async_recordbatch_stream_adaptor() {

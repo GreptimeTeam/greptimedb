@@ -20,12 +20,12 @@ use arrow_flight::flight_service_server::FlightServiceServer;
 use auth::UserProviderRef;
 use common_grpc::error::{Error, InvalidConfigFilePathSnafu, Result};
 use common_runtime::Runtime;
-use otel_arrow_rust::opentelemetry::ArrowMetricsServiceServer;
+use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsServiceServer;
 use snafu::ResultExt;
 use tokio::sync::Mutex;
 use tonic::codec::CompressionEncoding;
-use tonic::service::interceptor::InterceptedService;
 use tonic::service::RoutesBuilder;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Identity, ServerTlsConfig};
 
 use crate::grpc::database::DatabaseService;
@@ -38,6 +38,7 @@ use crate::grpc::{GrpcServer, GrpcServerConfig};
 use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
+use crate::request_limiter::RequestMemoryLimiter;
 use crate::tls::TlsOption;
 
 /// Add a gRPC service (`service`) to a `builder`([RoutesBuilder]).
@@ -57,11 +58,22 @@ macro_rules! add_service {
             .send_compressed(CompressionEncoding::Gzip)
             .send_compressed(CompressionEncoding::Zstd);
 
-        $builder.routes_builder_mut().add_service(service_builder);
+        // Apply memory limiter layer
+        use $crate::grpc::memory_limit::MemoryLimiterExtensionLayer;
+        let service_with_limiter = $crate::tower::ServiceBuilder::new()
+            .layer(MemoryLimiterExtensionLayer::new(
+                $builder.memory_limiter().clone(),
+            ))
+            .service(service_builder);
+
+        $builder
+            .routes_builder_mut()
+            .add_service(service_with_limiter);
     };
 }
 
 pub struct GrpcServerBuilder {
+    name: Option<String>,
     config: GrpcServerConfig,
     runtime: Runtime,
     routes_builder: RoutesBuilder,
@@ -72,16 +84,20 @@ pub struct GrpcServerBuilder {
             HeaderInterceptor,
         >,
     >,
+    memory_limiter: RequestMemoryLimiter,
 }
 
 impl GrpcServerBuilder {
     pub fn new(config: GrpcServerConfig, runtime: Runtime) -> Self {
+        let memory_limiter = RequestMemoryLimiter::new(config.max_total_message_memory);
         Self {
+            name: None,
             config,
             runtime,
             routes_builder: RoutesBuilder::default(),
             tls_config: None,
             otel_arrow_service: None,
+            memory_limiter,
         }
     }
 
@@ -91,6 +107,14 @@ impl GrpcServerBuilder {
 
     pub fn runtime(&self) -> &Runtime {
         &self.runtime
+    }
+
+    pub fn memory_limiter(&self) -> &RequestMemoryLimiter {
+        &self.memory_limiter
+    }
+
+    pub fn name(self, name: Option<String>) -> Self {
+        Self { name, ..self }
     }
 
     /// Add handler for [DatabaseService] service.
@@ -190,6 +214,9 @@ impl GrpcServerBuilder {
             tls_config: self.tls_config,
             otel_arrow_service: Mutex::new(self.otel_arrow_service),
             bind_addr: None,
+            name: self.name,
+            config: self.config,
+            memory_limiter: self.memory_limiter,
         }
     }
 }

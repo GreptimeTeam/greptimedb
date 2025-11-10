@@ -15,8 +15,8 @@
 use std::ops::DerefMut;
 
 use common_meta::ddl::DetectingRegion;
-use dashmap::mapref::multiple::RefMulti;
 use dashmap::DashMap;
+use dashmap::mapref::multiple::RefMulti;
 
 use crate::failure_detector::{PhiAccrualFailureDetector, PhiAccrualFailureDetectorOptions};
 
@@ -74,7 +74,7 @@ impl RegionFailureDetector {
     }
 
     /// Returns a [FailureDetectorEntry] iterator.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = FailureDetectorEntry> + '_ {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = FailureDetectorEntry<'_>> + '_ {
         self.detectors
             .iter()
             .map(move |e| FailureDetectorEntry { e })

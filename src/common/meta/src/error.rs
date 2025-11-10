@@ -18,14 +18,15 @@ use std::sync::Arc;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_procedure::ProcedureId;
 use common_wal::options::WalOptions;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
-use crate::peer::Peer;
 use crate::DatanodeId;
+use crate::peer::Peer;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -136,6 +137,21 @@ pub enum Error {
     #[snafu(display("Unsupported operation {}", operation))]
     Unsupported {
         operation: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to get procedure state receiver, procedure id: {procedure_id}"))]
+    ProcedureStateReceiver {
+        procedure_id: ProcedureId,
+        #[snafu(implicit)]
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Procedure state receiver not found: {procedure_id}"))]
+    ProcedureStateReceiverNotFound {
+        procedure_id: ProcedureId,
         #[snafu(implicit)]
         location: Location,
     },
@@ -359,6 +375,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region not found: {}", region_id))]
+    RegionNotFound {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("View not found: '{}'", view_name))]
     ViewNotFound {
         view_name: String,
@@ -383,6 +406,13 @@ pub enum Error {
     #[snafu(display("Schema nod found, schema: {}", table_schema))]
     SchemaNotFound {
         table_schema: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Catalog not found, catalog: {}", catalog))]
+    CatalogNotFound {
+        catalog: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -504,9 +534,6 @@ pub enum Error {
         location: Location,
         source: common_wal::error::Error,
     },
-
-    #[snafu(display("Failed to resolve Kafka broker endpoint."))]
-    ResolveKafkaEndpoint { source: common_wal::error::Error },
 
     #[snafu(display("Failed to build a Kafka controller client"))]
     BuildKafkaCtrlClient {
@@ -717,6 +744,31 @@ pub enum Error {
         operation: String,
     },
 
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to setup PostgreSQL TLS configuration: {}", reason))]
+    PostgresTlsConfig {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to load TLS certificate from path: {}", path))]
+    LoadTlsCertificate {
+        path: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Invalid TLS configuration: {}", reason))]
+    InvalidTlsConfig {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[cfg(feature = "mysql_kvbackend")]
     #[snafu(display("Failed to execute via MySql, sql: {}", sql))]
     MySqlExecution {
@@ -878,6 +930,12 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display("Missing column ids"))]
+    MissingColumnIds {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Missing column in column metadata: {}, table: {}, table_id: {}",
         column_name,
@@ -907,6 +965,89 @@ pub enum Error {
         table_name: String,
         table_id: TableId,
     },
+
+    #[snafu(display("Failed to convert column def, column: {}", column))]
+    ConvertColumnDef {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: api::error::Error,
+    },
+
+    #[snafu(display("Failed to convert time ranges"))]
+    ConvertTimeRanges {
+        #[snafu(implicit)]
+        location: Location,
+        source: api::error::Error,
+    },
+
+    #[snafu(display(
+        "Column metadata inconsistencies found in table: {}, table_id: {}",
+        table_name,
+        table_id
+    ))]
+    ColumnMetadataConflicts {
+        table_name: String,
+        table_id: TableId,
+    },
+
+    #[snafu(display(
+        "Column not found in column metadata, column_name: {}, column_id: {}",
+        column_name,
+        column_id
+    ))]
+    ColumnNotFound { column_name: String, column_id: u32 },
+
+    #[snafu(display(
+        "Column id mismatch, column_name: {}, expected column_id: {}, actual column_id: {}",
+        column_name,
+        expected_column_id,
+        actual_column_id
+    ))]
+    ColumnIdMismatch {
+        column_name: String,
+        expected_column_id: u32,
+        actual_column_id: u32,
+    },
+
+    #[snafu(display(
+        "Timestamp column mismatch, expected column_name: {}, expected column_id: {}, actual column_name: {}, actual column_id: {}",
+        expected_column_name,
+        expected_column_id,
+        actual_column_name,
+        actual_column_id,
+    ))]
+    TimestampMismatch {
+        expected_column_name: String,
+        expected_column_id: u32,
+        actual_column_name: String,
+        actual_column_id: u32,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Too large duration"))]
+    TooLargeDuration {
+        #[snafu(source)]
+        error: prost_types::DurationError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Negative duration"))]
+    NegativeDuration {
+        #[snafu(source)]
+        error: prost_types::DurationError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Missing interval field"))]
+    MissingInterval {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -928,8 +1069,14 @@ impl ErrorExt for Error {
             NoLeader { .. } => StatusCode::TableUnavailable,
             ValueNotExist { .. }
             | ProcedurePoisonConflict { .. }
+            | ProcedureStateReceiverNotFound { .. }
+            | MissingColumnIds { .. }
             | MissingColumnInColumnMetadata { .. }
-            | MismatchColumnId { .. } => StatusCode::Unexpected,
+            | MismatchColumnId { .. }
+            | ColumnMetadataConflicts { .. }
+            | ColumnNotFound { .. }
+            | ColumnIdMismatch { .. }
+            | TimestampMismatch { .. } => StatusCode::Unexpected,
 
             Unsupported { .. } => StatusCode::Unsupported,
             WriteObject { .. } | ReadObject { .. } => StatusCode::StorageUnavailable,
@@ -957,7 +1104,6 @@ impl ErrorExt for Error {
             | BuildKafkaClient { .. }
             | BuildKafkaCtrlClient { .. }
             | KafkaPartitionClient { .. }
-            | ResolveKafkaEndpoint { .. }
             | ProduceRecord { .. }
             | CreateKafkaWalTopic { .. }
             | EmptyTopicPool { .. }
@@ -969,7 +1115,8 @@ impl ErrorExt for Error {
             | KafkaGetOffset { .. }
             | ReadFlexbuffers { .. }
             | SerializeFlexbuffers { .. }
-            | DeserializeFlexbuffers { .. } => StatusCode::Unexpected,
+            | DeserializeFlexbuffers { .. }
+            | ConvertTimeRanges { .. } => StatusCode::Unexpected,
 
             SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 
@@ -989,14 +1136,21 @@ impl ErrorExt for Error {
             | InvalidTimeZone { .. }
             | InvalidFileExtension { .. }
             | InvalidFileName { .. }
+            | InvalidFlowRequestBody { .. }
             | InvalidFilePath { .. } => StatusCode::InvalidArguments,
-            InvalidFlowRequestBody { .. } => StatusCode::InvalidArguments,
+
+            #[cfg(feature = "enterprise")]
+            MissingInterval { .. } | NegativeDuration { .. } | TooLargeDuration { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowRouteNotFound { .. } => StatusCode::Unexpected,
             FlowAlreadyExists { .. } => StatusCode::FlowAlreadyExists,
 
-            ViewNotFound { .. } | TableNotFound { .. } => StatusCode::TableNotFound,
+            ViewNotFound { .. } | TableNotFound { .. } | RegionNotFound { .. } => {
+                StatusCode::TableNotFound
+            }
             ViewAlreadyExists { .. } | TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
 
             SubmitProcedure { source, .. }
@@ -1013,21 +1167,28 @@ impl ErrorExt for Error {
             AbortProcedure { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
             PutPoison { source, .. } => source.status_code(),
+            ConvertColumnDef { source, .. } => source.status_code(),
+            ProcedureStateReceiver { source, .. } => source.status_code(),
 
             ParseProcedureId { .. }
             | InvalidNumTopics { .. }
             | SchemaNotFound { .. }
+            | CatalogNotFound { .. }
             | InvalidNodeInfoKey { .. }
             | InvalidStatKey { .. }
             | ParseNum { .. }
             | InvalidRole { .. }
             | EmptyDdlTasks { .. } => StatusCode::InvalidArguments,
 
+            LoadTlsCertificate { .. } => StatusCode::Internal,
+
             #[cfg(feature = "pg_kvbackend")]
             PostgresExecution { .. }
             | CreatePostgresPool { .. }
             | GetPostgresConnection { .. }
-            | PostgresTransaction { .. } => StatusCode::Internal,
+            | PostgresTransaction { .. }
+            | PostgresTlsConfig { .. }
+            | InvalidTlsConfig { .. } => StatusCode::Internal,
             #[cfg(feature = "mysql_kvbackend")]
             MySqlExecution { .. } | CreateMySqlPool { .. } | MySqlTransaction { .. } => {
                 StatusCode::Internal

@@ -18,14 +18,13 @@ use std::sync::Arc;
 use api::v1::index::InvertedIndexMetas;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::future::try_join_all;
 use index::inverted_index::error::Result;
 use index::inverted_index::format::reader::InvertedIndexReader;
 use prost::Message;
+use store_api::storage::FileId;
 
-use crate::cache::index::{IndexCache, PageKey, INDEX_METADATA_TYPE};
+use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache, PageKey};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
-use crate::sst::file::FileId;
 
 const INDEX_TYPE_INVERTED_INDEX: &str = "inverted_index";
 
@@ -44,6 +43,11 @@ impl InvertedIndexCache {
             inverted_index_metadata_weight,
             inverted_index_content_weight,
         )
+    }
+
+    /// Removes all cached entries for the given `file_id`.
+    pub fn invalidate_file(&self, file_id: FileId) {
+        self.invalidate_if(move |key| *key == file_id);
     }
 }
 
@@ -93,21 +97,24 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
     }
 
     async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        let fetch = ranges.iter().map(|range| {
+        let mut pages = Vec::with_capacity(ranges.len());
+        for range in ranges {
             let inner = &self.inner;
-            self.cache.get_or_load(
-                self.file_id,
-                self.blob_size,
-                range.start,
-                (range.end - range.start) as u32,
-                move |ranges| async move { inner.read_vec(&ranges).await },
-            )
-        });
-        Ok(try_join_all(fetch)
-            .await?
-            .into_iter()
-            .map(Bytes::from)
-            .collect::<Vec<_>>())
+            let page = self
+                .cache
+                .get_or_load(
+                    self.file_id,
+                    self.blob_size,
+                    range.start,
+                    (range.end - range.start) as u32,
+                    move |ranges| async move { inner.read_vec(&ranges).await },
+                )
+                .await?;
+
+            pages.push(Bytes::from(page));
+        }
+
+        Ok(pages)
     }
 
     async fn metadata(&self) -> Result<Arc<InvertedIndexMetas>> {
@@ -128,10 +135,10 @@ mod test {
     use std::num::NonZeroUsize;
 
     use futures::stream;
+    use index::Bytes;
     use index::bitmap::{Bitmap, BitmapType};
     use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
     use index::inverted_index::format::writer::{InvertedIndexBlobWriter, InvertedIndexWriter};
-    use index::Bytes;
     use prometheus::register_int_counter_vec;
     use rand::{Rng, RngCore};
 
@@ -173,7 +180,11 @@ mod test {
             if read != data.get(expected_range).unwrap() {
                 panic!(
                     "fuzz_read_index failed, offset: {}, size: {}, page_size: {}\nread len: {}, expected len: {}\nrange: {:?}, page num: {}",
-                    offset, size, page_size, read.len(), size as usize,
+                    offset,
+                    size,
+                    page_size,
+                    read.len(),
+                    size as usize,
                     PageKey::calculate_range(offset, size, page_size as u64),
                     page_num
                 );

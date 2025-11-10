@@ -24,7 +24,9 @@ use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRe
 use common_config::Configurable;
 use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
+use common_options::memory::MemoryOptions;
 use common_runtime::JoinHandle;
+use common_stat::get_total_cpu_cores;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{debug, info, trace};
 use datatypes::schema::ColumnSchema;
@@ -32,31 +34,31 @@ use datatypes::value::Value;
 use greptime_proto::v1;
 use itertools::{EitherOrBoth, Itertools};
 use meta_client::MetaClientOptions;
-use query::options::QueryOptions;
 use query::QueryEngine;
+use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use session::context::QueryContext;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{ConcreteDataType, RegionId};
 use table::metadata::TableId;
 use tokio::sync::broadcast::error::TryRecvError;
-use tokio::sync::{broadcast, watch, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast, watch};
 
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::refill::RefillTask;
 use crate::adapter::table_source::ManagedTableSource;
 use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
-pub(crate) use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
+pub(crate) use crate::adapter::worker::{Worker, WorkerHandle, create_worker};
 use crate::batching_mode::BatchingModeOptions;
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
 use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, InvalidQuerySnafu, UnexpectedSnafu};
 use crate::expr::Batch;
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
-use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
+use crate::repr::{self, BATCH_SIZE, DiffRow, RelationDesc, Row};
 use crate::{CreateFlowArgs, FlowId, TableName};
 
 pub(crate) mod flownode_impl;
@@ -71,9 +73,9 @@ mod worker;
 pub(crate) mod node_context;
 pub(crate) mod table_source;
 
+use crate::FrontendInvoker;
 use crate::error::Error;
 use crate::utils::StateReportHandler;
-use crate::FrontendInvoker;
 
 // `GREPTIME_TIMESTAMP` is not used to distinguish when table is created automatically by flow
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
@@ -91,7 +93,7 @@ pub struct FlowConfig {
 impl Default for FlowConfig {
     fn default() -> Self {
         Self {
-            num_workers: (common_config::utils::get_cpus() / 2).max(1),
+            num_workers: (get_total_cpu_cores() / 2).max(1),
             batching_mode: BatchingModeOptions::default(),
         }
     }
@@ -111,6 +113,7 @@ pub struct FlownodeOptions {
     pub heartbeat: HeartbeatOptions,
     pub query: QueryOptions,
     pub user_provider: Option<String>,
+    pub memory: MemoryOptions,
 }
 
 impl Default for FlownodeOptions {
@@ -126,8 +129,12 @@ impl Default for FlownodeOptions {
             heartbeat: HeartbeatOptions::default(),
             // flownode's query option is set to 1 to throttle flow's query so
             // that it won't use too much cpu or memory
-            query: QueryOptions { parallelism: 1 },
+            query: QueryOptions {
+                parallelism: 1,
+                allow_query_fallback: false,
+            },
             user_provider: None,
+            memory: MemoryOptions::default(),
         }
     }
 }
@@ -135,7 +142,7 @@ impl Default for FlownodeOptions {
 impl Configurable for FlownodeOptions {
     fn validate_sanitize(&mut self) -> common_config::error::Result<()> {
         if self.flow.num_workers == 0 {
-            self.flow.num_workers = (common_config::utils::get_cpus() / 2).max(1);
+            self.flow.num_workers = (get_total_cpu_cores() / 2).max(1);
         }
         Ok(())
     }
@@ -632,7 +639,10 @@ impl StreamingEngine {
                     break;
                 }
                 Some(Err(TryRecvError::Lagged(num))) => {
-                    common_telemetry::error!("Shutdown channel is lagged by {}, meaning multiple shutdown cmd have been issued", num);
+                    common_telemetry::error!(
+                        "Shutdown channel is lagged by {}, meaning multiple shutdown cmd have been issued",
+                        num
+                    );
                     break;
                 }
                 None => (),
@@ -733,8 +743,7 @@ impl StreamingEngine {
             .await?;
         trace!(
             "Handling write request for table_id={} with {} rows",
-            table_id,
-            rows_len
+            table_id, rows_len
         );
         Ok(())
     }
@@ -767,6 +776,7 @@ impl StreamingEngine {
             create_if_not_exists,
             or_replace,
             expire_after,
+            eval_interval: _,
             comment,
             sql,
             flow_options,

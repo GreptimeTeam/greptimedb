@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::stream;
 use once_cell::sync::Lazy;
-use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
 use pgwire::api::Type;
+use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
 use pgwire::error::PgWireResult;
 use pgwire::messages::data::DataRow;
 use regex::Regex;
@@ -73,7 +72,7 @@ fn set_transaction_warning(query_ctx: QueryContextRef) {
 }
 
 /// Process unsupported SQL and return fixed result as a compatibility solution
-pub(crate) fn process<'a>(query: &str, query_ctx: QueryContextRef) -> Option<Vec<Response<'a>>> {
+pub(crate) fn process(query: &str, query_ctx: QueryContextRef) -> Option<Vec<Response>> {
     // Transaction directives:
     if START_TRANSACTION_PATTERN.is_match(query) {
         set_transaction_warning(query_ctx);
@@ -115,17 +114,6 @@ pub(crate) fn process<'a>(query: &str, query_ctx: QueryContextRef) -> Option<Vec
     }
 }
 
-pub(crate) fn rewrite_sql(query: &str) -> Cow<'_, str> {
-    // DBeaver tricky replacement for datafusion not support sql
-    // TODO: add more here
-    query
-        .replace(
-            "SELECT db.oid,db.* FROM pg_catalog.pg_database db",
-            "SELECT db.oid as _oid,db.* FROM pg_catalog.pg_database db",
-        )
-        .into()
-}
-
 #[cfg(test)]
 mod test {
     use session::context::{QueryContext, QueryContextRef};
@@ -145,7 +133,7 @@ mod test {
         }
     }
 
-    fn get_data<'a>(q: &str, query_context: QueryContextRef) -> QueryResponse<'a> {
+    fn get_data(q: &str, query_context: QueryContextRef) -> QueryResponse {
         if let Response::Query(resp) = process(q, query_context.clone())
             .unwrap_or_else(|| panic!("fail to match {}", q))
             .remove(0)
@@ -210,13 +198,5 @@ mod test {
         assert!(process("SELECT 1", query_context.clone()).is_none());
         assert!(process("SHOW TABLES ", query_context.clone()).is_none());
         assert!(process("SET TIME_ZONE=utc ", query_context.clone()).is_none());
-    }
-
-    #[test]
-    fn test_rewrite() {
-        assert_eq!(
-            "SELECT db.oid as _oid,db.* FROM pg_catalog.pg_database db",
-            rewrite_sql("SELECT db.oid,db.* FROM pg_catalog.pg_database db")
-        );
     }
 }

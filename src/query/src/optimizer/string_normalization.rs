@@ -90,9 +90,9 @@ impl TreeNodeRewriter for StringNormalizationConverter {
             Expr::Cast(Cast { expr, data_type }) => {
                 let expr = match data_type {
                     DataType::Timestamp(_, _) => match *expr {
-                        Expr::Literal(value) => match value {
+                        Expr::Literal(value, _) => match value {
                             ScalarValue::Utf8(Some(s)) => trim_utf_expr(s),
-                            _ => Expr::Literal(value),
+                            _ => Expr::Literal(value, None),
                         },
                         expr => expr,
                     },
@@ -112,7 +112,7 @@ impl TreeNodeRewriter for StringNormalizationConverter {
 fn trim_utf_expr(s: String) -> Expr {
     let parts: Vec<_> = s.split_whitespace().collect();
     let trimmed = parts.join(" ");
-    Expr::Literal(ScalarValue::Utf8(Some(trimmed)))
+    Expr::Literal(ScalarValue::Utf8(Some(trimmed)), None)
 }
 
 #[cfg(test)]
@@ -122,9 +122,9 @@ mod tests {
     use arrow::datatypes::TimeUnit::{Microsecond, Millisecond, Nanosecond, Second};
     use arrow::datatypes::{DataType, SchemaRef};
     use arrow_schema::{Field, Schema, TimeUnit};
-    use datafusion::datasource::{provider_as_source, MemTable};
+    use datafusion::datasource::{MemTable, provider_as_source};
     use datafusion_common::config::ConfigOptions;
-    use datafusion_expr::{lit, Cast, Expr, LogicalPlan, LogicalPlanBuilder};
+    use datafusion_expr::{Cast, Expr, LogicalPlan, LogicalPlanBuilder, lit};
     use datafusion_optimizer::analyzer::AnalyzerRule;
 
     use crate::optimizer::string_normalization::StringNormalizationRule;
@@ -142,8 +142,9 @@ mod tests {
         for (time_unit, proj) in projects {
             let plan = create_test_plan_with_project(proj);
             let result = StringNormalizationRule.analyze(plan, config).unwrap();
-            let expected = format!("Projection: CAST(Utf8(\"2017-07-23 13:10:11\") AS Timestamp({:#?}, None))\n  TableScan: t",
-                                   time_unit
+            let expected = format!(
+                "Projection: CAST(Utf8(\"2017-07-23 13:10:11\") AS Timestamp({:#?}, None))\n  TableScan: t",
+                time_unit
             );
             assert_eq!(expected, result.to_string());
         }
@@ -161,7 +162,7 @@ mod tests {
             .analyze(int_to_timestamp_plan, config)
             .unwrap();
         let expected = String::from(
-            "Projection: CAST(Int64(158412331400600000) AS Timestamp(Nanosecond, None))\n  TableScan: t"
+            "Projection: CAST(Int64(158412331400600000) AS Timestamp(Nanosecond, None))\n  TableScan: t",
         );
         assert_eq!(expected, result.to_string());
 
@@ -195,7 +196,7 @@ mod tests {
 
     fn prepare_test_plan_builder() -> LogicalPlanBuilder {
         let schema = Schema::new(vec![Field::new("f", DataType::Float64, false)]);
-        let table = MemTable::try_new(SchemaRef::from(schema), vec![]).unwrap();
+        let table = MemTable::try_new(SchemaRef::from(schema), vec![vec![]]).unwrap();
         LogicalPlanBuilder::scan("t", provider_as_source(Arc::new(table)), None).unwrap()
     }
 }

@@ -10,6 +10,7 @@ on:
       - 'docker/**'
       - '.gitignore'
       - 'grafana/**'
+      - 'Makefile'
   push:
     branches:
       - main
@@ -21,6 +22,7 @@ on:
       - 'docker/**'
       - '.gitignore'
       - 'grafana/**'
+      - 'Makefile'
   workflow_dispatch:
 
 name: CI
@@ -65,6 +67,12 @@ jobs:
     steps:
       - run: 'echo "No action required"'
 
+  check-udeps:
+    name: Unused Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'echo "No action required"'
+
   coverage:
     runs-on: ubuntu-latest
     steps:
@@ -84,5 +92,6 @@ jobs:
         mode:
           - name: "Basic"
           - name: "Remote WAL"
+          - name: "Flat format"
     steps:
       - run: 'echo "No action required"'

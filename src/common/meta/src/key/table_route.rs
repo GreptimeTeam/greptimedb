@@ -17,13 +17,13 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::error::{
-    InvalidMetadataSnafu, MetadataCorruptionSnafu, Result, SerdeJsonSnafu, TableRouteNotFoundSnafu,
-    UnexpectedLogicalRouteTableSnafu,
+    InvalidMetadataSnafu, MetadataCorruptionSnafu, RegionNotFoundSnafu, Result, SerdeJsonSnafu,
+    TableRouteNotFoundSnafu, UnexpectedLogicalRouteTableSnafu,
 };
 use crate::key::node_address::{NodeAddressKey, NodeAddressValue};
 use crate::key::txn_helper::TxnOpGetResponseSet;
@@ -31,9 +31,9 @@ use crate::key::{
     DeserializedValueWithBytes, MetadataKey, MetadataValue, RegionDistribution,
     TABLE_ROUTE_KEY_PATTERN, TABLE_ROUTE_PREFIX,
 };
-use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::router::{region_distribution, RegionRoute};
+use crate::kv_backend::txn::Txn;
+use crate::rpc::router::{RegionRoute, region_distribution};
 use crate::rpc::store::BatchGetRequest;
 
 /// The key stores table routes
@@ -186,6 +186,17 @@ impl TableRouteValue {
         match self {
             TableRouteValue::Physical(x) => x,
             _ => unreachable!("Mistakenly been treated as a Physical TableRoute: {self:?}"),
+        }
+    }
+
+    /// Converts to [`LogicalTableRouteValue`].
+    ///
+    /// # Panic
+    /// If it is not the [`LogicalTableRouteValue`].
+    pub fn into_logical_table_route(self) -> LogicalTableRouteValue {
+        match self {
+            TableRouteValue::Logical(x) => x,
+            _ => unreachable!("Mistakenly been treated as a Logical TableRoute: {self:?}"),
         }
     }
 
@@ -444,6 +455,101 @@ impl TableRouteManager {
             .transpose()
     }
 
+    /// Sets the staging state for a specific region.
+    ///
+    /// Returns a [TableRouteNotFound](crate::error::Error::TableRouteNotFound) Error if:
+    /// - the table does not exist
+    /// - the region is not found in the table
+    pub async fn set_region_staging_state(
+        &self,
+        region_id: store_api::storage::RegionId,
+        staging: bool,
+    ) -> Result<()> {
+        let table_id = region_id.table_id();
+
+        // Get current table route with raw bytes for CAS operation
+        let current_table_route = self
+            .storage
+            .get_with_raw_bytes(table_id)
+            .await?
+            .context(TableRouteNotFoundSnafu { table_id })?;
+
+        // Clone the current route value and update the specific region
+        let new_table_route = current_table_route.inner.clone();
+
+        // Only physical tables have region routes
+        ensure!(
+            new_table_route.is_physical(),
+            UnexpectedLogicalRouteTableSnafu {
+                err_msg: format!("Cannot set staging state for logical table {table_id}"),
+            }
+        );
+
+        let region_routes = new_table_route.region_routes()?.clone();
+        let mut updated_routes = region_routes.clone();
+
+        // Find and update the specific region
+        // TODO(ruihang): maybe update them in one transaction
+        let mut region_found = false;
+        for route in &mut updated_routes {
+            if route.region.id == region_id {
+                if staging {
+                    route.set_leader_staging();
+                } else {
+                    route.clear_leader_staging();
+                }
+                region_found = true;
+                break;
+            }
+        }
+
+        ensure!(region_found, RegionNotFoundSnafu { region_id });
+
+        // Create new table route with updated region routes
+        let updated_table_route = new_table_route.update(updated_routes)?;
+
+        // Execute atomic update
+        let (txn, _) =
+            self.storage
+                .build_update_txn(table_id, &current_table_route, &updated_table_route)?;
+
+        let result = self.storage.kv_backend.txn(txn).await?;
+
+        ensure!(
+            result.succeeded,
+            MetadataCorruptionSnafu {
+                err_msg: format!(
+                    "Failed to update staging state for region {}: CAS operation failed",
+                    region_id
+                ),
+            }
+        );
+
+        Ok(())
+    }
+
+    /// Checks if a specific region is in staging state.
+    ///
+    /// Returns false if the table/region doesn't exist.
+    pub async fn is_region_staging(&self, region_id: store_api::storage::RegionId) -> Result<bool> {
+        let table_id = region_id.table_id();
+
+        let table_route = self.storage.get(table_id).await?;
+
+        match table_route {
+            Some(route) if route.is_physical() => {
+                let region_routes = route.region_routes()?;
+                for route in region_routes {
+                    if route.region.id == region_id {
+                        return Ok(route.is_leader_staging());
+                    }
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// Returns low-level APIs.
     pub fn table_route_storage(&self) -> &TableRouteStorage {
         &self.storage
@@ -470,7 +576,7 @@ impl TableRouteStorage {
         table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult + use<>,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.to_bytes();
@@ -494,7 +600,7 @@ impl TableRouteStorage {
         new_table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult + use<>,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.to_bytes();
@@ -649,10 +755,10 @@ fn set_addresses(
     };
 
     for region_route in &mut physical_table_route.region_routes {
-        if let Some(leader) = &mut region_route.leader_peer {
-            if let Some(node_addr) = node_addrs.get(&leader.id) {
-                leader.addr = node_addr.peer.addr.clone();
-            }
+        if let Some(leader) = &mut region_route.leader_peer
+            && let Some(node_addr) = node_addrs.get(&leader.id)
+        {
+            leader.addr = node_addr.peer.addr.clone();
         }
         for follower in &mut region_route.follower_peers {
             if let Some(node_addr) = node_addrs.get(&follower.id) {

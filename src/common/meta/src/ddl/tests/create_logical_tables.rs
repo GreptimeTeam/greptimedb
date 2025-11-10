@@ -18,7 +18,7 @@ use std::sync::Arc;
 use api::region::RegionResponse;
 use api::v1::meta::Peer;
 use api::v1::region::sync_request::ManifestInfo;
-use api::v1::region::{region_request, MetricManifestInfo, RegionRequest, SyncRequest};
+use api::v1::region::{MetricManifestInfo, RegionRequest, SyncRequest, region_request};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Status};
@@ -26,21 +26,21 @@ use common_procedure_test::MockContextProvider;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{ALTER_PHYSICAL_EXTENSION_KEY, MANIFEST_INFO_EXTENSION_KEY};
 use store_api::region_engine::RegionManifestInfo;
-use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
+use store_api::storage::consts::ReservedColumnId;
 use tokio::sync::mpsc;
 
+use crate::ddl::TableMetadata;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::test_util::datanode_handler::{DatanodeWatcher, NaiveDatanodeHandler};
 use crate::ddl::test_util::{
     assert_column_name, create_physical_table_metadata, get_raw_table_info, test_column_metadatas,
     test_create_logical_table_task, test_create_physical_table_task,
 };
-use crate::ddl::TableMetadata;
 use crate::error::{Error, Result};
 use crate::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
 use crate::rpc::router::{Region, RegionRoute};
-use crate::test_util::{new_ddl_context, MockDatanodeManager};
+use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 fn make_creates_request_handler(
     column_metadatas: Vec<ColumnMetadata>,

@@ -16,8 +16,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use api::prom_store::remote::ReadRequest;
-use api::v1::greptime_request::Request;
 use api::v1::RowInsertRequests;
+use api::v1::greptime_request::Request;
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_query::Output;
@@ -26,6 +26,7 @@ use log_query::LogQuery;
 use query::parser::PromQuery;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
+use table::TableRef;
 use vrl::value::Value;
 
 /// SqlQueryInterceptor can track life cycle of a sql query and customize or
@@ -148,6 +149,15 @@ pub trait GrpcQueryInterceptor {
         Ok(())
     }
 
+    /// Called before bulk insert is executed.
+    fn pre_bulk_insert(
+        &self,
+        _table: TableRef,
+        _query_ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Called after execution finished. The implementation can modify the
     /// output if needed.
     fn post_execute(
@@ -175,6 +185,18 @@ where
     ) -> Result<(), Self::Error> {
         if let Some(this) = self {
             this.pre_execute(_request, _query_ctx)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn pre_bulk_insert(
+        &self,
+        _table: TableRef,
+        _query_ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        if let Some(this) = self {
+            this.pre_bulk_insert(_table, _query_ctx)
         } else {
             Ok(())
         }

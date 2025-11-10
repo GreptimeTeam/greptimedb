@@ -8,7 +8,7 @@ CARGO_BUILD_OPTS := --locked
 IMAGE_REGISTRY ?= docker.io
 IMAGE_NAMESPACE ?= greptime
 IMAGE_TAG ?= latest
-DEV_BUILDER_IMAGE_TAG ?= 2025-05-19-b2377d4b-20250520045554
+DEV_BUILDER_IMAGE_TAG ?= 2025-10-01-8fe17d43-20251011080129
 BUILDX_MULTI_PLATFORM_BUILD ?= false
 BUILDX_BUILDER_NAME ?= gtbuilder
 BASE_IMAGE ?= ubuntu
@@ -22,7 +22,7 @@ SQLNESS_OPTS ?=
 ETCD_VERSION ?= v3.5.9
 ETCD_IMAGE ?= quay.io/coreos/etcd:${ETCD_VERSION}
 RETRY_COUNT ?= 3
-NEXTEST_OPTS := --retries ${RETRY_COUNT}
+NEXTEST_OPTS := --retries ${RETRY_COUNT} --features pg_kvbackend,mysql_kvbackend
 BUILD_JOBS ?= $(shell which nproc 1>/dev/null && expr $$(nproc) / 2) # If nproc is not available, we don't set the build jobs.
 ifeq ($(BUILD_JOBS), 0) # If the number of cores is less than 2, set the build jobs to 1.
   BUILD_JOBS := 1
@@ -169,7 +169,7 @@ nextest: ## Install nextest tools.
 
 .PHONY: sqlness-test
 sqlness-test: ## Run sqlness test.
-	cargo sqlness ${SQLNESS_OPTS}
+	cargo sqlness bare ${SQLNESS_OPTS}
 
 RUNS ?= 1
 FUZZ_TARGET ?= fuzz_alter_table
@@ -193,6 +193,17 @@ clippy: ## Check clippy rules.
 fix-clippy: ## Fix clippy violations.
 	cargo clippy --workspace --all-targets --all-features --fix
 
+.PHONY: check-udeps
+check-udeps: ## Check unused dependencies.
+	cargo udeps --workspace --all-targets
+
+.PHONY: fix-udeps
+fix-udeps: ## Remove unused dependencies automatically.
+	@echo "Running cargo-udeps to find unused dependencies..."
+	@cargo udeps --workspace --all-targets --output json > udeps-report.json || true
+	@echo "Removing unused dependencies..."
+	@python3 scripts/fix-udeps.py udeps-report.json
+	
 .PHONY: fmt-check
 fmt-check: ## Check code format.
 	cargo fmt --all -- --check

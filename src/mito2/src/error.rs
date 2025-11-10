@@ -20,22 +20,22 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_runtime::JoinError;
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
+use partition::error::Error as PartitionError;
 use prost::DecodeError;
 use snafu::{Location, Snafu};
-use store_api::logstore::provider::Provider;
-use store_api::storage::RegionId;
 use store_api::ManifestVersion;
+use store_api::logstore::provider::Provider;
+use store_api::storage::{FileId, RegionId};
 use tokio::time::error::Elapsed;
 
 use crate::cache::file_cache::FileType;
 use crate::region::RegionRoleState;
 use crate::schedule::remote_job_scheduler::JobId;
-use crate::sst::file::FileId;
 use crate::worker::WorkerId;
 
 #[derive(Snafu)]
@@ -214,6 +214,57 @@ pub enum Error {
     InvalidRequest {
         region_id: RegionId,
         reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Old manifest missing for region {}", region_id))]
+    MissingOldManifest {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("New manifest missing for region {}", region_id))]
+    MissingNewManifest {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("File consistency check failed for file {}: {}", file_id, reason))]
+    InconsistentFile {
+        file_id: FileId,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Files lost during remapping: old={}, new={}", old_count, new_count))]
+    FilesLost {
+        old_count: usize,
+        new_count: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("No old manifests provided (need at least one for template)"))]
+    NoOldManifests {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Partition expression missing for region {}", region_id))]
+    MissingPartitionExpr {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to serialize partition expression: {}", source))]
+    SerializePartitionExpr {
+        #[snafu(source)]
+        source: PartitionError,
         #[snafu(implicit)]
         location: Location,
     },
@@ -544,6 +595,14 @@ pub enum Error {
     #[snafu(display("Failed to build index applier"))]
     BuildIndexApplier {
         source: index::inverted_index::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build index asynchronously in region {}", region_id))]
+    BuildIndexAsync {
+        region_id: RegionId,
+        source: Arc<Error>,
         #[snafu(implicit)]
         location: Location,
     },
@@ -959,7 +1018,11 @@ pub enum Error {
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
 
-    #[snafu(display("Incompatible WAL provider change. This is typically caused by changing WAL provider in database config file without completely cleaning existing files. Global provider: {}, region provider: {}", global, region))]
+    #[snafu(display(
+        "Incompatible WAL provider change. This is typically caused by changing WAL provider in database config file without completely cleaning existing files. Global provider: {}, region provider: {}",
+        global,
+        region
+    ))]
     IncompatibleWalProviderChange { global: String, region: String },
 
     #[snafu(display("Expected mito manifest info"))]
@@ -980,6 +1043,14 @@ pub enum Error {
         partition: usize,
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Invalid partition expression: {}", expr))]
+    InvalidPartitionExpr {
+        expr: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: partition::error::Error,
     },
 
     #[snafu(display("Failed to decode bulk wal entry"))]
@@ -1029,6 +1100,33 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Too many files to read concurrently: {}, max allowed: {}",
+        actual,
+        max
+    ))]
+    TooManyFilesToRead {
+        actual: usize,
+        max: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Duration out of range: {input:?}"))]
+    DurationOutOfRange {
+        input: std::time::Duration,
+        #[snafu(source)]
+        error: chrono::OutOfRangeError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("GC job permit exhausted"))]
+    TooManyGcJobs {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1064,12 +1162,14 @@ impl ErrorExt for Error {
             | Utf8 { .. }
             | NewRecordBatch { .. }
             | RegionCorrupted { .. }
+            | InconsistentFile { .. }
             | CreateDefault { .. }
             | InvalidParquet { .. }
             | OperateAbortedIndex { .. }
             | IndexEncodeNull { .. }
             | NoCheckpoint { .. }
             | NoManifests { .. }
+            | FilesLost { .. }
             | InstallManifestTo { .. }
             | Unexpected { .. }
             | SerializeColumnMetadata { .. } => StatusCode::Unexpected,
@@ -1086,7 +1186,13 @@ impl ErrorExt for Error {
             | InvalidRegionOptions { .. }
             | InvalidWalReadRequest { .. }
             | PartitionOutOfRange { .. }
-            | ParseJobId { .. } => StatusCode::InvalidArguments,
+            | ParseJobId { .. }
+            | DurationOutOfRange { .. }
+            | MissingOldManifest { .. }
+            | MissingNewManifest { .. }
+            | NoOldManifests { .. }
+            | MissingPartitionExpr { .. }
+            | SerializePartitionExpr { .. } => StatusCode::InvalidArguments,
 
             RegionMetadataNotFound { .. }
             | Join { .. }
@@ -1118,7 +1224,7 @@ impl ErrorExt for Error {
             InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
             DeleteSst { .. } | DeleteIndex { .. } => StatusCode::StorageUnavailable,
-            FlushRegion { source, .. } => source.status_code(),
+            FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
             RegionTruncated { .. } => StatusCode::Cancelled,
@@ -1133,6 +1239,7 @@ impl ErrorExt for Error {
             ArrowReader { .. } => StatusCode::StorageUnavailable,
             ConvertValue { source, .. } => source.status_code(),
             ApplyBloomFilterIndex { source, .. } => source.status_code(),
+            InvalidPartitionExpr { source, .. } => source.status_code(),
             BuildIndexApplier { source, .. }
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }
@@ -1189,6 +1296,8 @@ impl ErrorExt for Error {
             ScanExternalRange { source, .. } => source.status_code(),
 
             InconsistentTimestampLength { .. } => StatusCode::InvalidArguments,
+
+            TooManyFilesToRead { .. } | TooManyGcJobs { .. } => StatusCode::RateLimited,
         }
     }
 

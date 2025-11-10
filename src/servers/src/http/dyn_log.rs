@@ -15,7 +15,7 @@
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use common_telemetry::tracing_subscriber::filter;
-use common_telemetry::{info, LOG_RELOAD_HANDLE};
+use common_telemetry::{LOG_RELOAD_HANDLE, info};
 use snafu::OptionExt;
 
 use crate::error::{InternalSnafu, InvalidParameterSnafu, Result};

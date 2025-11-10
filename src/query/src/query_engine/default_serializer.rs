@@ -29,9 +29,10 @@ use datafusion::logical_expr::LogicalPlan;
 use datafusion_expr::UserDefinedLogicalNode;
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
 use promql::functions::{
-    quantile_udaf, AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters,
-    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
+    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
+    Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
     QuantileOverTime, Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime,
+    quantile_udaf,
 };
 use prost::Message;
 use session::context::QueryContextRef;
@@ -174,7 +175,7 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         if optimize {
             self.session_state
                 .optimize(&logical_plan)
-                .context(common_query::error::GeneralDataFusionSnafu)
+                .map_err(Into::into)
         } else {
             Ok(logical_plan)
         }
@@ -184,15 +185,15 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
 #[cfg(test)]
 mod tests {
     use datafusion::catalog::TableProvider;
-    use datafusion_expr::{col, lit, LogicalPlanBuilder, LogicalTableSource};
+    use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource, col, lit};
     use datatypes::arrow::datatypes::SchemaRef;
     use session::context::QueryContext;
 
     use super::*;
+    use crate::QueryEngineFactory;
     use crate::dummy_catalog::DummyCatalogList;
     use crate::optimizer::test_util::mock_table_provider;
     use crate::options::QueryOptions;
-    use crate::QueryEngineFactory;
 
     fn mock_plan(schema: SchemaRef) -> LogicalPlan {
         let table_source = LogicalTableSource::new(schema);

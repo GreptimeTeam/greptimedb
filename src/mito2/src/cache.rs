@@ -23,6 +23,7 @@ pub(crate) mod test_util;
 pub(crate) mod write_cache;
 
 use std::mem;
+use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -32,10 +33,9 @@ use index::bloom_filter_index::{BloomFilterIndexCache, BloomFilterIndexCacheRef}
 use index::result_cache::IndexResultCache;
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
-use parquet::column::page::Page;
 use parquet::file::metadata::ParquetMetaData;
 use puffin::puffin_manager::cache::{PuffinMetadataCache, PuffinMetadataCacheRef};
-use store_api::storage::{ConcreteDataType, RegionId, TimeSeriesRowSelector};
+use store_api::storage::{ConcreteDataType, FileId, RegionId, TimeSeriesRowSelector};
 
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
@@ -43,7 +43,7 @@ use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCache
 use crate::cache::write_cache::WriteCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
-use crate::sst::file::{FileId, RegionFileId};
+use crate::sst::file::RegionFileId;
 
 /// Metrics type key for sst meta.
 const SST_META_TYPE: &str = "sst_meta";
@@ -170,6 +170,19 @@ impl CacheStrategy {
         }
     }
 
+    /// Calls [CacheManager::evict_puffin_cache()].
+    pub async fn evict_puffin_cache(&self, file_id: RegionFileId) {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => {
+                cache_manager.evict_puffin_cache(file_id).await
+            }
+            CacheStrategy::Compaction(cache_manager) => {
+                cache_manager.evict_puffin_cache(file_id).await
+            }
+            CacheStrategy::Disabled => {}
+        }
+    }
+
     /// Calls [CacheManager::get_selector_result()].
     /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
     pub fn get_selector_result(
@@ -290,13 +303,13 @@ impl CacheManager {
 
         // Try to get metadata from write cache
         let key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
-        if let Some(write_cache) = &self.write_cache {
-            if let Some(metadata) = write_cache.file_cache().get_parquet_meta_data(key).await {
-                let metadata = Arc::new(metadata);
-                // Put metadata into sst meta cache
-                self.put_parquet_meta_data(file_id, metadata.clone());
-                return Some(metadata);
-            }
+        if let Some(write_cache) = &self.write_cache
+            && let Some(metadata) = write_cache.file_cache().get_parquet_meta_data(key).await
+        {
+            let metadata = Arc::new(metadata);
+            // Put metadata into sst meta cache
+            self.put_parquet_meta_data(file_id, metadata.clone());
+            return Some(metadata);
         };
 
         None
@@ -371,6 +384,35 @@ impl CacheManager {
                 .with_label_values(&[PAGE_TYPE])
                 .add(page_cache_weight(&page_key, &pages).into());
             cache.insert(page_key, pages);
+        }
+    }
+
+    /// Evicts every puffin-related cache entry for the given file.
+    pub async fn evict_puffin_cache(&self, file_id: RegionFileId) {
+        if let Some(cache) = &self.bloom_filter_index_cache {
+            cache.invalidate_file(file_id.file_id());
+        }
+
+        if let Some(cache) = &self.inverted_index_cache {
+            cache.invalidate_file(file_id.file_id());
+        }
+
+        if let Some(cache) = &self.index_result_cache {
+            cache.invalidate_file(file_id.file_id());
+        }
+
+        if let Some(cache) = &self.puffin_metadata_cache {
+            cache.remove(&file_id.to_string());
+        }
+
+        if let Some(write_cache) = &self.write_cache {
+            write_cache
+                .remove(IndexKey::new(
+                    file_id.region_id(),
+                    file_id.file_id(),
+                    FileType::Puffin,
+                ))
+                .await;
         }
     }
 
@@ -656,49 +698,33 @@ pub struct ColumnPagePath {
     column_idx: usize,
 }
 
-/// Cache key for pages of a SST row group.
+/// Cache key to pages in a row group (after projection).
+///
+/// Different projections will have different cache keys.
+/// We cache all ranges together because they may refer to the same `Bytes`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum PageKey {
-    /// Cache key for a compressed page in a row group.
-    Compressed(ColumnPagePath),
-    /// Cache key for all uncompressed pages in a row group.
-    Uncompressed(ColumnPagePath),
+pub struct PageKey {
+    /// Id of the SST file to cache.
+    file_id: FileId,
+    /// Index of the row group.
+    row_group_idx: usize,
+    /// Byte ranges of the pages to cache.
+    ranges: Vec<Range<u64>>,
 }
 
 impl PageKey {
-    /// Creates a key for a compressed page.
-    pub fn new_compressed(
-        region_id: RegionId,
-        file_id: FileId,
-        row_group_idx: usize,
-        column_idx: usize,
-    ) -> PageKey {
-        PageKey::Compressed(ColumnPagePath {
-            region_id,
+    /// Creates a key for a list of pages.
+    pub fn new(file_id: FileId, row_group_idx: usize, ranges: Vec<Range<u64>>) -> PageKey {
+        PageKey {
             file_id,
             row_group_idx,
-            column_idx,
-        })
-    }
-
-    /// Creates a key for all uncompressed pages in a row group.
-    pub fn new_uncompressed(
-        region_id: RegionId,
-        file_id: FileId,
-        row_group_idx: usize,
-        column_idx: usize,
-    ) -> PageKey {
-        PageKey::Uncompressed(ColumnPagePath {
-            region_id,
-            file_id,
-            row_group_idx,
-            column_idx,
-        })
+            ranges,
+        }
     }
 
     /// Returns memory used by the key (estimated).
     fn estimated_size(&self) -> usize {
-        mem::size_of::<Self>()
+        mem::size_of::<Self>() + mem::size_of_val(self.ranges.as_slice())
     }
 }
 
@@ -706,38 +732,26 @@ impl PageKey {
 // We don't use enum here to make it easier to mock and use the struct.
 #[derive(Default)]
 pub struct PageValue {
-    /// Compressed page of the column in the row group.
-    pub compressed: Bytes,
-    /// All pages of the column in the row group.
-    pub row_group: Vec<Page>,
+    /// Compressed page in the row group.
+    pub compressed: Vec<Bytes>,
+    /// Total size of the pages (may be larger than sum of compressed bytes due to gaps).
+    pub page_size: u64,
 }
 
 impl PageValue {
-    /// Creates a new value from a compressed page.
-    pub fn new_compressed(bytes: Bytes) -> PageValue {
+    /// Creates a new value from a range of compressed pages.
+    pub fn new(bytes: Vec<Bytes>, page_size: u64) -> PageValue {
         PageValue {
             compressed: bytes,
-            row_group: vec![],
-        }
-    }
-
-    /// Creates a new value from all pages in a row group.
-    pub fn new_row_group(pages: Vec<Page>) -> PageValue {
-        PageValue {
-            compressed: Bytes::new(),
-            row_group: pages,
+            page_size,
         }
     }
 
     /// Returns memory used by the value (estimated).
     fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
-            + self.compressed.len()
-            + self
-                .row_group
-                .iter()
-                .map(|page| page.buffer().len())
-                .sum::<usize>()
+            + self.page_size as usize
+            + self.compressed.iter().map(mem::size_of_val).sum::<usize>()
     }
 }
 
@@ -788,10 +802,16 @@ type SelectorResultCache = Cache<SelectorResultKey, Arc<SelectorResultValue>>;
 mod tests {
     use std::sync::Arc;
 
+    use api::v1::index::{BloomFilterMeta, InvertedIndexMetas};
     use datatypes::vectors::Int64Vector;
+    use puffin::file_metadata::FileMetadata;
+    use store_api::storage::ColumnId;
 
     use super::*;
+    use crate::cache::index::bloom_filter_index::Tag;
+    use crate::cache::index::result_cache::PredicateKey;
     use crate::cache::test_util::parquet_meta;
+    use crate::sst::parquet::row_selection::RowGroupSelection;
 
     #[tokio::test]
     async fn test_disable_cache() {
@@ -809,11 +829,13 @@ mod tests {
         let value = Value::Int64(10);
         let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
         cache.put_repeated_vector(value.clone(), vector.clone());
-        assert!(cache
-            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
-            .is_none());
+        assert!(
+            cache
+                .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
+                .is_none()
+        );
 
-        let key = PageKey::new_uncompressed(region_id, file_id.file_id(), 0, 0);
+        let key = PageKey::new(file_id.file_id(), 1, vec![Range { start: 0, end: 5 }]);
         let pages = Arc::new(PageValue::default());
         cache.put_pages(key.clone(), pages);
         assert!(cache.get_pages(&key).is_none());
@@ -838,9 +860,11 @@ mod tests {
     fn test_repeated_vector_cache() {
         let cache = CacheManager::builder().vector_cache_size(4096).build();
         let value = Value::Int64(10);
-        assert!(cache
-            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
-            .is_none());
+        assert!(
+            cache
+                .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
+                .is_none()
+        );
         let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
         cache.put_repeated_vector(value.clone(), vector.clone());
         let cached = cache
@@ -852,9 +876,8 @@ mod tests {
     #[test]
     fn test_page_cache() {
         let cache = CacheManager::builder().page_cache_size(1000).build();
-        let region_id = RegionId::new(1, 1);
         let file_id = FileId::random();
-        let key = PageKey::new_compressed(region_id, file_id, 0, 0);
+        let key = PageKey::new(file_id, 0, vec![(0..10), (10..20)]);
         assert!(cache.get_pages(&key).is_none());
         let pages = Arc::new(PageValue::default());
         cache.put_pages(key.clone(), pages);
@@ -876,5 +899,107 @@ mod tests {
         let result = Arc::new(SelectorResultValue::new(Vec::new(), Vec::new()));
         cache.put_selector_result(key, result);
         assert!(cache.get_selector_result(&key).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_evict_puffin_cache_clears_all_entries() {
+        use std::collections::{BTreeMap, HashMap};
+
+        let cache = CacheManager::builder()
+            .index_metadata_size(128)
+            .index_content_size(128)
+            .index_content_page_size(64)
+            .index_result_cache_size(128)
+            .puffin_metadata_size(128)
+            .build();
+        let cache = Arc::new(cache);
+
+        let region_id = RegionId::new(1, 1);
+        let region_file_id = RegionFileId::new(region_id, FileId::random());
+        let column_id: ColumnId = 1;
+
+        let bloom_cache = cache.bloom_filter_index_cache().unwrap().clone();
+        let inverted_cache = cache.inverted_index_cache().unwrap().clone();
+        let result_cache = cache.index_result_cache().unwrap();
+        let puffin_metadata_cache = cache.puffin_metadata_cache().unwrap().clone();
+
+        let bloom_key = (region_file_id.file_id(), column_id, Tag::Skipping);
+        bloom_cache.put_metadata(bloom_key, Arc::new(BloomFilterMeta::default()));
+        inverted_cache.put_metadata(
+            region_file_id.file_id(),
+            Arc::new(InvertedIndexMetas::default()),
+        );
+        let predicate = PredicateKey::new_bloom(Arc::new(BTreeMap::new()));
+        let selection = Arc::new(RowGroupSelection::default());
+        result_cache.put(predicate.clone(), region_file_id.file_id(), selection);
+        let file_id_str = region_file_id.to_string();
+        let metadata = Arc::new(FileMetadata {
+            blobs: Vec::new(),
+            properties: HashMap::new(),
+        });
+        puffin_metadata_cache.put_metadata(file_id_str.clone(), metadata);
+
+        assert!(bloom_cache.get_metadata(bloom_key).is_some());
+        assert!(
+            inverted_cache
+                .get_metadata(region_file_id.file_id())
+                .is_some()
+        );
+        assert!(
+            result_cache
+                .get(&predicate, region_file_id.file_id())
+                .is_some()
+        );
+        assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_some());
+
+        cache.evict_puffin_cache(region_file_id).await;
+
+        assert!(bloom_cache.get_metadata(bloom_key).is_none());
+        assert!(
+            inverted_cache
+                .get_metadata(region_file_id.file_id())
+                .is_none()
+        );
+        assert!(
+            result_cache
+                .get(&predicate, region_file_id.file_id())
+                .is_none()
+        );
+        assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
+
+        // Refill caches and evict via CacheStrategy to ensure delegation works.
+        bloom_cache.put_metadata(bloom_key, Arc::new(BloomFilterMeta::default()));
+        inverted_cache.put_metadata(
+            region_file_id.file_id(),
+            Arc::new(InvertedIndexMetas::default()),
+        );
+        result_cache.put(
+            predicate.clone(),
+            region_file_id.file_id(),
+            Arc::new(RowGroupSelection::default()),
+        );
+        puffin_metadata_cache.put_metadata(
+            file_id_str.clone(),
+            Arc::new(FileMetadata {
+                blobs: Vec::new(),
+                properties: HashMap::new(),
+            }),
+        );
+
+        let strategy = CacheStrategy::EnableAll(cache.clone());
+        strategy.evict_puffin_cache(region_file_id).await;
+
+        assert!(bloom_cache.get_metadata(bloom_key).is_none());
+        assert!(
+            inverted_cache
+                .get_metadata(region_file_id.file_id())
+                .is_none()
+        );
+        assert!(
+            result_cache
+                .get(&predicate, region_file_id.file_id())
+                .is_none()
+        );
+        assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
     }
 }

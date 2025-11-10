@@ -24,12 +24,12 @@ use common_error::ext::BoxedError;
 use common_meta::error as meta_error;
 use common_meta::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
 use common_meta::kv_backend::{KvBackend, TxnService};
+use common_meta::rpc::KeyValue;
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse,
     RangeRequest, RangeResponse,
 };
-use common_meta::rpc::KeyValue;
 use common_meta::util::get_next_prefix_key;
 use common_runtime::RepeatedTask;
 use raft_engine::{Config, Engine, LogBatch, ReadableSize, RecoveryMode};
@@ -71,7 +71,7 @@ fn ensure_dir(dir: &str) -> error::Result<()> {
 impl RaftEngineBackend {
     pub fn try_open_with_cfg(dir: String, config: &KvBackendConfig) -> error::Result<Self> {
         let cfg = Config {
-            dir: dir.to_string(),
+            dir: dir.clone(),
             purge_threshold: ReadableSize(config.purge_threshold.0),
             recovery_mode: RecoveryMode::TolerateTailCorruption,
             batch_compression_threshold: ReadableSize::kb(8),

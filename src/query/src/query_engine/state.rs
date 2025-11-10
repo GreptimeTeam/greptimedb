@@ -19,32 +19,37 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
+use common_function::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
 use common_function::state::FunctionState;
 use common_telemetry::warn;
+use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
+use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionContext, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::execution::SessionStateBuilder;
-use datafusion::physical_optimizer::enforce_sorting::EnforceSorting;
+use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
-use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion_expr::{AggregateUDF, LogicalPlan as DfLogicalPlan};
-use datafusion_optimizer::analyzer::count_wildcard_rule::CountWildcardRule;
-use datafusion_optimizer::analyzer::{Analyzer, AnalyzerRule};
+use datafusion_optimizer::analyzer::Analyzer;
 use datafusion_optimizer::optimizer::Optimizer;
+use partition::manager::PartitionRuleManagerRef;
 use promql::extension_plan::PromExtensionPlanner;
-use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
+use table::table::adapter::DfTableProviderAdapter;
 
-use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer, MergeSortExtensionPlanner};
+use crate::QueryEngineContext;
+use crate::dist_plan::{
+    DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, MergeSortExtensionPlanner,
+};
+use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
@@ -55,13 +60,11 @@ use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
-use crate::optimizer::ExtensionAnalyzerRule;
 use crate::options::QueryOptions as QueryOptionsNew;
-use crate::query_engine::options::QueryOptions;
 use crate::query_engine::DefaultSerializer;
+use crate::query_engine::options::QueryOptions;
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
-use crate::QueryEngineContext;
 
 /// Query engine global state
 #[derive(Clone)]
@@ -71,6 +74,7 @@ pub struct QueryEngineState {
     function_state: Arc<FunctionState>,
     scalar_functions: Arc<RwLock<HashMap<String, ScalarFunctionFactory>>>,
     aggr_functions: Arc<RwLock<HashMap<String, AggregateUDF>>>,
+    table_functions: Arc<RwLock<HashMap<String, Arc<TableFunction>>>>,
     extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
     plugins: Plugins,
 }
@@ -87,6 +91,7 @@ impl QueryEngineState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         catalog_list: CatalogManagerRef,
+        partition_rule_manager: Option<PartitionRuleManagerRef>,
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
@@ -99,6 +104,14 @@ impl QueryEngineState {
         let mut session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         if options.parallelism > 0 {
             session_config = session_config.with_target_partitions(options.parallelism);
+        }
+        if options.allow_query_fallback {
+            session_config
+                .options_mut()
+                .extensions
+                .insert(DistPlannerOptions {
+                    allow_query_fallback: true,
+                });
         }
 
         // todo(hl): This serves as a workaround for https://github.com/GreptimeTeam/greptimedb/issues/5659
@@ -118,9 +131,6 @@ impl QueryEngineState {
         let mut analyzer = Analyzer::new();
         analyzer.rules.insert(0, Arc::new(TranscribeAtatRule));
         analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
-
-        // Use our custom rule instead to optimize the count(*) query
-        Self::remove_analyzer_rule(&mut analyzer.rules, CountWildcardRule {}.name());
         analyzer
             .rules
             .insert(0, Arc::new(CountWildcardToTimeIndexRule));
@@ -129,22 +139,26 @@ impl QueryEngineState {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
         }
 
+        analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));
+
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(ScanHintRule));
 
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();
-        // Change TableScan's partition at first
+        // Change TableScan's partition right before enforcing distribution
         physical_optimizer
             .rules
-            .insert(0, Arc::new(ParallelizeScan));
+            .insert(5, Arc::new(ParallelizeScan));
         // Pass distribution requirement to MergeScanExec to avoid unnecessary shuffling
         physical_optimizer
             .rules
-            .insert(1, Arc::new(PassDistribution));
-        physical_optimizer
-            .rules
-            .insert(2, Arc::new(EnforceSorting {}));
+            .insert(6, Arc::new(PassDistribution));
+        // Enforce sorting AFTER custom rules that modify the plan structure
+        physical_optimizer.rules.insert(
+            7,
+            Arc::new(datafusion::physical_optimizer::enforce_sorting::EnforceSorting {}),
+        );
         // Add rule for windowed sort
         physical_optimizer
             .rules
@@ -169,6 +183,7 @@ impl QueryEngineState {
             .with_serializer_registry(Arc::new(DefaultSerializer))
             .with_query_planner(Arc::new(DfQueryPlanner::new(
                 catalog_list.clone(),
+                partition_rule_manager,
                 region_query_handler,
             )))
             .with_optimizer_rules(optimizer.rules)
@@ -186,14 +201,11 @@ impl QueryEngineState {
                 flow_service_handler,
             }),
             aggr_functions: Arc::new(RwLock::new(HashMap::new())),
+            table_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,
             plugins,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
         }
-    }
-
-    fn remove_analyzer_rule(rules: &mut Vec<Arc<dyn AnalyzerRule + Send + Sync>>, name: &str) {
-        rules.retain(|rule| rule.name() != name);
     }
 
     fn remove_physical_optimizer_rule(
@@ -259,6 +271,25 @@ impl QueryEngineState {
             .collect()
     }
 
+    /// Retrieve table function by name
+    pub fn table_function(&self, function_name: &str) -> Option<Arc<TableFunction>> {
+        self.table_functions
+            .read()
+            .unwrap()
+            .get(function_name)
+            .cloned()
+    }
+
+    /// Retrieve table function names.
+    pub fn table_function_names(&self) -> Vec<String> {
+        self.table_functions
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     /// Register an scalar function.
     /// Will override if the function with same name is already registered.
     pub fn register_scalar_function(&self, func: ScalarFunctionFactory) {
@@ -293,6 +324,19 @@ impl QueryEngineState {
             x.is_none(),
             "Already registered aggregate function '{name}'"
         );
+    }
+
+    pub fn register_table_function(&self, func: Arc<TableFunction>) {
+        let name = func.name();
+        let x = self
+            .table_functions
+            .write()
+            .unwrap()
+            .insert(name.to_string(), func.clone());
+
+        if x.is_some() {
+            warn!("Already registered table function '{name}");
+        }
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
@@ -356,13 +400,17 @@ impl QueryPlanner for DfQueryPlanner {
 impl DfQueryPlanner {
     fn new(
         catalog_manager: CatalogManagerRef,
+        partition_rule_manager: Option<PartitionRuleManagerRef>,
         region_query_handler: Option<RegionQueryHandlerRef>,
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
             vec![Arc::new(PromExtensionPlanner), Arc::new(RangeSelectPlanner)];
-        if let Some(region_query_handler) = region_query_handler {
+        if let (Some(region_query_handler), Some(partition_rule_manager)) =
+            (region_query_handler, partition_rule_manager)
+        {
             planners.push(Arc::new(DistExtensionPlanner::new(
                 catalog_manager,
+                partition_rule_manager,
                 region_query_handler,
             )));
             planners.push(Arc::new(MergeSortExtensionPlanner {}));

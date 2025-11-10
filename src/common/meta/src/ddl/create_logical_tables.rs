@@ -34,17 +34,17 @@ use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId};
 
+use crate::ddl::DdlContext;
 use crate::ddl::utils::{
     add_peer_context_if_needed, extract_column_metadatas, map_to_procedure_error,
     sync_follower_regions,
 };
-use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
 use crate::rpc::ddl::CreateTableTask;
-use crate::rpc::router::{find_leaders, RegionRoute};
+use crate::rpc::router::{RegionRoute, find_leaders};
 
 pub struct CreateLogicalTablesProcedure {
     pub context: DdlContext,
@@ -68,6 +68,7 @@ impl CreateLogicalTablesProcedure {
                 physical_table_id,
                 physical_region_numbers: vec![],
                 physical_columns: vec![],
+                physical_partition_columns: vec![],
             },
         }
     }
@@ -91,6 +92,8 @@ impl CreateLogicalTablesProcedure {
         self.check_input_tasks()?;
         // Sets physical region numbers
         self.fill_physical_table_info().await?;
+        // Add partition columns from physical table to logical table schemas
+        self.merge_partition_columns_into_logical_tables()?;
         // Checks if the tables exist
         self.check_tables_already_exist().await?;
 
@@ -172,7 +175,9 @@ impl CreateLogicalTablesProcedure {
         {
             self.data.physical_columns = column_metadatas;
         } else {
-            warn!("creating logical table result doesn't contains extension key `{ALTER_PHYSICAL_EXTENSION_KEY}`,leaving the physical table's schema unchanged");
+            warn!(
+                "creating logical table result doesn't contains extension key `{ALTER_PHYSICAL_EXTENSION_KEY}`,leaving the physical table's schema unchanged"
+            );
         }
 
         self.submit_sync_region_requests(&results, region_routes)
@@ -257,6 +262,7 @@ pub struct CreateTablesData {
     physical_table_id: TableId,
     physical_region_numbers: Vec<RegionNumber>,
     physical_columns: Vec<ColumnMetadata>,
+    physical_partition_columns: Vec<String>,
 }
 
 impl CreateTablesData {

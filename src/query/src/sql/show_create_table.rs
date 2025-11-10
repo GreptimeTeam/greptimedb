@@ -16,13 +16,15 @@
 
 use std::collections::HashMap;
 
+use arrow_schema::extension::ExtensionType;
 use common_meta::SchemaOptions;
+use datatypes::extension::json::JsonExtensionType;
 use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextBackend, SchemaRef,
     COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
     COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
     COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
     COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY,
+    ColumnDefaultConstraint, ColumnSchema, FulltextBackend, SchemaRef,
 };
 use snafu::ResultExt;
 use sql::ast::{ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName};
@@ -62,7 +64,7 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
         .iter()
         .filter(|(k, _)| k != &FILE_TABLE_META_KEY)
     {
-        options.insert(k.to_string(), v.to_string());
+        options.insert(k.clone(), v.clone());
     }
     options
 }
@@ -87,7 +89,8 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         let expr = match c {
             ColumnDefaultConstraint::Value(v) => Expr::Value(
                 statements::value_to_sql_value(v)
-                    .with_context(|_| ConvertSqlValueSnafu { value: v.clone() })?,
+                    .with_context(|_| ConvertSqlValueSnafu { value: v.clone() })?
+                    .into(),
             ),
             ColumnDefaultConstraint::Function(expr) => {
                 ParserContext::parse_function(expr, &GreptimeDbDialect {}).context(SqlSnafu)?
@@ -98,7 +101,7 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
     }
 
     if let Some(c) = column_schema.metadata().get(COMMENT_KEY) {
-        options.push(column_option_def(ColumnOption::Comment(c.to_string())));
+        options.push(column_option_def(ColumnOption::Comment(c.clone())));
     }
 
     if let Some(opt) = column_schema
@@ -158,6 +161,15 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         extensions.inverted_index_options = Some(HashMap::new().into());
     }
 
+    if let Some(json_extension) = column_schema.extension_type::<JsonExtensionType>()? {
+        let settings = json_extension
+            .metadata()
+            .json_structure_settings
+            .clone()
+            .unwrap_or_default();
+        extensions.set_json_structure_settings(settings);
+    }
+
     Ok(Column {
         column_def: ColumnDef {
             name: Ident::with_quote(quote_style, name),
@@ -165,7 +177,6 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
                 .with_context(|_| ConvertSqlTypeSnafu {
                     datatype: column_schema.data_type.clone(),
                 })?,
-            collation: None,
             options,
         },
         extensions,
@@ -241,7 +252,7 @@ pub fn create_table_stmt(
     Ok(CreateTable {
         if_not_exists: true,
         table_id: table_info.ident.table_id,
-        name: ObjectName(vec![Ident::with_quote(quote_style, table_name)]),
+        name: ObjectName::from(vec![Ident::with_quote(quote_style, table_name)]),
         columns,
         engine: table_meta.engine.clone(),
         constraints,
@@ -260,7 +271,7 @@ mod tests {
     use datatypes::schema::{FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
     use table::metadata::*;
     use table::requests::{
-        TableOptions, FILE_TABLE_FORMAT_KEY, FILE_TABLE_LOCATION_KEY, FILE_TABLE_META_KEY,
+        FILE_TABLE_FORMAT_KEY, FILE_TABLE_LOCATION_KEY, FILE_TABLE_META_KEY, TableOptions,
     };
 
     use super::*;

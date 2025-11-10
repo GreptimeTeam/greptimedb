@@ -21,9 +21,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use api::v1::SemanticType;
 use api::v1::column_def::try_as_column_schema;
 use api::v1::region::RegionColumnDef;
-use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -31,9 +31,10 @@ use datatypes::arrow;
 use datatypes::arrow::datatypes::FieldRef;
 use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef};
 use datatypes::types::TimestampType;
+use itertools::Itertools;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
-use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
+use snafu::{Location, OptionExt, ResultExt, Snafu, ensure};
 
 use crate::codec::PrimaryKeyEncoding;
 use crate::region_request::{
@@ -153,6 +154,12 @@ pub struct RegionMetadata {
 
     /// Primary key encoding mode.
     pub primary_key_encoding: PrimaryKeyEncoding,
+
+    /// Partition expression serialized as a JSON string.
+    /// Compatibility behavior:
+    /// - None: no partition expr was ever set in the manifest (legacy regions).
+    /// - Some(""): an explicit “single-region/no-partition” designation. This is distinct from None and should be preserved as-is.
+    pub partition_expr: Option<String>,
 }
 
 impl fmt::Debug for RegionMetadata {
@@ -163,6 +170,7 @@ impl fmt::Debug for RegionMetadata {
             .field("primary_key", &self.primary_key)
             .field("region_id", &self.region_id)
             .field("schema_version", &self.schema_version)
+            .field("partition_expr", &self.partition_expr)
             .finish()
     }
 }
@@ -183,6 +191,8 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             schema_version: u64,
             #[serde(default)]
             primary_key_encoding: PrimaryKeyEncoding,
+            #[serde(default)]
+            partition_expr: Option<String>,
         }
 
         let without_schema = RegionMetadataWithoutSchema::deserialize(deserializer)?;
@@ -198,6 +208,7 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             region_id: without_schema.region_id,
             schema_version: without_schema.schema_version,
             primary_key_encoding: without_schema.primary_key_encoding,
+            partition_expr: without_schema.partition_expr,
         })
     }
 }
@@ -350,6 +361,7 @@ impl RegionMetadata {
             region_id: self.region_id,
             schema_version: self.schema_version,
             primary_key_encoding: self.primary_key_encoding,
+            partition_expr: self.partition_expr.clone(),
         })
     }
 
@@ -395,15 +407,22 @@ impl RegionMetadata {
         }
 
         // Checks there is only one time index.
-        let num_time_index = self
+        let time_indexes = self
             .column_metadatas
             .iter()
             .filter(|col| col.semantic_type == SemanticType::Timestamp)
-            .count();
+            .collect::<Vec<_>>();
         ensure!(
-            num_time_index == 1,
+            time_indexes.len() == 1,
             InvalidMetaSnafu {
-                reason: format!("expect only one time index, found {}", num_time_index),
+                reason: format!(
+                    "expect only one time index, found {}: {}",
+                    time_indexes.len(),
+                    time_indexes
+                        .iter()
+                        .map(|c| &c.column_schema.name)
+                        .join(", ")
+                ),
             }
         );
 
@@ -524,6 +543,7 @@ pub struct RegionMetadataBuilder {
     primary_key: Vec<ColumnId>,
     schema_version: u64,
     primary_key_encoding: PrimaryKeyEncoding,
+    partition_expr: Option<String>,
 }
 
 impl RegionMetadataBuilder {
@@ -535,6 +555,7 @@ impl RegionMetadataBuilder {
             primary_key: vec![],
             schema_version: 0,
             primary_key_encoding: PrimaryKeyEncoding::Dense,
+            partition_expr: None,
         }
     }
 
@@ -546,12 +567,19 @@ impl RegionMetadataBuilder {
             region_id: existing.region_id,
             schema_version: existing.schema_version,
             primary_key_encoding: existing.primary_key_encoding,
+            partition_expr: existing.partition_expr,
         }
     }
 
     /// Sets the primary key encoding mode.
     pub fn primary_key_encoding(&mut self, encoding: PrimaryKeyEncoding) -> &mut Self {
         self.primary_key_encoding = encoding;
+        self
+    }
+
+    /// Sets the partition expression in JSON string form.
+    pub fn partition_expr_json(&mut self, expr_json: Option<String>) -> &mut Self {
+        self.partition_expr = expr_json;
         self
     }
 
@@ -592,6 +620,20 @@ impl RegionMetadataBuilder {
             AlterKind::DropDefaults { names } => {
                 self.drop_defaults(names)?;
             }
+            AlterKind::SetDefaults { columns } => self.set_defaults(&columns)?,
+            AlterKind::SyncColumns { column_metadatas } => {
+                self.primary_key = column_metadatas
+                    .iter()
+                    .filter_map(|column_metadata| {
+                        if column_metadata.semantic_type == SemanticType::Tag {
+                            Some(column_metadata.column_id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                self.column_metadatas = column_metadatas;
+            }
         }
         Ok(self)
     }
@@ -609,6 +651,7 @@ impl RegionMetadataBuilder {
             region_id: self.region_id,
             schema_version: self.schema_version,
             primary_key_encoding: self.primary_key_encoding,
+            partition_expr: self.partition_expr,
         };
 
         meta.validate()?;
@@ -775,7 +818,7 @@ impl RegionMetadataBuilder {
                     .column_schema
                     .fulltext_options()
                     .with_context(|_| GetFulltextOptionsSnafu {
-                        column_name: column_name.to_string(),
+                        column_name: column_name.clone(),
                     })?;
                 set_column_fulltext_options(
                     column_metadata,
@@ -816,7 +859,7 @@ impl RegionMetadataBuilder {
                     .column_schema
                     .fulltext_options()
                     .with_context(|_| GetFulltextOptionsSnafu {
-                        column_name: column_name.to_string(),
+                        column_name: column_name.clone(),
                     })?;
 
                 unset_column_fulltext_options(
@@ -866,6 +909,38 @@ impl RegionMetadataBuilder {
                 return InvalidRegionRequestSnafu {
                     region_id: self.region_id,
                     err: format!("column {name} not found",),
+                }
+                .fail();
+            }
+        }
+        Ok(())
+    }
+
+    fn set_defaults(&mut self, set_defaults: &[crate::region_request::SetDefault]) -> Result<()> {
+        for set_default in set_defaults.iter() {
+            let meta = self
+                .column_metadatas
+                .iter_mut()
+                .find(|col| col.column_schema.name == set_default.name);
+            if let Some(meta) = meta {
+                let default_constraint = common_sql::convert::deserialize_default_constraint(
+                    set_default.default_constraint.as_slice(),
+                    &meta.column_schema.name,
+                    &meta.column_schema.data_type,
+                )
+                .context(SqlCommonSnafu)?;
+
+                meta.column_schema = meta
+                    .column_schema
+                    .clone()
+                    .with_default_constraint(default_constraint)
+                    .with_context(|_| CastDefaultValueSnafu {
+                        reason: format!("Failed to set default : {set_default:?}"),
+                    })?;
+            } else {
+                return InvalidRegionRequestSnafu {
+                    region_id: self.region_id,
+                    err: format!("column {} not found", set_default.name),
                 }
                 .fail();
             }
@@ -989,6 +1064,13 @@ pub enum MetadataError {
         location: Location,
     },
 
+    #[snafu(display("Failed to convert TimeRanges"))]
+    ConvertTimeRanges {
+        source: api::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid set region option request, key: {}, value: {}", key, value))]
     InvalidSetRegionOptionRequest {
         key: String,
@@ -1089,11 +1171,21 @@ pub enum MetadataError {
         #[snafu(source)]
         error: datatypes::error::Error,
     },
+
+    #[snafu(display("Sql common error"))]
+    SqlCommon {
+        source: common_sql::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for MetadataError {
     fn status_code(&self) -> StatusCode {
-        StatusCode::InvalidArguments
+        match self {
+            Self::SqlCommon { source, .. } => source.status_code(),
+            _ => StatusCode::InvalidArguments,
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1121,8 +1213,10 @@ fn set_column_fulltext_options(
                 && current_options.case_sensitive == options.case_sensitive,
             InvalidColumnOptionSnafu {
                 column_name,
-                msg: format!("Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: {}, previous case_sensitive: {}",
-                current_options.analyzer, current_options.case_sensitive),
+                msg: format!(
+                    "Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: {}, previous case_sensitive: {}",
+                    current_options.analyzer, current_options.case_sensitive
+                ),
             }
         );
     }
@@ -1195,7 +1289,8 @@ mod test {
                 semantic_type: SemanticType::Timestamp,
                 column_id: 3,
             })
-            .primary_key(vec![1]);
+            .primary_key(vec![1])
+            .partition_expr_json(Some("".to_string()));
         builder.build().unwrap()
     }
 
@@ -1838,7 +1933,10 @@ mod test {
     fn test_debug_for_column_metadata() {
         let region_metadata = build_test_region_metadata();
         let formatted = format!("{:?}", region_metadata);
-        assert_eq!(formatted, "RegionMetadata { column_metadatas: [[a Int64 not null Tag 1], [b Float64 not null Field 2], [c TimestampMillisecond not null Timestamp 3]], time_index: 3, primary_key: [1], region_id: 5299989648942(1234, 5678), schema_version: 0 }");
+        assert_eq!(
+            formatted,
+            "RegionMetadata { column_metadatas: [[a Int64 not null Tag 1], [b Float64 not null Field 2], [c TimestampMillisecond not null Timestamp 3]], time_index: 3, primary_key: [1], region_id: 5299989648942(1234, 5678), schema_version: 0, partition_expr: Some(\"\") }"
+        );
     }
 
     #[test]

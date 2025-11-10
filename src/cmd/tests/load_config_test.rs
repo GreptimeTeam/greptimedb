@@ -15,12 +15,11 @@
 use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
-use cmd::standalone::StandaloneOptions;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
-use common_telemetry::logging::{LoggingOptions, DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT};
-use common_wal::config::raft_engine::RaftEngineConfig;
+use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
 use common_wal::config::DatanodeWalConfig;
+use common_wal::config::raft_engine::RaftEngineConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::FlownodeOptions;
@@ -34,6 +33,8 @@ use query::options::QueryOptions;
 use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
+use servers::tls::{TlsMode, TlsOption};
+use standalone::options::StandaloneOptions;
 use store_api::path_utils::WAL_DIR;
 
 #[allow(deprecated)]
@@ -47,6 +48,7 @@ fn test_load_datanode_example_config() {
     let expected = GreptimeOptions::<DatanodeOptions> {
         component: DatanodeOptions {
             node_id: Some(42),
+            default_column_prefix: Some("greptime".to_string()),
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
@@ -112,6 +114,7 @@ fn test_load_frontend_example_config() {
     let expected = GreptimeOptions::<FrontendOptions> {
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
+            default_column_prefix: Some("greptime".to_string()),
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
@@ -142,9 +145,12 @@ fn test_load_frontend_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
-            grpc: GrpcOptions::default()
-                .with_bind_addr("127.0.0.1:4001")
-                .with_server_addr("127.0.0.1:4001"),
+            grpc: GrpcOptions {
+                bind_addr: "127.0.0.1:4001".to_string(),
+                server_addr: "127.0.0.1:4001".to_string(),
+                ..Default::default()
+            },
+            internal_grpc: Some(GrpcOptions::internal_default()),
             http: HttpOptions {
                 cors_allowed_origins: vec!["https://example.com".to_string()],
                 ..Default::default()
@@ -190,6 +196,14 @@ fn test_load_metasrv_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
+            backend_tls: Some(TlsOption {
+                mode: TlsMode::Prefer,
+                cert_path: String::new(),
+                key_path: String::new(),
+                ca_cert_path: String::new(),
+                watch: false,
+            }),
+            meta_schema_name: Some("greptime_schema".to_string()),
             ..Default::default()
         },
         ..Default::default()
@@ -225,7 +239,10 @@ fn test_load_flownode_example_config() {
             heartbeat: Default::default(),
             // flownode deliberately use a slower query parallelism
             // to avoid overwhelming the frontend with too many queries
-            query: QueryOptions { parallelism: 1 },
+            query: QueryOptions {
+                parallelism: 1,
+                allow_query_fallback: false,
+            },
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
@@ -242,6 +259,7 @@ fn test_load_flownode_example_config() {
                 ..Default::default()
             },
             user_provider: None,
+            memory: Default::default(),
         },
         ..Default::default()
     };
@@ -257,6 +275,7 @@ fn test_load_standalone_example_config() {
     let expected = GreptimeOptions::<StandaloneOptions> {
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
+            default_column_prefix: Some("greptime".to_string()),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
                 sync_period: Some(Duration::from_secs(10)),
@@ -295,6 +314,7 @@ fn test_load_standalone_example_config() {
                 cors_allowed_origins: vec!["https://example.com".to_string()],
                 ..Default::default()
             },
+
             ..Default::default()
         },
         ..Default::default()

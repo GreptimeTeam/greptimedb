@@ -15,12 +15,12 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use datatypes::arrow;
 use datatypes::arrow::array::{ArrayRef, RecordBatch, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datatypes::arrow_array::StringArray;
-use mito2::memtable::{filter_record_batch, BulkPart};
+use mito2::memtable::{BulkPart, filter_record_batch};
 
 fn random_array(num: usize) -> BulkPart {
     let mut min = i64::MAX;
@@ -53,8 +53,8 @@ fn random_array(num: usize) -> BulkPart {
     .unwrap();
     BulkPart {
         batch,
-        max_ts: max,
-        min_ts: min,
+        max_timestamp: max,
+        min_timestamp: min,
         sequence: 0,
         timestamp_index: 0,
         raw_data: None,
@@ -86,8 +86,8 @@ fn filter_arrow_impl(part: &BulkPart, min: i64, max: i64) -> Option<BulkPart> {
     let batch = arrow::compute::filter_record_batch(&part.batch, &predicate).unwrap();
     Some(BulkPart {
         batch,
-        max_ts: max,
-        min_ts: min,
+        max_timestamp: max,
+        min_timestamp: min,
         sequence: 0,
         timestamp_index: part.timestamp_index,
         raw_data: None,

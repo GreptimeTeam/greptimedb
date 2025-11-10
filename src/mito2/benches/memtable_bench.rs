@@ -16,20 +16,25 @@ use std::sync::Arc;
 
 use api::v1::value::ValueData;
 use api::v1::{Row, Rows, SemanticType};
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use datafusion_common::Column;
-use datafusion_expr::{lit, Expr};
+use datafusion_expr::{Expr, lit};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use mito_codec::row_converter::DensePrimaryKeyCodec;
+use mito2::memtable::bulk::context::BulkIterContext;
+use mito2::memtable::bulk::part::BulkPartConverter;
+use mito2::memtable::bulk::part_reader::BulkPartRecordBatchIter;
 use mito2::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable};
 use mito2::memtable::time_series::TimeSeriesMemtable;
 use mito2::memtable::{KeyValues, Memtable};
+use mito2::read::flat_merge::FlatMergeIterator;
 use mito2::region::options::MergeMode;
+use mito2::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 use mito2::test_util::memtable_util::{self, region_metadata_to_row_schema};
-use mito_codec::row_converter::DensePrimaryKeyCodec;
+use rand::Rng;
 use rand::rngs::ThreadRng;
 use rand::seq::IndexedRandom;
-use rand::Rng;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
@@ -38,7 +43,7 @@ use table::predicate::Predicate;
 
 /// Writes rows.
 fn write_rows(c: &mut Criterion) {
-    let metadata = memtable_util::metadata_with_primary_key(vec![1, 0], true);
+    let metadata = Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true));
     let timestamps = (0..100).collect::<Vec<_>>();
 
     // Note that this test only generate one time series.
@@ -359,5 +364,231 @@ fn cpu_metadata() -> RegionMetadata {
     builder.build().unwrap()
 }
 
-criterion_group!(benches, write_rows, full_scan, filter_1_host);
+fn bulk_part_converter(c: &mut Criterion) {
+    let metadata = Arc::new(cpu_metadata());
+    let start_sec = 1710043200;
+
+    let mut group = c.benchmark_group("bulk_part_converter");
+
+    for &rows in &[1024, 2048, 4096, 8192] {
+        // Benchmark without storing primary key columns (baseline)
+        group.bench_with_input(format!("{}_rows_no_pk_columns", rows), &rows, |b, &rows| {
+            b.iter(|| {
+                let generator =
+                    CpuDataGenerator::new(metadata.clone(), rows, start_sec, start_sec + 1);
+                let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+                let schema = to_flat_sst_arrow_schema(
+                    &metadata,
+                    &FlatSchemaOptions {
+                        raw_pk_columns: false,
+                        string_pk_use_dict: false,
+                    },
+                );
+                let mut converter = BulkPartConverter::new(&metadata, schema, rows, codec, false);
+
+                if let Some(kvs) = generator.iter().next() {
+                    converter.append_key_values(&kvs).unwrap();
+                }
+
+                let _bulk_part = converter.convert().unwrap();
+            });
+        });
+
+        // Benchmark with storing primary key columns
+        group.bench_with_input(
+            format!("{}_rows_with_pk_columns", rows),
+            &rows,
+            |b, &rows| {
+                b.iter(|| {
+                    let generator =
+                        CpuDataGenerator::new(metadata.clone(), rows, start_sec, start_sec + 1);
+                    let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+                    let schema = to_flat_sst_arrow_schema(
+                        &metadata,
+                        &FlatSchemaOptions {
+                            raw_pk_columns: true,
+                            string_pk_use_dict: true,
+                        },
+                    );
+                    let mut converter =
+                        BulkPartConverter::new(&metadata, schema, rows, codec, true);
+
+                    if let Some(kvs) = generator.iter().next() {
+                        converter.append_key_values(&kvs).unwrap();
+                    }
+
+                    let _bulk_part = converter.convert().unwrap();
+                });
+            },
+        );
+    }
+}
+
+fn flat_merge_iterator_bench(c: &mut Criterion) {
+    let metadata = Arc::new(cpu_metadata());
+    let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+    let start_sec = 1710043200;
+
+    let mut group = c.benchmark_group("flat_merge_iterator");
+    group.sample_size(10);
+
+    for &num_parts in &[8, 16, 32, 64, 128, 256, 512] {
+        // Pre-create BulkParts with different timestamps but same hosts (1024)
+        let mut bulk_parts = Vec::with_capacity(num_parts);
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+
+        for part_idx in 0..num_parts {
+            let generator = CpuDataGenerator::new(
+                metadata.clone(),
+                1024,                             // 1024 hosts per part
+                start_sec + part_idx as i64 * 10, // Different timestamps for each part
+                start_sec + part_idx as i64 * 10 + 1,
+            );
+
+            let mut converter =
+                BulkPartConverter::new(&metadata, schema.clone(), 1024, codec.clone(), true);
+            if let Some(kvs) = generator.iter().next() {
+                converter.append_key_values(&kvs).unwrap();
+            }
+            let bulk_part = converter.convert().unwrap();
+            bulk_parts.push(bulk_part);
+        }
+
+        // Pre-create BulkIterContext
+        let context = Arc::new(
+            BulkIterContext::new(
+                metadata.clone(),
+                None, // No projection
+                None, // No predicate
+                false,
+            )
+            .unwrap(),
+        );
+
+        group.bench_with_input(
+            format!("{}_parts_1024_hosts", num_parts),
+            &num_parts,
+            |b, _| {
+                b.iter(|| {
+                    // Create iterators from BulkParts
+                    let mut iters = Vec::with_capacity(num_parts);
+                    for bulk_part in &bulk_parts {
+                        let iter = BulkPartRecordBatchIter::new(
+                            bulk_part.batch.clone(),
+                            context.clone(),
+                            None, // No sequence filter
+                            1024, // 1024 hosts per part
+                            None, // No mem_scan_metrics
+                        );
+                        iters.push(Box::new(iter) as _);
+                    }
+
+                    // Create and consume FlatMergeIterator
+                    let merge_iter = FlatMergeIterator::new(schema.clone(), iters, 1024).unwrap();
+                    for batch_result in merge_iter {
+                        let _batch = batch_result.unwrap();
+                    }
+                });
+            },
+        );
+    }
+}
+
+fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
+    let metadata = Arc::new(cpu_metadata());
+    let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+    let start_sec = 1710043200;
+
+    let mut group = c.benchmark_group("bulk_part_record_batch_iter_filter");
+
+    // Pre-create RecordBatch and primary key arrays
+    let (record_batch_with_filter, record_batch_no_filter) = {
+        let generator = CpuDataGenerator::new(metadata.clone(), 4096, start_sec, start_sec + 1);
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+        let mut converter = BulkPartConverter::new(&metadata, schema, 4096, codec, true);
+
+        if let Some(kvs) = generator.iter().next() {
+            converter.append_key_values(&kvs).unwrap();
+        }
+
+        let bulk_part = converter.convert().unwrap();
+        let record_batch = bulk_part.batch;
+
+        (record_batch.clone(), record_batch)
+    };
+
+    // Pre-create predicate
+    let generator = CpuDataGenerator::new(metadata.clone(), 4096, start_sec, start_sec + 1);
+    let predicate = generator.random_host_filter();
+
+    // Benchmark with hostname filter using non-encoded primary keys
+    group.bench_function("4096_rows_with_hostname_filter", |b| {
+        b.iter(|| {
+            // Create context for BulkPartRecordBatchIter with predicate
+            let context = Arc::new(
+                BulkIterContext::new(
+                    metadata.clone(),
+                    None,                    // No projection
+                    Some(predicate.clone()), // With hostname filter
+                    false,
+                )
+                .unwrap(),
+            );
+
+            // Create and iterate over BulkPartRecordBatchIter with filter
+            let iter = BulkPartRecordBatchIter::new(
+                record_batch_with_filter.clone(),
+                context,
+                None, // No sequence filter
+                4096, // 4096 hosts
+                None, // No mem_scan_metrics
+            );
+
+            // Consume all batches
+            for batch_result in iter {
+                let _batch = batch_result.unwrap();
+            }
+        });
+    });
+
+    // Benchmark without filter for comparison
+    group.bench_function("4096_rows_no_filter", |b| {
+        b.iter(|| {
+            // Create context for BulkPartRecordBatchIter without predicate
+            let context = Arc::new(
+                BulkIterContext::new(
+                    metadata.clone(),
+                    None, // No projection
+                    None, // No predicate
+                    false,
+                )
+                .unwrap(),
+            );
+
+            // Create and iterate over BulkPartRecordBatchIter
+            let iter = BulkPartRecordBatchIter::new(
+                record_batch_no_filter.clone(),
+                context,
+                None, // No sequence filter
+                4096, // 4096 hosts
+                None, // No mem_scan_metrics
+            );
+
+            // Consume all batches
+            for batch_result in iter {
+                let _batch = batch_result.unwrap();
+            }
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    write_rows,
+    full_scan,
+    filter_1_host,
+    bulk_part_converter,
+    bulk_part_record_batch_iter_filter,
+    flat_merge_iterator_bench
+);
 criterion_main!(benches);

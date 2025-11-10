@@ -17,14 +17,19 @@ use std::fmt;
 use std::str::FromStr;
 
 use arrow::datatypes::Field;
+use arrow_schema::extension::{
+    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+};
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::data_type::{ConcreteDataType, DataType};
-use crate::error::{self, Error, InvalidFulltextOptionSnafu, ParseExtendedTypeSnafu, Result};
-use crate::schema::constraint::ColumnDefaultConstraint;
+use crate::error::{
+    self, ArrowMetadataSnafu, Error, InvalidFulltextOptionSnafu, ParseExtendedTypeSnafu, Result,
+};
 use crate::schema::TYPE_KEY;
+use crate::schema::constraint::ColumnDefaultConstraint;
 use crate::value::Value;
 use crate::vectors::VectorRef;
 
@@ -296,7 +301,7 @@ impl ColumnSchema {
         let value_ref = padding_value.as_value_ref();
         let mut mutable_vector = self.data_type.create_mutable_vector(num_rows);
         for _ in 0..num_rows {
-            mutable_vector.push_value_ref(value_ref);
+            mutable_vector.push_value_ref(&value_ref);
         }
         mutable_vector.to_vector()
     }
@@ -389,6 +394,41 @@ impl ColumnSchema {
 
     pub fn unset_skipping_options(&mut self) -> Result<()> {
         self.metadata.remove(SKIPPING_INDEX_KEY);
+        Ok(())
+    }
+
+    pub fn extension_type<E>(&self) -> Result<Option<E>>
+    where
+        E: ExtensionType,
+    {
+        let extension_type_name = self.metadata.get(EXTENSION_TYPE_NAME_KEY);
+
+        if extension_type_name.map(|s| s.as_str()) == Some(E::NAME) {
+            let extension_metadata = self.metadata.get(EXTENSION_TYPE_METADATA_KEY);
+            let extension_metadata =
+                E::deserialize_metadata(extension_metadata.map(|s| s.as_str()))
+                    .context(ArrowMetadataSnafu)?;
+
+            let extension = E::try_new(&self.data_type.as_arrow_type(), extension_metadata)
+                .context(ArrowMetadataSnafu)?;
+            Ok(Some(extension))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn with_extension_type<E>(&mut self, extension_type: &E) -> Result<()>
+    where
+        E: ExtensionType,
+    {
+        self.metadata
+            .insert(EXTENSION_TYPE_NAME_KEY.to_string(), E::NAME.to_string());
+
+        if let Some(extension_metadata) = extension_type.serialize_metadata() {
+            self.metadata
+                .insert(EXTENSION_TYPE_METADATA_KEY.to_string(), extension_metadata);
+        }
+
         Ok(())
     }
 }
@@ -803,7 +843,9 @@ impl SkippingIndexOptions {
         ensure!(
             0.0 < false_positive_rate && false_positive_rate <= 1.0,
             error::InvalidSkippingIndexOptionSnafu {
-                msg: format!("Invalid false positive rate: {false_positive_rate}, expected: 0.0 < rate <= 1.0"),
+                msg: format!(
+                    "Invalid false positive rate: {false_positive_rate}, expected: 0.0 < rate <= 1.0"
+                ),
             }
         );
         ensure!(
@@ -945,10 +987,12 @@ mod tests {
         let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true)
             .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(99))))
             .unwrap();
-        assert!(column_schema
-            .metadata()
-            .get(DEFAULT_CONSTRAINT_KEY)
-            .is_none());
+        assert!(
+            column_schema
+                .metadata()
+                .get(DEFAULT_CONSTRAINT_KEY)
+                .is_none()
+        );
 
         let field = Field::try_from(&column_schema).unwrap();
         assert_eq!("test", field.name());
@@ -975,10 +1019,12 @@ mod tests {
             .unwrap();
         assert_eq!("v1", column_schema.metadata().get("k1").unwrap());
         assert_eq!("test comment", column_schema.column_comment().unwrap());
-        assert!(column_schema
-            .metadata()
-            .get(DEFAULT_CONSTRAINT_KEY)
-            .is_none());
+        assert!(
+            column_schema
+                .metadata()
+                .get(DEFAULT_CONSTRAINT_KEY)
+                .is_none()
+        );
 
         let field = Field::try_from(&column_schema).unwrap();
         assert_eq!("v1", field.metadata().get("k1").unwrap());
@@ -1202,7 +1248,10 @@ mod tests {
         assert_eq!(DEFAULT_FALSE_POSITIVE_RATE, options.false_positive_rate());
 
         let options_str = serde_json::to_string(&options).unwrap();
-        assert_eq!(options_str, "{\"granularity\":10240,\"false-positive-rate-in-10000\":100,\"index-type\":\"BloomFilter\"}");
+        assert_eq!(
+            options_str,
+            "{\"granularity\":10240,\"false-positive-rate-in-10000\":100,\"index-type\":\"BloomFilter\"}"
+        );
     }
 
     #[test]
@@ -1233,6 +1282,9 @@ mod tests {
         assert_eq!(DEFAULT_FALSE_POSITIVE_RATE, options.false_positive_rate());
 
         let options_str = serde_json::to_string(&options).unwrap();
-        assert_eq!(options_str, "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false,\"backend\":\"bloom\",\"granularity\":10240,\"false-positive-rate-in-10000\":100}");
+        assert_eq!(
+            options_str,
+            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false,\"backend\":\"bloom\",\"granularity\":10240,\"false-positive-rate-in-10000\":100}"
+        );
     }
 }

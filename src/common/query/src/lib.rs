@@ -14,11 +14,9 @@
 
 pub mod columnar_value;
 pub mod error;
-pub mod function;
 pub mod logical_plan;
 pub mod prelude;
 pub mod request;
-mod signature;
 pub mod stream;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
@@ -26,8 +24,8 @@ pub mod test_util;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
-use api::greptime_proto::v1::add_column_location::LocationType;
 use api::greptime_proto::v1::AddColumnLocation as Location;
+use api::greptime_proto::v1::add_column_location::LocationType;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use datafusion::physical_plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
@@ -147,7 +145,7 @@ impl From<&AddColumnLocation> for Location {
             },
             AddColumnLocation::After { column_name } => Location {
                 location_type: LocationType::After.into(),
-                after_column_name: column_name.to_string(),
+                after_column_name: column_name.clone(),
             },
         }
     }

@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
@@ -89,8 +89,12 @@ impl FulltextIndexCreator for BloomFilterFulltextIndexCreator {
         &mut self,
         puffin_writer: &mut (impl PuffinWriter + Send),
         blob_key: &str,
-        put_options: PutOptions,
+        mut put_options: PutOptions,
     ) -> Result<u64> {
+        // Compressing the bloom filter doesn't reduce the size but hurts read performance.
+        // Always disable compression here.
+        put_options.compression = None;
+
         let creator = self.inner.as_mut().context(AbortedSnafu)?;
 
         let (tx, rx) = tokio::io::duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);

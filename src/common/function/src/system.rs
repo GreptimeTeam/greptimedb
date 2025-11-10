@@ -19,12 +19,9 @@ mod procedure_state;
 mod timezone;
 mod version;
 
-use std::sync::Arc;
-
 use build::BuildFunction;
 use database::{
-    ConnectionIdFunction, CurrentSchemaFunction, DatabaseFunction, PgBackendPidFunction,
-    ReadPreferenceFunction, SessionUserFunction,
+    ConnectionIdFunction, DatabaseFunction, PgBackendPidFunction, ReadPreferenceFunction,
 };
 use pg_catalog::PGCatalogFunction;
 use procedure_state::ProcedureStateFunction;
@@ -37,16 +34,35 @@ pub(crate) struct SystemFunction;
 
 impl SystemFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_scalar(BuildFunction);
-        registry.register_scalar(VersionFunction);
-        registry.register_scalar(CurrentSchemaFunction);
-        registry.register_scalar(DatabaseFunction);
-        registry.register_scalar(SessionUserFunction);
-        registry.register_scalar(ReadPreferenceFunction);
-        registry.register_scalar(PgBackendPidFunction);
-        registry.register_scalar(ConnectionIdFunction);
-        registry.register_scalar(TimezoneFunction);
-        registry.register_async(Arc::new(ProcedureStateFunction));
+        registry.register_scalar(BuildFunction::default());
+        registry.register_scalar(VersionFunction::default());
+        registry.register_scalar(DatabaseFunction::default());
+        registry.register_scalar(ReadPreferenceFunction::default());
+        registry.register_scalar(PgBackendPidFunction::default());
+        registry.register_scalar(ConnectionIdFunction::default());
+        registry.register_scalar(TimezoneFunction::default());
+        registry.register(ProcedureStateFunction::factory());
         PGCatalogFunction::register(registry);
     }
 }
+
+macro_rules! define_nullary_udf {
+    ($(#[$attr:meta])* $name: ident) => {
+        $(#[$attr])*
+        #[derive(Clone, Debug, derive_more::Display)]
+        #[display("{}", self.name())]
+        pub(crate) struct $name {
+            signature: datafusion_expr::Signature,
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    signature: datafusion_expr::Signature::nullary(Volatility::Immutable),
+                }
+            }
+        }
+    };
+}
+
+pub(crate) use define_nullary_udf;

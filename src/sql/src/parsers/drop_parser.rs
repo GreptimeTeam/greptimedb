@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::tokenizer::Token;
 
 use crate::error::{self, InvalidFlowNameSnafu, InvalidTableNameSnafu, Result};
-use crate::parser::{ParserContext, FLOW};
+use crate::parser::{FLOW, ParserContext};
 #[cfg(feature = "enterprise")]
 use crate::statements::drop::trigger::DropTrigger;
 use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
@@ -58,7 +58,7 @@ impl ParserContext<'_> {
                     expected: "a trigger name",
                     actual: self.peek_token_as_string(),
                 })?;
-        let trigger_ident = Self::canonicalize_object_name(raw_trigger_ident);
+        let trigger_ident = Self::canonicalize_object_name(raw_trigger_ident)?;
         ensure!(
             !trigger_ident.0.is_empty(),
             error::InvalidTriggerNameSnafu {
@@ -82,7 +82,7 @@ impl ParserContext<'_> {
                 expected: "a view name",
                 actual: self.peek_token_as_string(),
             })?;
-        let view_ident = Self::canonicalize_object_name(raw_view_ident);
+        let view_ident = Self::canonicalize_object_name(raw_view_ident)?;
         ensure!(
             !view_ident.0.is_empty(),
             InvalidTableNameSnafu {
@@ -106,7 +106,7 @@ impl ParserContext<'_> {
                 expected: "a flow name",
                 actual: self.peek_token_as_string(),
             })?;
-        let flow_ident = Self::canonicalize_object_name(raw_flow_ident);
+        let flow_ident = Self::canonicalize_object_name(raw_flow_ident)?;
         ensure!(
             !flow_ident.0.is_empty(),
             InvalidFlowNameSnafu {
@@ -129,7 +129,7 @@ impl ParserContext<'_> {
                         expected: "a table name",
                         actual: self.peek_token_as_string(),
                     })?;
-            let table_ident = Self::canonicalize_object_name(raw_table_ident);
+            let table_ident = Self::canonicalize_object_name(raw_table_ident)?;
             ensure!(
                 !table_ident.0.is_empty(),
                 InvalidTableNameSnafu {
@@ -155,7 +155,7 @@ impl ParserContext<'_> {
                 expected: "a database name",
                 actual: self.peek_token_as_string(),
             })?;
-        let database_name = Self::canonicalize_object_name(database_name);
+        let database_name = Self::canonicalize_object_name(database_name)?;
 
         Ok(Statement::DropDatabase(DropDatabase::new(
             database_name,
@@ -181,7 +181,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropTable(DropTable::new(
-                vec![ObjectName(vec![Ident::new("foo")])],
+                vec![ObjectName::from(vec![Ident::new("foo")])],
                 false
             ))
         );
@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropTable(DropTable::new(
-                vec![ObjectName(vec![Ident::new("foo")])],
+                vec![ObjectName::from(vec![Ident::new("foo")])],
                 true
             ))
         );
@@ -205,7 +205,10 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropTable(DropTable::new(
-                vec![ObjectName(vec![Ident::new("my_schema"), Ident::new("foo")])],
+                vec![ObjectName::from(vec![
+                    Ident::new("my_schema"),
+                    Ident::new("foo")
+                ])],
                 false
             ))
         );
@@ -217,7 +220,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropTable(DropTable::new(
-                vec![ObjectName(vec![
+                vec![ObjectName::from(vec![
                     Ident::new("my_catalog"),
                     Ident::new("my_schema"),
                     Ident::new("foo")
@@ -236,7 +239,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropDatabase(DropDatabase::new(
-                ObjectName(vec![Ident::new("public")]),
+                ObjectName::from(vec![Ident::new("public")]),
                 false
             ))
         );
@@ -248,7 +251,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropDatabase(DropDatabase::new(
-                ObjectName(vec![Ident::new("public")]),
+                ObjectName::from(vec![Ident::new("public")]),
                 true
             ))
         );
@@ -260,7 +263,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropDatabase(DropDatabase::new(
-                ObjectName(vec![Ident::with_quote('`', "fOo"),]),
+                ObjectName::from(vec![Ident::with_quote('`', "fOo"),]),
                 false
             ))
         );
@@ -274,7 +277,10 @@ mod tests {
         let mut stmts: Vec<Statement> = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::DropFlow(DropFlow::new(ObjectName(vec![Ident::new("foo")]), false))
+            Statement::DropFlow(DropFlow::new(
+                ObjectName::from(vec![Ident::new("foo")]),
+                false
+            ))
         );
 
         let sql = "DROP FLOW IF EXISTS foo";
@@ -283,7 +289,10 @@ mod tests {
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::DropFlow(DropFlow::new(ObjectName(vec![Ident::new("foo")]), true))
+            Statement::DropFlow(DropFlow::new(
+                ObjectName::from(vec![Ident::new("foo")]),
+                true
+            ))
         );
 
         let sql = "DROP FLOW my_schema.foo";
@@ -293,7 +302,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropFlow(DropFlow::new(
-                ObjectName(vec![Ident::new("my_schema"), Ident::new("foo")]),
+                ObjectName::from(vec![Ident::new("my_schema"), Ident::new("foo")]),
                 false
             ))
         );
@@ -305,7 +314,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropFlow(DropFlow::new(
-                ObjectName(vec![
+                ObjectName::from(vec![
                     Ident::new("my_catalog"),
                     Ident::new("my_schema"),
                     Ident::new("foo")
@@ -325,7 +334,7 @@ mod tests {
         assert_eq!(
             stmt,
             Statement::DropView(DropView {
-                view_name: ObjectName(vec![Ident::new("foo")]),
+                view_name: ObjectName::from(vec![Ident::new("foo")]),
                 drop_if_exists: false,
             })
         );
@@ -339,7 +348,7 @@ mod tests {
         assert_eq!(
             stmt,
             Statement::DropView(DropView {
-                view_name: ObjectName(vec![
+                view_name: ObjectName::from(vec![
                     Ident::new("greptime"),
                     Ident::new("public"),
                     Ident::new("foo")
@@ -357,7 +366,7 @@ mod tests {
         assert_eq!(
             stmt,
             Statement::DropView(DropView {
-                view_name: ObjectName(vec![Ident::new("foo")]),
+                view_name: ObjectName::from(vec![Ident::new("foo")]),
                 drop_if_exists: true,
             })
         );

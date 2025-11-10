@@ -16,8 +16,9 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rskafka::client::{Credentials, SaslConfig};
+use common_base::readable_size::ReadableSize;
 use rskafka::BackoffConfig;
+use rskafka::client::{Credentials, SaslConfig};
 use rustls::{ClientConfig, RootCertStore};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -36,14 +37,16 @@ pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
 };
 
 /// Default interval for auto WAL pruning.
-pub const DEFAULT_AUTO_PRUNE_INTERVAL: Duration = Duration::ZERO;
+pub const DEFAULT_AUTO_PRUNE_INTERVAL: Duration = Duration::from_mins(30);
 /// Default limit for concurrent auto pruning tasks.
 pub const DEFAULT_AUTO_PRUNE_PARALLELISM: usize = 10;
-/// Default interval for sending flush request to regions when pruning remote WAL.
-pub const DEFAULT_TRIGGER_FLUSH_THRESHOLD: u64 = 0;
+/// Default size of WAL to trigger flush.
+pub const DEFAULT_FLUSH_TRIGGER_SIZE: ReadableSize = ReadableSize::mb(512);
+/// Default checkpoint trigger size.
+pub const DEFAULT_CHECKPOINT_TRIGGER_SIZE: ReadableSize = ReadableSize::mb(128);
 
 use crate::error::{self, Result};
-use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};
+use crate::{BROKER_ENDPOINT, TOPIC_NAME_PREFIX, TopicSelectorType};
 
 /// The SASL configurations for kafka client.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

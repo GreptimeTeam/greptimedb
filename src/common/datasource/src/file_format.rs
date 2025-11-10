@@ -33,7 +33,7 @@ use bytes::{Buf, Bytes};
 use datafusion::datasource::physical_plan::FileOpenFuture;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::physical_plan::SendableRecordBatchStream;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio_util::compat::FuturesAsyncWriteCompatExt;
@@ -42,11 +42,11 @@ use self::csv::CsvFormat;
 use self::json::JsonFormat;
 use self::orc::OrcFormat;
 use self::parquet::ParquetFormat;
+use crate::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::buffered_writer::{DfRecordBatchEncoder, LazyBufferedWriter};
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::share_buffer::SharedBuffer;
-use crate::DEFAULT_WRITE_BUFFER_SIZE;
 
 pub const FORMAT_COMPRESSION_TYPE: &str = "compression_type";
 pub const FORMAT_DELIMITER: &str = "delimiter";
@@ -54,8 +54,11 @@ pub const FORMAT_SCHEMA_INFER_MAX_RECORD: &str = "schema_infer_max_record";
 pub const FORMAT_HAS_HEADER: &str = "has_header";
 pub const FORMAT_TYPE: &str = "format";
 pub const FILE_PATTERN: &str = "pattern";
+pub const TIMESTAMP_FORMAT: &str = "timestamp_format";
+pub const TIME_FORMAT: &str = "time_format";
+pub const DATE_FORMAT: &str = "date_format";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Format {
     Csv(CsvFormat),
     Json(JsonFormat),
@@ -158,10 +161,10 @@ pub fn open_with_decoder<T: ArrowDecoder, F: Fn() -> DataFusionResult<T>>(
 
         let stream = futures::stream::poll_fn(move |cx| {
             loop {
-                if buffered.is_empty() {
-                    if let Some(result) = futures::ready!(upstream.poll_next_unpin(cx)) {
-                        buffered = result?;
-                    };
+                if buffered.is_empty()
+                    && let Some(result) = futures::ready!(upstream.poll_next_unpin(cx))
+                {
+                    buffered = result?;
                 }
 
                 let decoded = decoder.decode(buffered.as_ref())?;
@@ -176,7 +179,7 @@ pub fn open_with_decoder<T: ArrowDecoder, F: Fn() -> DataFusionResult<T>>(
             Poll::Ready(decoder.flush().transpose())
         });
 
-        Ok(stream.boxed())
+        Ok(stream.map_err(Into::into).boxed())
     }))
 }
 

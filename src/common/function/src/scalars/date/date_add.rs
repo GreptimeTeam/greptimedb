@@ -14,21 +14,44 @@
 
 use std::fmt;
 
-use common_query::error::{ArrowComputeSnafu, IntoVectorSnafu, InvalidFuncArgsSnafu, Result};
-use common_query::prelude::Signature;
+use common_query::error::ArrowComputeSnafu;
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_expr::{ScalarFunctionArgs, Signature};
 use datatypes::arrow::compute::kernels::numeric;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::vectors::{Helper, VectorRef};
-use snafu::{ensure, ResultExt};
+use datatypes::arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
+use snafu::ResultExt;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
 use crate::helper;
 
 /// A function adds an interval value to Timestamp, Date, and return the result.
 /// The implementation of datetime type is based on Date64 which is incorrect so this function
 /// doesn't support the datetime type.
-#[derive(Clone, Debug, Default)]
-pub struct DateAddFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct DateAddFunction {
+    signature: Signature,
+}
+
+impl Default for DateAddFunction {
+    fn default() -> Self {
+        Self {
+            signature: helper::one_of_sigs2(
+                vec![
+                    DataType::Date32,
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                ],
+                vec![
+                    DataType::Interval(IntervalUnit::MonthDayNano),
+                    DataType::Interval(IntervalUnit::YearMonth),
+                    DataType::Interval(IntervalUnit::DayTime),
+                ],
+            ),
+        }
+    }
+}
 
 const NAME: &str = "date_add";
 
@@ -37,46 +60,22 @@ impl Function for DateAddFunction {
         NAME
     }
 
-    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+    fn return_type(&self, input_types: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(input_types[0].clone())
     }
 
-    fn signature(&self) -> Signature {
-        helper::one_of_sigs2(
-            vec![
-                ConcreteDataType::date_datatype(),
-                ConcreteDataType::timestamp_second_datatype(),
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                ConcreteDataType::timestamp_microsecond_datatype(),
-                ConcreteDataType::timestamp_nanosecond_datatype(),
-            ],
-            vec![
-                ConcreteDataType::interval_month_day_nano_datatype(),
-                ConcreteDataType::interval_year_month_datatype(),
-                ConcreteDataType::interval_day_time_datatype(),
-            ],
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 2, have: {}",
-                    columns.len()
-                ),
-            }
-        );
-
-        let left = columns[0].to_arrow_array();
-        let right = columns[1].to_arrow_array();
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [left, right] = extract_args(self.name(), &args)?;
 
         let result = numeric::add(&left, &right).context(ArrowComputeSnafu)?;
-        let arrow_type = result.data_type().clone();
-        Helper::try_into_vector(result).context(IntoVectorSnafu {
-            data_type: arrow_type,
-        })
+        Ok(ColumnarValue::Array(result))
     }
 }
 
@@ -90,33 +89,34 @@ impl fmt::Display for DateAddFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::{TypeSignature, Volatility};
-    use datatypes::arrow::datatypes::IntervalDayTime;
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::value::Value;
-    use datatypes::vectors::{
-        DateVector, IntervalDayTimeVector, IntervalYearMonthVector, TimestampSecondVector,
+    use arrow_schema::Field;
+    use datafusion::arrow::array::{
+        Array, AsArray, Date32Array, IntervalDayTimeArray, IntervalYearMonthArray,
+        TimestampSecondArray,
     };
+    use datafusion::arrow::datatypes::{Date32Type, IntervalDayTime, TimestampSecondType};
+    use datafusion_common::config::ConfigOptions;
+    use datafusion_expr::{TypeSignature, Volatility};
 
     use super::{DateAddFunction, *};
 
     #[test]
     fn test_date_add_misc() {
-        let f = DateAddFunction;
+        let f = DateAddFunction::default();
         assert_eq!("date_add", f.name());
         assert_eq!(
-            ConcreteDataType::timestamp_microsecond_datatype(),
-            f.return_type(&[ConcreteDataType::timestamp_microsecond_datatype()])
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            f.return_type(&[DataType::Timestamp(TimeUnit::Microsecond, None)])
                 .unwrap()
         );
         assert_eq!(
-            ConcreteDataType::timestamp_second_datatype(),
-            f.return_type(&[ConcreteDataType::timestamp_second_datatype()])
+            DataType::Timestamp(TimeUnit::Second, None),
+            f.return_type(&[DataType::Timestamp(TimeUnit::Second, None)])
                 .unwrap()
         );
         assert_eq!(
-            ConcreteDataType::date_datatype(),
-            f.return_type(&[ConcreteDataType::date_datatype()]).unwrap()
+            DataType::Date32,
+            f.return_type(&[DataType::Date32]).unwrap()
         );
         assert!(
             matches!(f.signature(),
@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_date_add() {
-        let f = DateAddFunction;
+        let f = DateAddFunction::default();
 
         let times = vec![Some(123), None, Some(42), None];
         // Intervals in milliseconds
@@ -143,57 +143,81 @@ mod tests {
         ];
         let results = [Some(124), None, Some(45), None];
 
-        let time_vector = TimestampSecondVector::from(times.clone());
-        let interval_vector = IntervalDayTimeVector::from_vec(intervals);
-        let args: Vec<VectorRef> = vec![Arc::new(time_vector), Arc::new(interval_vector)];
-        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
+        let args = vec![
+            ColumnarValue::Array(Arc::new(TimestampSecondArray::from(times.clone()))),
+            ColumnarValue::Array(Arc::new(IntervalDayTimeArray::from(intervals))),
+        ];
+
+        let vector = f
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields: vec![],
+                number_rows: 4,
+                return_field: Arc::new(Field::new(
+                    "x",
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    true,
+                )),
+                config_options: Arc::new(ConfigOptions::new()),
+            })
+            .and_then(|v| ColumnarValue::values_to_arrays(&[v]))
+            .map(|mut a| a.remove(0))
+            .unwrap();
+        let vector = vector.as_primitive::<TimestampSecondType>();
 
         assert_eq!(4, vector.len());
         for (i, _t) in times.iter().enumerate() {
-            let v = vector.get(i);
             let result = results.get(i).unwrap();
 
-            if result.is_none() {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::Timestamp(ts) => {
-                    assert_eq!(ts.value(), result.unwrap());
-                }
-                _ => unreachable!(),
+            if let Some(x) = result {
+                assert!(vector.is_valid(i));
+                assert_eq!(vector.value(i), *x);
+            } else {
+                assert!(vector.is_null(i));
             }
         }
     }
 
     #[test]
     fn test_date_date_add() {
-        let f = DateAddFunction;
+        let f = DateAddFunction::default();
 
         let dates = vec![Some(123), None, Some(42), None];
         // Intervals in months
         let intervals = vec![1, 2, 3, 1];
         let results = [Some(154), None, Some(131), None];
 
-        let date_vector = DateVector::from(dates.clone());
-        let interval_vector = IntervalYearMonthVector::from_vec(intervals);
-        let args: Vec<VectorRef> = vec![Arc::new(date_vector), Arc::new(interval_vector)];
-        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
+        let args = vec![
+            ColumnarValue::Array(Arc::new(Date32Array::from(dates.clone()))),
+            ColumnarValue::Array(Arc::new(IntervalYearMonthArray::from(intervals))),
+        ];
+
+        let vector = f
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields: vec![],
+                number_rows: 4,
+                return_field: Arc::new(Field::new(
+                    "x",
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    true,
+                )),
+                config_options: Arc::new(ConfigOptions::new()),
+            })
+            .and_then(|v| ColumnarValue::values_to_arrays(&[v]))
+            .map(|mut a| a.remove(0))
+            .unwrap();
+        let vector = vector.as_primitive::<Date32Type>();
 
         assert_eq!(4, vector.len());
         for (i, _t) in dates.iter().enumerate() {
-            let v = vector.get(i);
             let result = results.get(i).unwrap();
 
-            if result.is_none() {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::Date(date) => {
-                    assert_eq!(date.val(), result.unwrap());
-                }
-                _ => unreachable!(),
+            if let Some(x) = result {
+                assert!(vector.is_valid(i));
+                assert_eq!(vector.value(i), *x);
+            } else {
+                assert!(vector.is_null(i));
             }
         }
     }

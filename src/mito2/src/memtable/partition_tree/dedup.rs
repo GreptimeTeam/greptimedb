@@ -15,9 +15,9 @@
 use std::ops::Range;
 
 use crate::error::Result;
+use crate::memtable::partition_tree::PkId;
 use crate::memtable::partition_tree::data::DataBatch;
 use crate::memtable::partition_tree::shard::DataBatchSource;
-use crate::memtable::partition_tree::PkId;
 
 /// A reader that dedup sorted batches from a merger.
 pub struct DedupReader<T> {
@@ -100,7 +100,7 @@ impl<T: DataBatchSource> DataBatchSource for DedupReader<T> {
         self.inner.current_key()
     }
 
-    fn current_data_batch(&self) -> DataBatch {
+    fn current_data_batch(&self) -> DataBatch<'_> {
         let range = self.current_batch_range.as_ref().unwrap();
         let data_batch = self.inner.current_data_batch();
         data_batch.slice(range.start, range.len())
@@ -139,7 +139,7 @@ mod tests {
             None
         }
 
-        fn current_data_batch(&self) -> DataBatch {
+        fn current_data_batch(&self) -> DataBatch<'_> {
             self.0.current_data_batch()
         }
     }

@@ -23,16 +23,16 @@ mod tablesuffix;
 
 pub use etl::ctx_req::{ContextOpt, ContextReq};
 pub use etl::processor::Processor;
+pub use etl::transform::GreptimeTransformer;
 pub use etl::transform::transformer::greptime::{GreptimePipelineParams, SchemaInfo};
 pub use etl::transform::transformer::identity_pipeline;
-pub use etl::transform::GreptimeTransformer;
 pub use etl::{
-    parse, Content, DispatchedTo, Pipeline, PipelineExecOutput, TransformedOutput, TransformerMode,
+    Content, DispatchedTo, Pipeline, PipelineExecOutput, TransformedOutput, TransformerMode, parse,
 };
 pub use manager::{
-    pipeline_operator, table, util, IdentityTimeIndex, PipelineContext, PipelineDefinition,
-    PipelineInfo, PipelineRef, PipelineTableRef, PipelineVersion, PipelineWay, SelectInfo,
     GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME,
+    IdentityTimeIndex, PipelineContext, PipelineDefinition, PipelineInfo, PipelineRef,
+    PipelineTableRef, PipelineVersion, PipelineWay, SelectInfo, pipeline_operator, table, util,
 };
 
 #[macro_export]
@@ -49,4 +49,9 @@ macro_rules! unwrap_or_continue_if_err {
             }
         }
     }};
+}
+
+pub fn truthy<V: AsRef<str>>(v: V) -> bool {
+    let v = v.as_ref().to_lowercase();
+    v == "true" || v == "1" || v == "yes" || v == "on" || v == "t"
 }

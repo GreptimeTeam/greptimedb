@@ -13,98 +13,43 @@
 // limitations under the License.
 
 use std::fmt;
+use std::sync::Arc;
 
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_query::error::{self, InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, TypeSignature};
-use datafusion::logical_expr::Volatility;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::scalars::{Scalar, ScalarVectorBuilder};
-use datatypes::value::{ListValue, Value};
-use datatypes::vectors::{ListVectorBuilder, MutableVector, StringVectorBuilder, VectorRef};
+use common_query::error;
+use datafusion::arrow::array::{Array, AsArray, ListBuilder, StringViewBuilder};
+use datafusion::arrow::datatypes::{DataType, Field, Float64Type, UInt8Type};
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_common::DataFusionError;
+use datafusion_expr::type_coercion::aggregates::INTEGERS;
+use datafusion_expr::{ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use geohash::Coord;
-use snafu::{ensure, ResultExt};
+use snafu::ResultExt;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
+use crate::scalars::geo::helpers;
 
-macro_rules! ensure_resolution_usize {
-    ($v: ident) => {
-        if !($v > 0 && $v <= 12) {
-            Err(BoxedError::new(PlainError::new(
-                format!("Invalid geohash resolution {}, expect value: [1, 12]", $v),
-                StatusCode::EngineExecuteQuery,
-            )))
-            .context(error::ExecuteSnafu)
-        } else {
-            Ok($v as usize)
-        }
-    };
-}
-
-fn try_into_resolution(v: Value) -> Result<usize> {
-    match v {
-        Value::Int8(v) => {
-            ensure_resolution_usize!(v)
-        }
-        Value::Int16(v) => {
-            ensure_resolution_usize!(v)
-        }
-        Value::Int32(v) => {
-            ensure_resolution_usize!(v)
-        }
-        Value::Int64(v) => {
-            ensure_resolution_usize!(v)
-        }
-        Value::UInt8(v) => {
-            ensure_resolution_usize!(v)
-        }
-        Value::UInt16(v) => {
-            ensure_resolution_usize!(v)
-        }
-        Value::UInt32(v) => {
-            ensure_resolution_usize!(v)
-        }
-        Value::UInt64(v) => {
-            ensure_resolution_usize!(v)
-        }
-        _ => unreachable!(),
+fn ensure_resolution_usize(v: u8) -> datafusion_common::Result<usize> {
+    if v == 0 || v > 12 {
+        return Err(DataFusionError::Execution(format!(
+            "Invalid geohash resolution {v}, valid value range: [1, 12]"
+        )));
     }
+    Ok(v as usize)
 }
 
 /// Function that return geohash string for a given geospatial coordinate.
-#[derive(Clone, Debug, Default)]
-pub struct GeohashFunction;
-
-impl GeohashFunction {
-    const NAME: &'static str = "geohash";
+#[derive(Clone, Debug)]
+pub(crate) struct GeohashFunction {
+    signature: Signature,
 }
 
-impl Function for GeohashFunction {
-    fn name(&self) -> &str {
-        Self::NAME
-    }
-
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
-    }
-
-    fn signature(&self) -> Signature {
+impl Default for GeohashFunction {
+    fn default() -> Self {
         let mut signatures = Vec::new();
-        for coord_type in &[
-            ConcreteDataType::float32_datatype(),
-            ConcreteDataType::float64_datatype(),
-        ] {
-            for resolution_type in &[
-                ConcreteDataType::int8_datatype(),
-                ConcreteDataType::int16_datatype(),
-                ConcreteDataType::int32_datatype(),
-                ConcreteDataType::int64_datatype(),
-                ConcreteDataType::uint8_datatype(),
-                ConcreteDataType::uint16_datatype(),
-                ConcreteDataType::uint32_datatype(),
-                ConcreteDataType::uint64_datatype(),
-            ] {
+        for coord_type in &[DataType::Float32, DataType::Float64] {
+            for resolution_type in INTEGERS {
                 signatures.push(TypeSignature::Exact(vec![
                     // latitude
                     coord_type.clone(),
@@ -115,34 +60,55 @@ impl Function for GeohashFunction {
                 ]));
             }
         }
-        Signature::one_of(signatures, Volatility::Stable)
+        Self {
+            signature: Signature::one_of(signatures, Volatility::Stable),
+        }
+    }
+}
+
+impl GeohashFunction {
+    const NAME: &'static str = "geohash";
+}
+
+impl Function for GeohashFunction {
+    fn name(&self) -> &str {
+        Self::NAME
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 3,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 3, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Utf8View)
+    }
 
-        let lat_vec = &columns[0];
-        let lon_vec = &columns[1];
-        let resolution_vec = &columns[2];
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [lat_vec, lon_vec, resolutions] = extract_args(self.name(), &args)?;
+
+        let lat_vec = helpers::cast::<Float64Type>(&lat_vec)?;
+        let lat_vec = lat_vec.as_primitive::<Float64Type>();
+        let lon_vec = helpers::cast::<Float64Type>(&lon_vec)?;
+        let lon_vec = lon_vec.as_primitive::<Float64Type>();
+        let resolutions = helpers::cast::<UInt8Type>(&resolutions)?;
+        let resolutions = resolutions.as_primitive::<UInt8Type>();
 
         let size = lat_vec.len();
-        let mut results = StringVectorBuilder::with_capacity(size);
+        let mut builder = StringViewBuilder::with_capacity(size);
 
         for i in 0..size {
-            let lat = lat_vec.get(i).as_f64_lossy();
-            let lon = lon_vec.get(i).as_f64_lossy();
-            let r = try_into_resolution(resolution_vec.get(i))?;
+            let lat = lat_vec.is_valid(i).then(|| lat_vec.value(i));
+            let lon = lon_vec.is_valid(i).then(|| lon_vec.value(i));
+            let r = resolutions
+                .is_valid(i)
+                .then(|| ensure_resolution_usize(resolutions.value(i)))
+                .transpose()?;
 
-            let result = match (lat, lon) {
-                (Some(lat), Some(lon)) => {
+            let result = match (lat, lon, r) {
+                (Some(lat), Some(lon), Some(r)) => {
                     let coord = Coord { x: lon, y: lat };
                     let encoded = geohash::encode(coord, r)
                         .map_err(|e| {
@@ -157,10 +123,10 @@ impl Function for GeohashFunction {
                 _ => None,
             };
 
-            results.push(result.as_deref());
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -171,40 +137,16 @@ impl fmt::Display for GeohashFunction {
 }
 
 /// Function that return geohash string for a given geospatial coordinate.
-#[derive(Clone, Debug, Default)]
-pub struct GeohashNeighboursFunction;
-
-impl GeohashNeighboursFunction {
-    const NAME: &'static str = "geohash_neighbours";
+#[derive(Clone, Debug)]
+pub(crate) struct GeohashNeighboursFunction {
+    signature: Signature,
 }
 
-impl Function for GeohashNeighboursFunction {
-    fn name(&self) -> &str {
-        GeohashNeighboursFunction::NAME
-    }
-
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::list_datatype(
-            ConcreteDataType::string_datatype(),
-        ))
-    }
-
-    fn signature(&self) -> Signature {
+impl Default for GeohashNeighboursFunction {
+    fn default() -> Self {
         let mut signatures = Vec::new();
-        for coord_type in &[
-            ConcreteDataType::float32_datatype(),
-            ConcreteDataType::float64_datatype(),
-        ] {
-            for resolution_type in &[
-                ConcreteDataType::int8_datatype(),
-                ConcreteDataType::int16_datatype(),
-                ConcreteDataType::int32_datatype(),
-                ConcreteDataType::int64_datatype(),
-                ConcreteDataType::uint8_datatype(),
-                ConcreteDataType::uint16_datatype(),
-                ConcreteDataType::uint32_datatype(),
-                ConcreteDataType::uint64_datatype(),
-            ] {
+        for coord_type in &[DataType::Float32, DataType::Float64] {
+            for resolution_type in INTEGERS {
                 signatures.push(TypeSignature::Exact(vec![
                     // latitude
                     coord_type.clone(),
@@ -215,35 +157,59 @@ impl Function for GeohashNeighboursFunction {
                 ]));
             }
         }
-        Signature::one_of(signatures, Volatility::Stable)
+        Self {
+            signature: Signature::one_of(signatures, Volatility::Stable),
+        }
+    }
+}
+
+impl GeohashNeighboursFunction {
+    const NAME: &'static str = "geohash_neighbours";
+}
+
+impl Function for GeohashNeighboursFunction {
+    fn name(&self) -> &str {
+        GeohashNeighboursFunction::NAME
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 3,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 3, provided : {}",
-                    columns.len()
-                ),
-            }
-        );
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::Utf8View,
+            true,
+        ))))
+    }
 
-        let lat_vec = &columns[0];
-        let lon_vec = &columns[1];
-        let resolution_vec = &columns[2];
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [lat_vec, lon_vec, resolutions] = extract_args(self.name(), &args)?;
+
+        let lat_vec = helpers::cast::<Float64Type>(&lat_vec)?;
+        let lat_vec = lat_vec.as_primitive::<Float64Type>();
+        let lon_vec = helpers::cast::<Float64Type>(&lon_vec)?;
+        let lon_vec = lon_vec.as_primitive::<Float64Type>();
+        let resolutions = helpers::cast::<UInt8Type>(&resolutions)?;
+        let resolutions = resolutions.as_primitive::<UInt8Type>();
 
         let size = lat_vec.len();
-        let mut results =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::string_datatype(), size);
+        let mut builder = ListBuilder::new(StringViewBuilder::new());
 
         for i in 0..size {
-            let lat = lat_vec.get(i).as_f64_lossy();
-            let lon = lon_vec.get(i).as_f64_lossy();
-            let r = try_into_resolution(resolution_vec.get(i))?;
+            let lat = lat_vec.is_valid(i).then(|| lat_vec.value(i));
+            let lon = lon_vec.is_valid(i).then(|| lon_vec.value(i));
+            let r = resolutions
+                .is_valid(i)
+                .then(|| ensure_resolution_usize(resolutions.value(i)))
+                .transpose()?;
 
-            let result = match (lat, lon) {
-                (Some(lat), Some(lon)) => {
+            match (lat, lon, r) {
+                (Some(lat), Some(lon), Some(r)) => {
                     let coord = Coord { x: lon, y: lat };
                     let encoded = geohash::encode(coord, r)
                         .map_err(|e| {
@@ -261,8 +227,8 @@ impl Function for GeohashNeighboursFunction {
                             ))
                         })
                         .context(error::ExecuteSnafu)?;
-                    Some(ListValue::new(
-                        vec![
+                    builder.append_value(
+                        [
                             neighbours.n,
                             neighbours.nw,
                             neighbours.w,
@@ -273,22 +239,14 @@ impl Function for GeohashNeighboursFunction {
                             neighbours.ne,
                         ]
                         .into_iter()
-                        .map(Value::from)
-                        .collect(),
-                        ConcreteDataType::string_datatype(),
-                    ))
+                        .map(Some),
+                    );
                 }
-                _ => None,
+                _ => builder.append_null(),
             };
-
-            if let Some(list_value) = result {
-                results.push(Some(list_value.as_scalar_ref()));
-            } else {
-                results.push(None);
-            }
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 

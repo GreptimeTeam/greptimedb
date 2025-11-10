@@ -16,60 +16,64 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef};
-use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
+use common_meta::datanode::TopicStatsReporter;
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::wal_options_allocator::prepare_wal_options;
 pub use common_procedure::options::ProcedureConfig;
+use common_query::prelude::set_default_prefix;
+use common_stat::ResourceStatImpl;
 use common_telemetry::{error, info, warn};
+use common_wal::config::DatanodeWalConfig;
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
-use common_wal::config::DatanodeWalConfig;
 use file_engine::engine::FileRegionEngine;
-use futures_util::TryStreamExt;
 use log_store::kafka::log_store::KafkaLogStore;
-use log_store::kafka::{default_index_file, GlobalIndexCollector};
+use log_store::kafka::{GlobalIndexCollector, default_index_file};
+use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::MetaClientRef;
 use metric_engine::engine::MetricEngine;
 use mito2::config::MitoConfig;
 use mito2::engine::{MitoEngine, MitoEngineBuilder};
+use mito2::region::opener::PartitionExprFetcherRef;
+use mito2::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
-use query::dummy_catalog::TableProviderFactoryRef;
 use query::QueryEngineFactory;
+use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
 use servers::export_metrics::ExportMetricsTask;
 use servers::server::ServerHandlers;
-use snafu::{ensure, OptionExt, ResultExt};
-use store_api::path_utils::{table_dir, WAL_DIR};
-use store_api::region_engine::{RegionEngineRef, RegionRole};
-use store_api::region_request::{PathType, RegionOpenRequest};
-use store_api::storage::RegionId;
+use snafu::{OptionExt, ResultExt, ensure};
+use store_api::path_utils::WAL_DIR;
+use store_api::region_engine::{
+    RegionEngineRef, RegionRole, SetRegionRoleStateResponse, SettableRegionRoleState,
+};
 use tokio::fs;
 use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
-    self, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu,
-    MissingCacheSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
-    ShutdownServerSnafu, StartServerSnafu,
+    self, BuildDatanodeSnafu, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu,
+    GetMetadataSnafu, MissingCacheSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result,
+    ShutdownInstanceSnafu, ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
-    new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
-    RegionServerEventReceiver,
+    NoopRegionServerEventListener, RegionServerEventListenerRef, RegionServerEventReceiver,
+    new_region_server_event_channel,
 };
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::HeartbeatTask;
+use crate::partition_expr_fetcher::MetaPartitionExprFetcher;
 use crate::region_server::{DummyTableProviderFactory, RegionServer};
 use crate::store::{self, new_object_store_without_cache};
+use crate::utils::{RegionOpenRequests, build_region_open_requests};
 
 /// Datanode service.
 pub struct Datanode {
@@ -163,6 +167,7 @@ pub struct DatanodeBuilder {
     meta_client: Option<MetaClientRef>,
     kv_backend: KvBackendRef,
     cache_registry: Option<Arc<LayeredCacheRegistry>>,
+    topic_stats_reporter: Option<Box<dyn TopicStatsReporter>>,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<mito2::extension::BoxedExtensionRangeProviderFactory>,
 }
@@ -178,6 +183,7 @@ impl DatanodeBuilder {
             cache_registry: None,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
+            topic_stats_reporter: None,
         }
     }
 
@@ -215,6 +221,9 @@ impl DatanodeBuilder {
 
     pub async fn build(mut self) -> Result<Datanode> {
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
+        set_default_prefix(self.opts.default_column_prefix.as_deref())
+            .map_err(BoxedError::new)
+            .context(BuildDatanodeSnafu)?;
 
         let meta_client = self.meta_client.take();
 
@@ -240,8 +249,13 @@ impl DatanodeBuilder {
             table_id_schema_cache,
             schema_cache,
         ));
+        let file_ref_manager = Arc::new(FileReferenceManager::new(Some(node_id)));
         let region_server = self
-            .new_region_server(schema_metadata_manager, region_event_listener)
+            .new_region_server(
+                schema_metadata_manager,
+                region_event_listener,
+                file_ref_manager,
+            )
             .await?;
 
         // TODO(weny): Considering introducing a readonly kv_backend trait.
@@ -250,16 +264,12 @@ impl DatanodeBuilder {
             .recovery_mode()
             .await
             .context(GetMetadataSnafu)?;
-        let datanode_table_manager = DatanodeTableManager::new(self.kv_backend.clone());
-        let table_values = datanode_table_manager
-            .tables(node_id)
-            .try_collect::<Vec<_>>()
-            .await
-            .context(GetMetadataSnafu)?;
 
+        let region_open_requests =
+            build_region_open_requests(node_id, self.kv_backend.clone()).await?;
         let open_all_regions = open_all_regions(
             region_server.clone(),
-            table_values,
+            region_open_requests,
             !controlled_by_metasrv,
             self.opts.init_regions_parallelism,
             // Ignore nonexistent regions in recovery mode.
@@ -277,6 +287,9 @@ impl DatanodeBuilder {
             open_all_regions.await?;
         }
 
+        let mut resource_stat = ResourceStatImpl::default();
+        resource_stat.start_collect_cpu_usage();
+
         let heartbeat_task = if let Some(meta_client) = meta_client {
             Some(
                 HeartbeatTask::try_new(
@@ -285,6 +298,7 @@ impl DatanodeBuilder {
                     meta_client,
                     cache_registry,
                     self.plugins.clone(),
+                    Arc::new(resource_stat),
                 )
                 .await?,
             )
@@ -340,27 +354,22 @@ impl DatanodeBuilder {
     async fn initialize_region_server(
         &self,
         region_server: &RegionServer,
-        kv_backend: KvBackendRef,
         open_with_writable: bool,
     ) -> Result<()> {
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
 
-        let runtime_switch_manager = RuntimeSwitchManager::new(kv_backend.clone());
+        // TODO(weny): Considering introducing a readonly kv_backend trait.
+        let runtime_switch_manager = RuntimeSwitchManager::new(self.kv_backend.clone());
         let is_recovery_mode = runtime_switch_manager
             .recovery_mode()
             .await
             .context(GetMetadataSnafu)?;
-
-        let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
-        let table_values = datanode_table_manager
-            .tables(node_id)
-            .try_collect::<Vec<_>>()
-            .await
-            .context(GetMetadataSnafu)?;
+        let region_open_requests =
+            build_region_open_requests(node_id, self.kv_backend.clone()).await?;
 
         open_all_regions(
             region_server.clone(),
-            table_values,
+            region_open_requests,
             open_with_writable,
             self.opts.init_regions_parallelism,
             is_recovery_mode,
@@ -372,12 +381,14 @@ impl DatanodeBuilder {
         &mut self,
         schema_metadata_manager: SchemaMetadataManagerRef,
         event_listener: RegionServerEventListenerRef,
+        file_ref_manager: FileReferenceManagerRef,
     ) -> Result<RegionServer> {
         let opts: &DatanodeOptions = &self.opts;
 
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
-            MemoryCatalogManager::with_default_setup(),
+            DummyCatalogManager::arc(),
+            None,
             None,
             None,
             None,
@@ -409,11 +420,15 @@ impl DatanodeBuilder {
             .build_store_engines(
                 object_store_manager,
                 schema_metadata_manager,
+                file_ref_manager,
                 self.plugins.clone(),
             )
             .await?;
         for engine in engines {
             region_server.register_engine(engine);
+        }
+        if let Some(topic_stats_reporter) = self.topic_stats_reporter.take() {
+            region_server.set_topic_stats_reporter(topic_stats_reporter);
         }
 
         Ok(region_server)
@@ -426,6 +441,7 @@ impl DatanodeBuilder {
         &mut self,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
         plugins: Plugins,
     ) -> Result<Vec<RegionEngineRef>> {
         let mut metric_engine_config = metric_engine::config::EngineConfig::default();
@@ -446,11 +462,15 @@ impl DatanodeBuilder {
             }
         }
 
+        // Build a fetcher to backfill partition_expr on open.
+        let fetcher = Arc::new(MetaPartitionExprFetcher::new(self.kv_backend.clone()));
         let mito_engine = self
             .build_mito_engine(
                 object_store_manager.clone(),
                 mito_engine_config,
                 schema_metadata_manager.clone(),
+                file_ref_manager.clone(),
+                fetcher.clone(),
                 plugins.clone(),
             )
             .await?;
@@ -476,6 +496,8 @@ impl DatanodeBuilder {
         object_store_manager: ObjectStoreManagerRef,
         mut config: MitoConfig,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
     ) -> Result<MitoEngine> {
         let opts = &self.opts;
@@ -497,6 +519,8 @@ impl DatanodeBuilder {
                     log_store,
                     object_store_manager,
                     schema_metadata_manager,
+                    file_ref_manager,
+                    partition_expr_fetcher.clone(),
                     plugins,
                 );
 
@@ -528,12 +552,38 @@ impl DatanodeBuilder {
                     None
                 };
 
+                let log_store =
+                    Self::build_kafka_log_store(kafka_config, global_index_collector).await?;
+                self.topic_stats_reporter = Some(log_store.topic_stats_reporter());
                 let builder = MitoEngineBuilder::new(
                     &opts.storage.data_home,
                     config,
-                    Self::build_kafka_log_store(kafka_config, global_index_collector).await?,
+                    log_store,
                     object_store_manager,
                     schema_metadata_manager,
+                    file_ref_manager,
+                    partition_expr_fetcher,
+                    plugins,
+                );
+
+                #[cfg(feature = "enterprise")]
+                let builder = builder.with_extension_range_provider_factory(
+                    self.extension_range_provider_factory.take(),
+                );
+
+                builder.try_build().await.context(BuildMitoEngineSnafu)?
+            }
+            DatanodeWalConfig::Noop => {
+                let log_store = Arc::new(NoopLogStore);
+
+                let builder = MitoEngineBuilder::new(
+                    &opts.storage.data_home,
+                    config,
+                    log_store,
+                    object_store_manager,
+                    schema_metadata_manager,
+                    file_ref_manager,
+                    partition_expr_fetcher.clone(),
                     plugins,
                 );
 
@@ -600,135 +650,113 @@ impl DatanodeBuilder {
 /// Open all regions belong to this datanode.
 async fn open_all_regions(
     region_server: RegionServer,
-    table_values: Vec<DatanodeTableValue>,
+    region_open_requests: RegionOpenRequests,
     open_with_writable: bool,
     init_regions_parallelism: usize,
     ignore_nonexistent_region: bool,
 ) -> Result<()> {
-    let mut regions = vec![];
-    #[cfg(feature = "enterprise")]
-    let mut follower_regions = vec![];
-    for table_value in table_values {
-        for region_number in table_value.regions {
-            // Augments region options with wal options if a wal options is provided.
-            let mut region_options = table_value.region_info.region_options.clone();
-            prepare_wal_options(
-                &mut region_options,
-                RegionId::new(table_value.table_id, region_number),
-                &table_value.region_info.region_wal_options,
-            );
-
-            regions.push((
-                RegionId::new(table_value.table_id, region_number),
-                table_value.region_info.engine.clone(),
-                table_value.region_info.region_storage_path.clone(),
-                region_options,
-            ));
-        }
-
+    let RegionOpenRequests {
+        leader_regions,
         #[cfg(feature = "enterprise")]
-        for region_number in table_value.follower_regions {
-            // Augments region options with wal options if a wal options is provided.
-            let mut region_options = table_value.region_info.region_options.clone();
-            prepare_wal_options(
-                &mut region_options,
-                RegionId::new(table_value.table_id, region_number),
-                &table_value.region_info.region_wal_options,
-            );
+        follower_regions,
+    } = region_open_requests;
 
-            follower_regions.push((
-                RegionId::new(table_value.table_id, region_number),
-                table_value.region_info.engine.clone(),
-                table_value.region_info.region_storage_path.clone(),
-                region_options,
-            ));
-        }
-    }
-    let num_regions = regions.len();
-    info!("going to open {} region(s)", num_regions);
-
-    let mut region_requests = Vec::with_capacity(regions.len());
-    for (region_id, engine, store_path, options) in regions {
-        let table_dir = table_dir(&store_path, region_id.table_id());
-        region_requests.push((
-            region_id,
-            RegionOpenRequest {
-                engine,
-                table_dir,
-                path_type: PathType::Bare,
-                options,
-                skip_wal_replay: false,
-            },
-        ));
-    }
-
+    let leader_region_num = leader_regions.len();
+    info!("going to open {} region(s)", leader_region_num);
+    let now = Instant::now();
     let open_regions = region_server
         .handle_batch_open_requests(
             init_regions_parallelism,
-            region_requests,
+            leader_regions,
             ignore_nonexistent_region,
         )
         .await?;
-    ensure!(
-        open_regions.len() == num_regions,
-        error::UnexpectedSnafu {
-            violated: format!(
-                "Expected to open {} of regions, only {} of regions has opened",
-                num_regions,
-                open_regions.len()
-            )
-        }
+    info!(
+        "Opened {} regions in {:?}",
+        open_regions.len(),
+        now.elapsed()
     );
+    if !ignore_nonexistent_region {
+        ensure!(
+            open_regions.len() == leader_region_num,
+            error::UnexpectedSnafu {
+                violated: format!(
+                    "Expected to open {} of regions, only {} of regions has opened",
+                    leader_region_num,
+                    open_regions.len()
+                )
+            }
+        );
+    } else if open_regions.len() != leader_region_num {
+        warn!(
+            "ignore nonexistent region, expected to open {} of regions, only {} of regions has opened",
+            leader_region_num,
+            open_regions.len()
+        );
+    }
 
     for region_id in open_regions {
         if open_with_writable {
-            if let Err(e) = region_server.set_region_role(region_id, RegionRole::Leader) {
-                error!(
-                    e; "failed to convert region {region_id} to leader"
-                );
+            let res = region_server.set_region_role(region_id, RegionRole::Leader);
+            match res {
+                Ok(_) => {
+                    // Finalize leadership: persist backfilled metadata.
+                    if let SetRegionRoleStateResponse::InvalidTransition(err) = region_server
+                        .set_region_role_state_gracefully(
+                            region_id,
+                            SettableRegionRoleState::Leader,
+                        )
+                        .await?
+                    {
+                        error!(err; "failed to convert region {region_id} to leader");
+                    }
+                }
+                Err(e) => {
+                    error!(e; "failed to convert region {region_id} to leader");
+                }
             }
         }
     }
 
     #[cfg(feature = "enterprise")]
     if !follower_regions.is_empty() {
-        info!(
-            "going to open {} follower region(s)",
-            follower_regions.len()
-        );
-        let mut region_requests = Vec::with_capacity(follower_regions.len());
-        for (region_id, engine, store_path, options) in follower_regions {
-            let table_dir = table_dir(&store_path, region_id.table_id());
-            region_requests.push((
-                region_id,
-                RegionOpenRequest {
-                    engine,
-                    table_dir,
-                    path_type: PathType::Bare,
-                    options,
-                    skip_wal_replay: true,
-                },
-            ));
-        }
+        use tokio::time::Instant;
 
+        let follower_region_num = follower_regions.len();
+        info!("going to open {} follower region(s)", follower_region_num);
+
+        let now = Instant::now();
         let open_regions = region_server
             .handle_batch_open_requests(
                 init_regions_parallelism,
-                region_requests,
+                follower_regions,
                 ignore_nonexistent_region,
             )
             .await?;
-
-        ensure!(
-            open_regions.len() == num_regions,
-            error::UnexpectedSnafu {
-                violated: format!(
-                    "Expected to open {} of follower regions, only {} of regions has opened",
-                    num_regions,
-                    open_regions.len()
-                )
-            }
+        info!(
+            "Opened {} follower regions in {:?}",
+            open_regions.len(),
+            now.elapsed()
         );
+
+        if !ignore_nonexistent_region {
+            ensure!(
+                open_regions.len() == follower_region_num,
+                error::UnexpectedSnafu {
+                    violated: format!(
+                        "Expected to open {} of follower regions, only {} of regions has opened",
+                        follower_region_num,
+                        open_regions.len()
+                    )
+                }
+            );
+        } else if open_regions.len() != follower_region_num {
+            warn!(
+                "ignore nonexistent region, expected to open {} of follower regions, only {} of regions has opened",
+                follower_region_num,
+                open_regions.len()
+            );
+        }
     }
 
     info!("all regions are opened");
@@ -745,17 +773,17 @@ mod tests {
     use cache::build_datanode_cache_registry;
     use common_base::Plugins;
     use common_meta::cache::LayeredCacheRegistryBuilder;
-    use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::key::RegionRoleSet;
-    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::KvBackendRef;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::engine::MITO_ENGINE_NAME;
     use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
 
     use crate::config::DatanodeOptions;
     use crate::datanode::DatanodeBuilder;
-    use crate::tests::{mock_region_server, MockRegionEngine};
+    use crate::tests::{MockRegionEngine, mock_region_server};
 
     async fn setup_table_datanode(kv: &KvBackendRef) {
         let mgr = DatanodeTableManager::new(kv.clone());
@@ -795,15 +823,13 @@ mod tests {
                 ..Default::default()
             },
             Plugins::default(),
-            kv_backend,
+            kv_backend.clone(),
         );
         builder.with_cache_registry(layered_cache_registry);
-
-        let kv = Arc::new(MemoryKvBackend::default()) as _;
-        setup_table_datanode(&kv).await;
+        setup_table_datanode(&(kv_backend as _)).await;
 
         builder
-            .initialize_region_server(&mock_region_server, kv.clone(), false)
+            .initialize_region_server(&mock_region_server, false)
             .await
             .unwrap();
 

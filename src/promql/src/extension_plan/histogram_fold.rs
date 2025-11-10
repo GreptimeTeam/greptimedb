@@ -21,7 +21,7 @@ use std::time::Instant;
 use common_recordbatch::RecordBatch as GtRecordBatch;
 use common_telemetry::warn;
 use datafusion::arrow::array::AsArray;
-use datafusion::arrow::compute::{self, concat_batches, SortOptions};
+use datafusion::arrow::compute::{self, SortOptions, concat_batches};
 use datafusion::arrow::datatypes::{DataType, Float64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
@@ -29,7 +29,9 @@ use datafusion::common::{ColumnStatistics, DFSchema, DFSchemaRef, Statistics};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::{EquivalenceProperties, LexRequirement, PhysicalSortRequirement};
+use datafusion::physical_expr::{
+    EquivalenceProperties, LexRequirement, OrderingRequirements, PhysicalSortRequirement,
+};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::expressions::{CastExpr as PhyCast, Column as PhyColumn};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
@@ -42,7 +44,7 @@ use datatypes::prelude::{ConcreteDataType, DataType as GtDataType};
 use datatypes::schema::Schema as GtSchema;
 use datatypes::value::{OrderedF64, ValueRef};
 use datatypes::vectors::MutableVector;
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 
 /// `HistogramFold` will fold the conventional (non-native) histogram ([1]) for later
 /// computing.
@@ -150,10 +152,10 @@ impl HistogramFold {
         let check_column = |col| {
             if !input_schema.has_column_with_unqualified_name(col) {
                 Err(DataFusionError::SchemaError(
-                    datafusion::common::SchemaError::FieldNotFound {
+                    Box::new(datafusion::common::SchemaError::FieldNotFound {
                         field: Box::new(Column::new(None::<String>, col)),
                         valid_fields: input_schema.columns(),
-                    },
+                    }),
                     Box::new(None),
                 ))
             } else {
@@ -179,7 +181,7 @@ impl HistogramFold {
             .index_of_column_by_name(None, &self.ts_column)
             .unwrap();
 
-        let output_schema: SchemaRef = Arc::new(self.output_schema.as_ref().into());
+        let output_schema: SchemaRef = self.output_schema.inner().clone();
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::UnknownPartitioning(1),
@@ -266,7 +268,7 @@ impl ExecutionPlan for HistogramFoldExec {
         &self.properties
     }
 
-    fn required_input_ordering(&self) -> Vec<Option<LexRequirement>> {
+    fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
         let mut cols = self
             .tag_col_exprs()
             .into_iter()
@@ -299,7 +301,10 @@ impl ExecutionPlan for HistogramFoldExec {
             }),
         });
 
-        vec![Some(LexRequirement::new(cols))]
+        // Safety: `cols` is not empty
+        let requirement = LexRequirement::new(cols).unwrap();
+
+        vec![Some(OrderingRequirements::Hard(vec![requirement]))]
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
@@ -370,7 +375,7 @@ impl ExecutionPlan for HistogramFoldExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> DataFusionResult<Statistics> {
+    fn partition_statistics(&self, _: Option<usize>) -> DataFusionResult<Statistics> {
         Ok(Statistics {
             num_rows: Precision::Absent,
             total_byte_size: Precision::Absent,
@@ -414,7 +419,9 @@ impl HistogramFoldExec {
 impl DisplayAs for HistogramFoldExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(
                     f,
                     "HistogramFoldExec: le=@{}, field=@{}, quantile={}",
@@ -560,7 +567,7 @@ impl HistogramFoldStream {
             // "sample" normal columns
             for normal_index in &self.normal_indices {
                 let val = batch.column(*normal_index).get(cursor);
-                self.output_buffer[*normal_index].push_value_ref(val.as_value_ref());
+                self.output_buffer[*normal_index].push_value_ref(&val.as_value_ref());
             }
             // "fold" `le` and field columns
             let le_array = batch.column(self.le_column_index);
@@ -571,7 +578,7 @@ impl HistogramFoldStream {
                 let le_str_val = le_array.get(cursor + bias);
                 let le_str_val_ref = le_str_val.as_value_ref();
                 let le_str = le_str_val_ref
-                    .as_string()
+                    .try_into_string()
                     .unwrap()
                     .expect("le column should not be nullable");
                 let le = le_str.parse::<f64>().unwrap();
@@ -580,14 +587,14 @@ impl HistogramFoldStream {
                 let counter = field_array
                     .get(cursor + bias)
                     .as_value_ref()
-                    .as_f64()
+                    .try_into_f64()
                     .unwrap()
                     .expect("field column should not be nullable");
                 counters.push(counter);
             }
             // ignore invalid data
             let result = Self::evaluate_row(self.quantile, &bucket, &counters).unwrap_or(f64::NAN);
-            self.output_buffer[self.field_column_index].push_value_ref(ValueRef::from(result));
+            self.output_buffer[self.field_column_index].push_value_ref(&ValueRef::from(result));
             cursor += bucket_num;
             remaining_rows -= bucket_num;
             self.output_buffered_rows += 1;
@@ -629,7 +636,7 @@ impl HistogramFoldStream {
         self.output_buffered_rows = 0;
         RecordBatch::try_new(self.output_schema.clone(), columns)
             .map(Some)
-            .map_err(|e| DataFusionError::ArrowError(e, None))
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
     }
 
     /// Find the first `+Inf` which indicates the end of the bucket group
@@ -729,13 +736,14 @@ mod test {
     use datafusion::arrow::array::Float64Array;
     use datafusion::arrow::datatypes::{Field, Schema};
     use datafusion::common::ToDFSchema;
-    use datafusion::physical_plan::memory::MemoryExec;
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow_array::StringArray;
 
     use super::*;
 
-    fn prepare_test_data() -> MemoryExec {
+    fn prepare_test_data() -> DataSourceExec {
         let schema = Arc::new(Schema::new(vec![
             Field::new("host", DataType::Utf8, true),
             Field::new("le", DataType::Utf8, true),
@@ -788,21 +796,22 @@ mod test {
         )
         .unwrap();
 
-        MemoryExec::try_new(&[vec![data_1, data_2, data_3]], schema, None).unwrap()
+        DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![data_1, data_2, data_3]], schema, None).unwrap(),
+        ))
     }
 
     #[tokio::test]
     async fn fold_overall() {
         let memory_exec = Arc::new(prepare_test_data());
         let output_schema: SchemaRef = Arc::new(
-            (*HistogramFold::convert_schema(
+            HistogramFold::convert_schema(
                 &Arc::new(memory_exec.schema().to_dfschema().unwrap()),
                 "le",
             )
             .unwrap()
-            .as_ref())
-            .clone()
-            .into(),
+            .as_arrow()
+            .clone(),
         );
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),

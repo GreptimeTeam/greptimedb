@@ -19,100 +19,85 @@ mod l2sq;
 use std::borrow::Cow;
 use std::fmt::Display;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
-use common_query::prelude::Signature;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{Float32VectorBuilder, MutableVector, VectorRef};
-use snafu::ensure;
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_common::ScalarValue;
+use datafusion_expr::{ScalarFunctionArgs, Signature};
+use datatypes::arrow::datatypes::DataType;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::Function;
 use crate::helper;
-use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const};
 
 macro_rules! define_distance_function {
     ($StructName:ident, $display_name:expr, $similarity_method:path) => {
-
         /// A function calculates the distance between two vectors.
 
-        #[derive(Debug, Clone, Default)]
-        pub struct $StructName;
+        #[derive(Debug, Clone)]
+        pub(crate) struct $StructName {
+            signature: Signature,
+        }
+
+        impl Default for $StructName {
+            fn default() -> Self {
+                Self {
+                    signature: helper::one_of_sigs2(
+                        vec![
+                            DataType::Utf8,
+                            DataType::Utf8View,
+                            DataType::Binary,
+                            DataType::BinaryView,
+                        ],
+                        vec![
+                            DataType::Utf8,
+                            DataType::Utf8View,
+                            DataType::Binary,
+                            DataType::BinaryView,
+                        ],
+                    ),
+                }
+            }
+        }
 
         impl Function for $StructName {
             fn name(&self) -> &str {
                 $display_name
             }
 
-            fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-                Ok(ConcreteDataType::float32_datatype())
+            fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+                Ok(DataType::Float32)
             }
 
-            fn signature(&self) -> Signature {
-                helper::one_of_sigs2(
-                    vec![
-                        ConcreteDataType::string_datatype(),
-                        ConcreteDataType::binary_datatype(),
-                    ],
-                    vec![
-                        ConcreteDataType::string_datatype(),
-                        ConcreteDataType::binary_datatype(),
-                    ],
-                )
+            fn signature(&self) -> &Signature {
+                &self.signature
             }
 
-            fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-                ensure!(
-                    columns.len() == 2,
-                    InvalidFuncArgsSnafu {
-                        err_msg: format!(
-                            "The length of the args is not correct, expect exactly two, have: {}",
-                            columns.len()
-                        ),
-                    }
-                );
-                let arg0 = &columns[0];
-                let arg1 = &columns[1];
+            fn invoke_with_args(
+                &self,
+                args: ScalarFunctionArgs,
+            ) -> datafusion_common::Result<ColumnarValue> {
+                let body = |v0: &Option<Cow<[f32]>>,
+                            v1: &Option<Cow<[f32]>>|
+                 -> datafusion_common::Result<ScalarValue> {
+                    let result = if let (Some(v0), Some(v1)) = (v0, v1) {
+                        if v0.len() != v1.len() {
+                            return Err(datafusion_common::DataFusionError::Execution(format!(
+                                "vectors length not match: {}",
+                                self.name()
+                            )));
+                        }
 
-                let size = arg0.len();
-                let mut result = Float32VectorBuilder::with_capacity(size);
-                if size == 0 {
-                    return Ok(result.to_vector());
-                }
-
-                let arg0_const = as_veclit_if_const(arg0)?;
-                let arg1_const = as_veclit_if_const(arg1)?;
-
-                for i in 0..size {
-                    let vec0 = match arg0_const.as_ref() {
-                        Some(a) => Some(Cow::Borrowed(a.as_ref())),
-                        None => as_veclit(arg0.get_ref(i))?,
-                    };
-                    let vec1 = match arg1_const.as_ref() {
-                        Some(b) => Some(Cow::Borrowed(b.as_ref())),
-                        None => as_veclit(arg1.get_ref(i))?,
-                    };
-
-                    if let (Some(vec0), Some(vec1)) = (vec0, vec1) {
-                        ensure!(
-                            vec0.len() == vec1.len(),
-                            InvalidFuncArgsSnafu {
-                                err_msg: format!(
-                                    "The length of the vectors must match to calculate distance, have: {} vs {}",
-                                    vec0.len(),
-                                    vec1.len()
-                                ),
-                            }
-                        );
-
-                        // Checked if the length of the vectors match
-                        let d = $similarity_method(vec0.as_ref(), vec1.as_ref());
-                        result.push(Some(d));
+                        let d = $similarity_method(v0, v1);
+                        Some(d)
                     } else {
-                        result.push_null();
-                    }
-                }
+                        None
+                    };
+                    Ok(ScalarValue::Float32(result))
+                };
 
-                return Ok(result.to_vector());
+                let calculator = $crate::scalars::vector::VectorCalculator {
+                    name: self.name(),
+                    func: body,
+                };
+                calculator.invoke_with_vectors(args)
             }
         }
 
@@ -121,7 +106,7 @@ macro_rules! define_distance_function {
                 write!(f, "{}", $display_name.to_ascii_uppercase())
             }
         }
-    }
+    };
 }
 
 define_distance_function!(CosDistanceFunction, "vec_cos_distance", cos::cos);
@@ -132,234 +117,170 @@ define_distance_function!(DotProductFunction, "vec_dot_product", dot::dot);
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::vectors::{BinaryVector, ConstantVector, StringVector};
+    use arrow_schema::Field;
+    use datafusion::arrow::array::{Array, ArrayRef, AsArray, BinaryArray, StringViewArray};
+    use datafusion::arrow::datatypes::Float32Type;
+    use datafusion_common::config::ConfigOptions;
 
     use super::*;
+
+    fn test_invoke(func: &dyn Function, args: &[ArrayRef]) -> datafusion_common::Result<ArrayRef> {
+        let number_rows = args[0].len();
+        let args = ScalarFunctionArgs {
+            args: args
+                .iter()
+                .map(|x| ColumnarValue::Array(x.clone()))
+                .collect::<Vec<_>>(),
+            arg_fields: vec![],
+            number_rows,
+            return_field: Arc::new(Field::new("x", DataType::Float32, false)),
+            config_options: Arc::new(ConfigOptions::new()),
+        };
+        func.invoke_with_args(args)
+            .and_then(|x| x.to_array(number_rows))
+    }
 
     #[test]
     fn test_distance_string_string() {
         let funcs = [
-            Box::new(CosDistanceFunction {}) as Box<dyn Function>,
-            Box::new(L2SqDistanceFunction {}) as Box<dyn Function>,
-            Box::new(DotProductFunction {}) as Box<dyn Function>,
+            Box::new(CosDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(L2SqDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(DotProductFunction::default()) as Box<dyn Function>,
         ];
 
         for func in funcs {
-            let vec1 = Arc::new(StringVector::from(vec![
+            let vec1: ArrayRef = Arc::new(StringViewArray::from(vec![
                 Some("[0.0, 1.0]"),
                 Some("[1.0, 0.0]"),
                 None,
                 Some("[1.0, 0.0]"),
-            ])) as VectorRef;
-            let vec2 = Arc::new(StringVector::from(vec![
+            ]));
+            let vec2: ArrayRef = Arc::new(StringViewArray::from(vec![
                 Some("[0.0, 1.0]"),
                 Some("[0.0, 1.0]"),
                 Some("[0.0, 1.0]"),
                 None,
-            ])) as VectorRef;
+            ]));
 
-            let result = func
-                .eval(&FunctionContext::default(), &[vec1.clone(), vec2.clone()])
-                .unwrap();
+            let result = test_invoke(func.as_ref(), &[vec1.clone(), vec2.clone()]).unwrap();
+            let result = result.as_primitive::<Float32Type>();
 
-            assert!(!result.get(0).is_null());
-            assert!(!result.get(1).is_null());
-            assert!(result.get(2).is_null());
-            assert!(result.get(3).is_null());
+            assert!(!result.is_null(0));
+            assert!(!result.is_null(1));
+            assert!(result.is_null(2));
+            assert!(result.is_null(3));
 
-            let result = func
-                .eval(&FunctionContext::default(), &[vec2, vec1])
-                .unwrap();
+            let result = test_invoke(func.as_ref(), &[vec2, vec1]).unwrap();
+            let result = result.as_primitive::<Float32Type>();
 
-            assert!(!result.get(0).is_null());
-            assert!(!result.get(1).is_null());
-            assert!(result.get(2).is_null());
-            assert!(result.get(3).is_null());
+            assert!(!result.is_null(0));
+            assert!(!result.is_null(1));
+            assert!(result.is_null(2));
+            assert!(result.is_null(3));
         }
     }
 
     #[test]
     fn test_distance_binary_binary() {
         let funcs = [
-            Box::new(CosDistanceFunction {}) as Box<dyn Function>,
-            Box::new(L2SqDistanceFunction {}) as Box<dyn Function>,
-            Box::new(DotProductFunction {}) as Box<dyn Function>,
+            Box::new(CosDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(L2SqDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(DotProductFunction::default()) as Box<dyn Function>,
         ];
 
         for func in funcs {
-            let vec1 = Arc::new(BinaryVector::from(vec![
+            let vec1: ArrayRef = Arc::new(BinaryArray::from_iter(vec![
                 Some(vec![0, 0, 0, 0, 0, 0, 128, 63]),
                 Some(vec![0, 0, 128, 63, 0, 0, 0, 0]),
                 None,
                 Some(vec![0, 0, 128, 63, 0, 0, 0, 0]),
-            ])) as VectorRef;
-            let vec2 = Arc::new(BinaryVector::from(vec![
+            ]));
+            let vec2: ArrayRef = Arc::new(BinaryArray::from_iter(vec![
                 // [0.0, 1.0]
                 Some(vec![0, 0, 0, 0, 0, 0, 128, 63]),
                 Some(vec![0, 0, 0, 0, 0, 0, 128, 63]),
                 Some(vec![0, 0, 0, 0, 0, 0, 128, 63]),
                 None,
-            ])) as VectorRef;
+            ]));
 
-            let result = func
-                .eval(&FunctionContext::default(), &[vec1.clone(), vec2.clone()])
-                .unwrap();
+            let result = test_invoke(func.as_ref(), &[vec1.clone(), vec2.clone()]).unwrap();
+            let result = result.as_primitive::<Float32Type>();
 
-            assert!(!result.get(0).is_null());
-            assert!(!result.get(1).is_null());
-            assert!(result.get(2).is_null());
-            assert!(result.get(3).is_null());
+            assert!(!result.is_null(0));
+            assert!(!result.is_null(1));
+            assert!(result.is_null(2));
+            assert!(result.is_null(3));
 
-            let result = func
-                .eval(&FunctionContext::default(), &[vec2, vec1])
-                .unwrap();
+            let result = test_invoke(func.as_ref(), &[vec2, vec1]).unwrap();
+            let result = result.as_primitive::<Float32Type>();
 
-            assert!(!result.get(0).is_null());
-            assert!(!result.get(1).is_null());
-            assert!(result.get(2).is_null());
-            assert!(result.get(3).is_null());
+            assert!(!result.is_null(0));
+            assert!(!result.is_null(1));
+            assert!(result.is_null(2));
+            assert!(result.is_null(3));
         }
     }
 
     #[test]
     fn test_distance_string_binary() {
         let funcs = [
-            Box::new(CosDistanceFunction {}) as Box<dyn Function>,
-            Box::new(L2SqDistanceFunction {}) as Box<dyn Function>,
-            Box::new(DotProductFunction {}) as Box<dyn Function>,
+            Box::new(CosDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(L2SqDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(DotProductFunction::default()) as Box<dyn Function>,
         ];
 
         for func in funcs {
-            let vec1 = Arc::new(StringVector::from(vec![
+            let vec1: ArrayRef = Arc::new(StringViewArray::from(vec![
                 Some("[0.0, 1.0]"),
                 Some("[1.0, 0.0]"),
                 None,
                 Some("[1.0, 0.0]"),
-            ])) as VectorRef;
-            let vec2 = Arc::new(BinaryVector::from(vec![
+            ]));
+            let vec2: ArrayRef = Arc::new(BinaryArray::from_iter(vec![
                 // [0.0, 1.0]
                 Some(vec![0, 0, 0, 0, 0, 0, 128, 63]),
                 Some(vec![0, 0, 0, 0, 0, 0, 128, 63]),
                 Some(vec![0, 0, 0, 0, 0, 0, 128, 63]),
                 None,
-            ])) as VectorRef;
+            ]));
 
-            let result = func
-                .eval(&FunctionContext::default(), &[vec1.clone(), vec2.clone()])
-                .unwrap();
+            let result = test_invoke(func.as_ref(), &[vec1.clone(), vec2.clone()]).unwrap();
+            let result = result.as_primitive::<Float32Type>();
 
-            assert!(!result.get(0).is_null());
-            assert!(!result.get(1).is_null());
-            assert!(result.get(2).is_null());
-            assert!(result.get(3).is_null());
+            assert!(!result.is_null(0));
+            assert!(!result.is_null(1));
+            assert!(result.is_null(2));
+            assert!(result.is_null(3));
 
-            let result = func
-                .eval(&FunctionContext::default(), &[vec2, vec1])
-                .unwrap();
+            let result = test_invoke(func.as_ref(), &[vec2, vec1]).unwrap();
+            let result = result.as_primitive::<Float32Type>();
 
-            assert!(!result.get(0).is_null());
-            assert!(!result.get(1).is_null());
-            assert!(result.get(2).is_null());
-            assert!(result.get(3).is_null());
-        }
-    }
-
-    #[test]
-    fn test_distance_const_string() {
-        let funcs = [
-            Box::new(CosDistanceFunction {}) as Box<dyn Function>,
-            Box::new(L2SqDistanceFunction {}) as Box<dyn Function>,
-            Box::new(DotProductFunction {}) as Box<dyn Function>,
-        ];
-
-        for func in funcs {
-            let const_str = Arc::new(ConstantVector::new(
-                Arc::new(StringVector::from(vec!["[0.0, 1.0]"])),
-                4,
-            ));
-
-            let vec1 = Arc::new(StringVector::from(vec![
-                Some("[0.0, 1.0]"),
-                Some("[1.0, 0.0]"),
-                None,
-                Some("[1.0, 0.0]"),
-            ])) as VectorRef;
-            let vec2 = Arc::new(BinaryVector::from(vec![
-                // [0.0, 1.0]
-                Some(vec![0, 0, 0, 0, 0, 0, 128, 63]),
-                Some(vec![0, 0, 0, 0, 0, 0, 128, 63]),
-                Some(vec![0, 0, 0, 0, 0, 0, 128, 63]),
-                None,
-            ])) as VectorRef;
-
-            let result = func
-                .eval(
-                    &FunctionContext::default(),
-                    &[const_str.clone(), vec1.clone()],
-                )
-                .unwrap();
-
-            assert!(!result.get(0).is_null());
-            assert!(!result.get(1).is_null());
-            assert!(result.get(2).is_null());
-            assert!(!result.get(3).is_null());
-
-            let result = func
-                .eval(
-                    &FunctionContext::default(),
-                    &[vec1.clone(), const_str.clone()],
-                )
-                .unwrap();
-
-            assert!(!result.get(0).is_null());
-            assert!(!result.get(1).is_null());
-            assert!(result.get(2).is_null());
-            assert!(!result.get(3).is_null());
-
-            let result = func
-                .eval(
-                    &FunctionContext::default(),
-                    &[const_str.clone(), vec2.clone()],
-                )
-                .unwrap();
-
-            assert!(!result.get(0).is_null());
-            assert!(!result.get(1).is_null());
-            assert!(!result.get(2).is_null());
-            assert!(result.get(3).is_null());
-
-            let result = func
-                .eval(
-                    &FunctionContext::default(),
-                    &[vec2.clone(), const_str.clone()],
-                )
-                .unwrap();
-
-            assert!(!result.get(0).is_null());
-            assert!(!result.get(1).is_null());
-            assert!(!result.get(2).is_null());
-            assert!(result.get(3).is_null());
+            assert!(!result.is_null(0));
+            assert!(!result.is_null(1));
+            assert!(result.is_null(2));
+            assert!(result.is_null(3));
         }
     }
 
     #[test]
     fn test_invalid_vector_length() {
         let funcs = [
-            Box::new(CosDistanceFunction {}) as Box<dyn Function>,
-            Box::new(L2SqDistanceFunction {}) as Box<dyn Function>,
-            Box::new(DotProductFunction {}) as Box<dyn Function>,
+            Box::new(CosDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(L2SqDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(DotProductFunction::default()) as Box<dyn Function>,
         ];
 
         for func in funcs {
-            let vec1 = Arc::new(StringVector::from(vec!["[1.0]"])) as VectorRef;
-            let vec2 = Arc::new(StringVector::from(vec!["[1.0, 1.0]"])) as VectorRef;
-            let result = func.eval(&FunctionContext::default(), &[vec1, vec2]);
+            let vec1: ArrayRef = Arc::new(StringViewArray::from(vec!["[1.0]"]));
+            let vec2: ArrayRef = Arc::new(StringViewArray::from(vec!["[1.0, 1.0]"]));
+            let result = test_invoke(func.as_ref(), &[vec1, vec2]);
             assert!(result.is_err());
 
-            let vec1 = Arc::new(BinaryVector::from(vec![vec![0, 0, 128, 63]])) as VectorRef;
-            let vec2 =
-                Arc::new(BinaryVector::from(vec![vec![0, 0, 128, 63, 0, 0, 0, 64]])) as VectorRef;
-            let result = func.eval(&FunctionContext::default(), &[vec1, vec2]);
+            let vec1: ArrayRef = Arc::new(BinaryArray::from_iter_values(vec![vec![0, 0, 128, 63]]));
+            let vec2: ArrayRef = Arc::new(BinaryArray::from_iter_values(vec![vec![
+                0, 0, 128, 63, 0, 0, 0, 64,
+            ]]));
+            let result = test_invoke(func.as_ref(), &[vec1, vec2]);
             assert!(result.is_err());
         }
     }

@@ -13,21 +13,33 @@
 // limitations under the License.
 
 use std::fmt::{self, Display};
+use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use common_query::prelude::Signature;
-use datafusion::logical_expr::Volatility;
-use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::VectorRef;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{BooleanVectorBuilder, MutableVector};
-use snafu::ensure;
+use arrow::compute;
+use datafusion_common::arrow::array::{Array, AsArray, BooleanBuilder};
+use datafusion_common::arrow::datatypes::DataType;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature};
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
+use crate::helper;
 
 /// Check if the given JSON data match the given JSON path's predicate.
-#[derive(Clone, Debug, Default)]
-pub struct JsonPathMatchFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct JsonPathMatchFunction {
+    signature: Signature,
+}
+
+impl Default for JsonPathMatchFunction {
+    fn default() -> Self {
+        Self {
+            // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
+            signature: helper::one_of_sigs2(
+                vec![DataType::Binary, DataType::BinaryView],
+                vec![DataType::Utf8, DataType::Utf8View],
+            ),
+        }
+    }
+}
 
 const NAME: &str = "json_path_match";
 
@@ -36,74 +48,49 @@ impl Function for JsonPathMatchFunction {
         NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::exact(
-            vec![
-                ConcreteDataType::json_datatype(),
-                ConcreteDataType::string_datatype(),
-            ],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly two, have: {}",
-                    columns.len()
-                ),
-            }
-        );
-        let jsons = &columns[0];
-        let paths = &columns[1];
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
+        let arg0 = compute::cast(&arg0, &DataType::BinaryView)?;
+        let jsons = arg0.as_binary_view();
+        let arg1 = compute::cast(&arg1, &DataType::Utf8View)?;
+        let paths = arg1.as_string_view();
 
         let size = jsons.len();
-        let mut results = BooleanVectorBuilder::with_capacity(size);
+        let mut builder = BooleanBuilder::with_capacity(size);
 
         for i in 0..size {
-            let json = jsons.get_ref(i);
-            let path = paths.get_ref(i);
+            let json = jsons.is_valid(i).then(|| jsons.value(i));
+            let path = paths.is_valid(i).then(|| paths.value(i));
 
-            match json.data_type() {
-                // JSON data type uses binary vector
-                ConcreteDataType::Binary(_) => {
-                    let json = json.as_binary();
-                    let path = path.as_string();
-                    let result = match (json, path) {
-                        (Ok(Some(json)), Ok(Some(path))) => {
-                            if !jsonb::is_null(json) {
-                                let json_path = jsonb::jsonpath::parse_json_path(path.as_bytes());
-                                match json_path {
-                                    Ok(json_path) => jsonb::path_match(json, json_path).ok(),
-                                    Err(_) => None,
-                                }
-                            } else {
-                                None
-                            }
+            let result = match (json, path) {
+                (Some(json), Some(path)) => {
+                    if !jsonb::is_null(json) {
+                        let json_path = jsonb::jsonpath::parse_json_path(path.as_bytes());
+                        match json_path {
+                            Ok(json_path) => jsonb::path_match(json, json_path).ok(),
+                            Err(_) => None,
                         }
-                        _ => None,
-                    };
-
-                    results.push(result);
-                }
-
-                _ => {
-                    return UnsupportedInputDataTypeSnafu {
-                        function: NAME,
-                        datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
+                    } else {
+                        None
                     }
-                    .fail();
                 }
-            }
+                _ => None,
+            };
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -117,29 +104,20 @@ impl Display for JsonPathMatchFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
-    use datatypes::vectors::{BinaryVector, StringVector};
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::{BinaryArray, StringArray};
 
     use super::*;
 
     #[test]
     fn test_json_path_match_function() {
-        let json_path_match = JsonPathMatchFunction;
+        let json_path_match = JsonPathMatchFunction::default();
 
         assert_eq!("json_path_match", json_path_match.name());
         assert_eq!(
-            ConcreteDataType::boolean_datatype(),
-            json_path_match
-                .return_type(&[ConcreteDataType::json_datatype()])
-                .unwrap()
+            DataType::Boolean,
+            json_path_match.return_type(&[DataType::Binary]).unwrap()
         );
-
-        assert!(matches!(json_path_match.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Exact(valid_types),
-                             volatility: Volatility::Immutable
-                         } if valid_types == vec![ConcreteDataType::json_datatype(), ConcreteDataType::string_datatype()],
-        ));
 
         let json_strings = [
             Some(r#"{"a": {"b": 2}, "b": 2, "c": 3}"#.to_string()),
@@ -176,27 +154,25 @@ mod tests {
             .map(|s| s.map(|json| jsonb::parse_value(json.as_bytes()).unwrap().to_vec()))
             .collect::<Vec<_>>();
 
-        let json_vector = BinaryVector::from(jsonbs);
-        let path_vector = StringVector::from(paths);
-        let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
-        let vector = json_path_match
-            .eval(&FunctionContext::default(), &args)
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(BinaryArray::from_iter(jsonbs))),
+                ColumnarValue::Array(Arc::new(StringArray::from_iter(paths))),
+            ],
+            arg_fields: vec![],
+            number_rows: 7,
+            return_field: Arc::new(Field::new("x", DataType::Boolean, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = json_path_match
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(7))
             .unwrap();
+        let vector = result.as_boolean();
 
         assert_eq!(7, vector.len());
-        for (i, expected) in results.iter().enumerate() {
-            let result = vector.get_ref(i);
-
-            match expected {
-                Some(expected_value) => {
-                    assert!(!result.is_null());
-                    let result_value = result.as_boolean().unwrap().unwrap();
-                    assert_eq!(*expected_value, result_value);
-                }
-                None => {
-                    assert!(result.is_null());
-                }
-            }
+        for (actual, expected) in vector.iter().zip(results) {
+            assert_eq!(actual, expected);
         }
     }
 }

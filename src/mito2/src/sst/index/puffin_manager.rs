@@ -29,8 +29,8 @@ use snafu::ResultExt;
 use crate::access_layer::FilePathProvider;
 use crate::error::{PuffinInitStagerSnafu, PuffinPurgeStagerSnafu, Result};
 use crate::metrics::{
-    StagerMetrics, INDEX_PUFFIN_FLUSH_OP_TOTAL, INDEX_PUFFIN_READ_BYTES_TOTAL,
-    INDEX_PUFFIN_READ_OP_TOTAL, INDEX_PUFFIN_WRITE_BYTES_TOTAL, INDEX_PUFFIN_WRITE_OP_TOTAL,
+    INDEX_PUFFIN_FLUSH_OP_TOTAL, INDEX_PUFFIN_READ_BYTES_TOTAL, INDEX_PUFFIN_READ_OP_TOTAL,
+    INDEX_PUFFIN_WRITE_BYTES_TOTAL, INDEX_PUFFIN_WRITE_OP_TOTAL, StagerMetrics,
 };
 use crate::sst::file::RegionFileId;
 use crate::sst::index::store::{self, InstrumentedStore};
@@ -181,9 +181,10 @@ mod tests {
     use object_store::services::Memory;
     use puffin::blob_metadata::CompressionCodec;
     use puffin::puffin_manager::{PuffinManager, PuffinReader, PuffinWriter, PutOptions};
+    use store_api::storage::FileId;
 
     use super::*;
-    use crate::sst::file::{FileId, RegionFileId};
+    use crate::sst::file::RegionFileId;
 
     struct TestFilePathProvider;
 

@@ -26,7 +26,7 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{info, warn};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
 use store_api::storage::{RegionId, RegionNumber};
@@ -34,7 +34,7 @@ use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
-use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
+use crate::ddl::create_table_template::{CreateRequestBuilder, build_template};
 use crate::ddl::utils::raw_table_info::update_table_info_column_ids;
 use crate::ddl::utils::{
     add_peer_context_if_needed, convert_region_routes_to_detecting_regions,
@@ -49,7 +49,7 @@ use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{
-    find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
+    RegionRoute, find_leader_regions, find_leaders, operating_leader_regions,
 };
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -214,6 +214,11 @@ impl CreateTableProcedure {
         let leaders = find_leaders(region_routes);
         let mut create_region_tasks = Vec::with_capacity(leaders.len());
 
+        let partition_exprs = region_routes
+            .iter()
+            .map(|r| (r.region.id.region_number(), r.region.partition_expr()))
+            .collect();
+
         for datanode in leaders {
             let requester = self.context.node_manager.datanode(&datanode).await;
 
@@ -221,8 +226,12 @@ impl CreateTableProcedure {
             let mut requests = Vec::with_capacity(regions.len());
             for region_number in regions {
                 let region_id = RegionId::new(self.table_id(), region_number);
-                let create_region_request =
-                    request_builder.build_one(region_id, storage_path.clone(), region_wal_options);
+                let create_region_request = request_builder.build_one(
+                    region_id,
+                    storage_path.clone(),
+                    region_wal_options,
+                    &partition_exprs,
+                );
                 requests.push(PbRegionRequest::Create(create_region_request));
             }
 
@@ -256,7 +265,9 @@ impl CreateTableProcedure {
         {
             self.creator.data.column_metadatas = column_metadatas;
         } else {
-            warn!("creating table result doesn't contains extension key `{TABLE_COLUMN_METADATA_EXTENSION_KEY}`,leaving the table's column metadata unchanged");
+            warn!(
+                "creating table result doesn't contains extension key `{TABLE_COLUMN_METADATA_EXTENSION_KEY}`,leaving the table's column metadata unchanged"
+            );
         }
 
         self.creator.data.state = CreateTableState::CreateMetadata;

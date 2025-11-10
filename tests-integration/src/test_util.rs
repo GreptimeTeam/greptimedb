@@ -17,35 +17,34 @@ use std::fmt::Display;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use auth::UserProviderRef;
+use auth::{DefaultPermissionChecker, PermissionCheckerRef, UserProviderRef};
 use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
-use common_base::secrets::ExposeSecret;
+use common_base::Plugins;
 use common_config::Configurable;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_runtime::runtime::BuilderBuild;
 use common_runtime::{Builder as RuntimeBuilder, Runtime};
-use common_telemetry::warn;
 use common_test_util::ports;
-use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, StorageConfig};
 use frontend::instance::Instance;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
-use futures::future::BoxFuture;
 use object_store::config::{
     AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
 };
 use object_store::services::{Azblob, Gcs, Oss, S3};
 use object_store::test_util::TempFolder;
-use object_store::ObjectStore;
+use object_store::{AzblobConnection, GcsConnection, ObjectStore, OssConnection, S3Connection};
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{FlightCompression, GrpcOptions, GrpcServer, GrpcServerConfig};
 use servers::http::{HttpOptions, HttpServerBuilder, PromValidationMode};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
+use servers::otel_arrow::OtelArrowServiceHandler;
 use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
@@ -84,10 +83,10 @@ impl StorageType {
     pub fn build_storage_types_based_on_env() -> Vec<StorageType> {
         let mut storage_types = Vec::with_capacity(4);
         storage_types.push(StorageType::File);
-        if let Ok(bucket) = env::var("GT_S3_BUCKET") {
-            if !bucket.is_empty() {
-                storage_types.push(StorageType::S3);
-            }
+        if let Ok(bucket) = env::var("GT_S3_BUCKET")
+            && !bucket.is_empty()
+        {
+            storage_types.push(StorageType::S3);
         }
         if env::var("GT_OSS_BUCKET").is_ok() {
             storage_types.push(StorageType::Oss);
@@ -140,11 +139,14 @@ impl StorageType {
 
 fn s3_test_config() -> S3Config {
     S3Config {
-        root: uuid::Uuid::new_v4().to_string(),
-        access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap().into(),
-        secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap().into(),
-        bucket: env::var("GT_S3_BUCKET").unwrap(),
-        region: Some(env::var("GT_S3_REGION").unwrap()),
+        connection: S3Connection {
+            root: uuid::Uuid::new_v4().to_string(),
+            access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap().into(),
+            secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap().into(),
+            bucket: env::var("GT_S3_BUCKET").unwrap(),
+            region: Some(env::var("GT_S3_REGION").unwrap()),
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
@@ -155,104 +157,69 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
     match store_type {
         StorageType::Gcs => {
             let gcs_config = GcsConfig {
-                root: uuid::Uuid::new_v4().to_string(),
-                bucket: env::var("GT_GCS_BUCKET").unwrap(),
-                scope: env::var("GT_GCS_SCOPE").unwrap(),
-                credential_path: env::var("GT_GCS_CREDENTIAL_PATH").unwrap().into(),
-                credential: env::var("GT_GCS_CREDENTIAL").unwrap().into(),
-                endpoint: env::var("GT_GCS_ENDPOINT").unwrap(),
+                connection: GcsConnection {
+                    root: uuid::Uuid::new_v4().to_string(),
+                    bucket: env::var("GT_GCS_BUCKET").unwrap(),
+                    scope: env::var("GT_GCS_SCOPE").unwrap(),
+                    credential_path: env::var("GT_GCS_CREDENTIAL_PATH").unwrap().into(),
+                    credential: env::var("GT_GCS_CREDENTIAL").unwrap().into(),
+                    endpoint: env::var("GT_GCS_ENDPOINT").unwrap(),
+                },
                 ..Default::default()
             };
 
-            let builder = Gcs::default()
-                .root(&gcs_config.root)
-                .bucket(&gcs_config.bucket)
-                .scope(&gcs_config.scope)
-                .credential_path(gcs_config.credential_path.expose_secret())
-                .credential(gcs_config.credential.expose_secret())
-                .endpoint(&gcs_config.endpoint);
-
+            let builder = Gcs::from(&gcs_config.connection);
             let config = ObjectStoreConfig::Gcs(gcs_config);
             let store = ObjectStore::new(builder).unwrap().finish();
             (config, TempDirGuard::Gcs(TempFolder::new(&store, "/")))
         }
         StorageType::Azblob => {
             let azblob_config = AzblobConfig {
-                root: uuid::Uuid::new_v4().to_string(),
-                container: env::var("GT_AZBLOB_CONTAINER").unwrap(),
-                account_name: env::var("GT_AZBLOB_ACCOUNT_NAME").unwrap().into(),
-                account_key: env::var("GT_AZBLOB_ACCOUNT_KEY").unwrap().into(),
-                endpoint: env::var("GT_AZBLOB_ENDPOINT").unwrap(),
+                connection: AzblobConnection {
+                    root: uuid::Uuid::new_v4().to_string(),
+                    container: env::var("GT_AZBLOB_CONTAINER").unwrap(),
+                    account_name: env::var("GT_AZBLOB_ACCOUNT_NAME").unwrap().into(),
+                    account_key: env::var("GT_AZBLOB_ACCOUNT_KEY").unwrap().into(),
+                    endpoint: env::var("GT_AZBLOB_ENDPOINT").unwrap(),
+                    ..Default::default()
+                },
                 ..Default::default()
             };
 
-            let mut builder = Azblob::default()
-                .root(&azblob_config.root)
-                .endpoint(&azblob_config.endpoint)
-                .account_name(azblob_config.account_name.expose_secret())
-                .account_key(azblob_config.account_key.expose_secret())
-                .container(&azblob_config.container);
-
-            if let Ok(sas_token) = env::var("GT_AZBLOB_SAS_TOKEN") {
-                builder = builder.sas_token(&sas_token);
-            };
-
+            let builder = Azblob::from(&azblob_config.connection);
             let config = ObjectStoreConfig::Azblob(azblob_config);
-
             let store = ObjectStore::new(builder).unwrap().finish();
-
             (config, TempDirGuard::Azblob(TempFolder::new(&store, "/")))
         }
         StorageType::Oss => {
             let oss_config = OssConfig {
-                root: uuid::Uuid::new_v4().to_string(),
-                access_key_id: env::var("GT_OSS_ACCESS_KEY_ID").unwrap().into(),
-                access_key_secret: env::var("GT_OSS_ACCESS_KEY").unwrap().into(),
-                bucket: env::var("GT_OSS_BUCKET").unwrap(),
-                endpoint: env::var("GT_OSS_ENDPOINT").unwrap(),
+                connection: OssConnection {
+                    root: uuid::Uuid::new_v4().to_string(),
+                    access_key_id: env::var("GT_OSS_ACCESS_KEY_ID").unwrap().into(),
+                    access_key_secret: env::var("GT_OSS_ACCESS_KEY").unwrap().into(),
+                    bucket: env::var("GT_OSS_BUCKET").unwrap(),
+                    endpoint: env::var("GT_OSS_ENDPOINT").unwrap(),
+                },
                 ..Default::default()
             };
 
-            let builder = Oss::default()
-                .root(&oss_config.root)
-                .endpoint(&oss_config.endpoint)
-                .access_key_id(oss_config.access_key_id.expose_secret())
-                .access_key_secret(oss_config.access_key_secret.expose_secret())
-                .bucket(&oss_config.bucket);
-
+            let builder = Oss::from(&oss_config.connection);
             let config = ObjectStoreConfig::Oss(oss_config);
-
             let store = ObjectStore::new(builder).unwrap().finish();
-
             (config, TempDirGuard::Oss(TempFolder::new(&store, "/")))
         }
         StorageType::S3 | StorageType::S3WithCache => {
             let mut s3_config = s3_test_config();
 
             if *store_type == StorageType::S3WithCache {
-                s3_config.cache.cache_path = Some("/tmp/greptimedb_cache".to_string());
+                s3_config.cache.cache_path = "/tmp/greptimedb_cache".to_string();
             } else {
-                // An empty string means disabling.
-                s3_config.cache.cache_path = Some("".to_string());
+                s3_config.cache.enable_read_cache = false;
             }
 
-            let mut builder = S3::default()
-                .root(&s3_config.root)
-                .access_key_id(s3_config.access_key_id.expose_secret())
-                .secret_access_key(s3_config.secret_access_key.expose_secret())
-                .bucket(&s3_config.bucket);
-
-            if s3_config.endpoint.is_some() {
-                builder = builder.endpoint(s3_config.endpoint.as_ref().unwrap());
-            };
-            if s3_config.region.is_some() {
-                builder = builder.region(s3_config.region.as_ref().unwrap());
-            };
-
+            let builder = S3::from(&s3_config.connection);
             let config = ObjectStoreConfig::S3(s3_config);
-
             let store = ObjectStore::new(builder).unwrap().finish();
-
             (config, TempDirGuard::S3(TempFolder::new(&store, "/")))
         }
         StorageType::File => (ObjectStoreConfig::File(FileConfig {}), TempDirGuard::None),
@@ -310,10 +277,9 @@ impl Drop for TestGuard {
                 | TempDirGuard::Oss(guard)
                 | TempDirGuard::Azblob(guard)
                 | TempDirGuard::Gcs(guard) = guard.0
+                    && let Err(e) = guard.remove_all().await
                 {
-                    if let Err(e) = guard.remove_all().await {
-                        errors.push(e);
-                    }
+                    errors.push(e);
                 }
             }
             if errors.is_empty() {
@@ -407,6 +373,18 @@ async fn setup_standalone_instance(
         .await
 }
 
+async fn setup_standalone_instance_with_plugins(
+    test_name: &str,
+    store_type: StorageType,
+    plugins: Plugins,
+) -> GreptimeDbStandalone {
+    GreptimeDbStandaloneBuilder::new(test_name)
+        .with_default_store_type(store_type)
+        .with_plugin(plugins)
+        .build()
+        .await
+}
+
 pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router, TestGuard) {
     let instance = setup_standalone_instance(name, store_type).await;
 
@@ -440,7 +418,13 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
     name: &str,
     user_provider: Option<UserProviderRef>,
 ) -> (Router, TestGuard) {
-    let instance = setup_standalone_instance(name, store_type).await;
+    let plugins = Plugins::new();
+    if let Some(user_provider) = user_provider.clone() {
+        plugins.insert::<UserProviderRef>(user_provider.clone());
+        plugins.insert::<PermissionCheckerRef>(DefaultPermissionChecker::arc());
+    }
+
+    let instance = setup_standalone_instance_with_plugins(name, store_type, plugins).await;
 
     create_test_table(instance.fe_instance(), "demo").await;
 
@@ -458,7 +442,7 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
         .with_influxdb_handler(instance.fe_instance().clone())
-        .with_otlp_handler(instance.fe_instance().clone())
+        .with_otlp_handler(instance.fe_instance().clone(), true)
         .with_jaeger_handler(instance.fe_instance().clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap());
 
@@ -484,7 +468,9 @@ pub async fn setup_test_prom_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
-    std::env::set_var("TZ", "UTC");
+    unsafe {
+        std::env::set_var("TZ", "UTC");
+    }
 
     let instance = setup_standalone_instance(name, store_type).await;
 
@@ -594,7 +580,8 @@ pub async fn setup_grpc_server_with(
     let grpc_builder = GrpcServerBuilder::new(grpc_config.clone(), runtime)
         .database_handler(greptime_request_handler)
         .flight_handler(flight_handler)
-        .prometheus_handler(fe_instance_ref.clone(), user_provider)
+        .prometheus_handler(fe_instance_ref.clone(), user_provider.clone())
+        .otel_arrow_handler(OtelArrowServiceHandler::new(fe_instance_ref, user_provider))
         .with_tls_config(grpc_config.tls)
         .unwrap();
 
@@ -618,7 +605,13 @@ pub async fn setup_mysql_server_with_user_provider(
     name: &str,
     user_provider: Option<UserProviderRef>,
 ) -> (TestGuard, Arc<Box<dyn Server>>) {
-    let instance = setup_standalone_instance(name, store_type).await;
+    let plugins = Plugins::new();
+    if let Some(user_provider) = user_provider.clone() {
+        plugins.insert::<UserProviderRef>(user_provider.clone());
+        plugins.insert::<PermissionCheckerRef>(DefaultPermissionChecker::arc());
+    }
+
+    let instance = setup_standalone_instance_with_plugins(name, store_type, plugins).await;
 
     let runtime = RuntimeBuilder::default()
         .worker_threads(2)
@@ -647,6 +640,7 @@ pub async fn setup_mysql_server_with_user_provider(
             ),
             0,
             opts.reject_no_database.unwrap_or(false),
+            opts.prepared_stmt_cache_size,
         )),
         None,
     );
@@ -731,23 +725,4 @@ pub(crate) async fn prepare_another_catalog_and_schema(instance: &Instance) {
         )
         .await
         .unwrap();
-}
-
-pub async fn run_test_with_kafka_wal<F>(test: F)
-where
-    F: FnOnce(Vec<String>) -> BoxFuture<'static, ()>,
-{
-    let _ = dotenv::dotenv();
-    let endpoints = env::var("GT_KAFKA_ENDPOINTS").unwrap_or_default();
-    if endpoints.is_empty() {
-        warn!("The endpoints is empty, skipping the test");
-        return;
-    }
-
-    let endpoints = endpoints
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect::<Vec<_>>();
-
-    test(endpoints).await
 }

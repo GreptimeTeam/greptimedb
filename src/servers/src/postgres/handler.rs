@@ -17,40 +17,41 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_query::{Output, OutputData};
-use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
+use common_recordbatch::error::Result as RecordBatchResult;
 use common_telemetry::{debug, tracing};
 use datafusion_common::ParamValues;
+use datafusion_pg_catalog::sql::PostgresCompatibilityParser;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
-use futures::{future, stream, Sink, SinkExt, Stream, StreamExt};
+use futures::{Sink, SinkExt, Stream, StreamExt, future, stream};
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
-    DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, QueryResponse, Response, Tag,
+    DescribePortalResponse, DescribeStatementResponse, QueryResponse, Response, Tag,
 };
 use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::{ClientInfo, ErrorHandler, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use query::query_engine::DescribeResult;
-use session::context::QueryContextRef;
 use session::Session;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::dialect::PostgreSqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 
+use crate::SqlPlan;
 use crate::error::{DataFusionSnafu, Result};
 use crate::postgres::types::*;
 use crate::postgres::utils::convert_err;
-use crate::postgres::{fixtures, PostgresServerHandlerInner};
+use crate::postgres::{PostgresServerHandlerInner, fixtures};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
-use crate::SqlPlan;
 
 #[async_trait]
 impl SimpleQueryHandler for PostgresServerHandlerInner {
     #[tracing::instrument(skip_all, fields(protocol = "postgres"))]
-    async fn do_query<'a, C>(&self, client: &mut C, query: &str) -> PgWireResult<Vec<Response<'a>>>
+    async fn do_query<C>(&self, client: &mut C, query: &str) -> PgWireResult<Vec<Response>>
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: Debug,
@@ -67,14 +68,21 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
             return Ok(vec![Response::EmptyQuery]);
         }
 
-        let query = fixtures::rewrite_sql(query);
-        let query = query.as_ref();
+        let query = if let Ok(statements) = self.query_parser.compatibility_parser.parse(query) {
+            statements
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(";")
+        } else {
+            query.to_string()
+        };
 
-        if let Some(resps) = fixtures::process(query, query_ctx.clone()) {
+        if let Some(resps) = fixtures::process(&query, query_ctx.clone()) {
             send_warning_opt(client, query_ctx).await?;
             Ok(resps)
         } else {
-            let outputs = self.query_handler.do_query(query, query_ctx.clone()).await;
+            let outputs = self.query_handler.do_query(&query, query_ctx.clone()).await;
 
             let mut results = Vec::with_capacity(outputs.len());
 
@@ -102,7 +110,7 @@ where
                 ErrorInfo::new(
                     PgErrorSeverity::Warning.to_string(),
                     PgErrorCode::Ec01000.code(),
-                    warning.to_string(),
+                    warning.clone(),
                 )
                 .into(),
             ))
@@ -112,11 +120,11 @@ where
     Ok(())
 }
 
-pub(crate) fn output_to_query_response<'a>(
+pub(crate) fn output_to_query_response(
     query_ctx: QueryContextRef,
     output: Result<Output>,
     field_format: &Format,
-) -> PgWireResult<Response<'a>> {
+) -> PgWireResult<Response> {
     match output {
         Ok(o) => match o.data {
             OutputData::AffectedRows(rows) => {
@@ -140,37 +148,28 @@ pub(crate) fn output_to_query_response<'a>(
     }
 }
 
-fn recordbatches_to_query_response<'a, S>(
+fn recordbatches_to_query_response<S>(
     query_ctx: QueryContextRef,
     recordbatches_stream: S,
     schema: SchemaRef,
     field_format: &Format,
-) -> PgWireResult<Response<'a>>
+) -> PgWireResult<Response>
 where
     S: Stream<Item = RecordBatchResult<RecordBatch>> + Send + Unpin + 'static,
 {
     let pg_schema = Arc::new(schema_to_pg(schema.as_ref(), field_format).map_err(convert_err)?);
     let pg_schema_ref = pg_schema.clone();
     let data_row_stream = recordbatches_stream
-        .map(|record_batch_result| match record_batch_result {
-            Ok(rb) => stream::iter(
-                // collect rows from a single recordbatch into vector to avoid
-                // borrowing it
-                rb.rows().map(Ok).collect::<Vec<_>>(),
-            )
+        .map(move |result| match result {
+            Ok(record_batch) => stream::iter(RecordBatchRowIterator::new(
+                query_ctx.clone(),
+                pg_schema_ref.clone(),
+                record_batch,
+            ))
             .boxed(),
             Err(e) => stream::once(future::err(convert_err(e))).boxed(),
         })
-        .flatten() // flatten into stream<result<row>>
-        .map(move |row| {
-            row.and_then(|row| {
-                let mut encoder = DataRowEncoder::new(pg_schema_ref.clone());
-                for (value, column) in row.iter().zip(schema.column_schemas()) {
-                    encode_value(&query_ctx, value, &mut encoder, &column.data_type)?;
-                }
-                encoder.finish()
-            })
-        });
+        .flatten();
 
     Ok(Response::Query(QueryResponse::new(
         pg_schema,
@@ -181,6 +180,7 @@ where
 pub struct DefaultQueryParser {
     query_handler: ServerSqlQueryHandlerRef,
     session: Arc<Session>,
+    compatibility_parser: PostgresCompatibilityParser,
 }
 
 impl DefaultQueryParser {
@@ -188,6 +188,7 @@ impl DefaultQueryParser {
         DefaultQueryParser {
             query_handler,
             session,
+            compatibility_parser: PostgresCompatibilityParser::new(),
         }
     }
 }
@@ -209,17 +210,26 @@ impl QueryParser for DefaultQueryParser {
         if sql.is_empty() || fixtures::matches(sql) {
             return Ok(SqlPlan {
                 query: sql.to_owned(),
+                statement: None,
                 plan: None,
                 schema: None,
             });
         }
 
-        let sql = fixtures::rewrite_sql(sql);
-        let sql = sql.as_ref();
+        let sql = if let Ok(mut statements) = self.compatibility_parser.parse(sql) {
+            statements.remove(0).to_string()
+        } else {
+            // bypass the error: it can run into error because of different
+            // versions of sqlparser
+            sql.to_string()
+        };
 
-        let mut stmts =
-            ParserContext::create_with_dialect(sql, &PostgreSqlDialect {}, ParseOptions::default())
-                .map_err(convert_err)?;
+        let mut stmts = ParserContext::create_with_dialect(
+            &sql,
+            &PostgreSqlDialect {},
+            ParseOptions::default(),
+        )
+        .map_err(convert_err)?;
         if stmts.len() != 1 {
             Err(PgWireError::UserError(Box::new(ErrorInfo::from(
                 PgErrorCode::Ec42P14,
@@ -229,7 +239,7 @@ impl QueryParser for DefaultQueryParser {
 
             let describe_result = self
                 .query_handler
-                .do_describe(stmt, query_ctx)
+                .do_describe(stmt.clone(), query_ctx)
                 .await
                 .map_err(convert_err)?;
 
@@ -244,7 +254,8 @@ impl QueryParser for DefaultQueryParser {
             };
 
             Ok(SqlPlan {
-                query: sql.to_owned(),
+                query: sql.clone(),
+                statement: Some(stmt),
                 plan,
                 schema,
             })
@@ -261,12 +272,12 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         self.query_parser.clone()
     }
 
-    async fn do_query<'a, C>(
+    async fn do_query<C>(
         &self,
         client: &mut C,
         portal: &Portal<Self::Statement>,
         _max_rows: usize,
-    ) -> PgWireResult<Response<'a>>
+    ) -> PgWireResult<Response>
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: Debug,
@@ -300,7 +311,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
                 .context(DataFusionSnafu)
                 .map_err(convert_err)?;
             self.query_handler
-                .do_exec_plan(plan, query_ctx.clone())
+                .do_exec_plan(sql_plan.statement.clone(), plan, query_ctx.clone())
                 .await
         } else {
             // manually replace variables in prepared statement when no
@@ -354,13 +365,12 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         } else {
             if let Some(mut resp) =
                 fixtures::process(&sql_plan.query, self.session.new_query_context())
+                && let Response::Query(query_response) = resp.remove(0)
             {
-                if let Response::Query(query_response) = resp.remove(0) {
-                    return Ok(DescribeStatementResponse::new(
-                        param_types,
-                        (*query_response.row_schema()).clone(),
-                    ));
-                }
+                return Ok(DescribeStatementResponse::new(
+                    param_types,
+                    (*query_response.row_schema()).clone(),
+                ));
             }
 
             Ok(DescribeStatementResponse::new(param_types, vec![]))
@@ -385,12 +395,11 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         } else {
             if let Some(mut resp) =
                 fixtures::process(&sql_plan.query, self.session.new_query_context())
+                && let Response::Query(query_response) = resp.remove(0)
             {
-                if let Response::Query(query_response) = resp.remove(0) {
-                    return Ok(DescribePortalResponse::new(
-                        (*query_response.row_schema()).clone(),
-                    ));
-                }
+                return Ok(DescribePortalResponse::new(
+                    (*query_response.row_schema()).clone(),
+                ));
             }
 
             Ok(DescribePortalResponse::new(vec![]))

@@ -16,14 +16,17 @@ use std::fmt::Display;
 use std::path;
 use std::time::Duration;
 
-use common_telemetry::{debug, error, info, trace, warn};
-use opendal::layers::{LoggingInterceptor, LoggingLayer, RetryInterceptor, TracingLayer};
+use common_error::root_source;
+use common_telemetry::{debug, error, info, warn};
+use opendal::layers::{
+    LoggingInterceptor, LoggingLayer, RetryInterceptor, RetryLayer, TracingLayer,
+};
 use opendal::raw::{AccessorInfo, HttpClient, Operation};
 use opendal::{Error, ErrorKind};
 use snafu::ResultExt;
 
 use crate::config::HttpClientConfig;
-use crate::{error, ObjectStore};
+use crate::{ObjectStore, error};
 
 /// Join two paths and normalize the output dir.
 ///
@@ -132,6 +135,15 @@ pub fn with_instrument_layers(object_store: ObjectStore, path_label: bool) -> Ob
         .layer(crate::layers::build_prometheus_metrics_layer(path_label))
 }
 
+/// Adds retry layer to the object store.
+pub fn with_retry_layers(object_store: ObjectStore) -> ObjectStore {
+    object_store.layer(
+        RetryLayer::new()
+            .with_jitter()
+            .with_notify(PrintDetailedError),
+    )
+}
+
 static LOGGING_TARGET: &str = "opendal::services";
 
 struct LoggingContext<'a>(&'a [(&'a str, &'a str)]);
@@ -163,11 +175,12 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
         err: Option<&opendal::Error>,
     ) {
         if let Some(err) = err {
+            let root = root_source(err);
             // Print error if it's unexpected, otherwise in error.
             if err.kind() == ErrorKind::Unexpected {
                 error!(
                     target: LOGGING_TARGET,
-                    "service={} name={} {}: {operation} {message} {err:#?}",
+                    "service={} name={} {}: {operation} {message} {err:#?}, root={root:#?}",
                     info.scheme(),
                     info.name(),
                     LoggingContext(context),
@@ -175,7 +188,7 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
             } else {
                 debug!(
                     target: LOGGING_TARGET,
-                    "service={} name={} {}: {operation} {message} {err}",
+                    "service={} name={} {}: {operation} {message} {err}, root={root:?}",
                     info.scheme(),
                     info.name(),
                     LoggingContext(context),
@@ -183,30 +196,21 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
             };
         }
 
-        // Print debug message if operation is oneshot, otherwise in trace.
-        if operation.is_oneshot() {
-            debug!(
-                target: LOGGING_TARGET,
-                "service={} name={} {}: {operation} {message}",
-                info.scheme(),
-                info.name(),
-                LoggingContext(context),
-            );
-        } else {
-            trace!(
-                target: LOGGING_TARGET,
-                "service={} name={} {}: {operation} {message}",
-                info.scheme(),
-                info.name(),
-                LoggingContext(context),
-            );
-        };
+        debug!(
+            target: LOGGING_TARGET,
+            "service={} name={} {}: {operation} {message}",
+            info.scheme(),
+            info.name(),
+            LoggingContext(context),
+        );
     }
 }
 
 pub(crate) fn build_http_client(config: &HttpClientConfig) -> error::Result<HttpClient> {
     if config.skip_ssl_validation {
-        common_telemetry::warn!("Skipping SSL validation for object storage HTTP client. Please ensure the environment is trusted.");
+        common_telemetry::warn!(
+            "Skipping SSL validation for object storage HTTP client. Please ensure the environment is trusted."
+        );
     }
 
     let client = reqwest::ClientBuilder::new()

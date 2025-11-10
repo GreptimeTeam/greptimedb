@@ -26,8 +26,8 @@ pub(crate) struct DateFunction;
 
 impl DateFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_scalar(DateAddFunction);
-        registry.register_scalar(DateSubFunction);
-        registry.register_scalar(DateFormatFunction);
+        registry.register_scalar(DateAddFunction::default());
+        registry.register_scalar(DateSubFunction::default());
+        registry.register_scalar(DateFormatFunction::default());
     }
 }

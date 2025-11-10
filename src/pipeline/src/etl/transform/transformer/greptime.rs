@@ -24,30 +24,30 @@ use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, SemanticType};
 use coerce::{coerce_columns, coerce_value};
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::warn;
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
 use jsonb::Number;
 use once_cell::sync::OnceCell;
+use serde_json as serde_json_crate;
 use session::context::Channel;
 use snafu::OptionExt;
-use vrl::prelude::VrlValueConvert;
+use vrl::prelude::{Bytes, VrlValueConvert};
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    IdentifyPipelineColumnTypeMismatchSnafu, InvalidTimestampSnafu, ReachedMaxNestedLevelsSnafu,
-    Result, TimeIndexMustBeNonNullSnafu, TransformColumnNameMustBeUniqueSnafu,
+    IdentifyPipelineColumnTypeMismatchSnafu, InvalidTimestampSnafu, Result,
+    TimeIndexMustBeNonNullSnafu, TransformColumnNameMustBeUniqueSnafu,
     TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu, ValueMustBeMapSnafu,
 };
+use crate::etl::PipelineDocVersion;
 use crate::etl::ctx_req::ContextOpt;
 use crate::etl::field::{Field, Fields};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transforms};
-use crate::etl::PipelineDocVersion;
-use crate::{unwrap_or_continue_if_err, PipelineContext};
+use crate::{PipelineContext, truthy, unwrap_or_continue_if_err};
 
-const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
 
 /// fields not in the columns will be discarded
@@ -58,11 +58,6 @@ pub struct GreptimeTransformer {
     schema: Vec<ColumnSchema>,
 }
 
-fn truthy<V: AsRef<str>>(v: V) -> bool {
-    let v = v.as_ref().to_lowercase();
-    v == "true" || v == "1" || v == "yes" || v == "on" || v == "t"
-}
-
 /// Parameters that can be used to configure the greptime pipelines.
 #[derive(Debug, Default)]
 pub struct GreptimePipelineParams {
@@ -70,23 +65,24 @@ pub struct GreptimePipelineParams {
     /// This should not be used directly, instead, use the parsed shortcut option values.
     options: HashMap<String, String>,
 
-    /// Parsed shortcut option values
-    pub flatten_json_object: OnceCell<bool>,
     /// Whether to skip error when processing the pipeline.
     pub skip_error: OnceCell<bool>,
+    /// Max nested levels when flattening JSON object. Defaults to
+    /// `DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING` when not provided.
+    pub max_nested_levels: OnceCell<usize>,
 }
 
 impl GreptimePipelineParams {
     /// Create a `GreptimePipelineParams` from params string which is from the http header with key `x-greptime-pipeline-params`
     /// The params is in the format of `key1=value1&key2=value2`,for example:
-    /// x-greptime-pipeline-params: flatten_json_object=true
+    /// x-greptime-pipeline-params: max_nested_levels=5
     pub fn from_params(params: Option<&str>) -> Self {
         let options = Self::parse_header_str_to_map(params);
 
         Self {
             options,
             skip_error: OnceCell::new(),
-            flatten_json_object: OnceCell::new(),
+            max_nested_levels: OnceCell::new(),
         }
     }
 
@@ -94,7 +90,7 @@ impl GreptimePipelineParams {
         Self {
             options,
             skip_error: OnceCell::new(),
-            flatten_json_object: OnceCell::new(),
+            max_nested_levels: OnceCell::new(),
         }
     }
 
@@ -114,21 +110,23 @@ impl GreptimePipelineParams {
         }
     }
 
-    /// Whether to flatten the JSON object.
-    pub fn flatten_json_object(&self) -> bool {
-        *self.flatten_json_object.get_or_init(|| {
-            self.options
-                .get("flatten_json_object")
-                .map(|v| v == "true")
-                .unwrap_or(false)
-        })
-    }
-
     /// Whether to skip error when processing the pipeline.
     pub fn skip_error(&self) -> bool {
         *self
             .skip_error
             .get_or_init(|| self.options.get("skip_error").map(truthy).unwrap_or(false))
+    }
+
+    /// Max nested levels for JSON flattening. If not provided or invalid,
+    /// falls back to `DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING`.
+    pub fn max_nested_levels(&self) -> usize {
+        *self.max_nested_levels.get_or_init(|| {
+            self.options
+                .get("max_nested_levels")
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING)
+        })
     }
 }
 
@@ -139,10 +137,7 @@ impl GreptimeTransformer {
         let default = None;
 
         let transform = Transform {
-            fields: Fields::one(Field::new(
-                DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
-                None,
-            )),
+            fields: Fields::one(Field::new(greptime_timestamp().to_string(), None)),
             type_,
             default,
             index: Some(Index::Time),
@@ -183,23 +178,17 @@ impl GreptimeTransformer {
 
             column_names_set.extend(target_fields_set);
 
-            if let Some(idx) = transform.index {
-                if idx == Index::Time {
-                    match transform.fields.len() {
-                        //Safety unwrap is fine here because we have checked the length of real_fields
-                        1 => {
-                            timestamp_columns.push(transform.fields.first().unwrap().input_field())
+            if let Some(idx) = transform.index
+                && idx == Index::Time
+            {
+                match transform.fields.len() {
+                    //Safety unwrap is fine here because we have checked the length of real_fields
+                    1 => timestamp_columns.push(transform.fields.first().unwrap().input_field()),
+                    _ => {
+                        return TransformMultipleTimestampIndexSnafu {
+                            columns: transform.fields.iter().map(|x| x.input_field()).join(", "),
                         }
-                        _ => {
-                            return TransformMultipleTimestampIndexSnafu {
-                                columns: transform
-                                    .fields
-                                    .iter()
-                                    .map(|x| x.input_field())
-                                    .join(", "),
-                            }
-                            .fail();
-                        }
+                        .fail();
                     }
                 }
             }
@@ -354,7 +343,7 @@ fn calc_ts(p_ctx: &PipelineContext, values: &VrlValue) -> Result<Option<ValueDat
         Channel::Prometheus => {
             let ts = values
                 .as_object()
-                .and_then(|m| m.get(GREPTIME_TIMESTAMP))
+                .and_then(|m| m.get(greptime_timestamp()))
                 .and_then(|ts| ts.try_into_i64().ok())
                 .unwrap_or_default();
             Ok(Some(ValueData::TimestampMillisecondValue(ts)))
@@ -402,7 +391,7 @@ pub(crate) fn values_to_row(
     // skip ts column
     let ts_column_name = custom_ts
         .as_ref()
-        .map_or(DEFAULT_GREPTIME_TIMESTAMP_COLUMN, |ts| ts.get_column_name());
+        .map_or(greptime_timestamp(), |ts| ts.get_column_name());
 
     let values = values.into_object().context(ValueMustBeMapSnafu)?;
 
@@ -423,7 +412,7 @@ pub(crate) fn values_to_row(
 }
 
 fn decide_semantic(p_ctx: &PipelineContext, column_name: &str) -> i32 {
-    if p_ctx.channel == Channel::Prometheus && column_name != GREPTIME_VALUE {
+    if p_ctx.channel == Channel::Prometheus && column_name != greptime_value() {
         SemanticType::Tag as i32
     } else {
         SemanticType::Field as i32
@@ -570,7 +559,7 @@ fn identity_pipeline_inner(
     schema_info.schema.push(ColumnSchema {
         column_name: custom_ts
             .map(|ts| ts.get_column_name().to_string())
-            .unwrap_or_else(|| DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string()),
+            .unwrap_or_else(|| greptime_timestamp().to_string()),
         datatype: custom_ts.map(|c| c.get_datatype()).unwrap_or_else(|| {
             if pipeline_ctx.channel == Channel::Prometheus {
                 ColumnDataType::TimestampMillisecond
@@ -629,19 +618,14 @@ pub fn identity_pipeline(
     pipeline_ctx: &PipelineContext<'_>,
 ) -> Result<HashMap<ContextOpt, Rows>> {
     let skip_error = pipeline_ctx.pipeline_param.skip_error();
-    let input = if pipeline_ctx.pipeline_param.flatten_json_object() {
-        let mut results = Vec::with_capacity(array.len());
-        for item in array.into_iter() {
-            let result = unwrap_or_continue_if_err!(
-                flatten_object(item, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING),
-                skip_error
-            );
-            results.push(result);
-        }
-        results
-    } else {
-        array
-    };
+    let max_nested_levels = pipeline_ctx.pipeline_param.max_nested_levels();
+    // Always flatten JSON objects and stringify arrays
+    let mut input = Vec::with_capacity(array.len());
+    for item in array.into_iter() {
+        let result =
+            unwrap_or_continue_if_err!(flatten_object(item, max_nested_levels), skip_error);
+        input.push(result);
+    }
 
     identity_pipeline_inner(input, pipeline_ctx).map(|(mut schema, opt_map)| {
         if let Some(table) = table {
@@ -670,18 +654,43 @@ pub fn identity_pipeline(
 
 /// Consumes the JSON object and consumes it into a single-level object.
 ///
-/// The `max_nested_levels` parameter is used to limit the nested levels of the JSON object.
-/// The error will be returned if the nested levels is greater than the `max_nested_levels`.
+/// The `max_nested_levels` parameter is used to limit how deep to flatten nested JSON objects.
+/// When the maximum level is reached, the remaining nested structure is serialized to a JSON
+/// string and stored at the current flattened key.
 pub fn flatten_object(object: VrlValue, max_nested_levels: usize) -> Result<VrlValue> {
     let mut flattened = BTreeMap::new();
     let object = object.into_object().context(ValueMustBeMapSnafu)?;
 
     if !object.is_empty() {
         // it will use recursion to flatten the object.
-        do_flatten_object(&mut flattened, None, object, 1, max_nested_levels)?;
+        do_flatten_object(&mut flattened, None, object, 1, max_nested_levels);
     }
 
     Ok(VrlValue::Object(flattened))
+}
+
+fn vrl_value_to_serde_json(value: &VrlValue) -> serde_json_crate::Value {
+    match value {
+        VrlValue::Null => serde_json_crate::Value::Null,
+        VrlValue::Boolean(b) => serde_json_crate::Value::Bool(*b),
+        VrlValue::Integer(i) => serde_json_crate::Value::Number((*i).into()),
+        VrlValue::Float(not_nan) => serde_json_crate::Number::from_f64(not_nan.into_inner())
+            .map(serde_json_crate::Value::Number)
+            .unwrap_or(serde_json_crate::Value::Null),
+        VrlValue::Bytes(bytes) => {
+            serde_json_crate::Value::String(String::from_utf8_lossy(bytes).into_owned())
+        }
+        VrlValue::Regex(re) => serde_json_crate::Value::String(re.as_str().to_string()),
+        VrlValue::Timestamp(ts) => serde_json_crate::Value::String(ts.to_rfc3339()),
+        VrlValue::Array(arr) => {
+            serde_json_crate::Value::Array(arr.iter().map(vrl_value_to_serde_json).collect())
+        }
+        VrlValue::Object(map) => serde_json_crate::Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.to_string(), vrl_value_to_serde_json(v)))
+                .collect(),
+        ),
+    }
 }
 
 fn do_flatten_object(
@@ -690,12 +699,7 @@ fn do_flatten_object(
     object: BTreeMap<KeyString, VrlValue>,
     current_level: usize,
     max_nested_levels: usize,
-) -> Result<()> {
-    // For safety, we do not allow the depth to be greater than the max_object_depth.
-    if current_level > max_nested_levels {
-        return ReachedMaxNestedLevelsSnafu { max_nested_levels }.fail();
-    }
-
+) {
     for (key, value) in object {
         let new_key = base.map_or_else(
             || key.clone(),
@@ -704,22 +708,35 @@ fn do_flatten_object(
 
         match value {
             VrlValue::Object(object) => {
-                do_flatten_object(
-                    dest,
-                    Some(&new_key),
-                    object,
-                    current_level + 1,
-                    max_nested_levels,
-                )?;
+                if current_level >= max_nested_levels {
+                    // Reached the maximum level; stringify the remaining object.
+                    let json_string = serde_json_crate::to_string(&vrl_value_to_serde_json(
+                        &VrlValue::Object(object),
+                    ))
+                    .unwrap_or_else(|_| String::from("{}"));
+                    dest.insert(new_key, VrlValue::Bytes(Bytes::from(json_string)));
+                } else {
+                    do_flatten_object(
+                        dest,
+                        Some(&new_key),
+                        object,
+                        current_level + 1,
+                        max_nested_levels,
+                    );
+                }
             }
-            // For other types, we will directly insert them into as JSON type.
+            // Arrays are stringified to ensure no JSON column types in the result.
+            VrlValue::Array(_) => {
+                let json_string = serde_json_crate::to_string(&vrl_value_to_serde_json(&value))
+                    .unwrap_or_else(|_| String::from("[]"));
+                dest.insert(new_key, VrlValue::Bytes(Bytes::from(json_string)));
+            }
+            // Other leaf types are inserted as-is.
             _ => {
                 dest.insert(new_key, value);
             }
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -727,7 +744,7 @@ mod tests {
     use api::v1::SemanticType;
 
     use super::*;
-    use crate::{identity_pipeline, PipelineDefinition};
+    use crate::{PipelineDefinition, identity_pipeline};
 
     #[test]
     fn test_identify_pipeline() {
@@ -931,9 +948,9 @@ mod tests {
                 10,
                 Some(serde_json::json!(
                     {
-                        "a.b.c": [1,2,3],
-                        "d": ["foo","bar"],
-                        "e.f": [7,8,9],
+                        "a.b.c": "[1,2,3]",
+                        "d": "[\"foo\",\"bar\"]",
+                        "e.f": "[7,8,9]",
                         "e.g.h": 123,
                         "e.g.i": "hello",
                         "e.g.j.k": true
@@ -958,7 +975,12 @@ mod tests {
                     }
                 ),
                 3,
-                None,
+                Some(serde_json::json!(
+                    {
+                        "a.b.c": "{\"d\":[1,2,3]}",
+                        "e": "[\"foo\",\"bar\"]"
+                    }
+                )),
             ),
         ];
 
@@ -969,16 +991,5 @@ mod tests {
             let flattened_object = flatten_object(input, max_depth).ok();
             assert_eq!(flattened_object, expected);
         }
-    }
-
-    #[test]
-    fn test_greptime_pipeline_params() {
-        let params = Some("flatten_json_object=true");
-        let pipeline_params = GreptimePipelineParams::from_params(params);
-        assert!(pipeline_params.flatten_json_object());
-
-        let params = None;
-        let pipeline_params = GreptimePipelineParams::from_params(params);
-        assert!(!pipeline_params.flatten_json_object());
     }
 }

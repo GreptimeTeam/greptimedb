@@ -28,9 +28,11 @@ use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
 use common_query::Output;
+use datafusion::catalog::TableFunction;
 use datafusion_expr::{AggregateUDF, LogicalPlan};
 use datatypes::schema::Schema;
 pub use default_serializer::{DefaultPlanDecoder, DefaultSerializer};
+use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use table::TableRef;
 
@@ -84,6 +86,9 @@ pub trait QueryEngine: Send + Sync {
     /// Will override if the function with same name is already registered.
     fn register_scalar_function(&self, func: ScalarFunctionFactory);
 
+    /// Register table function
+    fn register_table_function(&self, func: Arc<TableFunction>);
+
     /// Create a DataFrame from a table.
     fn read_table(&self, table: TableRef) -> Result<DataFrame>;
 
@@ -110,6 +115,7 @@ impl QueryEngineFactory {
     ) -> Self {
         Self::new_with_plugins(
             catalog_manager,
+            None,
             region_query_handler,
             table_mutation_handler,
             procedure_service_handler,
@@ -123,6 +129,7 @@ impl QueryEngineFactory {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_plugins(
         catalog_manager: CatalogManagerRef,
+        partition_rule_manager: Option<PartitionRuleManagerRef>,
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
@@ -133,6 +140,7 @@ impl QueryEngineFactory {
     ) -> Self {
         let state = Arc::new(QueryEngineState::new(
             catalog_manager,
+            partition_rule_manager,
             region_query_handler,
             table_mutation_handler,
             procedure_service_handler,
@@ -159,6 +167,10 @@ fn register_functions(query_engine: &Arc<DatafusionQueryEngine>) {
 
     for accumulator in FUNCTION_REGISTRY.aggregate_functions() {
         query_engine.register_aggregate_function(accumulator);
+    }
+
+    for table_function in FUNCTION_REGISTRY.table_functions() {
+        query_engine.register_table_function(table_function);
     }
 }
 

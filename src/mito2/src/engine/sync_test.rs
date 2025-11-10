@@ -31,7 +31,7 @@ use super::MitoEngine;
 use crate::config::MitoConfig;
 use crate::error::Error;
 use crate::test_util::{
-    build_rows, flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
+    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
 };
 
 fn add_tag1() -> RegionAlterRequest {
@@ -71,9 +71,19 @@ async fn scan_check(
 
 #[tokio::test]
 async fn test_sync_after_flush_region() {
+    test_sync_after_flush_region_with_format(false).await;
+    test_sync_after_flush_region_with_format(true).await;
+}
+
+async fn test_sync_after_flush_region_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
     let region_id = RegionId::new(1, 1);
     env.get_schema_metadata_manager()
         .register_region_table_info(
@@ -100,7 +110,12 @@ async fn test_sync_after_flush_region() {
     put_rows(&engine, region_id, rows).await;
 
     // Open the region on the follower engine
-    let follower_engine = env.create_follower_engine(MitoConfig::default()).await;
+    let follower_engine = env
+        .create_follower_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
     follower_engine
         .handle_request(
             region_id,
@@ -111,6 +126,7 @@ async fn test_sync_after_flush_region() {
                 options: Default::default(),
                 // Ensure the region is not replayed from the WAL.
                 skip_wal_replay: true,
+                checkpoint: None,
             }),
         )
         .await
@@ -163,10 +179,20 @@ async fn test_sync_after_flush_region() {
 
 #[tokio::test]
 async fn test_sync_after_alter_region() {
+    test_sync_after_alter_region_with_format(false).await;
+    test_sync_after_alter_region_with_format(true).await;
+}
+
+async fn test_sync_after_alter_region_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -196,7 +222,12 @@ async fn test_sync_after_alter_region() {
     put_rows(&engine, region_id, rows).await;
 
     // Open the region on the follower engine
-    let follower_engine = env.create_follower_engine(MitoConfig::default()).await;
+    let follower_engine = env
+        .create_follower_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
     follower_engine
         .handle_request(
             region_id,
@@ -207,6 +238,7 @@ async fn test_sync_after_alter_region() {
                 options: Default::default(),
                 // Ensure the region is not replayed from the WAL.
                 skip_wal_replay: true,
+                checkpoint: None,
             }),
         )
         .await

@@ -16,9 +16,9 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 
+use axum::Json;
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
@@ -34,9 +34,9 @@ use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    status_code_to_http_status, CollectRecordbatchSnafu, Result, UnexpectedResultSnafu,
+    CollectRecordbatchSnafu, Result, UnexpectedResultSnafu, status_code_to_http_status,
 };
-use crate::http::header::{collect_plan_metrics, GREPTIME_DB_HEADER_METRICS};
+use crate::http::header::{GREPTIME_DB_HEADER_METRICS, collect_plan_metrics};
 use crate::http::prometheus::{
     PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusResponse,
 };
@@ -118,7 +118,7 @@ impl PrometheusJsonResponse {
     /// Convert from `Result<Output>`
     pub async fn from_query_result(
         result: Result<Output>,
-        metric_name: String,
+        metric_name: Option<String>,
         result_type: ValueType,
     ) -> Self {
         let response: Result<Self> = try {
@@ -182,9 +182,17 @@ impl PrometheusJsonResponse {
     /// Convert [RecordBatches] to [PromData]
     fn record_batches_to_data(
         batches: RecordBatches,
-        metric_name: String,
+        metric_name: Option<String>,
         result_type: ValueType,
     ) -> Result<PrometheusResponse> {
+        // Return empty result if no batches
+        if batches.iter().next().is_none() {
+            return Ok(PrometheusResponse::PromData(PromData {
+                result_type: result_type.to_string(),
+                ..Default::default()
+            }));
+        }
+
         // infer semantic type of each column from schema.
         // TODO(ruihang): wish there is a better way to do this.
         let mut timestamp_column_index = None;
@@ -230,7 +238,6 @@ impl PrometheusJsonResponse {
             reason: "no value column found".to_string(),
         })?;
 
-        let metric_name = (METRIC_NAME, metric_name.as_str());
         // Preserves the order of output tags.
         // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
         let mut buffer = IndexMap::<Vec<(&str, &str)>, Vec<(f64, String)>>::new();
@@ -276,9 +283,10 @@ impl PrometheusJsonResponse {
                     }
 
                     // retrieve tags
-                    // TODO(ruihang): push table name `__metric__`
                     let mut tags = Vec::with_capacity(num_label_columns + 1);
-                    tags.push(metric_name);
+                    if let Some(metric_name) = &metric_name {
+                        tags.push((METRIC_NAME, metric_name.as_str()));
+                    }
                     for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
                         // TODO(ruihang): add test for NULL tag
                         if let Some(tag_value) = tag_column.get_data(row_index) {

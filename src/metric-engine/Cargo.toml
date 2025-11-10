@@ -13,6 +13,7 @@ aquamarine.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 base64.workspace = true
+bytes.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
@@ -29,6 +30,7 @@ itertools.workspace = true
 lazy_static = "1.4"
 mito-codec.workspace = true
 mito2.workspace = true
+moka.workspace = true
 mur3 = "0.1"
 object-store.workspace = true
 prometheus.workspace = true
@@ -44,3 +46,7 @@ tracing.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 mito2 = { workspace = true, features = ["test"] }
+common-wal = { workspace = true }
+
+[package.metadata.cargo-udeps.ignore]
+normal = ["aquamarine"]

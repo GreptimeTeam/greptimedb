@@ -25,14 +25,14 @@ use common_recordbatch::DfRecordBatch;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::buffer::Buffer;
-use datatypes::arrow::datatypes::{Schema as ArrowSchema, SchemaRef};
+use datatypes::arrow::datatypes::{DataType, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::error::ArrowError;
-use datatypes::arrow::ipc::{convert, reader, root_as_message, writer, MessageHeader};
+use datatypes::arrow::ipc::{MessageHeader, convert, reader, root_as_message, writer};
 use flatbuffers::FlatBufferBuilder;
-use prost::bytes::Bytes as ProstBytes;
 use prost::Message;
+use prost::bytes::Bytes as ProstBytes;
 use snafu::{OptionExt, ResultExt};
-use vec1::{vec1, Vec1};
+use vec1::{Vec1, vec1};
 
 use crate::error;
 use crate::error::{DecodeFlightDataSnafu, InvalidFlightDataSnafu, Result};
@@ -91,7 +91,15 @@ impl FlightEncoder {
     /// be encoded to exactly one [FlightData].
     pub fn encode(&mut self, flight_message: FlightMessage) -> Vec1<FlightData> {
         match flight_message {
-            FlightMessage::Schema(schema) => vec1![self.encode_schema(schema.as_ref())],
+            FlightMessage::Schema(schema) => {
+                schema.fields().iter().for_each(|x| {
+                    if matches!(x.data_type(), DataType::Dictionary(_, _)) {
+                        self.dictionary_tracker.next_dict_id();
+                    }
+                });
+
+                vec1![self.encode_schema(schema.as_ref())]
+            }
             FlightMessage::RecordBatch(record_batch) => {
                 let (encoded_dictionaries, encoded_batch) = self
                     .data_gen
@@ -309,7 +317,7 @@ pub fn flight_messages_to_recordbatches(
                 return InvalidFlightDataSnafu {
                     reason: "First Flight Message must be schema!",
                 }
-                .fail()
+                .fail();
             }
         };
 
@@ -320,7 +328,7 @@ pub fn flight_messages_to_recordbatches(
                     return InvalidFlightDataSnafu {
                         reason: "Expect the following Flight Messages are all Recordbatches!",
                     }
-                    .fail()
+                    .fail();
                 }
             }
         }
@@ -347,7 +355,7 @@ fn build_none_flight_msg() -> Bytes {
 mod test {
     use arrow_flight::utils::batches_to_flight_data;
     use datatypes::arrow::array::{
-        DictionaryArray, Int32Array, StringArray, UInt32Array, UInt8Array,
+        DictionaryArray, Int32Array, StringArray, UInt8Array, UInt32Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
 
@@ -385,10 +393,12 @@ mod test {
 
         let result = decoder.try_decode(d2);
         assert!(matches!(result, Err(Error::InvalidFlightData { .. })));
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Should have decoded schema first!"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Should have decoded schema first!")
+        );
 
         let message = decoder.try_decode(d1)?.unwrap();
         assert!(matches!(message, FlightMessage::Schema(_)));
@@ -436,17 +446,21 @@ mod test {
 
         let result = flight_messages_to_recordbatches(vec![m2.clone(), m1.clone(), m3.clone()]);
         assert!(matches!(result, Err(Error::InvalidFlightData { .. })));
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("First Flight Message must be schema!"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("First Flight Message must be schema!")
+        );
 
         let result = flight_messages_to_recordbatches(vec![m1.clone(), m2.clone(), m1.clone()]);
         assert!(matches!(result, Err(Error::InvalidFlightData { .. })));
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Expect the following Flight Messages are all Recordbatches!"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Expect the following Flight Messages are all Recordbatches!")
+        );
 
         let actual = flight_messages_to_recordbatches(vec![m1, m2, m3]).unwrap();
         assert_eq!(actual, recordbatches);

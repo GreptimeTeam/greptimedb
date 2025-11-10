@@ -70,6 +70,7 @@ pub struct CreateFlowArgs {
     pub create_if_not_exists: bool,
     pub or_replace: bool,
     pub expire_after: Option<i64>,
+    pub eval_interval: Option<i64>,
     pub comment: Option<String>,
     pub sql: String,
     pub flow_options: HashMap<String, String>,
@@ -91,5 +92,10 @@ pub trait FlowEngine {
     async fn handle_flow_inserts(
         &self,
         request: api::v1::region::InsertRequests,
+    ) -> Result<(), Error>;
+
+    async fn handle_mark_window_dirty(
+        &self,
+        req: api::v1::flow::DirtyWindowRequests,
     ) -> Result<(), Error>;
 }

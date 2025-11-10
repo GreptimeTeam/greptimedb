@@ -15,10 +15,11 @@
 #[cfg(feature = "enterprise")]
 pub mod trigger;
 
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::Token;
 
+use crate::ast::ObjectNamePartExt;
 use crate::error::{
     self, InvalidDatabaseNameSnafu, InvalidFlowNameSnafu, InvalidTableNameSnafu, Result,
 };
@@ -85,6 +86,11 @@ impl ParserContext<'_> {
             // SHOW REGIONS
             self.parse_show_regions()
         } else if self.consume_token("CREATE") {
+            #[cfg(feature = "enterprise")]
+            if self.consume_token("TRIGGER") {
+                return self.parse_show_create_trigger();
+            }
+
             if self.consume_token("DATABASE") || self.consume_token("SCHEMA") {
                 self.parse_show_create_database()
             } else if self.consume_token("TABLE") {
@@ -124,7 +130,14 @@ impl ParserContext<'_> {
         } else if self.consume_token("PROCESSLIST") {
             self.parse_show_processlist(false)
         } else {
-            self.unsupported(self.peek_token_as_string())
+            // follow postgres dialect and assume the next token is the variable
+            let variable = self
+                .parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    expected: "a variable name",
+                    actual: self.peek_token_as_string(),
+                })?;
+            Ok(Statement::ShowVariables(ShowVariables { variable }))
         }
     }
 
@@ -135,7 +148,7 @@ impl ParserContext<'_> {
                     expected: "a database name",
                     actual: self.peek_token_as_string(),
                 })?;
-        let database_name = Self::canonicalize_object_name(raw_database_name);
+        let database_name = Self::canonicalize_object_name(raw_database_name)?;
         ensure!(
             !database_name.0.is_empty(),
             InvalidDatabaseNameSnafu {
@@ -155,7 +168,7 @@ impl ParserContext<'_> {
                 expected: "a table name",
                 actual: self.peek_token_as_string(),
             })?;
-        let table_name = Self::canonicalize_object_name(raw_table_name);
+        let table_name = Self::canonicalize_object_name(raw_table_name)?;
         ensure!(
             !table_name.0.is_empty(),
             InvalidTableNameSnafu {
@@ -184,7 +197,7 @@ impl ParserContext<'_> {
                 expected: "a flow name",
                 actual: self.peek_token_as_string(),
             })?;
-        let flow_name = Self::canonicalize_object_name(raw_flow_name);
+        let flow_name = Self::canonicalize_object_name(raw_flow_name)?;
         ensure!(
             !flow_name.0.is_empty(),
             InvalidFlowNameSnafu {
@@ -201,7 +214,7 @@ impl ParserContext<'_> {
                 expected: "a view name",
                 actual: self.peek_token_as_string(),
             })?;
-        let view_name = Self::canonicalize_object_name(raw_view_name);
+        let view_name = Self::canonicalize_object_name(raw_view_name)?;
         ensure!(
             !view_name.0.is_empty(),
             InvalidTableNameSnafu {
@@ -228,9 +241,7 @@ impl ParserContext<'_> {
         );
 
         // Safety: already checked above
-        Ok(Self::canonicalize_object_name(table_name).0[0]
-            .value
-            .clone())
+        Ok(Self::canonicalize_object_name(table_name)?.0[0].to_string_unquoted())
     }
 
     fn parse_db_name(&mut self) -> Result<Option<String>> {
@@ -251,7 +262,7 @@ impl ParserContext<'_> {
 
         // Safety: already checked above
         Ok(Some(
-            Self::canonicalize_object_name(db_name).0[0].value.clone(),
+            Self::canonicalize_object_name(db_name)?.0[0].to_string_unquoted(),
         ))
     }
 
@@ -596,6 +607,10 @@ mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
     use crate::statements::show::ShowDatabases;
+    #[cfg(feature = "enterprise")]
+    use crate::statements::show::trigger::ShowCreateTrigger;
+    #[cfg(feature = "enterprise")]
+    use crate::statements::show::trigger::ShowTriggers;
 
     #[test]
     pub fn test_show_database_all() {
@@ -866,7 +881,7 @@ mod tests {
         assert_eq!(
             stmts[0],
             Statement::ShowVariables(ShowVariables {
-                variable: ObjectName(vec![Ident::new("system_time_zone")]),
+                variable: ObjectName::from(vec![Ident::new("system_time_zone")]),
             })
         );
     }
@@ -877,7 +892,10 @@ mod tests {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let error = result.unwrap_err();
-        assert_eq!("Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: EOF", error.to_string());
+        assert_eq!(
+            "Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: EOF",
+            error.to_string()
+        );
 
         let sql = "SHOW COLUMNS from test";
         let result =
@@ -937,7 +955,10 @@ mod tests {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let error = result.unwrap_err();
-        assert_eq!("Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: EOF", error.to_string());
+        assert_eq!(
+            "Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: EOF",
+            error.to_string()
+        );
 
         let sql = "SHOW INDEX from test";
         let result =
@@ -993,7 +1014,10 @@ mod tests {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let error = result.unwrap_err();
-        assert_eq!("Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: EOF", error.to_string());
+        assert_eq!(
+            "Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: EOF",
+            error.to_string()
+        );
 
         let sql = "SHOW REGION from test";
         let result =
@@ -1152,7 +1176,7 @@ mod tests {
         assert_eq!(
             stmts[0],
             Statement::ShowCreateView(ShowCreateView {
-                view_name: ObjectName(vec![Ident::new("test")]),
+                view_name: ObjectName::from(vec![Ident::new("test")]),
             })
         );
         assert_eq!(sql, stmts[0].to_string());
@@ -1248,6 +1272,74 @@ mod tests {
             stmts[0],
             Statement::ShowProcesslist(ShowProcessList { full: true })
         );
+        assert_eq!(sql, stmts[0].to_string());
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    pub fn test_parse_show_create_trigger() {
+        let sql = "SHOW CREATE TRIGGER test_trigger";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowCreateTrigger(ShowCreateTrigger {
+                trigger_name: ObjectName::from(vec![Ident::new("test_trigger")]),
+            })
+        );
+        assert_eq!(sql, stmts[0].to_string());
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    pub fn test_parse_show_triggers() {
+        let sql = "SHOW TRIGGERS";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowTriggers(ShowTriggers {
+                kind: ShowKind::All,
+            })
+        );
+        assert_eq!(sql, stmts[0].to_string());
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    pub fn test_parse_show_triggers_like() {
+        let sql = "SHOW TRIGGERS LIKE 'test_trigger'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowTriggers(ShowTriggers {
+                kind: ShowKind::Like(Ident::with_quote('\'', "test_trigger")),
+            })
+        );
+        assert_eq!(sql, stmts[0].to_string());
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    pub fn test_parse_show_triggers_where() {
+        let sql = "SHOW TRIGGERS WHERE name = 'test_trigger'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert!(matches!(
+            &stmts[0],
+            Statement::ShowTriggers(ShowTriggers {
+                kind: ShowKind::Where(_)
+            })
+        ));
         assert_eq!(sql, stmts[0].to_string());
     }
 }

@@ -14,16 +14,18 @@
 
 use std::collections::HashMap;
 
+use axum::Json;
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tonic::codegen::http;
-use tonic::codegen::http::Response;
 
 use crate::error::RuntimeSwitchManagerSnafu;
-use crate::service::admin::util::{to_json_response, to_not_found_response};
 use crate::service::admin::HttpHandler;
+use crate::service::admin::util::{ErrorHandler, to_json_response, to_not_found_response};
 
 #[derive(Clone)]
 pub struct ProcedureManagerHandler {
@@ -40,6 +42,39 @@ pub(crate) struct ProcedureManagerStatusResponse {
 enum ProcedureManagerStatus {
     Paused,
     Running,
+}
+
+/// Get the procedure manager status.
+#[axum_macros::debug_handler]
+pub(crate) async fn status(State(handler): State<ProcedureManagerHandler>) -> Response {
+    handler
+        .get_procedure_manager_status()
+        .await
+        .map(Json)
+        .map_err(ErrorHandler::new)
+        .into_response()
+}
+
+/// Pause the procedure manager.
+#[axum_macros::debug_handler]
+pub(crate) async fn pause(State(handler): State<ProcedureManagerHandler>) -> Response {
+    handler
+        .pause_procedure_manager()
+        .await
+        .map(Json)
+        .map_err(ErrorHandler::new)
+        .into_response()
+}
+
+/// Resume the procedure manager.
+#[axum_macros::debug_handler]
+pub(crate) async fn resume(State(handler): State<ProcedureManagerHandler>) -> Response {
+    handler
+        .resume_procedure_manager()
+        .await
+        .map(Json)
+        .map_err(ErrorHandler::new)
+        .into_response()
 }
 
 impl ProcedureManagerHandler {
@@ -98,7 +133,7 @@ impl HttpHandler for ProcedureManagerHandler {
         path: &str,
         method: http::Method,
         _: &HashMap<String, String>,
-    ) -> crate::Result<Response<String>> {
+    ) -> crate::Result<http::Response<String>> {
         match method {
             http::Method::GET => {
                 if path.ends_with("status") {

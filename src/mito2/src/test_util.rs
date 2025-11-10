@@ -23,34 +23,35 @@ pub mod wal_util;
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use api::greptime_proto::v1;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column_def::options_from_column_schema;
+use api::v1::helper::row;
 use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
-use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
+use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
 use common_meta::cache::{new_schema_cache, new_table_schema_cache};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
-use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_telemetry::warn;
-use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
-use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
+use common_test_util::temp_dir::{TempDir, create_temp_dir};
+use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
+use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use moka::future::CacheBuilder;
+use object_store::ObjectStore;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
-use object_store::ObjectStore;
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
@@ -67,12 +68,15 @@ use store_api::storage::{ColumnId, RegionId};
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::config::MitoConfig;
 use crate::engine::listener::EventListenerRef;
-use crate::engine::{MitoEngine, MITO_ENGINE_NAME};
+use crate::engine::{MITO_ENGINE_NAME, MitoEngine};
 use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
+use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
+use crate::sst::FormatType;
 use crate::sst::file_purger::{FilePurgerRef, NoopFilePurger};
+use crate::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
@@ -86,7 +90,7 @@ pub(crate) fn raft_engine_log_store_factory() -> Option<LogStoreFactory> {
     Some(LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory))
 }
 
-pub(crate) fn kafka_log_store_factory() -> Option<LogStoreFactory> {
+pub fn kafka_log_store_factory() -> Option<LogStoreFactory> {
     let _ = dotenv::dotenv();
     let Ok(broker_endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
         warn!("env GT_KAFKA_ENDPOINTS not found");
@@ -103,6 +107,19 @@ pub(crate) fn kafka_log_store_factory() -> Option<LogStoreFactory> {
     }))
 }
 
+pub(crate) fn noop_partition_expr_fetcher() -> PartitionExprFetcherRef {
+    struct NoopPartitionExprFetcher;
+
+    #[async_trait::async_trait]
+    impl PartitionExprFetcher for NoopPartitionExprFetcher {
+        async fn fetch_expr(&self, _region_id: RegionId) -> Option<String> {
+            None
+        }
+    }
+
+    Arc::new(NoopPartitionExprFetcher)
+}
+
 #[template]
 #[rstest]
 #[case::with_raft_engine(raft_engine_log_store_factory())]
@@ -113,7 +130,7 @@ pub(crate) fn multiple_log_store_factories(#[case] factory: Option<LogStoreFacto
 #[template]
 #[rstest]
 #[case::with_kafka(kafka_log_store_factory())]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 pub(crate) fn single_kafka_log_store_factory(#[case] factory: Option<LogStoreFactory>) {}
 
 #[template]
@@ -123,7 +140,7 @@ pub(crate) fn single_kafka_log_store_factory(#[case] factory: Option<LogStoreFac
 pub(crate) fn single_raft_engine_log_store_factory(#[case] factory: Option<LogStoreFactory>) {}
 
 #[derive(Clone)]
-pub(crate) struct RaftEngineLogStoreFactory;
+pub struct RaftEngineLogStoreFactory;
 
 impl RaftEngineLogStoreFactory {
     async fn create_log_store<P: AsRef<Path>>(&self, wal_path: P) -> RaftEngineLogStore {
@@ -131,7 +148,7 @@ impl RaftEngineLogStoreFactory {
     }
 }
 
-pub(crate) async fn prepare_test_for_kafka_log_store(factory: &LogStoreFactory) -> Option<String> {
+pub async fn prepare_test_for_kafka_log_store(factory: &LogStoreFactory) -> Option<String> {
     if let LogStoreFactory::Kafka(factory) = factory {
         let topic = uuid::Uuid::new_v4().to_string();
         let client = factory.client().await;
@@ -169,7 +186,7 @@ pub(crate) async fn append_noop_record(client: &Client, topic: &str) {
         .unwrap();
 }
 #[derive(Clone)]
-pub(crate) struct KafkaLogStoreFactory {
+pub struct KafkaLogStoreFactory {
     broker_endpoints: Vec<String>,
 }
 
@@ -187,7 +204,7 @@ impl KafkaLogStoreFactory {
 }
 
 #[derive(Clone)]
-pub(crate) enum LogStoreFactory {
+pub enum LogStoreFactory {
     RaftEngine(RaftEngineLogStoreFactory),
     Kafka(KafkaLogStoreFactory),
 }
@@ -208,7 +225,9 @@ pub struct TestEnv {
     log_store_factory: LogStoreFactory,
     object_store_manager: Option<ObjectStoreManagerRef>,
     schema_metadata_manager: SchemaMetadataManagerRef,
+    file_ref_manager: FileReferenceManagerRef,
     kv_backend: KvBackendRef,
+    partition_expr_fetcher: PartitionExprFetcherRef,
 }
 
 impl TestEnv {
@@ -242,12 +261,14 @@ impl TestEnv {
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
             schema_metadata_manager,
+            file_ref_manager: Arc::new(FileReferenceManager::new(None)),
             kv_backend,
+            partition_expr_fetcher: noop_partition_expr_fetcher(),
         }
     }
 
     /// Overwrites the original `log_store_factory`.
-    pub(crate) fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
+    pub fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
         self.log_store_factory = log_store_factory;
         self
     }
@@ -279,6 +300,8 @@ impl TestEnv {
                 log_store,
                 zelf.object_store_manager.as_ref().unwrap().clone(),
                 zelf.schema_metadata_manager.clone(),
+                zelf.file_ref_manager.clone(),
+                zelf.partition_expr_fetcher.clone(),
                 Plugins::new(),
             )
             .await
@@ -313,6 +336,7 @@ impl TestEnv {
         config: MitoConfig,
         manager: Option<WriteBufferManagerRef>,
         listener: Option<EventListenerRef>,
+        partition_expr_fetcher: Option<PartitionExprFetcherRef>,
     ) -> MitoEngine {
         let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
 
@@ -321,6 +345,10 @@ impl TestEnv {
         self.object_store_manager = Some(object_store_manager.clone());
 
         let data_home = self.data_home().display().to_string();
+
+        let partition_expr_fetcher =
+            partition_expr_fetcher.unwrap_or_else(noop_partition_expr_fetcher);
+        self.partition_expr_fetcher = partition_expr_fetcher;
 
         match log_store {
             LogStoreImpl::RaftEngine(log_store) => MitoEngine::new_for_test(
@@ -332,6 +360,8 @@ impl TestEnv {
                 listener,
                 Arc::new(StdTimeProvider),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
             )
             .await
             .unwrap(),
@@ -344,6 +374,8 @@ impl TestEnv {
                 listener,
                 Arc::new(StdTimeProvider),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
             )
             .await
             .unwrap(),
@@ -387,6 +419,8 @@ impl TestEnv {
                 listener,
                 Arc::new(StdTimeProvider),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
             )
             .await
             .unwrap(),
@@ -399,6 +433,8 @@ impl TestEnv {
                 listener,
                 Arc::new(StdTimeProvider),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
             )
             .await
             .unwrap(),
@@ -431,6 +467,8 @@ impl TestEnv {
                 listener,
                 time_provider.clone(),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
             )
             .await
             .unwrap(),
@@ -443,6 +481,8 @@ impl TestEnv {
                 listener,
                 time_provider.clone(),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
             )
             .await
             .unwrap(),
@@ -479,6 +519,8 @@ impl TestEnv {
                 log_store,
                 Arc::new(object_store_manager),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
                 Plugins::new(),
             )
             .await
@@ -488,6 +530,8 @@ impl TestEnv {
                 log_store,
                 Arc::new(object_store_manager),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
                 Plugins::new(),
             )
             .await
@@ -556,14 +600,17 @@ impl TestEnv {
             object_store,
             compress_type,
             checkpoint_distance,
+            remove_file_options: Default::default(),
         };
 
         if let Some(metadata) = initial_metadata {
             RegionManifestManager::new(
                 metadata,
+                0,
                 manifest_opts,
                 Default::default(),
                 Default::default(),
+                FormatType::PrimaryKey,
             )
             .await
             .map(Some)
@@ -645,6 +692,7 @@ pub struct CreateRequestBuilder {
     ts_type: ConcreteDataType,
     /// kafka topic name
     kafka_topic: Option<String>,
+    partition_expr_json: Option<String>,
 }
 
 impl Default for CreateRequestBuilder {
@@ -659,6 +707,7 @@ impl Default for CreateRequestBuilder {
             engine: MITO_ENGINE_NAME.to_string(),
             ts_type: ConcreteDataType::timestamp_millisecond_datatype(),
             kafka_topic: None,
+            partition_expr_json: None,
         }
     }
 }
@@ -717,6 +766,12 @@ impl CreateRequestBuilder {
         self
     }
 
+    #[must_use]
+    pub fn partition_expr_json(mut self, partition_expr_json: Option<String>) -> Self {
+        self.partition_expr_json = partition_expr_json;
+        self
+    }
+
     pub fn build(&self) -> RegionCreateRequest {
         let mut column_id = 0;
         let mut column_metadatas = Vec::with_capacity(self.tag_num + self.field_num + 1);
@@ -760,7 +815,7 @@ impl CreateRequestBuilder {
         let mut options = self.options.clone();
         if let Some(topic) = &self.kafka_topic {
             let wal_options = WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             });
             options.insert(
                 WAL_OPTIONS_KEY.to_string(),
@@ -768,12 +823,75 @@ impl CreateRequestBuilder {
             );
         }
         RegionCreateRequest {
-            engine: self.engine.to_string(),
+            engine: self.engine.clone(),
             column_metadatas,
             primary_key: self.primary_key.clone().unwrap_or(primary_key),
             options,
             table_dir: self.table_dir.clone(),
             path_type: PathType::Bare,
+            partition_expr_json: self.partition_expr_json.clone(),
+        }
+    }
+
+    pub fn build_with_index(&self) -> RegionCreateRequest {
+        let mut column_id = 0;
+        let mut column_metadatas = Vec::with_capacity(self.tag_num + self.field_num + 1);
+        let mut primary_key = Vec::with_capacity(self.tag_num);
+        let nullable = !self.all_not_null;
+        for i in 0..self.tag_num {
+            column_metadatas.push(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    format!("tag_{i}"),
+                    ConcreteDataType::string_datatype(),
+                    nullable,
+                )
+                .with_inverted_index(true),
+                semantic_type: SemanticType::Tag,
+                column_id,
+            });
+            primary_key.push(column_id);
+            column_id += 1;
+        }
+        for i in 0..self.field_num {
+            column_metadatas.push(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    format!("field_{i}"),
+                    ConcreteDataType::float64_datatype(),
+                    nullable,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id,
+            });
+            column_id += 1;
+        }
+        column_metadatas.push(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                self.ts_type.clone(),
+                // Time index is always not null.
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id,
+        });
+        let mut options = self.options.clone();
+        if let Some(topic) = &self.kafka_topic {
+            let wal_options = WalOptions::Kafka(KafkaWalOptions {
+                topic: topic.clone(),
+            });
+            options.insert(
+                WAL_OPTIONS_KEY.to_string(),
+                serde_json::to_string(&wal_options).unwrap(),
+            );
+        }
+        RegionCreateRequest {
+            engine: self.engine.clone(),
+            column_metadatas,
+            primary_key: self.primary_key.clone().unwrap_or(primary_key),
+            options,
+            table_dir: self.table_dir.clone(),
+            path_type: PathType::Bare,
+            partition_expr_json: self.partition_expr_json.clone(),
         }
     }
 }
@@ -940,18 +1058,25 @@ pub fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api::v1::C
 /// `start`, `end` are in second resolution.
 pub fn build_rows(start: usize, end: usize) -> Vec<Row> {
     (start..end)
-        .map(|i| api::v1::Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(i.to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::F64Value(i as f64)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(i as i64 * 1000)),
-                },
-            ],
+        .map(|i| {
+            row(vec![
+                ValueData::StringValue(i.to_string()),
+                ValueData::F64Value(i as f64),
+                ValueData::TimestampMillisecondValue(i as i64 * 1000),
+            ])
+        })
+        .collect()
+}
+
+/// Build rows with schema (string, ts_millis) in range `[start, end)`.
+/// `start`, `end` are in second resolution.
+pub fn build_delete_rows(start: usize, end: usize) -> Vec<Row> {
+    (start..end)
+        .map(|i| {
+            row(vec![
+                ValueData::StringValue(i.to_string()),
+                ValueData::TimestampMillisecondValue(i as i64 * 1000),
+            ])
         })
         .collect()
 }
@@ -1025,18 +1150,12 @@ pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
 pub fn build_rows_for_key(key: &str, start: usize, end: usize, value_start: usize) -> Vec<Row> {
     (start..end)
         .enumerate()
-        .map(|(idx, ts)| api::v1::Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(key.to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::F64Value((value_start + idx) as f64)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(ts as i64 * 1000)),
-                },
-            ],
+        .map(|(idx, ts)| {
+            row(vec![
+                ValueData::StringValue(key.to_string()),
+                ValueData::F64Value((value_start + idx) as f64),
+                ValueData::TimestampMillisecondValue(ts as i64 * 1000),
+            ])
         })
         .collect()
 }
@@ -1044,15 +1163,11 @@ pub fn build_rows_for_key(key: &str, start: usize, end: usize, value_start: usiz
 /// Build rows to delete for specific `key`.
 pub fn build_delete_rows_for_key(key: &str, start: usize, end: usize) -> Vec<Row> {
     (start..end)
-        .map(|ts| api::v1::Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(key.to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(ts as i64 * 1000)),
-                },
-            ],
+        .map(|ts| {
+            row(vec![
+                ValueData::StringValue(key.to_string()),
+                ValueData::TimestampMillisecondValue(ts as i64 * 1000),
+            ])
         })
         .collect()
 }
@@ -1106,6 +1221,7 @@ pub async fn reopen_region(
                 options,
                 skip_wal_replay: false,
                 path_type: PathType::Bare,
+                checkpoint: None,
             }),
         )
         .await

@@ -11,3 +11,4 @@ workspace = true
 async-trait.workspace = true
 common-procedure = { workspace = true, features = ["testing"] }
 snafu.workspace = true
+tokio.workspace = true

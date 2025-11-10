@@ -24,16 +24,16 @@ use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
-use common_meta::ddl::ProcedureExecutorRef;
-use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::{Flownode, NodeManagerRef};
+use common_meta::procedure_executor::ProcedureExecutorRef;
 use common_query::Output;
 use common_runtime::JoinHandle;
 use common_telemetry::tracing::info;
 use futures::TryStreamExt;
-use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertRequests};
+use greptime_proto::v1::flow::{FlowRequest, FlowResponse, InsertRequests, flow_server};
 use itertools::Itertools;
 use operator::delete::Deleter;
 use operator::insert::Inserter;
@@ -48,16 +48,16 @@ use servers::metrics_handler::MetricsHandler;
 use servers::server::{ServerHandler, ServerHandlers};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{Mutex, broadcast, oneshot};
 use tonic::codec::CompressionEncoding;
 use tonic::{Request, Response, Status};
 
 use crate::adapter::flownode_impl::{FlowDualEngine, FlowDualEngineRef};
-use crate::adapter::{create_worker, FlowStreamingEngineRef};
+use crate::adapter::{FlowStreamingEngineRef, create_worker};
 use crate::batching_mode::engine::BatchingEngine;
 use crate::error::{
-    to_status_with_last_err, CacheRequiredSnafu, ExternalSnafu, IllegalAuthConfigSnafu,
-    ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
+    CacheRequiredSnafu, ExternalSnafu, IllegalAuthConfigSnafu, ListFlowsSnafu, ParseAddrSnafu,
+    ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu, to_status_with_last_err,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
@@ -143,8 +143,7 @@ impl flow_server::Flow for FlowService {
         reqs: Request<DirtyWindowRequests>,
     ) -> Result<Response<FlowResponse>, Status> {
         self.dual_engine
-            .batching_engine()
-            .handle_mark_dirty_time_window(reqs.into_inner())
+            .handle_mark_window_dirty(reqs.into_inner())
             .await
             .map(Response::new)
             .map_err(to_status_with_last_err)
@@ -346,6 +345,7 @@ impl FlownodeBuilder {
             None,
             None,
             None,
+            None,
             false,
             Default::default(),
             self.opts.query.clone(),
@@ -490,7 +490,9 @@ impl<'a> FlownodeServiceBuilder<'a> {
         let config = GrpcServerConfig {
             max_recv_message_size: opts.grpc.max_recv_message_size.as_bytes() as usize,
             max_send_message_size: opts.grpc.max_send_message_size.as_bytes() as usize,
+            max_total_message_memory: opts.grpc.max_total_message_memory.as_bytes() as usize,
             tls: opts.grpc.tls.clone(),
+            max_connection_age: opts.grpc.max_connection_age,
         };
         let service = flownode_server.create_flow_service();
         let runtime = common_runtime::global_runtime();

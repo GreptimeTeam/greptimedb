@@ -12,6 +12,7 @@ on:
       - 'docker/**'
       - '.gitignore'
       - 'grafana/**'
+      - 'Makefile'
   workflow_dispatch:
 
 name: CI
@@ -612,15 +613,20 @@ jobs:
           - name: "MySQL Kvbackend"
             opts: "--setup-mysql"
             kafka: false
+          - name: "Flat format"
+            opts: "--enable-flat-format"
+            kafka: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+
       - if: matrix.mode.kafka
         name: Setup kafka server
         working-directory: tests-integration/fixtures
-        run: docker compose up -d --wait kafka
+        run:  ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait kafka
+
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -629,7 +635,7 @@ jobs:
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
       - name: Run sqlness
-        run: RUST_BACKTRACE=1 ./bins/sqlness-runner ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
       - name: Upload sqlness logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -682,6 +688,30 @@ jobs:
       - name: Run cargo clippy
         run: make clippy
 
+  check-udeps:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Check Unused Dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "check-udeps"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-udeps
+        run: cargo install cargo-udeps --locked
+      - name: Check unused dependencies
+        run: make check-udeps
+
   conflict-check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Check for conflict
@@ -697,7 +727,7 @@ jobs:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'merge_group' }}
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 60
-    needs:  [conflict-check, clippy, fmt]
+    needs: [conflict-check, clippy, fmt, check-udeps]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -709,7 +739,7 @@ jobs:
       - name: Install toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-            cache: false
+          cache: false
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -719,9 +749,11 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
+
       - name: Setup external services
         working-directory: tests-integration/fixtures
-        run: docker compose up -d --wait
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
+
       - name: Run nextest cases
         run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend
         env:
@@ -738,8 +770,11 @@ jobs:
           GT_MINIO_ACCESS_KEY: superpower_password
           GT_MINIO_REGION: us-west-2
           GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
+          GT_ETCD_TLS_ENDPOINTS: https://127.0.0.1:2378
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_POSTGRES15_ENDPOINTS: postgres://test_user:test_password@127.0.0.1:5433/postgres
+          GT_POSTGRES15_SCHEMA: test_schema
           GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
@@ -772,9 +807,11 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+
       - name: Setup external services
         working-directory: tests-integration/fixtures
-        run: docker compose up -d --wait
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
+
       - name: Run nextest cases
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend
         env:
@@ -790,8 +827,11 @@ jobs:
           GT_MINIO_ACCESS_KEY: superpower_password
           GT_MINIO_REGION: us-west-2
           GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
+          GT_ETCD_TLS_ENDPOINTS: https://127.0.0.1:2378
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_POSTGRES15_ENDPOINTS: postgres://test_user:test_password@127.0.0.1:5433/postgres
+          GT_POSTGRES15_SCHEMA: test_schema
           GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093

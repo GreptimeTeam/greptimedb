@@ -18,23 +18,23 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
 use api::v1::{
-    column_def, AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr, column_def,
 };
 #[cfg(feature = "enterprise")]
 use api::v1::{
-    meta::CreateTriggerTask as PbCreateTriggerTask, CreateTriggerExpr as PbCreateTriggerExpr,
+    CreateTriggerExpr as PbCreateTriggerExpr, meta::CreateTriggerTask as PbCreateTriggerTask,
 };
 use catalog::CatalogManagerRef;
 use chrono::Utc;
-use common_catalog::consts::{is_readonly_schema, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_base::regex_pattern::NAME_PATTERN_REG;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_readonly_schema};
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::create_flow::FlowType;
-use common_meta::ddl::ExecutorContext;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
-use common_meta::key::NAME_PATTERN;
+use common_meta::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
 use common_meta::rpc::ddl::trigger::CreateTriggerTask;
 #[cfg(feature = "enterprise")]
@@ -46,25 +46,25 @@ use common_meta::rpc::ddl::{
 use common_query::Output;
 use common_sql::convert::sql_value_to_value;
 use common_telemetry::{debug, info, tracing, warn};
-use common_time::Timezone;
+use common_time::{Timestamp, Timezone};
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{RawSchema, Schema};
 use datatypes::value::Value;
-use lazy_static::lazy_static;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::multi_dim::MultiDimPartitionRule;
 use query::parser::QueryStatement;
 use query::plan::extract_and_rewrite_full_table_names;
 use query::query_engine::DefaultSerializer;
 use query::sql::create_table_stmt;
-use regex::Regex;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::parser::{ParseOptions, ParserContext};
-use sql::statements::alter::{AlterDatabase, AlterTable};
+#[cfg(feature = "enterprise")]
+use sql::statements::alter::trigger::AlterTrigger;
+use sql::statements::alter::{AlterDatabase, AlterTable, AlterTableOperation};
 #[cfg(feature = "enterprise")]
 use sql::statements::create::trigger::CreateTrigger;
 use sql::statements::create::{
@@ -74,29 +74,25 @@ use sql::statements::statement::Statement;
 use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
-use table::requests::{AlterKind, AlterTableRequest, TableOptions, COMMENT_KEY};
+use table::requests::{AlterKind, AlterTableRequest, COMMENT_KEY, TableOptions};
 use table::table_name::TableName;
-use table::TableRef;
 
 use crate::error::{
     self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu,
     EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu, FlowNotFoundSnafu,
     InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu,
-    InvalidViewNameSnafu, InvalidViewStmtSnafu, PartitionExprToPbSnafu, Result, SchemaInUseSnafu,
-    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
-    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
-    ViewAlreadyExistsSnafu,
+    InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu, PartitionExprToPbSnafu, Result,
+    SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper;
-use crate::statement::show::create_partitions_stmt;
 use crate::statement::StatementExecutor;
-
-lazy_static! {
-    pub static ref NAME_PATTERN_REG: Regex = Regex::new(&format!("^{NAME_PATTERN}$")).unwrap();
-}
+use crate::statement::show::create_partitions_stmt;
 
 impl StatementExecutor {
     pub fn catalog_manager(&self) -> CatalogManagerRef {
@@ -220,13 +216,13 @@ impl StatementExecutor {
                 .table_options
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
+            if let Some(partitions) = partitions.as_ref()
+                && !partitions.exprs.is_empty()
+            {
+                self.validate_logical_table_partition_rule(create_table, partitions, &query_ctx)
+                    .await?;
+            }
             // Create logical tables
-            ensure!(
-                partitions.is_none(),
-                InvalidPartitionRuleSnafu {
-                    reason: "logical table in metric engine should not have partition rule, it will be inherited from physical table",
-                }
-            );
             self.create_logical_tables(std::slice::from_ref(create_table), query_ctx)
                 .await?
                 .into_iter()
@@ -377,9 +373,16 @@ impl StatementExecutor {
             .await?;
 
         let table_ids = resp.table_ids;
-        ensure!(table_ids.len() == raw_tables_info.len(), CreateLogicalTablesSnafu {
-            reason: format!("The number of tables is inconsistent with the expected number to be created, expected: {}, actual: {}", raw_tables_info.len(), table_ids.len())
-        });
+        ensure!(
+            table_ids.len() == raw_tables_info.len(),
+            CreateLogicalTablesSnafu {
+                reason: format!(
+                    "The number of tables is inconsistent with the expected number to be created, expected: {}, actual: {}",
+                    raw_tables_info.len(),
+                    table_ids.len()
+                )
+            }
+        );
         info!("Successfully created logical tables: {:?}", table_ids);
 
         for (i, table_info) in raw_tables_info.iter_mut().enumerate() {
@@ -394,6 +397,73 @@ impl StatementExecutor {
             .into_iter()
             .map(|x| DistTable::table(Arc::new(x)))
             .collect())
+    }
+
+    async fn validate_logical_table_partition_rule(
+        &self,
+        create_table: &CreateTableExpr,
+        partitions: &Partitions,
+        query_ctx: &QueryContextRef,
+    ) -> Result<()> {
+        let (_, mut logical_partition_exprs) =
+            parse_partitions_for_logical_validation(create_table, partitions, query_ctx)?;
+
+        let physical_table_name = create_table
+            .table_options
+            .get(LOGICAL_TABLE_METADATA_KEY)
+            .with_context(|| CreateLogicalTablesSnafu {
+                reason: format!(
+                    "expect `{LOGICAL_TABLE_METADATA_KEY}` option on creating logical table"
+                ),
+            })?;
+
+        let physical_table = self
+            .catalog_manager
+            .table(
+                &create_table.catalog_name,
+                &create_table.schema_name,
+                physical_table_name,
+                Some(query_ctx),
+            )
+            .await
+            .context(CatalogSnafu)?
+            .context(TableNotFoundSnafu {
+                table_name: physical_table_name.clone(),
+            })?;
+
+        let physical_table_info = physical_table.table_info();
+        let partition_rule = self
+            .partition_manager
+            .find_table_partition_rule(&physical_table_info)
+            .await
+            .context(error::FindTablePartitionRuleSnafu {
+                table_name: physical_table_name.clone(),
+            })?;
+
+        let multi_dim_rule = partition_rule
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MultiDimPartitionRule>()
+            .context(InvalidPartitionRuleSnafu {
+                reason: "physical table partition rule is not range-based",
+            })?;
+
+        // TODO(ruihang): project physical partition exprs to logical partition column
+        let mut physical_partition_exprs = multi_dim_rule.exprs().to_vec();
+        logical_partition_exprs.sort_unstable();
+        physical_partition_exprs.sort_unstable();
+
+        ensure!(
+            physical_partition_exprs == logical_partition_exprs,
+            InvalidPartitionRuleSnafu {
+                reason: format!(
+                    "logical table partition rule must match the corresponding physical table's\n logical table partition exprs:\t\t {:?}\n physical table partition exprs:\t {:?}",
+                    logical_partition_exprs, physical_partition_exprs
+                ),
+            }
+        );
+
+        Ok(())
     }
 
     #[cfg(feature = "enterprise")]
@@ -1005,7 +1075,7 @@ impl StatementExecutor {
             let schema = if expr.schema_name.is_empty() {
                 query_context.current_schema()
             } else {
-                expr.schema_name.to_string()
+                expr.schema_name.clone()
             };
             let table_name = &expr.table_name;
             let table = self
@@ -1149,6 +1219,7 @@ impl StatementExecutor {
     pub async fn truncate_table(
         &self,
         table_name: TableName,
+        time_ranges: Vec<(Timestamp, Timestamp)>,
         query_context: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
@@ -1172,7 +1243,7 @@ impl StatementExecutor {
                 table_name: table_name.to_string(),
             })?;
         let table_id = table.table_info().table_id();
-        self.truncate_table_procedure(&table_name, table_id, query_context)
+        self.truncate_table_procedure(&table_name, table_id, time_ranges, query_context)
             .await?;
 
         Ok(Output::new_with_affected_rows(0))
@@ -1184,6 +1255,17 @@ impl StatementExecutor {
         alter_table: AlterTable,
         query_context: QueryContextRef,
     ) -> Result<Output> {
+        if matches!(
+            alter_table.alter_operation(),
+            AlterTableOperation::Repartition { .. }
+        ) {
+            let _request = expr_helper::to_repartition_request(alter_table, &query_context)?;
+            return NotSupportedSnafu {
+                feat: "ALTER TABLE REPARTITION",
+            }
+            .fail();
+        }
+
         let expr = expr_helper::to_alter_table_expr(alter_table, &query_context)?;
         self.alter_table_inner(expr, query_context).await
     }
@@ -1306,6 +1388,19 @@ impl StatementExecutor {
         Ok(Output::new_with_affected_rows(0))
     }
 
+    #[cfg(feature = "enterprise")]
+    #[tracing::instrument(skip_all)]
+    pub async fn alter_trigger(
+        &self,
+        _alter_expr: AlterTrigger,
+        _query_context: QueryContextRef,
+    ) -> Result<Output> {
+        crate::error::NotSupportedSnafu {
+            feat: "alter trigger",
+        }
+        .fail()
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn alter_database(
         &self,
@@ -1423,9 +1518,9 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest {
             query_context,
             task: DdlTask::new_drop_table(
-                table_name.catalog_name.to_string(),
-                table_name.schema_name.to_string(),
-                table_name.table_name.to_string(),
+                table_name.catalog_name.clone(),
+                table_name.schema_name.clone(),
+                table_name.table_name.clone(),
                 table_id,
                 drop_if_exists,
             ),
@@ -1475,15 +1570,17 @@ impl StatementExecutor {
         &self,
         table_name: &TableName,
         table_id: TableId,
+        time_ranges: Vec<(Timestamp, Timestamp)>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
             query_context,
             task: DdlTask::new_truncate_table(
-                table_name.catalog_name.to_string(),
-                table_name.schema_name.to_string(),
-                table_name.table_name.to_string(),
+                table_name.catalog_name.clone(),
+                table_name.schema_name.clone(),
+                table_name.table_name.clone(),
                 table_id,
+                time_ranges,
             ),
         };
 
@@ -1580,6 +1677,51 @@ pub fn parse_partitions(
     Ok((partition_exprs, partition_columns))
 }
 
+fn parse_partitions_for_logical_validation(
+    create_table: &CreateTableExpr,
+    partitions: &Partitions,
+    query_ctx: &QueryContextRef,
+) -> Result<(Vec<String>, Vec<PartitionExpr>)> {
+    let partition_columns = partitions
+        .column_list
+        .iter()
+        .map(|ident| ident.value.clone())
+        .collect::<Vec<_>>();
+
+    let column_name_and_type = partition_columns
+        .iter()
+        .map(|pc| {
+            let column = create_table
+                .column_defs
+                .iter()
+                .find(|c| &c.name == pc)
+                .context(ColumnNotFoundSnafu { msg: pc.clone() })?;
+            let column_name = &column.name;
+            let data_type = ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension.clone())
+                    .context(ColumnDataTypeSnafu)?,
+            );
+            Ok((column_name, data_type))
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
+
+    let mut partition_exprs = Vec::with_capacity(partitions.exprs.len());
+    for expr in &partitions.exprs {
+        let partition_expr = convert_one_expr(expr, &column_name_and_type, &query_ctx.timezone())?;
+        partition_exprs.push(partition_expr);
+    }
+
+    MultiDimPartitionRule::try_new(
+        partition_columns.clone(),
+        vec![],
+        partition_exprs.clone(),
+        true,
+    )
+    .context(InvalidPartitionSnafu)?;
+
+    Ok((partition_columns, partition_exprs))
+}
+
 /// Verifies an alter and returns whether it is necessary to perform the alter.
 ///
 /// # Returns
@@ -1591,7 +1733,8 @@ pub fn verify_alter(
     expr: AlterTableExpr,
 ) -> Result<bool> {
     let request: AlterTableRequest =
-        common_grpc_expr::alter_expr_to_request(table_id, expr).context(AlterExprToRequestSnafu)?;
+        common_grpc_expr::alter_expr_to_request(table_id, expr, Some(&table_info.meta))
+            .context(AlterExprToRequestSnafu)?;
 
     let AlterTableRequest {
         table_name,
@@ -1694,6 +1837,7 @@ pub fn create_table_info(
         region_numbers: vec![],
         options: table_options,
         created_on: Utc::now(),
+        updated_on: Utc::now(),
         partition_key_indices,
         column_ids: vec![],
     };
@@ -1758,7 +1902,7 @@ fn find_partition_entries(
                 .unwrap();
             let column_name = &column.name;
             let data_type = ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension)
+                ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension.clone())
                     .context(ColumnDataTypeSnafu)?,
             );
             Ok((column_name, data_type))
@@ -1798,27 +1942,27 @@ fn convert_one_expr(
         // col, val
         (Expr::Identifier(ident), Expr::Value(value)) => {
             let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(value, data_type, timezone, None)?;
+            let value = convert_value(&value.value, data_type, timezone, None)?;
             (Operand::Column(column_name), op, Operand::Value(value))
         }
         (Expr::Identifier(ident), Expr::UnaryOp { op: unary_op, expr })
             if let Expr::Value(v) = &**expr =>
         {
             let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(v, data_type, timezone, Some(*unary_op))?;
+            let value = convert_value(&v.value, data_type, timezone, Some(*unary_op))?;
             (Operand::Column(column_name), op, Operand::Value(value))
         }
         // val, col
         (Expr::Value(value), Expr::Identifier(ident)) => {
             let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(value, data_type, timezone, None)?;
+            let value = convert_value(&value.value, data_type, timezone, None)?;
             (Operand::Value(value), op, Operand::Column(column_name))
         }
         (Expr::UnaryOp { op: unary_op, expr }, Expr::Identifier(ident))
             if let Expr::Value(v) = &**expr =>
         {
             let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(v, data_type, timezone, Some(*unary_op))?;
+            let value = convert_value(&v.value, data_type, timezone, Some(*unary_op))?;
             (Operand::Value(value), op, Operand::Column(column_name))
         }
         (Expr::BinaryOp { .. }, Expr::BinaryOp { .. }) => {

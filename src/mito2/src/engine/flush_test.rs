@@ -14,8 +14,8 @@
 
 //! Flush tests for mito engine.
 
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use api::v1::Rows;
@@ -31,18 +31,28 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::listener::{FlushListener, StallListener};
 use crate::test_util::{
-    build_rows, build_rows_for_key, flush_region, kafka_log_store_factory,
-    multiple_log_store_factories, prepare_test_for_kafka_log_store, put_rows,
-    raft_engine_log_store_factory, reopen_region, rows_schema, single_kafka_log_store_factory,
-    CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv,
+    CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv, build_rows,
+    build_rows_for_key, flush_region, kafka_log_store_factory, multiple_log_store_factories,
+    prepare_test_for_kafka_log_store, put_rows, raft_engine_log_store_factory, reopen_region,
+    rows_schema, single_kafka_log_store_factory,
 };
 use crate::time_provider::TimeProvider;
 use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
 
 #[tokio::test]
 async fn test_manual_flush() {
+    test_manual_flush_with_format(false).await;
+    test_manual_flush_with_format(true).await;
+}
+
+async fn test_manual_flush_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     env.get_schema_metadata_manager()
@@ -91,14 +101,23 @@ async fn test_manual_flush() {
 
 #[tokio::test]
 async fn test_flush_engine() {
+    test_flush_engine_with_format(false).await;
+    test_flush_engine_with_format(true).await;
+}
+
+async fn test_flush_engine_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let listener = Arc::new(FlushListener::default());
     let engine = env
         .create_engine_with(
-            MitoConfig::default(),
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
             Some(write_buffer_manager.clone()),
             Some(listener.clone()),
+            None,
         )
         .await;
 
@@ -161,14 +180,23 @@ async fn test_flush_engine() {
 
 #[tokio::test]
 async fn test_write_stall() {
+    test_write_stall_with_format(false).await;
+    test_write_stall_with_format(true).await;
+}
+
+async fn test_write_stall_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let listener = Arc::new(StallListener::default());
     let engine = env
         .create_engine_with(
-            MitoConfig::default(),
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
             Some(write_buffer_manager.clone()),
             Some(listener.clone()),
+            None,
         )
         .await;
 
@@ -236,12 +264,21 @@ async fn test_write_stall() {
 
 #[tokio::test]
 async fn test_flush_empty() {
+    test_flush_empty_with_format(false).await;
+    test_flush_empty_with_format(true).await;
+}
+
+async fn test_flush_empty_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let engine = env
         .create_engine_with(
-            MitoConfig::default(),
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
             Some(write_buffer_manager.clone()),
+            None,
             None,
         )
         .await;
@@ -337,7 +374,7 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
             serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             }))
             .unwrap(),
         );
@@ -396,6 +433,11 @@ impl MockTimeProvider {
 
 #[tokio::test]
 async fn test_auto_flush_engine() {
+    test_auto_flush_engine_with_format(false).await;
+    test_auto_flush_engine_with_format(true).await;
+}
+
+async fn test_auto_flush_engine_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let listener = Arc::new(FlushListener::default());
@@ -405,6 +447,7 @@ async fn test_auto_flush_engine() {
         .create_engine_with_time(
             MitoConfig {
                 auto_flush_interval: Duration::from_secs(60 * 5),
+                default_experimental_flat_format: flat_format,
                 ..Default::default()
             },
             Some(write_buffer_manager.clone()),
@@ -467,6 +510,11 @@ async fn test_auto_flush_engine() {
 
 #[tokio::test]
 async fn test_flush_workers() {
+    test_flush_workers_with_format(false).await;
+    test_flush_workers_with_format(true).await;
+}
+
+async fn test_flush_workers_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let listener = Arc::new(FlushListener::default());
@@ -474,10 +522,12 @@ async fn test_flush_workers() {
         .create_engine_with(
             MitoConfig {
                 num_workers: 2,
+                default_experimental_flat_format: flat_format,
                 ..Default::default()
             },
             Some(write_buffer_manager.clone()),
             Some(listener.clone()),
+            None,
         )
         .await;
 
@@ -560,6 +610,7 @@ async fn test_update_topic_latest_entry_id(factory: Option<LogStoreFactory>) {
             MitoConfig::default(),
             Some(write_buffer_manager.clone()),
             Some(listener.clone()),
+            None,
         )
         .await;
     let region_id = RegionId::new(1, 1);

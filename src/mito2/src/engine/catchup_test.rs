@@ -19,7 +19,7 @@ use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
-use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
+use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::logstore::provider::RaftEngineProvider;
@@ -33,9 +33,10 @@ use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::error::Error;
 use crate::test_util::{
-    build_rows, flush_region, kafka_log_store_factory, prepare_test_for_kafka_log_store, put_rows,
+    CreateRequestBuilder, LogStoreFactory, TestEnv, build_rows, flush_region,
+    kafka_log_store_factory, prepare_test_for_kafka_log_store, put_rows,
     raft_engine_log_store_factory, rows_schema, single_kafka_log_store_factory,
-    single_raft_engine_log_store_factory, CreateRequestBuilder, LogStoreFactory, TestEnv,
+    single_raft_engine_log_store_factory,
 };
 use crate::wal::EntryId;
 
@@ -81,7 +82,7 @@ async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
             serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             }))
             .unwrap(),
         );
@@ -95,6 +96,7 @@ async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
                 path_type: store_api::region_request::PathType::Bare,
                 options,
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -126,14 +128,14 @@ async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: last_entry_id,
-                metadata_entry_id: None,
-                location_id: None,
+                ..Default::default()
             }),
         )
         .await;
     let region = follower_engine.get_region(region_id).unwrap();
     assert!(!region.is_writable());
     assert!(resp.is_ok());
+    assert!(!follower_engine.is_region_catching_up(region_id));
 
     // Scans
     let request = ScanRequest::default();
@@ -159,8 +161,7 @@ async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
                 entry_id: last_entry_id,
-                metadata_entry_id: None,
-                location_id: None,
+                ..Default::default()
             }),
         )
         .await;
@@ -202,7 +203,7 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
             serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             }))
             .unwrap(),
         );
@@ -216,6 +217,7 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
                 path_type: store_api::region_request::PathType::Bare,
                 options,
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -249,14 +251,13 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: incorrect_last_entry_id,
-                metadata_entry_id: None,
-                location_id: None,
+                ..Default::default()
             }),
         )
         .await
         .unwrap_err();
     let err = err.as_any().downcast_ref::<Error>().unwrap();
-
+    assert!(!follower_engine.is_region_catching_up(region_id));
     assert_matches!(err, Error::Unexpected { .. });
 
     // It should ignore requests to writable regions.
@@ -267,8 +268,7 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: incorrect_last_entry_id,
-                metadata_entry_id: None,
-                location_id: None,
+                ..Default::default()
             }),
         )
         .await;
@@ -306,7 +306,7 @@ async fn test_catchup_without_last_entry_id(factory: Option<LogStoreFactory>) {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
             serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             }))
             .unwrap(),
         );
@@ -320,6 +320,7 @@ async fn test_catchup_without_last_entry_id(factory: Option<LogStoreFactory>) {
                 path_type: store_api::region_request::PathType::Bare,
                 options,
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -337,9 +338,7 @@ async fn test_catchup_without_last_entry_id(factory: Option<LogStoreFactory>) {
             region_id,
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
-                entry_id: None,
-                metadata_entry_id: None,
-                location_id: None,
+                ..Default::default()
             }),
         )
         .await;
@@ -369,9 +368,7 @@ async fn test_catchup_without_last_entry_id(factory: Option<LogStoreFactory>) {
             region_id,
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
-                entry_id: None,
-                metadata_entry_id: None,
-                location_id: None,
+                ..Default::default()
             }),
         )
         .await;
@@ -411,7 +408,7 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
             serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             }))
             .unwrap(),
         );
@@ -425,6 +422,7 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
                 path_type: store_api::region_request::PathType::Bare,
                 options,
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -461,9 +459,7 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
             region_id,
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
-                entry_id: None,
-                metadata_entry_id: None,
-                location_id: None,
+                ..Default::default()
             }),
         )
         .await;
@@ -499,9 +495,7 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
             region_id,
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
-                entry_id: None,
-                metadata_entry_id: None,
-                location_id: None,
+                ..Default::default()
             }),
         )
         .await;
@@ -532,6 +526,7 @@ async fn open_region(
                 options: HashMap::new(),
                 skip_wal_replay,
                 path_type: PathType::Bare,
+                checkpoint: None,
             }),
         )
         .await
@@ -626,6 +621,7 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
                 options: HashMap::new(),
                 skip_wal_replay: true,
                 path_type: PathType::Bare,
+                checkpoint: None,
             }),
         )
         .await
@@ -646,9 +642,7 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
             region_id,
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
-                entry_id: None,
-                metadata_entry_id: None,
-                location_id: None,
+                ..Default::default()
             }),
         )
         .await;
@@ -699,8 +693,18 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
 
 #[tokio::test]
 async fn test_catchup_not_exist() {
+    test_catchup_not_exist_with_format(false).await;
+    test_catchup_not_exist_with_format(true).await;
+}
+
+async fn test_catchup_not_exist_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let non_exist_region_id = RegionId::new(1, 1);
 
@@ -709,12 +713,40 @@ async fn test_catchup_not_exist() {
             non_exist_region_id,
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
-                entry_id: None,
-                metadata_entry_id: None,
-                location_id: None,
+                ..Default::default()
             }),
         )
         .await
         .unwrap_err();
     assert_matches!(err.status_code(), StatusCode::RegionNotFound);
+}
+
+#[tokio::test]
+async fn test_catchup_region_busy() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    let worker = engine.inner.workers.worker(region_id);
+    let catchup_regions = worker.catchup_regions();
+    catchup_regions.insert_region(region_id);
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Catchup(RegionCatchupRequest {
+                set_writable: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_matches!(err.status_code(), StatusCode::RegionBusy);
 }

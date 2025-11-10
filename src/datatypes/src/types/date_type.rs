@@ -83,10 +83,10 @@ impl LogicalPrimitiveType for DateType {
             })
     }
 
-    fn cast_value_ref(value: ValueRef) -> Result<Option<Date>> {
+    fn cast_value_ref(value: &ValueRef) -> Result<Option<Date>> {
         match value {
             ValueRef::Null => Ok(None),
-            ValueRef::Date(v) => Ok(Some(v)),
+            ValueRef::Date(v) => Ok(Some(*v)),
             other => error::CastTypeSnafu {
                 msg: format!("Failed to cast value {other:?} to Date"),
             }
@@ -98,8 +98,8 @@ impl LogicalPrimitiveType for DateType {
 #[cfg(test)]
 mod tests {
     use common_base::bytes::StringBytes;
-    use common_time::timezone::set_default_timezone;
     use common_time::Timestamp;
+    use common_time::timezone::set_default_timezone;
 
     use super::*;
 

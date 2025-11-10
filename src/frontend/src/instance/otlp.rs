@@ -12,21 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
+use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
-use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
-use servers::error::{self, AuthSnafu, InFlightWriteBytesExceededSnafu, Result as ServerResult};
+use servers::error::{self, AuthSnafu, OtherSnafu, Result as ServerResult};
+use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
 use servers::query_handler::{OpenTelemetryProtocolHandler, PipelineHandlerRef};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
+use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 
 use crate::instance::Instance;
 use crate::metrics::{OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_TRACES_ROWS};
@@ -50,23 +55,62 @@ impl OpenTelemetryProtocolHandler for Instance {
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
 
-        let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request)?;
+        let input_names = request
+            .resource_metrics
+            .iter()
+            .flat_map(|r| r.scope_metrics.iter())
+            .flat_map(|s| s.metrics.iter().map(|m| &m.name))
+            .collect::<Vec<_>>();
+
+        // See [`OtlpMetricCtx`] for details
+        let is_legacy = self.check_otlp_legacy(&input_names, ctx.clone()).await?;
+
+        let mut metric_ctx = ctx
+            .protocol_ctx()
+            .get_otlp_metric_ctx()
+            .cloned()
+            .unwrap_or_default();
+        metric_ctx.is_legacy = is_legacy;
+
+        let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
+        let ctx = if !is_legacy {
+            let mut c = (*ctx).clone();
+            c.set_extension(OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM.to_string());
+            Arc::new(c)
+        } else {
+            ctx
+        };
+
         let _guard = if let Some(limiter) = &self.limiter {
-            let result = limiter.limit_row_inserts(&requests);
-            if result.is_none() {
-                return InFlightWriteBytesExceededSnafu.fail();
-            }
-            result
+            Some(
+                limiter
+                    .limit_row_inserts(&requests)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(OtherSnafu)?,
+            )
         } else {
             None
         };
 
-        self.handle_row_inserts(requests, ctx, false, false)
-            .await
-            .map_err(BoxedError::new)
-            .context(error::ExecuteGrpcQuerySnafu)
+        // If the user uses the legacy path, it is by default without metric engine.
+        if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
+            self.handle_row_inserts(requests, ctx, false, false)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)
+        } else {
+            let physical_table = ctx
+                .extension(PHYSICAL_TABLE_PARAM)
+                .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+                .to_string();
+            self.handle_metric_row_inserts(requests, ctx, physical_table.clone())
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)
+        }
     }
 
     #[tracing::instrument(skip_all)]
@@ -148,11 +192,13 @@ impl OpenTelemetryProtocolHandler for Instance {
         .await?;
 
         let _guard = if let Some(limiter) = &self.limiter {
-            let result = limiter.limit_ctx_req(&opt_req);
-            if result.is_none() {
-                return InFlightWriteBytesExceededSnafu.fail();
-            }
-            result
+            Some(
+                limiter
+                    .limit_ctx_req(&opt_req)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(OtherSnafu)?,
+            )
         } else {
             None
         };

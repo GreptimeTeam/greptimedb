@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_plugins::GREPTIME_EXEC_PREFIX;
-use datafusion::physical_plan::metrics::MetricValue;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::metrics::MetricValue;
 use headers::{Header, HeaderName, HeaderValue};
 use hyper::HeaderMap;
 use serde_json::Value;
@@ -58,6 +58,16 @@ pub mod constants {
     pub const GREPTIME_LOG_TABLE_NAME_HEADER_NAME: &str = "x-greptime-log-table-name";
     pub const GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME: &str = "x-greptime-log-extract-keys";
     pub const GREPTIME_TRACE_TABLE_NAME_HEADER_NAME: &str = "x-greptime-trace-table-name";
+
+    // OTLP headers
+    pub const GREPTIME_OTLP_METRIC_PROMOTE_ALL_RESOURCE_ATTRS_HEADER_NAME: &str =
+        "x-greptime-otlp-metric-promote-all-resource-attrs";
+    pub const GREPTIME_OTLP_METRIC_PROMOTE_RESOURCE_ATTRS_HEADER_NAME: &str =
+        "x-greptime-otlp-metric-promote-resource-attrs";
+    pub const GREPTIME_OTLP_METRIC_IGNORE_RESOURCE_ATTRS_HEADER_NAME: &str =
+        "x-greptime-otlp-metric-ignore-resource-attrs";
+    pub const GREPTIME_OTLP_METRIC_PROMOTE_SCOPE_ATTRS_HEADER_NAME: &str =
+        "x-greptime-otlp-metric-promote-scope-attrs";
 
     /// The header key that contains the pipeline params.
     pub const GREPTIME_PIPELINE_PARAMS_HEADER: &str = "x-greptime-pipeline-params";
@@ -110,10 +120,10 @@ impl Header for GreptimeDbName {
     }
 
     fn encode<E: Extend<HeaderValue>>(&self, values: &mut E) {
-        if let Some(name) = &self.0 {
-            if let Ok(value) = HeaderValue::from_str(name) {
-                values.extend(std::iter::once(value));
-            }
+        if let Some(name) = &self.0
+            && let Ok(value) = HeaderValue::from_str(name)
+        {
+            values.extend(std::iter::once(value));
         }
     }
 }

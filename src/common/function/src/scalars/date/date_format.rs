@@ -13,107 +13,142 @@
 // limitations under the License.
 
 use std::fmt;
+use std::sync::Arc;
 
 use common_error::ext::BoxedError;
-use common_query::error::{self, InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use common_query::prelude::Signature;
-use datatypes::prelude::{ConcreteDataType, MutableVector, ScalarVectorBuilder};
-use datatypes::vectors::{StringVectorBuilder, VectorRef};
-use snafu::{ensure, ResultExt};
+use common_query::error;
+use common_time::{Date, Timestamp};
+use datafusion_common::DataFusionError;
+use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder};
+use datafusion_common::arrow::datatypes::{
+    ArrowTimestampType, DataType, Date32Type, Date64Type, TimeUnit,
+};
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature};
+use snafu::ResultExt;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args, find_function_context};
 use crate::helper;
+use crate::helper::with_match_timestamp_types;
 
 /// A function that formats timestamp/date/datetime into string by the format
-#[derive(Clone, Debug, Default)]
-pub struct DateFormatFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct DateFormatFunction {
+    signature: Signature,
+}
 
-const NAME: &str = "date_format";
+impl Default for DateFormatFunction {
+    fn default() -> Self {
+        Self {
+            signature: helper::one_of_sigs2(
+                vec![
+                    DataType::Date32,
+                    DataType::Date64,
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                ],
+                vec![DataType::Utf8],
+            ),
+        }
+    }
+}
 
 impl Function for DateFormatFunction {
     fn name(&self) -> &str {
-        NAME
+        "date_format"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        helper::one_of_sigs2(
-            vec![
-                ConcreteDataType::date_datatype(),
-                ConcreteDataType::timestamp_second_datatype(),
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                ConcreteDataType::timestamp_microsecond_datatype(),
-                ConcreteDataType::timestamp_nanosecond_datatype(),
-            ],
-            vec![ConcreteDataType::string_datatype()],
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 2, have: {}",
-                    columns.len()
-                ),
-            }
-        );
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let ctx = find_function_context(&args)?;
+        let timezone = &ctx.query_ctx.timezone();
 
-        let left = &columns[0];
-        let formats = &columns[1];
+        let [left, arg1] = extract_args(self.name(), &args)?;
+        let formats = arg1.as_string::<i32>();
 
         let size = left.len();
-        let left_datatype = columns[0].data_type();
-        let mut results = StringVectorBuilder::with_capacity(size);
+        let left_datatype = left.data_type();
+        let mut builder = StringViewBuilder::with_capacity(size);
 
         match left_datatype {
-            ConcreteDataType::Timestamp(_) => {
-                for i in 0..size {
-                    let ts = left.get(i).as_timestamp();
-                    let format = formats.get(i).as_string();
-
-                    let result = match (ts, format) {
-                        (Some(ts), Some(fmt)) => Some(
-                            ts.as_formatted_string(&fmt, Some(&func_ctx.query_ctx.timezone()))
-                                .map_err(BoxedError::new)
-                                .context(error::ExecuteSnafu)?,
-                        ),
-                        _ => None,
-                    };
-
-                    results.push(result.as_deref());
-                }
+            DataType::Timestamp(_, _) => {
+                with_match_timestamp_types!(left_datatype, |$S| {
+                    let array = left.as_primitive::<$S>();
+                    for (date, format) in array.iter().zip(formats.iter()) {
+                        let result = match (date, format) {
+                            (Some(date), Some(format)) => {
+                                let ts = Timestamp::new(date, $S::UNIT.into());
+                                let x = ts.as_formatted_string(&format, Some(timezone))
+                                    .map_err(|e| DataFusionError::Execution(format!(
+                                        "cannot format {ts:?} as '{format}': {e}"
+                                    )))?;
+                                Some(x)
+                            }
+                            _ => None
+                        };
+                        builder.append_option(result.as_deref());
+                    }
+                })?;
             }
-            ConcreteDataType::Date(_) => {
+            DataType::Date32 => {
+                let left = left.as_primitive::<Date32Type>();
                 for i in 0..size {
-                    let date = left.get(i).as_date();
-                    let format = formats.get(i).as_string();
+                    let date = left.is_valid(i).then(|| Date::from(left.value(i)));
+                    let format = formats.is_valid(i).then(|| formats.value(i));
 
                     let result = match (date, format) {
                         (Some(date), Some(fmt)) => date
-                            .as_formatted_string(&fmt, Some(&func_ctx.query_ctx.timezone()))
+                            .as_formatted_string(fmt, Some(timezone))
                             .map_err(BoxedError::new)
                             .context(error::ExecuteSnafu)?,
                         _ => None,
                     };
 
-                    results.push(result.as_deref());
+                    builder.append_option(result.as_deref());
                 }
             }
-            _ => {
-                return UnsupportedInputDataTypeSnafu {
-                    function: NAME,
-                    datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
+            DataType::Date64 => {
+                let left = left.as_primitive::<Date64Type>();
+                for i in 0..size {
+                    let date = left.is_valid(i).then(|| {
+                        let ms = left.value(i);
+                        Timestamp::new_millisecond(ms)
+                    });
+                    let format = formats.is_valid(i).then(|| formats.value(i));
+
+                    let result = match (date, format) {
+                        (Some(ts), Some(fmt)) => {
+                            Some(ts.as_formatted_string(fmt, Some(timezone)).map_err(|e| {
+                                DataFusionError::Execution(format!(
+                                    "cannot format {ts:?} as '{fmt}': {e}"
+                                ))
+                            })?)
+                        }
+                        _ => None,
+                    };
+
+                    builder.append_option(result.as_deref());
                 }
-                .fail();
+            }
+            x => {
+                return Err(DataFusionError::Execution(format!(
+                    "unsupported input data type {x}"
+                )));
             }
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -127,41 +162,44 @@ impl fmt::Display for DateFormatFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::{TypeSignature, Volatility};
-    use datatypes::prelude::{ConcreteDataType, ScalarVector};
-    use datatypes::value::Value;
-    use datatypes::vectors::{DateVector, StringVector, TimestampSecondVector};
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::{
+        Date32Array, Date64Array, StringArray, TimestampSecondArray,
+    };
+    use datafusion_common::config::ConfigOptions;
+    use datafusion_expr::{TypeSignature, Volatility};
 
     use super::{DateFormatFunction, *};
+    use crate::function::FunctionContext;
 
     #[test]
     fn test_date_format_misc() {
-        let f = DateFormatFunction;
+        let f = DateFormatFunction::default();
         assert_eq!("date_format", f.name());
         assert_eq!(
-            ConcreteDataType::string_datatype(),
-            f.return_type(&[ConcreteDataType::timestamp_microsecond_datatype()])
+            DataType::Utf8View,
+            f.return_type(&[DataType::Timestamp(TimeUnit::Microsecond, None)])
                 .unwrap()
         );
         assert_eq!(
-            ConcreteDataType::string_datatype(),
-            f.return_type(&[ConcreteDataType::timestamp_second_datatype()])
+            DataType::Utf8View,
+            f.return_type(&[DataType::Timestamp(TimeUnit::Second, None)])
                 .unwrap()
         );
         assert_eq!(
-            ConcreteDataType::string_datatype(),
-            f.return_type(&[ConcreteDataType::date_datatype()]).unwrap()
+            DataType::Utf8View,
+            f.return_type(&[DataType::Date32]).unwrap()
         );
         assert!(matches!(f.signature(),
                          Signature {
                              type_signature: TypeSignature::OneOf(sigs),
                              volatility: Volatility::Immutable
-                         } if  sigs.len() == 5));
+                         } if  sigs.len() == 6));
     }
 
     #[test]
     fn test_timestamp_date_format() {
-        let f = DateFormatFunction;
+        let f = DateFormatFunction::default();
 
         let times = vec![Some(123), None, Some(42), None];
         let formats = vec![
@@ -177,32 +215,79 @@ mod tests {
             None,
         ];
 
-        let time_vector = TimestampSecondVector::from(times.clone());
-        let interval_vector = StringVector::from_vec(formats);
-        let args: Vec<VectorRef> = vec![Arc::new(time_vector), Arc::new(interval_vector)];
-        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
+        let mut config_options = ConfigOptions::default();
+        config_options.extensions.insert(FunctionContext::default());
+        let config_options = Arc::new(config_options);
+
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(TimestampSecondArray::from(times))),
+                ColumnarValue::Array(Arc::new(StringArray::from_iter_values(formats))),
+            ],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options,
+        };
+        let result = f
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(4))
+            .unwrap();
+        let vector = result.as_string_view();
 
         assert_eq!(4, vector.len());
-        for (i, _t) in times.iter().enumerate() {
-            let v = vector.get(i);
-            let result = results.get(i).unwrap();
+        for (actual, expect) in vector.iter().zip(results) {
+            assert_eq!(actual, expect);
+        }
+    }
 
-            if result.is_none() {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::String(s) => {
-                    assert_eq!(s.as_utf8(), result.unwrap());
-                }
-                _ => unreachable!(),
-            }
+    #[test]
+    fn test_date64_date_format() {
+        let f = DateFormatFunction::default();
+
+        let dates = vec![Some(123000), None, Some(42000), None];
+        let formats = vec![
+            "%Y-%m-%d %T.%3f",
+            "%Y-%m-%d %T.%3f",
+            "%Y-%m-%d %T.%3f",
+            "%Y-%m-%d %T.%3f",
+        ];
+        let results = [
+            Some("1970-01-01 00:02:03.000"),
+            None,
+            Some("1970-01-01 00:00:42.000"),
+            None,
+        ];
+
+        let mut config_options = ConfigOptions::default();
+        config_options.extensions.insert(FunctionContext::default());
+        let config_options = Arc::new(config_options);
+
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(Date64Array::from(dates))),
+                ColumnarValue::Array(Arc::new(StringArray::from_iter_values(formats))),
+            ],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options,
+        };
+        let result = f
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(4))
+            .unwrap();
+        let vector = result.as_string_view();
+
+        assert_eq!(4, vector.len());
+        for (actual, expect) in vector.iter().zip(results) {
+            assert_eq!(actual, expect);
         }
     }
 
     #[test]
     fn test_date_date_format() {
-        let f = DateFormatFunction;
+        let f = DateFormatFunction::default();
 
         let dates = vec![Some(123), None, Some(42), None];
         let formats = vec![
@@ -218,26 +303,29 @@ mod tests {
             None,
         ];
 
-        let date_vector = DateVector::from(dates.clone());
-        let interval_vector = StringVector::from_vec(formats);
-        let args: Vec<VectorRef> = vec![Arc::new(date_vector), Arc::new(interval_vector)];
-        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
+        let mut config_options = ConfigOptions::default();
+        config_options.extensions.insert(FunctionContext::default());
+        let config_options = Arc::new(config_options);
+
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(Date32Array::from(dates))),
+                ColumnarValue::Array(Arc::new(StringArray::from_iter_values(formats))),
+            ],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options,
+        };
+        let result = f
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(4))
+            .unwrap();
+        let vector = result.as_string_view();
 
         assert_eq!(4, vector.len());
-        for (i, _t) in dates.iter().enumerate() {
-            let v = vector.get(i);
-            let result = results.get(i).unwrap();
-
-            if result.is_none() {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::String(s) => {
-                    assert_eq!(s.as_utf8(), result.unwrap());
-                }
-                _ => unreachable!(),
-            }
+        for (actual, expect) in vector.iter().zip(results) {
+            assert_eq!(actual, expect);
         }
     }
 }

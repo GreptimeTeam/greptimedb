@@ -21,7 +21,7 @@ use common_meta::rpc::store::{
     PutRequest, RangeRequest,
 };
 use meta_client::client::MetaClientBuilder;
-use tracing::{event, subscriber, Level};
+use tracing::{Level, event, subscriber};
 use tracing_subscriber::FmtSubscriber;
 
 fn main() {
@@ -36,7 +36,7 @@ async fn run() {
         .timeout(Duration::from_secs(3))
         .connect_timeout(Duration::from_secs(5))
         .tcp_nodelay(true);
-    let channel_manager = ChannelManager::with_config(config);
+    let channel_manager = ChannelManager::with_config(config, None);
     let mut meta_client = MetaClientBuilder::datanode_default_options(id)
         .channel_manager(channel_manager)
         .build();

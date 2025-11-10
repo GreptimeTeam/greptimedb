@@ -22,9 +22,9 @@ use store_api::path_utils::region_name;
 use store_api::region_request::{RegionCreateRequest, RegionOpenRequest};
 use store_api::storage::RegionId;
 
+use crate::FileOptions;
 use crate::error::Result;
 use crate::manifest::FileRegionManifest;
-use crate::FileOptions;
 
 #[derive(Debug)]
 pub struct FileRegion {
@@ -124,6 +124,7 @@ mod tests {
             options: new_test_options(),
             table_dir: "create_region_dir/".to_string(),
             path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
         };
         let region_id = RegionId::new(1, 0);
 
@@ -139,10 +140,12 @@ mod tests {
         assert_eq!(region.metadata.region_id, region_id);
         assert_eq!(region.metadata.primary_key, vec![1]);
 
-        assert!(object_store
-            .exists("create_region_dir/1_0000000000/manifest/_file_manifest")
-            .await
-            .unwrap());
+        assert!(
+            object_store
+                .exists("create_region_dir/1_0000000000/manifest/_file_manifest")
+                .await
+                .unwrap()
+        );
 
         // Object exists, should fail
         let err = FileRegion::create(region_id, request, &object_store)
@@ -163,6 +166,7 @@ mod tests {
             options: new_test_options(),
             table_dir: region_dir.clone(),
             path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
         };
         let region_id = RegionId::new(1, 0);
 
@@ -176,6 +180,7 @@ mod tests {
             path_type: PathType::Bare,
             options: HashMap::default(),
             skip_wal_replay: false,
+            checkpoint: None,
         };
 
         let region = FileRegion::open(region_id, request, &object_store)
@@ -203,6 +208,7 @@ mod tests {
             options: new_test_options(),
             table_dir: region_dir.clone(),
             path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
         };
         let region_id = RegionId::new(1, 0);
 
@@ -210,16 +216,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(object_store
-            .exists("drop_region_dir/1_0000000000/manifest/_file_manifest")
-            .await
-            .unwrap());
+        assert!(
+            object_store
+                .exists("drop_region_dir/1_0000000000/manifest/_file_manifest")
+                .await
+                .unwrap()
+        );
 
         FileRegion::drop(&region, &object_store).await.unwrap();
-        assert!(!object_store
-            .exists("drop_region_dir/1_0000000000/manifest/_file_manifest")
-            .await
-            .unwrap());
+        assert!(
+            !object_store
+                .exists("drop_region_dir/1_0000000000/manifest/_file_manifest")
+                .await
+                .unwrap()
+        );
 
         let request = RegionOpenRequest {
             engine: "file".to_string(),
@@ -227,6 +237,7 @@ mod tests {
             path_type: PathType::Bare,
             options: HashMap::default(),
             skip_wal_replay: false,
+            checkpoint: None,
         };
         let err = FileRegion::open(region_id, request, &object_store)
             .await

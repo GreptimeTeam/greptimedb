@@ -40,11 +40,7 @@ mod prometheus {
                 // remove path label first, waiting for later fix
                 // TODO(shuiyisong): add dynamic path label trim for opendal
 
-                let layer = PrometheusLayer::builder()
-                    .path_label(0)
-                    .register_default()
-                    .unwrap();
-
+                let layer = PrometheusLayer::builder().register_default().unwrap();
                 Mutex::new(layer)
             })
             .lock()

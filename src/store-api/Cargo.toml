@@ -16,24 +16,33 @@ common-error.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true
 common-recordbatch.workspace = true
+common-sql.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
+datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-physical-plan.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
 humantime.workspace = true
+itertools.workspace = true
 lazy_static.workspace = true
+num_enum = "0.7"
 prometheus.workspace = true
 prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
+sqlparser.workspace = true
 strum.workspace = true
 tokio.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 async-stream.workspace = true
 common-meta.workspace = true
 serde_json.workspace = true
+
+[package.metadata.cargo-udeps.ignore]
+normal = ["aquamarine"]

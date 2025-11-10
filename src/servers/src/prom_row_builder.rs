@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::string::ToString;
 
 use api::prom_store::remote::Sample;
+use api::v1::helper::{field_column_schema, tag_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType, Value};
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
 
@@ -113,25 +114,18 @@ impl Default for TableBuilder {
 impl TableBuilder {
     pub(crate) fn with_capacity(cols: usize, rows: usize) -> Self {
         let mut col_indexes = HashMap::with_capacity_and_hasher(cols, Default::default());
-        col_indexes.insert(GREPTIME_TIMESTAMP.to_string(), 0);
-        col_indexes.insert(GREPTIME_VALUE.to_string(), 1);
+        col_indexes.insert(greptime_timestamp().to_string(), 0);
+        col_indexes.insert(greptime_value().to_string(), 1);
 
         let mut schema = Vec::with_capacity(cols);
-        schema.push(ColumnSchema {
-            column_name: GREPTIME_TIMESTAMP.to_string(),
-            datatype: ColumnDataType::TimestampMillisecond as i32,
-            semantic_type: SemanticType::Timestamp as i32,
-            datatype_extension: None,
-            options: None,
-        });
-
-        schema.push(ColumnSchema {
-            column_name: GREPTIME_VALUE.to_string(),
-            datatype: ColumnDataType::Float64 as i32,
-            semantic_type: SemanticType::Field as i32,
-            datatype_extension: None,
-            options: None,
-        });
+        schema.push(time_index_column_schema(
+            greptime_timestamp(),
+            ColumnDataType::TimestampMillisecond,
+        ));
+        schema.push(field_column_schema(
+            greptime_value(),
+            ColumnDataType::Float64,
+        ));
 
         Self {
             schema,
@@ -160,15 +154,9 @@ impl TableBuilder {
                     row[*e.get()].value_data = tag_value;
                 }
                 Entry::Vacant(e) => {
-                    let column_name = e.key().clone();
+                    self.schema
+                        .push(tag_column_schema(e.key(), ColumnDataType::String));
                     e.insert(tag_num);
-                    self.schema.push(ColumnSchema {
-                        column_name,
-                        datatype: ColumnDataType::String as i32,
-                        semantic_type: SemanticType::Tag as i32,
-                        datatype_extension: None,
-                        options: None,
-                    });
                     row.push(Value {
                         value_data: tag_value,
                     });
@@ -222,8 +210,8 @@ impl TableBuilder {
 #[cfg(test)]
 mod tests {
     use api::prom_store::remote::Sample;
-    use api::v1::value::ValueData;
     use api::v1::Value;
+    use api::v1::value::ValueData;
     use arrow::datatypes::ToByteSlice;
     use bytes::Bytes;
     use prost::DecodeError;

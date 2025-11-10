@@ -61,6 +61,7 @@ members = [
     "src/promql",
     "src/puffin",
     "src/query",
+    "src/standalone",
     "src/servers",
     "src/session",
     "src/sql",
@@ -73,8 +74,8 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.16.0"
-edition = "2021"
+version = "0.18.0"
+edition = "2024"
 license = "Apache-2.0"
 
 [workspace.lints]
@@ -98,11 +99,12 @@ rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 # See for more detaiils: https://github.com/rust-lang/cargo/issues/11329
 ahash = { version = "0.8", features = ["compile-time-rng"] }
 aquamarine = "0.6"
-arrow = { version = "54.2", features = ["prettyprint"] }
-arrow-array = { version = "54.2", default-features = false, features = ["chrono-tz"] }
-arrow-flight = "54.2"
-arrow-ipc = { version = "54.2", default-features = false, features = ["lz4", "zstd"] }
-arrow-schema = { version = "54.2", features = ["serde"] }
+arrow = { version = "56.2", features = ["prettyprint"] }
+arrow-array = { version = "56.2", default-features = false, features = ["chrono-tz"] }
+arrow-buffer = "56.2"
+arrow-flight = "56.2"
+arrow-ipc = { version = "56.2", default-features = false, features = ["lz4", "zstd"] }
+arrow-schema = { version = "56.2", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 # Remember to update axum-extra, axum-macros when updating axum
@@ -116,31 +118,37 @@ bitflags = "2.4.1"
 bytemuck = "1.12"
 bytes = { version = "1.7", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10.1"
+chrono-tz = { version = "0.10.1", features = ["case-insensitive"] }
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
+const_format = "0.2"
 crossbeam-utils = "0.8"
 dashmap = "6.1"
-datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-functions = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-functions-aggregate-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-physical-plan = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
+datafusion = "50"
+datafusion-common = "50"
+datafusion-expr = "50"
+datafusion-functions = "50"
+datafusion-functions-aggregate-common = "50"
+datafusion-optimizer = "50"
+datafusion-orc = "0.5"
+datafusion-pg-catalog = "0.12.1"
+datafusion-physical-expr = "50"
+datafusion-physical-plan = "50"
+datafusion-sql = "50"
+datafusion-substrait = "50"
 deadpool = "0.12"
 deadpool-postgres = "0.14"
 derive_builder = "0.20"
 dotenv = "0.15"
 either = "1.15"
-etcd-client = "0.14"
+etcd-client = { git = "https://github.com/GreptimeTeam/etcd-client", rev = "f62df834f0cffda355eba96691fe1a9a332b75a7", features = [
+    "tls",
+    "tls-roots",
+] }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "7fcaa3e413947a7a28d9af95812af26c1939ce78" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "14b9dc40bdc8288742b0cefc7bb024303b7429ef" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -151,7 +159,7 @@ itertools = "0.14"
 jsonb = { git = "https://github.com/databendlabs/jsonb.git", rev = "8c8d2fc294a39f3ff08909d60f718639cfba3875", default-features = false }
 lazy_static = "1.4"
 local-ip-address = "0.6"
-loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "1434ecf23a2654025d86188fb5205e7a74b225d3" }
+loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "3b7cd33234358b18ece977bf689dc6fb760f29ab" }
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "5618e779cf2bb4755b499c630fba4c35e91898cb" }
 mockall = "0.13"
 moka = "0.12"
@@ -159,9 +167,9 @@ nalgebra = "0.33"
 nix = { version = "0.30.1", default-features = false, features = ["event", "fs", "process"] }
 notify = "8.0"
 num_cpus = "1.16"
-object_store_opendal = "0.50"
+object_store_opendal = "0.54"
 once_cell = "1.18"
-opentelemetry-proto = { version = "0.27", features = [
+opentelemetry-proto = { version = "0.30", features = [
     "gen-tonic",
     "metrics",
     "trace",
@@ -169,17 +177,22 @@ opentelemetry-proto = { version = "0.27", features = [
     "logs",
 ] }
 ordered-float = { version = "4.3", features = ["serde"] }
+otel-arrow-rust = { git = "https://github.com/GreptimeTeam/otel-arrow", rev = "2d64b7c0fa95642028a8205b36fe9ea0b023ec59", features = [
+    "server",
+] }
 parking_lot = "0.12"
-parquet = { version = "54.2", default-features = false, features = ["arrow", "async", "object_store"] }
+parquet = { version = "56.2", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
+pretty_assertions = "1.4.0"
 prometheus = { version = "0.13.3", features = ["process"] }
 promql-parser = { version = "0.6", features = ["ser"] }
 prost = { version = "0.13", features = ["no-recursion-limit"] }
+prost-types = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.9"
 ratelimit = "0.10"
-regex = "1.8"
+regex = "1.12"
 regex-automata = "0.4"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
@@ -187,7 +200,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "multipart",
 ] }
-rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "8dbd01ed809f5a791833a594e85b144e36e45820", features = [
+rskafka = { git = "https://github.com/WenyXu/rskafka.git", rev = "7b0f31ed39db049b4ee2e5f1e95b5a30be9baf76", features = [
     "transport-tls",
 ] }
 rstest = "0.25"
@@ -195,35 +208,28 @@ rstest_reuse = "0.7"
 rust_decimal = "1.33"
 rustc-hash = "2.0"
 # It is worth noting that we should try to avoid using aws-lc-rs until it can be compiled on various platforms.
+hostname = "0.4.0"
 rustls = { version = "0.23.25", default-features = false }
+sea-query = "0.32"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
-shadow-rs = "1.1"
 simd-json = "0.15"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "0cf6c04490d59435ee965edd2078e8855bd8471e", features = [
-    "visitor",
-    "serde",
-] } # branch = "v0.54.x"
-sqlx = { version = "0.8", features = [
-    "runtime-tokio-rustls",
-    "mysql",
-    "postgres",
-    "chrono",
-] }
+sqlparser = { version = "0.58.0", default-features = false, features = ["std", "visitor", "serde"] }
+sqlx = { version = "0.8", default-features = false, features = ["any", "macros", "json", "runtime-tokio-rustls"] }
 strum = { version = "0.27", features = ["derive"] }
 sysinfo = "0.33"
 tempfile = "3"
-tokio = { version = "1.40", features = ["full"] }
+tokio = { version = "1.47", features = ["full"] }
 tokio-postgres = "0.7"
 tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
-tonic = { version = "0.12", features = ["tls", "gzip", "zstd"] }
+tonic = { version = "0.13", features = ["tls-ring", "gzip", "zstd"] }
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
@@ -231,7 +237,7 @@ tracing-appender = "0.2"
 tracing-opentelemetry = "0.22.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
-uuid = { version = "1.7", features = ["serde", "v4", "fast-rng"] }
+uuid = { version = "1.17", features = ["serde", "v4", "fast-rng"] }
 vrl = "0.25"
 zstd = "0.13"
 # DO_NOT_REMOVE_THIS: END_OF_EXTERNAL_DEPENDENCIES
@@ -269,6 +275,7 @@ common-recordbatch = { path = "src/common/recordbatch" }
 common-runtime = { path = "src/common/runtime" }
 common-session = { path = "src/common/session" }
 common-sql = { path = "src/common/sql" }
+common-stat = { path = "src/common/stat" }
 common-telemetry = { path = "src/common/telemetry" }
 common-test-util = { path = "src/common/test-util" }
 common-time = { path = "src/common/time" }
@@ -290,9 +297,6 @@ mito-codec = { path = "src/mito-codec" }
 mito2 = { path = "src/mito2" }
 object-store = { path = "src/object-store" }
 operator = { path = "src/operator" }
-otel-arrow-rust = { git = "https://github.com/open-telemetry/otel-arrow", rev = "5d551412d2a12e689cde4d84c14ef29e36784e51", features = [
-    "server",
-] }
 partition = { path = "src/partition" }
 pipeline = { path = "src/pipeline" }
 plugins = { path = "src/plugins" }
@@ -302,7 +306,7 @@ query = { path = "src/query" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }
-stat = { path = "src/common/stat" }
+standalone = { path = "src/standalone" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }
@@ -310,6 +314,21 @@ table = { path = "src/table" }
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
 rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
+
+[patch.crates-io]
+datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
+datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
+datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
+datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
+datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
+datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
+datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
+datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
+datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
+datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
+datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
+datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "4b519a5caa95472cc3988f5556813a583dd35af1" }                           # branch = "v0.58.x"
 
 [profile.release]
 debug = 1

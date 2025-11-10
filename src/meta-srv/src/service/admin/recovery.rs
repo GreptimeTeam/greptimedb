@@ -12,18 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::Json;
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use serde::{Deserialize, Serialize};
-use servers::http::result::error_result::ErrorResponse;
 
-pub(crate) type RecoveryHandlerRef = Arc<RecoveryHandler>;
+use crate::service::admin::util::ErrorHandler;
 
+#[derive(Clone)]
 pub(crate) struct RecoveryHandler {
     pub(crate) manager: RuntimeSwitchManagerRef,
 }
@@ -35,29 +32,36 @@ pub(crate) struct RecoveryResponse {
 
 /// Get the recovery mode.
 #[axum_macros::debug_handler]
-pub(crate) async fn get_recovery_mode(State(handler): State<RecoveryHandlerRef>) -> Response {
-    let enabled = handler.manager.recovery_mode().await;
-
-    match enabled {
-        Ok(enabled) => (StatusCode::OK, Json(RecoveryResponse { enabled })).into_response(),
-        Err(e) => ErrorResponse::from_error(e).into_response(),
-    }
+pub(crate) async fn status(State(handler): State<RecoveryHandler>) -> Response {
+    handler
+        .manager
+        .recovery_mode()
+        .await
+        .map(|enabled| Json(RecoveryResponse { enabled }))
+        .map_err(ErrorHandler::new)
+        .into_response()
 }
 
 /// Set the recovery mode.
 #[axum_macros::debug_handler]
-pub(crate) async fn set_recovery_mode(State(handler): State<RecoveryHandlerRef>) -> Response {
-    match handler.manager.set_recovery_mode().await {
-        Ok(_) => (StatusCode::OK, Json(RecoveryResponse { enabled: true })).into_response(),
-        Err(e) => ErrorResponse::from_error(e).into_response(),
-    }
+pub(crate) async fn set(State(handler): State<RecoveryHandler>) -> Response {
+    handler
+        .manager
+        .set_recovery_mode()
+        .await
+        .map(|_| Json(RecoveryResponse { enabled: true }))
+        .map_err(ErrorHandler::new)
+        .into_response()
 }
 
 /// Unset the recovery mode.
 #[axum_macros::debug_handler]
-pub(crate) async fn unset_recovery_mode(State(handler): State<RecoveryHandlerRef>) -> Response {
-    match handler.manager.unset_recovery_mode().await {
-        Ok(_) => (StatusCode::OK, Json(RecoveryResponse { enabled: false })).into_response(),
-        Err(e) => ErrorResponse::from_error(e).into_response(),
-    }
+pub(crate) async fn unset(State(handler): State<RecoveryHandler>) -> Response {
+    handler
+        .manager
+        .unset_recovery_mode()
+        .await
+        .map(|_| Json(RecoveryResponse { enabled: false }))
+        .map_err(ErrorHandler::new)
+        .into_response()
 }

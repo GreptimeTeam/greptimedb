@@ -17,16 +17,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use datatypes::data_type::ConcreteDataType;
 use datatypes::value::ValueRef;
 use memcomparable::Serializer;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::ColumnId;
 
 use crate::error::{FieldTypeMismatchSnafu, IndexEncodeNullSnafu, Result};
-use crate::row_converter::{build_primary_key_codec_with_fields, PrimaryKeyCodec, SortField};
+use crate::row_converter::{PrimaryKeyCodec, SortField, build_primary_key_codec_with_fields};
 
 /// Encodes index values according to their data types for sorting and storage use.
 pub struct IndexValueCodec;
@@ -49,9 +48,9 @@ impl IndexValueCodec {
     ) -> Result<()> {
         ensure!(!value.is_null(), IndexEncodeNullSnafu);
 
-        if matches!(field.data_type(), ConcreteDataType::String(_)) {
+        if field.data_type().is_string() {
             let value = value
-                .as_string()
+                .try_into_string()
                 .context(FieldTypeMismatchSnafu)?
                 .context(IndexEncodeNullSnafu)?;
             buffer.extend_from_slice(value.as_bytes());
@@ -160,7 +159,7 @@ mod tests {
 
     #[test]
     fn test_decode_primary_key_basic() {
-        let tag_columns = vec![
+        let tag_columns = [
             ColumnMetadata {
                 column_schema: ColumnSchema::new("tag0", ConcreteDataType::string_datatype(), true),
                 semantic_type: api::v1::SemanticType::Tag,

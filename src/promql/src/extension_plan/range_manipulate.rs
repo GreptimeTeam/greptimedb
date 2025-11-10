@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use common_telemetry::debug;
 use datafusion::arrow::array::{Array, ArrayRef, Int64Array, TimestampMillisecondArray};
 use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::{Field, SchemaRef};
@@ -37,13 +38,15 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream, Statistics,
 };
 use datafusion::sql::TableReference;
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::{Millisecond, METRIC_NUM_SERIES};
+use crate::extension_plan::{
+    METRIC_NUM_SERIES, Millisecond, resolve_column_name, serialize_column_index,
+};
 use crate::metrics::PROMQL_SERIES_COUNT;
 use crate::range_array::RangeArray;
 
@@ -62,11 +65,17 @@ pub struct RangeManipulate {
     end: Millisecond,
     interval: Millisecond,
     range: Millisecond,
-
     time_index: String,
     field_columns: Vec<String>,
     input: LogicalPlan,
     output_schema: DFSchemaRef,
+    unfix: Option<UnfixIndices>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct UnfixIndices {
+    pub time_index_idx: u64,
+    pub tag_column_indices: Vec<u64>,
 }
 
 impl RangeManipulate {
@@ -90,6 +99,7 @@ impl RangeManipulate {
             field_columns,
             input,
             output_schema,
+            unfix: None,
         })
     }
 
@@ -157,7 +167,7 @@ impl RangeManipulate {
     }
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-        let output_schema: SchemaRef = SchemaRef::new(self.output_schema.as_ref().into());
+        let output_schema: SchemaRef = self.output_schema.inner().clone();
         let properties = exec_input.properties();
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
@@ -181,13 +191,22 @@ impl RangeManipulate {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
+        let time_index_idx = serialize_column_index(self.input.schema(), &self.time_index);
+
+        let tag_column_indices = self
+            .field_columns
+            .iter()
+            .map(|name| serialize_column_index(self.input.schema(), name))
+            .collect::<Vec<u64>>();
+
         pb::RangeManipulate {
             start: self.start,
             end: self.end,
             interval: self.interval,
             range: self.range,
-            time_index: self.time_index.clone(),
-            tag_columns: self.field_columns.clone(),
+            time_index_idx,
+            tag_column_indices,
+            ..Default::default()
         }
         .encode_to_vec()
     }
@@ -200,6 +219,12 @@ impl RangeManipulate {
             schema: empty_schema.clone(),
         });
 
+        let unfix = UnfixIndices {
+            time_index_idx: pb_range_manipulate.time_index_idx,
+            tag_column_indices: pb_range_manipulate.tag_column_indices.clone(),
+        };
+        debug!("RangeManipulate deserialize unfix: {:?}", unfix);
+
         // Unlike `Self::new()`, this method doesn't check the input schema as it will fail
         // because the input schema is empty.
         // But this is Ok since datafusion guarantees to call `with_exprs_and_inputs` for the
@@ -209,10 +234,11 @@ impl RangeManipulate {
             end: pb_range_manipulate.end,
             interval: pb_range_manipulate.interval,
             range: pb_range_manipulate.range,
-            time_index: pb_range_manipulate.time_index,
-            field_columns: pb_range_manipulate.tag_columns,
+            time_index: String::new(),
+            field_columns: Vec::new(),
             input: placeholder_plan,
             output_schema: empty_schema,
+            unfix: Some(unfix),
         })
     }
 }
@@ -286,19 +312,52 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
 
         let input: LogicalPlan = inputs.pop().unwrap();
         let input_schema = input.schema();
-        let output_schema =
-            Self::calculate_output_schema(input_schema, &self.time_index, &self.field_columns)?;
 
-        Ok(Self {
-            start: self.start,
-            end: self.end,
-            interval: self.interval,
-            range: self.range,
-            time_index: self.time_index.clone(),
-            field_columns: self.field_columns.clone(),
-            input,
-            output_schema,
-        })
+        if let Some(unfix) = &self.unfix {
+            // transform indices to names
+            let time_index = resolve_column_name(
+                unfix.time_index_idx,
+                input_schema,
+                "RangeManipulate",
+                "time index",
+            )?;
+
+            let field_columns = unfix
+                .tag_column_indices
+                .iter()
+                .map(|idx| resolve_column_name(*idx, input_schema, "RangeManipulate", "tag"))
+                .collect::<DataFusionResult<Vec<String>>>()?;
+
+            let output_schema =
+                Self::calculate_output_schema(input_schema, &time_index, &field_columns)?;
+
+            Ok(Self {
+                start: self.start,
+                end: self.end,
+                interval: self.interval,
+                range: self.range,
+                time_index,
+                field_columns,
+                input,
+                output_schema,
+                unfix: None,
+            })
+        } else {
+            let output_schema =
+                Self::calculate_output_schema(input_schema, &self.time_index, &self.field_columns)?;
+
+            Ok(Self {
+                start: self.start,
+                end: self.end,
+                interval: self.interval,
+                range: self.range,
+                time_index: self.time_index.clone(),
+                field_columns: self.field_columns.clone(),
+                input,
+                output_schema,
+                unfix: None,
+            })
+        }
     }
 }
 
@@ -430,8 +489,8 @@ impl ExecutionPlan for RangeManipulateExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> DataFusionResult<Statistics> {
-        let input_stats = self.input.statistics()?;
+    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
+        let input_stats = self.input.partition_statistics(partition)?;
 
         let estimated_row_num = (self.end - self.start) as f64 / self.interval as f64;
         let estimated_total_bytes = input_stats
@@ -459,11 +518,13 @@ impl ExecutionPlan for RangeManipulateExec {
 impl DisplayAs for RangeManipulateExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(
                     f,
                     "PromRangeManipulateExec: req range=[{}..{}], interval=[{}], eval range=[{}], time index=[{}]",
-                   self.start, self.end, self.interval, self.range, self.time_index_column
+                    self.start, self.end, self.interval, self.range, self.time_index_column
                 )
             }
         }
@@ -569,7 +630,7 @@ impl RangeManipulateStream {
 
         RecordBatch::try_new(self.output_schema.clone(), new_columns)
             .map(Some)
-            .map_err(|e| DataFusionError::ArrowError(e, None))
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
     }
 
     fn build_aligned_ts_array(start: i64, end: i64, interval: i64) -> ArrayRef {
@@ -603,7 +664,13 @@ impl RangeManipulateStream {
 
         // shorten the range to calculate
         let first_ts = ts_column.value(0);
-        let first_ts_aligned = (first_ts / self.interval) * self.interval;
+        // Preserve the query's alignment pattern when optimizing start time
+        let remainder = (first_ts - self.start).rem_euclid(self.interval);
+        let first_ts_aligned = if remainder == 0 {
+            first_ts
+        } else {
+            first_ts + (self.interval - remainder)
+        };
         let last_ts = ts_column.value(ts_column.len() - 1);
         let last_ts_aligned = ((last_ts + self.range) / self.interval) * self.interval;
         let start = self.start.max(first_ts_aligned);
@@ -665,9 +732,11 @@ mod test {
         ArrowPrimitiveType, DataType, Field, Int64Type, Schema, TimestampMillisecondType,
     };
     use datafusion::common::ToDFSchema;
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
     use datafusion::physical_expr::Partitioning;
     use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-    use datafusion::physical_plan::memory::MemoryExec;
+    use datafusion::physical_plan::memory::MemoryStream;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
 
@@ -675,7 +744,7 @@ mod test {
 
     const TIME_INDEX_COLUMN: &str = "timestamp";
 
-    fn prepare_test_data() -> MemoryExec {
+    fn prepare_test_data() -> DataSourceExec {
         let schema = Arc::new(Schema::new(vec![
             Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
             Field::new("value_1", DataType::Float64, true),
@@ -700,7 +769,9 @@ mod test {
         )
         .unwrap();
 
-        MemoryExec::try_new(&[vec![data]], schema, None).unwrap()
+        DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![data]], schema, None).unwrap(),
+        ))
     }
 
     async fn do_normalize_test(
@@ -720,8 +791,8 @@ mod test {
                 &field_columns,
             )
             .unwrap()
-            .as_ref()
-            .into(),
+            .as_arrow()
+            .clone(),
         );
         let properties = PlanProperties::new(
             EquivalenceProperties::new(manipulate_output_schema.clone()),
@@ -799,7 +870,7 @@ mod test {
                 base array: PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
                 ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
             }",
-);
+        );
         do_normalize_test(0, 310_000, 30_000, 90_000, expected.clone()).await;
 
         // dump large range
@@ -809,7 +880,7 @@ mod test {
     #[tokio::test]
     async fn small_empty_range() {
         let expected = String::from(
-        "PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  \
+            "PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  \
             1970-01-01T00:00:00.001,\n  \
             1970-01-01T00:00:03.001,\n  \
             1970-01-01T00:00:06.001,\n  \
@@ -824,7 +895,70 @@ mod test {
         RangeArray { \
             base array: PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
             ranges: [Some(0..1), Some(0..0), Some(0..0), Some(0..0)] \
-        }");
+        }",
+        );
         do_normalize_test(1, 10_001, 3_000, 1_000, expected).await;
+    }
+
+    #[test]
+    fn test_calculate_range_preserves_alignment() {
+        // Test case: query starts at timestamp ending in 4000, step is 30s
+        // Data starts at different alignment - should preserve query's 4000 pattern
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "timestamp",
+            TimestampMillisecondType::DATA_TYPE,
+            false,
+        )]));
+        let empty_stream = MemoryStream::try_new(vec![], schema.clone(), None).unwrap();
+
+        let stream = RangeManipulateStream {
+            start: 1758093274000, // ends in 4000
+            end: 1758093334000,   // ends in 4000
+            interval: 30000,      // 30s step
+            range: 60000,         // 60s lookback
+            time_index: 0,
+            field_columns: vec![],
+            aligned_ts_array: Arc::new(TimestampMillisecondArray::from(vec![0i64; 0])),
+            output_schema: schema.clone(),
+            input: Box::pin(empty_stream),
+            metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            num_series: Count::new(),
+        };
+
+        // Create test data with timestamps not aligned to query pattern
+        let test_timestamps = vec![
+            1758093260000, // ends in 0000 (different alignment)
+            1758093290000, // ends in 0000
+            1758093320000, // ends in 0000
+        ];
+        let ts_array = TimestampMillisecondArray::from(test_timestamps);
+        let test_schema = Arc::new(Schema::new(vec![Field::new(
+            "timestamp",
+            TimestampMillisecondType::DATA_TYPE,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(test_schema, vec![Arc::new(ts_array)]).unwrap();
+
+        let (ranges, (start, end)) = stream.calculate_range(&batch).unwrap();
+
+        // Verify the optimized start preserves query alignment (should end in 4000)
+        assert_eq!(
+            start % 30000,
+            1758093274000 % 30000,
+            "Optimized start should preserve query alignment pattern"
+        );
+
+        // Verify we generate correct number of ranges for the alignment
+        let expected_timestamps: Vec<i64> = (start..=end).step_by(30000).collect();
+        assert_eq!(ranges.len(), expected_timestamps.len());
+
+        // Verify all generated timestamps maintain the same alignment pattern
+        for ts in expected_timestamps {
+            assert_eq!(
+                ts % 30000,
+                1758093274000 % 30000,
+                "All timestamps should maintain query alignment pattern"
+            );
+        }
     }
 }

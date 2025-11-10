@@ -22,48 +22,57 @@ use std::time::Instant;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use datafusion_common::Column;
-use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::Expr;
+use datafusion_expr::utils::expr_to_columns;
+use futures::StreamExt;
+use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
+use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
-use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
-use table::predicate::{build_time_range_predicate, Predicate};
-use tokio::sync::{mpsc, Semaphore};
+use store_api::storage::{
+    RegionId, ScanRequest, SequenceRange, TimeSeriesDistribution, TimeSeriesRowSelector,
+};
+use table::predicate::{Predicate, build_time_range_predicate};
+use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
-use crate::config::DEFAULT_SCAN_CHANNEL_SIZE;
-use crate::error::Result;
+use crate::config::{DEFAULT_MAX_CONCURRENT_SCAN_FILES, DEFAULT_SCAN_CHANNEL_SIZE};
+use crate::error::{InvalidPartitionExprSnafu, Result};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
-use crate::memtable::MemtableRange;
+use crate::memtable::{MemtableRange, RangesOptions};
 use crate::metrics::READ_SST_COUNT;
-use crate::read::compat::{self, CompatBatch};
+use crate::read::compat::{self, CompatBatch, FlatCompatBatch, PrimaryKeyCompatBatch};
 use crate::read::projection::ProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
 use crate::read::unordered_scan::UnorderedScan;
-use crate::read::{Batch, Source};
+use crate::read::{Batch, BoxedRecordBatchStream, RecordBatch, Source};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierBuilder, BloomFilterIndexApplierRef,
 };
-use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
-use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
+use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
+use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
+use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::reader::ReaderMetrics;
+
+/// Parallel scan channel size for flat format.
+const FLAT_SCAN_CHANNEL_SIZE: usize = 2;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -199,6 +208,8 @@ pub(crate) struct ScanRegion {
     cache_strategy: CacheStrategy,
     /// Capacity of the channel to send data from parallel scan tasks to the main task.
     parallel_scan_channel_size: usize,
+    /// Maximum number of SST files to scan concurrently.
+    max_concurrent_scan_files: usize,
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
     /// Whether to ignore fulltext index.
@@ -210,6 +221,8 @@ pub(crate) struct ScanRegion {
     /// Whether to filter out the deleted rows.
     /// Usually true for normal read, and false for scan for compaction.
     filter_deleted: bool,
+    /// Whether to use flat format.
+    flat_format: bool,
     #[cfg(feature = "enterprise")]
     extension_range_provider: Option<BoxedExtensionRangeProvider>,
 }
@@ -228,11 +241,13 @@ impl ScanRegion {
             request,
             cache_strategy,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
+            max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
             ignore_bloom_filter: false,
             start_time: None,
             filter_deleted: true,
+            flat_format: false,
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
@@ -245,6 +260,16 @@ impl ScanRegion {
         parallel_scan_channel_size: usize,
     ) -> Self {
         self.parallel_scan_channel_size = parallel_scan_channel_size;
+        self
+    }
+
+    /// Sets maximum number of SST files to scan concurrently.
+    #[must_use]
+    pub(crate) fn with_max_concurrent_scan_files(
+        mut self,
+        max_concurrent_scan_files: usize,
+    ) -> Self {
+        self.max_concurrent_scan_files = max_concurrent_scan_files;
         self
     }
 
@@ -277,6 +302,13 @@ impl ScanRegion {
 
     pub(crate) fn set_filter_deleted(&mut self, filter_deleted: bool) {
         self.filter_deleted = filter_deleted;
+    }
+
+    /// Sets whether to use flat format.
+    #[must_use]
+    pub(crate) fn with_flat_format(mut self, flat_format: bool) -> Self {
+        self.flat_format = flat_format;
+        self
     }
 
     #[cfg(feature = "enterprise")]
@@ -318,8 +350,8 @@ impl ScanRegion {
 
     /// Scan sequentially.
     pub(crate) async fn seq_scan(self) -> Result<SeqScan> {
-        let input = self.scan_input().await?;
-        Ok(SeqScan::new(input, false))
+        let input = self.scan_input().await?.with_compaction(false);
+        Ok(SeqScan::new(input))
     }
 
     /// Unordered scan.
@@ -357,12 +389,14 @@ impl ScanRegion {
     async fn scan_input(mut self) -> Result<ScanInput> {
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
-        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters);
+        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
-            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
-            None => ProjectionMapper::all(&self.version.metadata)?,
+            Some(p) => {
+                ProjectionMapper::new(&self.version.metadata, p.iter().copied(), self.flat_format)?
+            }
+            None => ProjectionMapper::all(&self.version.metadata, self.flat_format)?,
         };
 
         let ssts = &self.version.ssts;
@@ -393,6 +427,10 @@ impl ScanRegion {
         let memtables = self.version.memtables.list_memtables();
         // Skip empty memtables and memtables out of time range.
         let mut mem_range_builders = Vec::new();
+        let filter_mode = pre_filter_mode(
+            self.version.options.append_mode,
+            self.version.options.merge_mode(),
+        );
 
         for m in memtables {
             // check if memtable is empty by reading stats.
@@ -406,8 +444,13 @@ impl ScanRegion {
             }
             let ranges_in_memtable = m.ranges(
                 Some(mapper.column_ids()),
-                predicate.clone(),
-                self.request.sequence,
+                RangesOptions::default()
+                    .with_predicate(predicate.clone())
+                    .with_sequence(SequenceRange::new(
+                        self.request.memtable_min_sequence,
+                        self.request.memtable_max_sequence,
+                    ))
+                    .with_pre_filter_mode(filter_mode),
             )?;
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
                 // todo: we should add stats to MemtableRange
@@ -429,18 +472,25 @@ impl ScanRegion {
             self.version.options.append_mode,
         );
 
-        // Remove field filters for LastNonNull mode after logging the request.
-        self.maybe_remove_field_filters();
+        let (non_field_filters, field_filters) = self.partition_by_field_filters();
+        let inverted_index_appliers = [
+            self.build_invereted_index_applier(&non_field_filters),
+            self.build_invereted_index_applier(&field_filters),
+        ];
+        let bloom_filter_appliers = [
+            self.build_bloom_filter_applier(&non_field_filters),
+            self.build_bloom_filter_applier(&field_filters),
+        ];
+        let fulltext_index_appliers = [
+            self.build_fulltext_index_applier(&non_field_filters),
+            self.build_fulltext_index_applier(&field_filters),
+        ];
+        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
-        let inverted_index_applier = self.build_invereted_index_applier();
-        let bloom_filter_applier = self.build_bloom_filter_applier();
-        let fulltext_index_applier = self.build_fulltext_index_applier();
-        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters);
-        // The mapper always computes projected column ids as the schema of SSTs may change.
-        let mapper = match &self.request.projection {
-            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
-            None => ProjectionMapper::all(&self.version.metadata)?,
-        };
+        if self.flat_format {
+            // The batch is already large enough so we use a small channel size here.
+            self.parallel_scan_channel_size = FLAT_SCAN_CHANNEL_SIZE;
+        }
 
         let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
@@ -448,22 +498,25 @@ impl ScanRegion {
             .with_memtables(mem_range_builders)
             .with_files(files)
             .with_cache(self.cache_strategy)
-            .with_inverted_index_applier(inverted_index_applier)
-            .with_bloom_filter_index_applier(bloom_filter_applier)
-            .with_fulltext_index_applier(fulltext_index_applier)
+            .with_inverted_index_appliers(inverted_index_appliers)
+            .with_bloom_filter_index_appliers(bloom_filter_appliers)
+            .with_fulltext_index_appliers(fulltext_index_appliers)
             .with_parallel_scan_channel_size(self.parallel_scan_channel_size)
+            .with_max_concurrent_scan_files(self.max_concurrent_scan_files)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(self.filter_deleted)
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
-            .with_distribution(self.request.distribution);
+            .with_distribution(self.request.distribution)
+            .with_flat_format(self.flat_format);
 
         #[cfg(feature = "enterprise")]
         let input = if let Some(provider) = self.extension_range_provider {
             let ranges = provider
-                .find_extension_ranges(time_range, &self.request)
+                .find_extension_ranges(self.version.flushed_sequence, time_range, &self.request)
                 .await?;
+            debug!("Find extension ranges: {ranges:?}");
             input.with_extension_ranges(ranges)
         } else {
             input
@@ -487,40 +540,34 @@ impl ScanRegion {
         build_time_range_predicate(&time_index.column_schema.name, unit, &self.request.filters)
     }
 
-    /// Remove field filters if the merge mode is [MergeMode::LastNonNull].
-    fn maybe_remove_field_filters(&mut self) {
-        if self.version.options.merge_mode() != MergeMode::LastNonNull {
-            return;
-        }
-
-        // TODO(yingwen): We can ignore field filters only when there are multiple sources in the same time window.
+    /// Partitions filters into two groups: non-field filters and field filters.
+    /// Returns `(non_field_filters, field_filters)`.
+    fn partition_by_field_filters(&self) -> (Vec<Expr>, Vec<Expr>) {
         let field_columns = self
             .version
             .metadata
             .field_columns()
             .map(|col| &col.column_schema.name)
             .collect::<HashSet<_>>();
-        // Columns in the expr.
+
         let mut columns = HashSet::new();
 
-        self.request.filters.retain(|expr| {
+        self.request.filters.iter().cloned().partition(|expr| {
             columns.clear();
             // `expr_to_columns` won't return error.
             if expr_to_columns(expr, &mut columns).is_err() {
-                return false;
+                // If we can't extract columns, treat it as non-field filter
+                return true;
             }
-            for column in &columns {
-                if field_columns.contains(&column.name) {
-                    // This expr uses the field column.
-                    return false;
-                }
-            }
-            true
-        });
+            // Return true for non-field filters (partition puts true cases in first vec)
+            !columns
+                .iter()
+                .any(|column| field_columns.contains(&column.name))
+        })
     }
 
     /// Use the latest schema to build the inverted index applier.
-    fn build_invereted_index_applier(&self) -> Option<InvertedIndexApplierRef> {
+    fn build_invereted_index_applier(&self, filters: &[Expr]) -> Option<InvertedIndexApplierRef> {
         if self.ignore_inverted_index {
             return None;
         }
@@ -548,7 +595,7 @@ impl ScanRegion {
         .with_file_cache(file_cache)
         .with_inverted_index_cache(inverted_index_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
-        .build(&self.request.filters)
+        .build(filters)
         .inspect_err(|err| warn!(err; "Failed to build invereted index applier"))
         .ok()
         .flatten()
@@ -556,7 +603,7 @@ impl ScanRegion {
     }
 
     /// Use the latest schema to build the bloom filter index applier.
-    fn build_bloom_filter_applier(&self) -> Option<BloomFilterIndexApplierRef> {
+    fn build_bloom_filter_applier(&self, filters: &[Expr]) -> Option<BloomFilterIndexApplierRef> {
         if self.ignore_bloom_filter {
             return None;
         }
@@ -575,7 +622,7 @@ impl ScanRegion {
         .with_file_cache(file_cache)
         .with_bloom_filter_index_cache(bloom_filter_index_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
-        .build(&self.request.filters)
+        .build(filters)
         .inspect_err(|err| warn!(err; "Failed to build bloom filter index applier"))
         .ok()
         .flatten()
@@ -583,7 +630,7 @@ impl ScanRegion {
     }
 
     /// Use the latest schema to build the fulltext index applier.
-    fn build_fulltext_index_applier(&self) -> Option<FulltextIndexApplierRef> {
+    fn build_fulltext_index_applier(&self, filters: &[Expr]) -> Option<FulltextIndexApplierRef> {
         if self.ignore_fulltext_index {
             return None;
         }
@@ -601,7 +648,7 @@ impl ScanRegion {
         .with_file_cache(file_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
         .with_bloom_filter_cache(bloom_filter_index_cache)
-        .build(&self.request.filters)
+        .build(filters)
         .inspect_err(|err| warn!(err; "Failed to build fulltext index applier"))
         .ok()
         .flatten()
@@ -630,6 +677,8 @@ pub struct ScanInput {
     time_range: Option<TimestampRange>,
     /// Predicate to push down.
     pub(crate) predicate: PredicateGroup,
+    /// Region partition expr applied at read time.
+    region_partition_expr: Option<PartitionExpr>,
     /// Memtable range builders for memtables in the time range..
     pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
@@ -640,10 +689,12 @@ pub struct ScanInput {
     ignore_file_not_found: bool,
     /// Capacity of the channel to send data from parallel scan tasks to the main task.
     pub(crate) parallel_scan_channel_size: usize,
+    /// Maximum number of SST files to scan concurrently.
+    pub(crate) max_concurrent_scan_files: usize,
     /// Index appliers.
-    inverted_index_applier: Option<InvertedIndexApplierRef>,
-    bloom_filter_index_applier: Option<BloomFilterIndexApplierRef>,
-    fulltext_index_applier: Option<FulltextIndexApplierRef>,
+    inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
+    bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
+    fulltext_index_appliers: [Option<FulltextIndexApplierRef>; 2],
     /// Start time of the query.
     pub(crate) query_start: Option<Instant>,
     /// The region is using append mode.
@@ -656,6 +707,10 @@ pub struct ScanInput {
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
     /// Hint for the required distribution of the scanner.
     pub(crate) distribution: Option<TimeSeriesDistribution>,
+    /// Whether to use flat format.
+    pub(crate) flat_format: bool,
+    /// Whether this scan is for compaction.
+    pub(crate) compaction: bool,
     #[cfg(feature = "enterprise")]
     extension_ranges: Vec<BoxedExtensionRange>,
 }
@@ -669,20 +724,24 @@ impl ScanInput {
             mapper: Arc::new(mapper),
             time_range: None,
             predicate: PredicateGroup::default(),
+            region_partition_expr: None,
             memtables: Vec::new(),
             files: Vec::new(),
             cache_strategy: CacheStrategy::Disabled,
             ignore_file_not_found: false,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
-            inverted_index_applier: None,
-            bloom_filter_index_applier: None,
-            fulltext_index_applier: None,
+            max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
+            inverted_index_appliers: [None, None],
+            bloom_filter_index_appliers: [None, None],
+            fulltext_index_appliers: [None, None],
             query_start: None,
             append_mode: false,
             filter_deleted: true,
             merge_mode: MergeMode::default(),
             series_row_selector: None,
             distribution: None,
+            flat_format: false,
+            compaction: false,
             #[cfg(feature = "enterprise")]
             extension_ranges: Vec::new(),
         }
@@ -698,6 +757,7 @@ impl ScanInput {
     /// Sets predicate to push down.
     #[must_use]
     pub(crate) fn with_predicate(mut self, predicate: PredicateGroup) -> Self {
+        self.region_partition_expr = predicate.region_partition_expr().cloned();
         self.predicate = predicate;
         self
     }
@@ -740,33 +800,43 @@ impl ScanInput {
         self
     }
 
-    /// Sets invereted index applier.
+    /// Sets maximum number of SST files to scan concurrently.
     #[must_use]
-    pub(crate) fn with_inverted_index_applier(
+    pub(crate) fn with_max_concurrent_scan_files(
         mut self,
-        applier: Option<InvertedIndexApplierRef>,
+        max_concurrent_scan_files: usize,
     ) -> Self {
-        self.inverted_index_applier = applier;
+        self.max_concurrent_scan_files = max_concurrent_scan_files;
         self
     }
 
-    /// Sets bloom filter applier.
+    /// Sets inverted index appliers.
     #[must_use]
-    pub(crate) fn with_bloom_filter_index_applier(
+    pub(crate) fn with_inverted_index_appliers(
         mut self,
-        applier: Option<BloomFilterIndexApplierRef>,
+        appliers: [Option<InvertedIndexApplierRef>; 2],
     ) -> Self {
-        self.bloom_filter_index_applier = applier;
+        self.inverted_index_appliers = appliers;
         self
     }
 
-    /// Sets fulltext index applier.
+    /// Sets bloom filter appliers.
     #[must_use]
-    pub(crate) fn with_fulltext_index_applier(
+    pub(crate) fn with_bloom_filter_index_appliers(
         mut self,
-        applier: Option<FulltextIndexApplierRef>,
+        appliers: [Option<BloomFilterIndexApplierRef>; 2],
     ) -> Self {
-        self.fulltext_index_applier = applier;
+        self.bloom_filter_index_appliers = appliers;
+        self
+    }
+
+    /// Sets fulltext index appliers.
+    #[must_use]
+    pub(crate) fn with_fulltext_index_appliers(
+        mut self,
+        appliers: [Option<FulltextIndexApplierRef>; 2],
+    ) -> Self {
+        self.fulltext_index_appliers = appliers;
         self
     }
 
@@ -817,6 +887,20 @@ impl ScanInput {
         self
     }
 
+    /// Sets whether to use flat format.
+    #[must_use]
+    pub(crate) fn with_flat_format(mut self, flat_format: bool) -> Self {
+        self.flat_format = flat_format;
+        self
+    }
+
+    /// Sets whether this scan is for compaction.
+    #[must_use]
+    pub(crate) fn with_compaction(mut self, compaction: bool) -> Self {
+        self.compaction = compaction;
+        self
+    }
+
     /// Scans sources in parallel.
     ///
     /// # Panics if the input doesn't allow parallel scan.
@@ -850,22 +934,45 @@ impl ScanInput {
         ranges
     }
 
+    fn predicate_for_file(&self, file: &FileHandle) -> Option<Predicate> {
+        if self.should_skip_region_partition(file) {
+            self.predicate.predicate_without_region().cloned()
+        } else {
+            self.predicate.predicate().cloned()
+        }
+    }
+
+    fn should_skip_region_partition(&self, file: &FileHandle) -> bool {
+        match (
+            self.region_partition_expr.as_ref(),
+            file.meta_ref().partition_expr.as_ref(),
+        ) {
+            (Some(region_expr), Some(file_expr)) => region_expr == file_expr,
+            _ => false,
+        }
+    }
+
     /// Prunes a file to scan and returns the builder to build readers.
     pub async fn prune_file(
         &self,
         file: &FileHandle,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
+        let predicate = self.predicate_for_file(file);
+        let filter_mode = pre_filter_mode(self.append_mode, self.merge_mode);
         let res = self
             .access_layer
             .read_sst(file.clone())
-            .predicate(self.predicate.predicate().cloned())
+            .predicate(predicate)
             .projection(Some(self.mapper.column_ids().to_vec()))
             .cache(self.cache_strategy.clone())
-            .inverted_index_applier(self.inverted_index_applier.clone())
-            .bloom_filter_index_applier(self.bloom_filter_index_applier.clone())
-            .fulltext_index_applier(self.fulltext_index_applier.clone())
+            .inverted_index_appliers(self.inverted_index_appliers.clone())
+            .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
+            .fulltext_index_appliers(self.fulltext_index_appliers.clone())
             .expected_metadata(Some(self.mapper.metadata().clone()))
+            .flat_format(self.flat_format)
+            .compaction(self.compaction)
+            .pre_filter_mode(filter_mode)
             .build_reader_input(reader_metrics)
             .await;
         let (mut file_range_ctx, selection) = match res {
@@ -879,17 +986,31 @@ impl ScanInput {
                 }
             }
         };
-        if !compat::has_same_columns_and_pk_encoding(
+
+        let need_compat = !compat::has_same_columns_and_pk_encoding(
             self.mapper.metadata(),
             file_range_ctx.read_format().metadata(),
-        ) {
+        );
+        if need_compat {
             // They have different schema. We need to adapt the batch first so the
             // mapper can convert it.
-            let compat = CompatBatch::new(
-                &self.mapper,
-                file_range_ctx.read_format().metadata().clone(),
-            )?;
-            file_range_ctx.set_compat_batch(Some(compat));
+            let compat = if let Some(flat_format) = file_range_ctx.read_format().as_flat() {
+                let mapper = self.mapper.as_flat().unwrap();
+                FlatCompatBatch::try_new(
+                    mapper,
+                    flat_format.metadata(),
+                    flat_format.format_projection(),
+                    self.compaction,
+                )?
+                .map(CompatBatch::Flat)
+            } else {
+                let compact_batch = PrimaryKeyCompatBatch::new(
+                    &self.mapper,
+                    file_range_ctx.read_format().metadata().clone(),
+                )?;
+                Some(CompatBatch::PrimaryKey(compact_batch))
+            };
+            file_range_ctx.set_compat_batch(compat);
         }
         Ok(FileRangeBuilder::new(Arc::new(file_range_ctx), selection))
     }
@@ -924,6 +1045,61 @@ impl ScanInput {
         });
     }
 
+    /// Scans flat sources (RecordBatch streams) in parallel.
+    ///
+    /// # Panics if the input doesn't allow parallel scan.
+    pub(crate) fn create_parallel_flat_sources(
+        &self,
+        sources: Vec<BoxedRecordBatchStream>,
+        semaphore: Arc<Semaphore>,
+    ) -> Result<Vec<BoxedRecordBatchStream>> {
+        if sources.len() <= 1 {
+            return Ok(sources);
+        }
+
+        // Spawn a task for each source.
+        let sources = sources
+            .into_iter()
+            .map(|source| {
+                let (sender, receiver) = mpsc::channel(self.parallel_scan_channel_size);
+                self.spawn_flat_scan_task(source, semaphore.clone(), sender);
+                let stream = Box::pin(ReceiverStream::new(receiver));
+                Box::pin(stream) as _
+            })
+            .collect();
+        Ok(sources)
+    }
+
+    /// Spawns a task to scan a flat source (RecordBatch stream) asynchronously.
+    pub(crate) fn spawn_flat_scan_task(
+        &self,
+        mut input: BoxedRecordBatchStream,
+        semaphore: Arc<Semaphore>,
+        sender: mpsc::Sender<Result<RecordBatch>>,
+    ) {
+        common_runtime::spawn_global(async move {
+            loop {
+                // We release the permit before sending result to avoid the task waiting on
+                // the channel with the permit held.
+                let maybe_batch = {
+                    // Safety: We never close the semaphore.
+                    let _permit = semaphore.acquire().await.unwrap();
+                    input.next().await
+                };
+                match maybe_batch {
+                    Some(Ok(batch)) => {
+                        let _ = sender.send(Ok(batch)).await;
+                    }
+                    Some(Err(e)) => {
+                        let _ = sender.send(Err(e)).await;
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        });
+    }
+
     pub(crate) fn total_rows(&self) -> usize {
         let rows_in_files: usize = self.files.iter().map(|f| f.num_rows()).sum();
         let rows_in_memtables: usize = self.memtables.iter().map(|m| m.stats().num_rows()).sum();
@@ -939,9 +1115,8 @@ impl ScanInput {
         rows
     }
 
-    /// Returns table predicate of all exprs.
-    pub(crate) fn predicate(&self) -> Option<&Predicate> {
-        self.predicate.predicate()
+    pub(crate) fn predicate_group(&self) -> &PredicateGroup {
+        &self.predicate
     }
 
     /// Returns number of memtables to scan.
@@ -989,6 +1164,17 @@ impl ScanInput {
     }
 }
 
+fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
+    if append_mode {
+        return PreFilterMode::All;
+    }
+
+    match merge_mode {
+        MergeMode::LastRow => PreFilterMode::SkipFieldsOnDelete,
+        MergeMode::LastNonNull => PreFilterMode::SkipFields,
+    }
+}
+
 /// Context shared by different streams from a scanner.
 /// It contains the input and ranges to scan.
 pub struct StreamContext {
@@ -1004,9 +1190,9 @@ pub struct StreamContext {
 
 impl StreamContext {
     /// Creates a new [StreamContext] for [SeqScan].
-    pub(crate) fn seq_scan_ctx(input: ScanInput, compaction: bool) -> Self {
+    pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
-        let ranges = RangeMeta::seq_scan_ranges(&input, compaction);
+        let ranges = RangeMeta::seq_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
 
         Self {
@@ -1074,7 +1260,7 @@ impl StreamContext {
             num_file_ranges,
         )?;
         if num_other_ranges > 0 {
-            write!(f, r#"", other_ranges":{}"#, num_other_ranges)?;
+            write!(f, r#", "other_ranges":{}"#, num_other_ranges)?;
         }
         write!(f, "}}")?;
 
@@ -1129,7 +1315,7 @@ impl StreamContext {
                 let mut delimiter = "";
                 write!(f, ", extension_ranges: [")?;
                 for range in self.input.extension_ranges() {
-                    write!(f, "{}{}", delimiter, range)?;
+                    write!(f, "{}{:?}", delimiter, range)?;
                     delimiter = ", ";
                 }
                 write!(f, "]")?;
@@ -1148,12 +1334,11 @@ impl StreamContext {
                         .collect();
                     write!(f, ", \"projection\": {:?}", names)?;
                 }
-                if let Some(predicate) = &self.input.predicate.predicate() {
-                    if !predicate.exprs().is_empty() {
-                        let exprs: Vec<_> =
-                            predicate.exprs().iter().map(|e| e.to_string()).collect();
-                        write!(f, ", \"filters\": {:?}", exprs)?;
-                    }
+                if let Some(predicate) = &self.input.predicate.predicate()
+                    && !predicate.exprs().is_empty()
+                {
+                    let exprs: Vec<_> = predicate.exprs().iter().map(|e| e.to_string()).collect();
+                    write!(f, ", \"filters\": {:?}", exprs)?;
                 }
                 if !self.input.files.is_empty() {
                     write!(f, ", \"files\": ")?;
@@ -1178,19 +1363,39 @@ impl StreamContext {
 #[derive(Clone, Default)]
 pub struct PredicateGroup {
     time_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
-
-    /// Table predicate for all logical exprs to evaluate.
-    /// Parquet reader uses it to prune row groups.
-    predicate: Option<Predicate>,
+    /// Predicate that includes request filters and region partition expr (if any).
+    predicate_all: Option<Predicate>,
+    /// Predicate that only includes request filters.
+    predicate_without_region: Option<Predicate>,
+    /// Region partition expression restored from metadata.
+    region_partition_expr: Option<PartitionExpr>,
 }
 
 impl PredicateGroup {
     /// Creates a new `PredicateGroup` from exprs according to the metadata.
-    pub fn new(metadata: &RegionMetadata, exprs: &[Expr]) -> Self {
-        let mut time_filters = Vec::with_capacity(exprs.len());
+    pub fn new(metadata: &RegionMetadata, exprs: &[Expr]) -> Result<Self> {
+        let mut combined_exprs = exprs.to_vec();
+        let mut region_partition_expr = None;
+
+        if let Some(expr_json) = metadata.partition_expr.as_ref()
+            && !expr_json.is_empty()
+            && let Some(expr) = PartitionExpr::from_json_str(expr_json)
+                .context(InvalidPartitionExprSnafu { expr: expr_json })?
+        {
+            let logical_expr = expr
+                .try_as_logical_expr()
+                .context(InvalidPartitionExprSnafu {
+                    expr: expr_json.clone(),
+                })?;
+
+            combined_exprs.push(logical_expr);
+            region_partition_expr = Some(expr);
+        }
+
+        let mut time_filters = Vec::with_capacity(combined_exprs.len());
         // Columns in the expr.
         let mut columns = HashSet::new();
-        for expr in exprs {
+        for expr in &combined_exprs {
             columns.clear();
             let Some(filter) = Self::expr_to_filter(expr, metadata, &mut columns) else {
                 continue;
@@ -1202,12 +1407,24 @@ impl PredicateGroup {
         } else {
             Some(Arc::new(time_filters))
         };
-        let predicate = Predicate::new(exprs.to_vec());
 
-        Self {
+        let predicate_all = if combined_exprs.is_empty() {
+            None
+        } else {
+            Some(Predicate::new(combined_exprs))
+        };
+        let predicate_without_region = if exprs.is_empty() {
+            None
+        } else {
+            Some(Predicate::new(exprs.to_vec()))
+        };
+
+        Ok(Self {
             time_filters,
-            predicate: Some(predicate),
-        }
+            predicate_all,
+            predicate_without_region,
+            region_partition_expr,
+        })
     }
 
     /// Returns time filters.
@@ -1215,9 +1432,19 @@ impl PredicateGroup {
         self.time_filters.clone()
     }
 
-    /// Returns predicate of all exprs.
+    /// Returns predicate of all exprs (including region partition expr if present).
     pub(crate) fn predicate(&self) -> Option<&Predicate> {
-        self.predicate.as_ref()
+        self.predicate_all.as_ref()
+    }
+
+    /// Returns predicate that excludes region partition expr.
+    pub(crate) fn predicate_without_region(&self) -> Option<&Predicate> {
+        self.predicate_without_region.as_ref()
+    }
+
+    /// Returns the region partition expr from metadata, if any.
+    pub(crate) fn region_partition_expr(&self) -> Option<&PartitionExpr> {
+        self.region_partition_expr.as_ref()
     }
 
     fn expr_to_filter(

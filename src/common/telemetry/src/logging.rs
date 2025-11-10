@@ -13,14 +13,17 @@
 // limitations under the License.
 
 //! logging stuffs, inspired by databend
+use std::collections::HashMap;
 use std::env;
 use std::io::IsTerminal;
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
+use common_base::serde::empty_string_as_default;
 use once_cell::sync::{Lazy, OnceCell};
-use opentelemetry::{global, KeyValue};
-use opentelemetry_otlp::{Protocol, SpanExporterBuilder, WithExportConfig};
+use opentelemetry::trace::TracerProvider;
+use opentelemetry::{KeyValue, global};
+use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{Sampler, Tracer};
 use opentelemetry_semantic_conventions::resource;
@@ -32,15 +35,15 @@ use tracing_subscriber::filter::{FilterFn, Targets};
 use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::{Layered, SubscriberExt};
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::{filter, EnvFilter, Registry};
+use tracing_subscriber::{EnvFilter, Registry, filter};
 
-use crate::tracing_sampler::{create_sampler, TracingSampleOptions};
+use crate::tracing_sampler::{TracingSampleOptions, create_sampler};
 
 /// The default endpoint when use gRPC exporter protocol.
 pub const DEFAULT_OTLP_GRPC_ENDPOINT: &str = "http://localhost:4317";
 
 /// The default endpoint when use HTTP exporter protocol.
-pub const DEFAULT_OTLP_HTTP_ENDPOINT: &str = "http://localhost:4318";
+pub const DEFAULT_OTLP_HTTP_ENDPOINT: &str = "http://localhost:4318/v1/traces";
 
 /// The default logs directory.
 pub const DEFAULT_LOGGING_DIR: &str = "logs";
@@ -76,6 +79,7 @@ pub struct LoggingOptions {
     pub level: Option<String>,
 
     /// The log format that can be one of "json" or "text". Default is "text".
+    #[serde(default, deserialize_with = "empty_string_as_default")]
     pub log_format: LogFormat,
 
     /// The maximum number of log files set by default.
@@ -87,7 +91,7 @@ pub struct LoggingOptions {
     /// Whether to enable tracing with OTLP. Default is false.
     pub enable_otlp_tracing: bool,
 
-    /// The endpoint of OTLP. Default is "http://localhost:4318".
+    /// The endpoint of OTLP.
     pub otlp_endpoint: Option<String>,
 
     /// The tracing sample ratio.
@@ -95,6 +99,10 @@ pub struct LoggingOptions {
 
     /// The protocol of OTLP export.
     pub otlp_export_protocol: Option<OtlpExportProtocol>,
+
+    /// Additional HTTP headers for OTLP exporter.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub otlp_headers: HashMap<String, String>,
 }
 
 /// The protocol of OTLP export.
@@ -110,23 +118,26 @@ pub enum OtlpExportProtocol {
 
 /// The options of slow query.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct SlowQueryOptions {
     /// Whether to enable slow query log.
     pub enable: bool,
 
     /// The record type of slow queries.
+    #[serde(deserialize_with = "empty_string_as_default")]
     pub record_type: SlowQueriesRecordType,
 
     /// The threshold of slow queries.
     #[serde(with = "humantime_serde")]
-    pub threshold: Option<Duration>,
+    pub threshold: Duration,
 
     /// The sample ratio of slow queries.
-    pub sample_ratio: Option<f64>,
+    pub sample_ratio: f64,
 
-    /// The table TTL of `slow_queries` system table. Default is "30d".
+    /// The table TTL of `slow_queries` system table. Default is "90d".
     /// It's used when `record_type` is `SystemTable`.
-    pub ttl: Option<String>,
+    #[serde(with = "humantime_serde")]
+    pub ttl: Duration,
 }
 
 impl Default for SlowQueryOptions {
@@ -134,24 +145,28 @@ impl Default for SlowQueryOptions {
         Self {
             enable: true,
             record_type: SlowQueriesRecordType::SystemTable,
-            threshold: Some(Duration::from_secs(30)),
-            sample_ratio: Some(1.0),
-            ttl: Some("30d".to_string()),
+            threshold: Duration::from_secs(30),
+            sample_ratio: 1.0,
+            ttl: Duration::from_days(90),
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SlowQueriesRecordType {
+    /// Record the slow query in the system table.
+    #[default]
     SystemTable,
+    /// Record the slow query in a specific logs file.
     Log,
 }
 
-#[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LogFormat {
     Json,
+    #[default]
     Text,
 }
 
@@ -182,6 +197,7 @@ impl Default for LoggingOptions {
             // Rotation hourly, 24 files per day, keeps info log files of 30 days
             max_log_files: 720,
             otlp_export_protocol: None,
+            otlp_headers: HashMap::new(),
         }
     }
 }
@@ -443,8 +459,36 @@ pub fn init_global_logging(
 
         global::set_text_map_propagator(TraceContextPropagator::new());
 
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("error setting global tracing subscriber");
+        let sampler = opts
+            .tracing_sample_ratio
+            .as_ref()
+            .map(create_sampler)
+            .map(Sampler::ParentBased)
+            .unwrap_or(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
+
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(build_otlp_exporter(opts))
+            .with_sampler(sampler)
+            .with_resource(
+                opentelemetry_sdk::Resource::builder_empty()
+                    .with_attributes([
+                        KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
+                        KeyValue::new(
+                            resource::SERVICE_INSTANCE_ID,
+                            node_id.unwrap_or("none".to_string()),
+                        ),
+                        KeyValue::new(resource::SERVICE_VERSION, common_version::version()),
+                        KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
+                    ])
+                    .build(),
+            )
+            .build();
+        let tracer = provider.tracer("greptimedb");
+
+        tracing::subscriber::set_global_default(
+            subscriber.with(tracing_opentelemetry::layer().with_tracer(tracer)),
+        )
+        .expect("error setting global tracing subscriber");
 
         if opts.enable_otlp_tracing {
             if let Some(tracer) = TRACER.get()
@@ -461,7 +505,7 @@ pub fn init_global_logging(
     guards
 }
 
-fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporterBuilder {
+fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporter {
     let protocol = opts
         .otlp_export_protocol
         .clone()
@@ -472,7 +516,7 @@ fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporterBuilder {
         .as_ref()
         .map(|e| {
             if e.starts_with("http") {
-                e.to_string()
+                e.clone()
             } else {
                 format!("http://{}", e)
             }
@@ -483,17 +527,19 @@ fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporterBuilder {
         });
 
     match protocol {
-        OtlpExportProtocol::Grpc => SpanExporterBuilder::Tonic(
-            opentelemetry_otlp::new_exporter()
-                .tonic()
-                .with_endpoint(endpoint),
-        ),
-        OtlpExportProtocol::Http => SpanExporterBuilder::Http(
-            opentelemetry_otlp::new_exporter()
-                .http()
-                .with_endpoint(endpoint)
-                .with_protocol(Protocol::HttpBinary),
-        ),
+        OtlpExportProtocol::Grpc => SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()
+            .expect("Failed to create OTLP gRPC exporter "),
+
+        OtlpExportProtocol::Http => SpanExporter::builder()
+            .with_http()
+            .with_endpoint(endpoint)
+            .with_protocol(Protocol::HttpBinary)
+            .with_headers(opts.otlp_headers.clone())
+            .build()
+            .expect("Failed to create OTLP HTTP exporter "),
     }
 }
 
@@ -558,5 +604,103 @@ where
         }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_logging_options_deserialization_default() {
+        let json = r#"{}"#;
+        let opts: LoggingOptions = serde_json::from_str(json).unwrap();
+
+        assert_eq!(opts.log_format, LogFormat::Text);
+        assert_eq!(opts.dir, "");
+        assert_eq!(opts.level, None);
+        assert!(opts.append_stdout);
+    }
+
+    #[test]
+    fn test_logging_options_deserialization_empty_log_format() {
+        let json = r#"{"log_format": ""}"#;
+        let opts: LoggingOptions = serde_json::from_str(json).unwrap();
+
+        // Empty string should use default (Text)
+        assert_eq!(opts.log_format, LogFormat::Text);
+    }
+
+    #[test]
+    fn test_logging_options_deserialization_valid_log_format() {
+        let json_format = r#"{"log_format": "json"}"#;
+        let opts: LoggingOptions = serde_json::from_str(json_format).unwrap();
+        assert_eq!(opts.log_format, LogFormat::Json);
+
+        let text_format = r#"{"log_format": "text"}"#;
+        let opts: LoggingOptions = serde_json::from_str(text_format).unwrap();
+        assert_eq!(opts.log_format, LogFormat::Text);
+    }
+
+    #[test]
+    fn test_logging_options_deserialization_missing_log_format() {
+        let json = r#"{"dir": "/tmp/logs"}"#;
+        let opts: LoggingOptions = serde_json::from_str(json).unwrap();
+
+        // Missing log_format should use default (Text)
+        assert_eq!(opts.log_format, LogFormat::Text);
+        assert_eq!(opts.dir, "/tmp/logs");
+    }
+
+    #[test]
+    fn test_slow_query_options_deserialization_default() {
+        let json = r#"{"enable": true, "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(json).unwrap();
+
+        assert_eq!(opts.record_type, SlowQueriesRecordType::SystemTable);
+        assert!(opts.enable);
+    }
+
+    #[test]
+    fn test_slow_query_options_deserialization_empty_record_type() {
+        let json = r#"{"enable": true, "record_type": "", "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(json).unwrap();
+
+        // Empty string should use default (SystemTable)
+        assert_eq!(opts.record_type, SlowQueriesRecordType::SystemTable);
+        assert!(opts.enable);
+    }
+
+    #[test]
+    fn test_slow_query_options_deserialization_valid_record_type() {
+        let system_table_json =
+            r#"{"enable": true, "record_type": "system_table", "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(system_table_json).unwrap();
+        assert_eq!(opts.record_type, SlowQueriesRecordType::SystemTable);
+
+        let log_json = r#"{"enable": true, "record_type": "log", "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(log_json).unwrap();
+        assert_eq!(opts.record_type, SlowQueriesRecordType::Log);
+    }
+
+    #[test]
+    fn test_slow_query_options_deserialization_missing_record_type() {
+        let json = r#"{"enable": false, "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(json).unwrap();
+
+        // Missing record_type should use default (SystemTable)
+        assert_eq!(opts.record_type, SlowQueriesRecordType::SystemTable);
+        assert!(!opts.enable);
+    }
+
+    #[test]
+    fn test_otlp_export_protocol_deserialization_valid_values() {
+        let grpc_json = r#""grpc""#;
+        let protocol: OtlpExportProtocol = serde_json::from_str(grpc_json).unwrap();
+        assert_eq!(protocol, OtlpExportProtocol::Grpc);
+
+        let http_json = r#""http""#;
+        let protocol: OtlpExportProtocol = serde_json::from_str(http_json).unwrap();
+        assert_eq!(protocol, OtlpExportProtocol::Http);
     }
 }

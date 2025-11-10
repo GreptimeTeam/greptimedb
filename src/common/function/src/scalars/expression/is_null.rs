@@ -16,23 +16,27 @@ use std::fmt;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use common_query::error;
-use common_query::error::{ArrowComputeSnafu, InvalidFuncArgsSnafu};
-use common_query::prelude::{Signature, Volatility};
-use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::compute::is_null;
-use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::VectorRef;
-use datatypes::vectors::Helper;
-use snafu::{ensure, ResultExt};
+use datafusion::arrow::datatypes::DataType;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
 
 const NAME: &str = "isnull";
 
 /// The function to check whether an expression is NULL
-#[derive(Clone, Debug, Default)]
-pub struct IsNullFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct IsNullFunction {
+    signature: Signature,
+}
+
+impl Default for IsNullFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
 
 impl Display for IsNullFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -45,33 +49,22 @@ impl Function for IsNullFunction {
         NAME
     }
 
-    fn return_type(&self, _: &[ConcreteDataType]) -> common_query::error::Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::any(1, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(
+    fn invoke_with_args(
         &self,
-        _func_ctx: &FunctionContext,
-        columns: &[VectorRef],
-    ) -> common_query::error::Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly one, have: {}",
-                    columns.len()
-                ),
-            }
-        );
-        let values = &columns[0];
-        let arrow_array = &values.to_arrow_array();
-        let result = is_null(arrow_array).context(ArrowComputeSnafu)?;
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0] = extract_args(self.name(), &args)?;
+        let result = is_null(&arg0)?;
 
-        Helper::try_into_vector(Arc::new(result) as ArrayRef).context(error::FromArrowArraySnafu)
+        Ok(ColumnarValue::Array(Arc::new(result)))
     }
 }
 
@@ -79,31 +72,31 @@ impl Function for IsNullFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
-    use datatypes::scalars::ScalarVector;
-    use datatypes::vectors::{BooleanVector, Float32Vector};
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::{AsArray, BooleanArray, Float32Array};
 
     use super::*;
     #[test]
     fn test_is_null_function() {
-        let is_null = IsNullFunction;
+        let is_null = IsNullFunction::default();
         assert_eq!("isnull", is_null.name());
-        assert_eq!(
-            ConcreteDataType::boolean_datatype(),
-            is_null.return_type(&[]).unwrap()
-        );
-        assert_eq!(
-            is_null.signature(),
-            Signature {
-                type_signature: TypeSignature::Any(1),
-                volatility: Volatility::Immutable
-            }
-        );
+        assert_eq!(DataType::Boolean, is_null.return_type(&[]).unwrap());
         let values = vec![None, Some(3.0), None];
 
-        let args: Vec<VectorRef> = vec![Arc::new(Float32Vector::from(values))];
-        let vector = is_null.eval(&FunctionContext::default(), &args).unwrap();
-        let expect: VectorRef = Arc::new(BooleanVector::from_vec(vec![true, false, true]));
+        let result = is_null
+            .invoke_with_args(ScalarFunctionArgs {
+                args: vec![ColumnarValue::Array(Arc::new(Float32Array::from(values)))],
+                arg_fields: vec![],
+                number_rows: 3,
+                return_field: Arc::new(Field::new("", DataType::Boolean, false)),
+                config_options: Arc::new(Default::default()),
+            })
+            .unwrap();
+        let ColumnarValue::Array(result) = result else {
+            unreachable!()
+        };
+        let vector = result.as_boolean();
+        let expect = &BooleanArray::from(vec![true, false, true]);
         assert_eq!(expect, vector);
     }
 }

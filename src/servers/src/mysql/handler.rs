@@ -14,8 +14,8 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use ::auth::{Identity, Password, UserProviderRef};
@@ -38,12 +38,13 @@ use query::query_engine::DescribeResult;
 use rand::RngCore;
 use session::context::{Channel, QueryContextRef};
 use session::{Session, SessionRef};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sql::dialect::MySqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
 
+use crate::SqlPlan;
 use crate::error::{self, DataFrameSnafu, InvalidPrepareStatementSnafu, Result};
 use crate::metrics::METRIC_AUTH_FAILURE;
 use crate::mysql::helper::{
@@ -52,7 +53,6 @@ use crate::mysql::helper::{
 use crate::mysql::writer;
 use crate::mysql::writer::{create_mysql_column, handle_err};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
-use crate::SqlPlan;
 
 const MYSQL_NATIVE_PASSWORD: &str = "mysql_native_password";
 const MYSQL_CLEAR_PASSWORD: &str = "mysql_clear_password";
@@ -83,6 +83,7 @@ pub struct MysqlInstanceShim {
     prepared_stmts: Arc<RwLock<HashMap<String, SqlPlan>>>,
     prepared_stmts_counter: AtomicU32,
     process_id: u32,
+    prepared_stmt_cache_size: usize,
 }
 
 impl MysqlInstanceShim {
@@ -91,6 +92,7 @@ impl MysqlInstanceShim {
         user_provider: Option<UserProviderRef>,
         client_addr: SocketAddr,
         process_id: u32,
+        prepared_stmt_cache_size: usize,
     ) -> MysqlInstanceShim {
         // init a random salt
         let mut bs = vec![0u8; 20];
@@ -118,6 +120,7 @@ impl MysqlInstanceShim {
             prepared_stmts: Default::default(),
             prepared_stmts_counter: AtomicU32::new(1),
             process_id,
+            prepared_stmt_cache_size,
         }
     }
 
@@ -136,6 +139,7 @@ impl MysqlInstanceShim {
     async fn do_exec_plan(
         &self,
         query: &str,
+        stmt: Option<Statement>,
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
@@ -144,7 +148,7 @@ impl MysqlInstanceShim {
         {
             Ok(output)
         } else {
-            self.query_handler.do_exec_plan(plan, query_ctx).await
+            self.query_handler.do_exec_plan(stmt, plan, query_ctx).await
         }
     }
 
@@ -158,9 +162,24 @@ impl MysqlInstanceShim {
     }
 
     /// Save query and logical plan with a given statement key
-    fn save_plan(&self, plan: SqlPlan, stmt_key: String) {
+    fn save_plan(&self, plan: SqlPlan, stmt_key: String) -> Result<()> {
         let mut prepared_stmts = self.prepared_stmts.write();
+        let max_capacity = self.prepared_stmt_cache_size;
+
+        let is_update = prepared_stmts.contains_key(&stmt_key);
+
+        if !is_update && prepared_stmts.len() >= max_capacity {
+            return error::InternalSnafu {
+                err_msg: format!(
+                    "Prepared statement cache is full, max capacity: {}",
+                    max_capacity
+                ),
+            }
+            .fail();
+        }
+
         let _ = prepared_stmts.insert(stmt_key, plan);
+        Ok(())
     }
 
     /// Retrieve the query and logical plan by a given statement key
@@ -230,21 +249,31 @@ impl MysqlInstanceShim {
         if params.len() != param_num - 1 {
             self.save_plan(
                 SqlPlan {
-                    query: query.to_string(),
+                    query: query.clone(),
+                    statement: Some(statement),
                     plan: None,
                     schema: None,
                 },
                 stmt_key,
-            );
+            )
+            .map_err(|e| {
+                error!(e; "Failed to save prepared statement");
+                e
+            })?;
         } else {
             self.save_plan(
                 SqlPlan {
-                    query: query.to_string(),
+                    query: query.clone(),
+                    statement: Some(statement),
                     plan,
                     schema,
                 },
                 stmt_key,
-            );
+            )
+            .map_err(|e| {
+                error!(e; "Failed to save prepared statement");
+                e
+            })?;
         }
 
         Ok((params, columns))
@@ -291,8 +320,13 @@ impl MysqlInstanceShim {
 
                 debug!("Mysql execute prepared plan: {}", plan.display_indent());
                 vec![
-                    self.do_exec_plan(&sql_plan.query, plan, query_ctx.clone())
-                        .await,
+                    self.do_exec_plan(
+                        &sql_plan.query,
+                        sql_plan.statement.clone(),
+                        plan,
+                        query_ctx.clone(),
+                    )
+                    .await,
                 ]
             }
             None => {
@@ -571,7 +605,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {
         let (catalog_from_db, schema) = parse_optional_catalog_and_schema_from_db_string(database);
         let catalog = if let Some(catalog) = &catalog_from_db {
-            catalog.to_string()
+            catalog.clone()
         } else {
             self.session.catalog()
         };
@@ -592,22 +626,21 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         let user_info = &self.session.user_info();
 
-        if let Some(schema_validator) = &self.user_provider {
-            if let Err(e) = schema_validator
+        if let Some(schema_validator) = &self.user_provider
+            && let Err(e) = schema_validator
                 .authorize(&catalog, &schema, user_info)
                 .await
-            {
-                METRIC_AUTH_FAILURE
-                    .with_label_values(&[e.status_code().as_ref()])
-                    .inc();
-                return w
-                    .error(
-                        ErrorKind::ER_DBACCESS_DENIED_ERROR,
-                        e.output_msg().as_bytes(),
-                    )
-                    .await
-                    .map_err(|e| e.into());
-            }
+        {
+            METRIC_AUTH_FAILURE
+                .with_label_values(&[e.status_code().as_ref()])
+                .inc();
+            return w
+                .error(
+                    ErrorKind::ER_DBACCESS_DENIED_ERROR,
+                    e.output_msg().as_bytes(),
+                )
+                .await
+                .map_err(|e| e.into());
         }
 
         if catalog_from_db.is_some() {

@@ -21,8 +21,18 @@ use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
 async fn test_engine_close_region() {
+    test_engine_close_region_with_format(false).await;
+    test_engine_close_region_with_format(true).await;
+}
+
+async fn test_engine_close_region_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("close").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     // It's okay to close a region doesn't exist.

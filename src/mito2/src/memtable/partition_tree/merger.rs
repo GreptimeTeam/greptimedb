@@ -18,8 +18,8 @@ use std::fmt::Debug;
 use std::ops::Range;
 
 use crate::error::Result;
-use crate::memtable::partition_tree::data::{DataBatch, DataBufferReader, DataPartReader};
 use crate::memtable::partition_tree::PkIndex;
+use crate::memtable::partition_tree::data::{DataBatch, DataBufferReader, DataPartReader};
 
 /// Nodes of merger's heap.
 pub trait Node: Ord {
@@ -167,7 +167,7 @@ pub(crate) enum DataSource {
 }
 
 impl DataSource {
-    fn current_data_batch(&self) -> DataBatch {
+    fn current_data_batch(&self) -> DataBatch<'_> {
         match self {
             DataSource::Buffer(buffer) => buffer.current_data_batch(),
             DataSource::Part(p) => p.current_data_batch(),
@@ -207,7 +207,7 @@ impl DataNode {
         }
     }
 
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    pub(crate) fn current_data_batch(&self) -> DataBatch<'_> {
         let range = self.current_range();
         let batch = self.source.current_data_batch();
         batch.slice(range.start, range.len())
@@ -297,7 +297,7 @@ mod tests {
     use store_api::metadata::RegionMetadataRef;
 
     use super::*;
-    use crate::memtable::partition_tree::data::{timestamp_array_to_i64_slice, DataBuffer};
+    use crate::memtable::partition_tree::data::{DataBuffer, timestamp_array_to_i64_slice};
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
     fn write_rows_to_buffer(

@@ -12,19 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Cow;
 use std::fmt::Display;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
-use common_query::prelude::Signature;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{Float32VectorBuilder, MutableVector, VectorRef};
-use snafu::ensure;
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_common::{DataFusionError, ScalarValue};
+use datafusion_expr::{ScalarFunctionArgs, Signature};
+use datatypes::arrow::datatypes::DataType;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::Function;
 use crate::helper;
-use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const};
+use crate::scalars::vector::VectorCalculator;
+use crate::scalars::vector::impl_conv::as_veclit;
 
 const NAME: &str = "vec_kth_elem";
 
@@ -44,97 +42,73 @@ const NAME: &str = "vec_kth_elem";
 /// ```
 ///
 
-#[derive(Debug, Clone, Default)]
-pub struct VectorKthElemFunction;
+#[derive(Debug, Clone)]
+pub(crate) struct VectorKthElemFunction {
+    signature: Signature,
+}
+
+impl Default for VectorKthElemFunction {
+    fn default() -> Self {
+        Self {
+            signature: helper::one_of_sigs2(
+                vec![DataType::Utf8, DataType::Binary],
+                vec![DataType::Int64],
+            ),
+        }
+    }
+}
 
 impl Function for VectorKthElemFunction {
     fn name(&self) -> &str {
         NAME
     }
 
-    fn return_type(
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Float32)
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn invoke_with_args(
         &self,
-        _input_types: &[ConcreteDataType],
-    ) -> common_query::error::Result<ConcreteDataType> {
-        Ok(ConcreteDataType::float32_datatype())
-    }
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let body = |v0: &ScalarValue, v1: &ScalarValue| -> datafusion_common::Result<ScalarValue> {
+            let v0 = as_veclit(v0)?;
 
-    fn signature(&self) -> Signature {
-        helper::one_of_sigs2(
-            vec![
-                ConcreteDataType::string_datatype(),
-                ConcreteDataType::binary_datatype(),
-            ],
-            vec![ConcreteDataType::int64_datatype()],
-        )
-    }
+            let v1 = match v1 {
+                ScalarValue::Int64(None) => return Ok(ScalarValue::Float32(None)),
+                ScalarValue::Int64(Some(v1)) if *v1 >= 0 => *v1 as usize,
+                _ => {
+                    return Err(DataFusionError::Execution(format!(
+                        "2nd argument not a valid index or expected datatype: {}",
+                        self.name()
+                    )));
+                }
+            };
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly two, have: {}",
-                    columns.len()
-                ),
-            }
-        );
-
-        let arg0 = &columns[0];
-        let arg1 = &columns[1];
-
-        let len = arg0.len();
-        let mut result = Float32VectorBuilder::with_capacity(len);
-        if len == 0 {
-            return Ok(result.to_vector());
+            let result = v0
+                .map(|v0| {
+                    if v1 >= v0.len() {
+                        Err(DataFusionError::Execution(format!(
+                            "index out of bound: {}",
+                            self.name()
+                        )))
+                    } else {
+                        Ok(v0[v1])
+                    }
+                })
+                .transpose()?;
+            Ok(ScalarValue::Float32(result))
         };
 
-        let arg0_const = as_veclit_if_const(arg0)?;
-
-        for i in 0..len {
-            let arg0 = match arg0_const.as_ref() {
-                Some(arg0) => Some(Cow::Borrowed(arg0.as_ref())),
-                None => as_veclit(arg0.get_ref(i))?,
-            };
-            let Some(arg0) = arg0 else {
-                result.push_null();
-                continue;
-            };
-
-            let arg1 = arg1.get(i).as_f64_lossy();
-            let Some(arg1) = arg1 else {
-                result.push_null();
-                continue;
-            };
-
-            ensure!(
-                arg1 >= 0.0 && arg1.fract() == 0.0,
-                InvalidFuncArgsSnafu {
-                    err_msg: format!(
-                        "Invalid argument: k must be a non-negative integer, but got k = {}.",
-                        arg1
-                    ),
-                }
-            );
-
-            let k = arg1 as usize;
-
-            ensure!(
-                k < arg0.len(),
-                InvalidFuncArgsSnafu {
-                    err_msg: format!(
-                        "Out of range: k must be in the range [0, {}], but got k = {}.",
-                        arg0.len() - 1,
-                        k
-                    ),
-                }
-            );
-
-            let value = arg0[k];
-
-            result.push(Some(value));
-        }
-        Ok(result.to_vector())
+        let calculator = VectorCalculator {
+            name: self.name(),
+            func: body,
+        };
+        calculator.invoke_with_args(args)
     }
 }
 
@@ -148,64 +122,77 @@ impl Display for VectorKthElemFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::error;
-    use datatypes::vectors::{Int64Vector, StringVector};
+    use arrow_schema::Field;
+    use datafusion::arrow::array::{Array, ArrayRef, AsArray, Int64Array, StringViewArray};
+    use datafusion::arrow::datatypes::Float32Type;
+    use datafusion_common::config::ConfigOptions;
 
     use super::*;
 
     #[test]
     fn test_vec_kth_elem() {
-        let func = VectorKthElemFunction;
+        let func = VectorKthElemFunction::default();
 
-        let input0 = Arc::new(StringVector::from(vec![
+        let input0: ArrayRef = Arc::new(StringViewArray::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),
             Some("[4.0,5.0,6.0]".to_string()),
             Some("[7.0,8.0,9.0]".to_string()),
             None,
         ]));
-        let input1 = Arc::new(Int64Vector::from(vec![Some(0), Some(2), None, Some(1)]));
+        let input1: ArrayRef = Arc::new(Int64Array::from(vec![Some(0), Some(2), None, Some(1)]));
 
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(input0), ColumnarValue::Array(input1)],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::Float32, false)),
+            config_options: Arc::new(ConfigOptions::new()),
+        };
         let result = func
-            .eval(&FunctionContext::default(), &[input0, input1])
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(4))
             .unwrap();
 
-        let result = result.as_ref();
+        let result = result.as_primitive::<Float32Type>();
         assert_eq!(result.len(), 4);
-        assert_eq!(result.get_ref(0).as_f32().unwrap(), Some(1.0));
-        assert_eq!(result.get_ref(1).as_f32().unwrap(), Some(6.0));
-        assert!(result.get_ref(2).is_null());
-        assert!(result.get_ref(3).is_null());
+        assert_eq!(result.value(0), 1.0);
+        assert_eq!(result.value(1), 6.0);
+        assert!(result.is_null(2));
+        assert!(result.is_null(3));
 
-        let input0 = Arc::new(StringVector::from(vec![Some("[1.0,2.0,3.0]".to_string())]));
-        let input1 = Arc::new(Int64Vector::from(vec![Some(3)]));
+        let input0: ArrayRef = Arc::new(StringViewArray::from(vec![Some(
+            "[1.0,2.0,3.0]".to_string(),
+        )]));
+        let input1: ArrayRef = Arc::new(Int64Array::from(vec![Some(3)]));
 
-        let err = func
-            .eval(&FunctionContext::default(), &[input0, input1])
-            .unwrap_err();
-        match err {
-            error::Error::InvalidFuncArgs { err_msg, .. } => {
-                assert_eq!(
-                    err_msg,
-                    format!("Out of range: k must be in the range [0, 2], but got k = 3.")
-                )
-            }
-            _ => unreachable!(),
-        }
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(input0), ColumnarValue::Array(input1)],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", DataType::Float32, false)),
+            config_options: Arc::new(ConfigOptions::new()),
+        };
+        let e = func.invoke_with_args(args).unwrap_err();
+        assert!(
+            e.to_string()
+                .starts_with("Execution error: index out of bound: vec_kth_elem")
+        );
 
-        let input0 = Arc::new(StringVector::from(vec![Some("[1.0,2.0,3.0]".to_string())]));
-        let input1 = Arc::new(Int64Vector::from(vec![Some(-1)]));
+        let input0: ArrayRef = Arc::new(StringViewArray::from(vec![Some(
+            "[1.0,2.0,3.0]".to_string(),
+        )]));
+        let input1: ArrayRef = Arc::new(Int64Array::from(vec![Some(-1)]));
 
-        let err = func
-            .eval(&FunctionContext::default(), &[input0, input1])
-            .unwrap_err();
-        match err {
-            error::Error::InvalidFuncArgs { err_msg, .. } => {
-                assert_eq!(
-                    err_msg,
-                    format!("Invalid argument: k must be a non-negative integer, but got k = -1.")
-                )
-            }
-            _ => unreachable!(),
-        }
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(input0), ColumnarValue::Array(input1)],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", DataType::Float32, false)),
+            config_options: Arc::new(ConfigOptions::new()),
+        };
+        let e = func.invoke_with_args(args).unwrap_err();
+        assert!(e.to_string().starts_with(
+            "Execution error: 2nd argument not a valid index or expected datatype: vec_kth_elem"
+        ));
     }
 }

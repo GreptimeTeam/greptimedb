@@ -21,12 +21,13 @@ use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_query::prelude::GREPTIME_VALUE;
+use common_function::function::FunctionContext;
+use common_query::prelude::greptime_value;
 use datafusion::common::DFSchemaRef;
 use datafusion::datasource::DefaultTableSource;
-use datafusion::execution::context::SessionState;
 use datafusion::functions_aggregate::average::avg_udaf;
 use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::functions_aggregate::expr_fn::first_value;
 use datafusion::functions_aggregate::grouping::grouping_udaf;
 use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion::functions_aggregate::stddev::stddev_pop_udaf;
@@ -43,30 +44,34 @@ use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::TableReference;
-use datafusion_common::DFSchema;
+use datafusion_common::{DFSchema, NullEquality};
+use datafusion_expr::expr::WindowFunctionParams;
 use datafusion_expr::utils::conjunction;
-use datafusion_expr::{col, lit, ExprSchemable, SortExpr};
+use datafusion_expr::{ExprSchemable, Literal, SortExpr, col, lit};
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
+use once_cell::sync::Lazy;
 use promql::extension_plan::{
-    build_special_time_expr, EmptyMetric, HistogramFold, InstantManipulate, Millisecond,
-    RangeManipulate, ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
+    Absent, EmptyMetric, HistogramFold, InstantManipulate, Millisecond, RangeManipulate,
+    ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn, build_special_time_expr,
 };
 use promql::functions::{
-    quantile_udaf, AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters,
-    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
+    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
+    Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
     QuantileOverTime, Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime,
+    quantile_udaf,
 };
-use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
+use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::{
-    token, AggregateExpr, BinModifier, BinaryExpr as PromBinaryExpr, Call, EvalStmt,
-    Expr as PromExpr, Function, FunctionArgs as PromFunctionArgs, LabelModifier, MatrixSelector,
-    NumberLiteral, Offset, ParenExpr, StringLiteral, SubqueryExpr, UnaryExpr,
-    VectorMatchCardinality, VectorSelector,
+    AggregateExpr, BinModifier, BinaryExpr as PromBinaryExpr, Call, EvalStmt, Expr as PromExpr,
+    Function, FunctionArgs as PromFunctionArgs, LabelModifier, MatrixSelector, NumberLiteral,
+    Offset, ParenExpr, StringLiteral, SubqueryExpr, UnaryExpr, VectorMatchCardinality,
+    VectorSelector, token,
 };
-use snafu::{ensure, OptionExt, ResultExt};
+use regex::{self, Regex};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
 };
@@ -74,24 +79,33 @@ use table::table::adapter::DfTableProviderAdapter;
 
 use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
-    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, InvalidTimeRangeSnafu,
-    MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu, MultipleVectorSnafu,
-    NoMetricMatcherSnafu, PromqlPlanNodeSnafu, Result, SameLabelSetSnafu, TableNameNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
-    UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, UnsupportedVectorMatchSnafu,
-    ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu,
+    InvalidRegularExpressionSnafu, InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu,
+    MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, PromqlPlanNodeSnafu,
+    Result, SameLabelSetSnafu, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
+    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
+    UnsupportedMatcherOpSnafu, UnsupportedVectorMatchSnafu, ValueNotFoundSnafu,
+    ZeroRangeSelectorSnafu,
 };
+use crate::query_engine::QueryEngineState;
 
 /// `time()` function in PromQL.
 const SPECIAL_TIME_FUNCTION: &str = "time";
 /// `scalar()` function in PromQL.
 const SCALAR_FUNCTION: &str = "scalar";
+/// `absent()` function in PromQL
+const SPECIAL_ABSENT_FUNCTION: &str = "absent";
 /// `histogram_quantile` function in PromQL
 const SPECIAL_HISTOGRAM_QUANTILE: &str = "histogram_quantile";
 /// `vector` function in PromQL
 const SPECIAL_VECTOR_FUNCTION: &str = "vector";
 /// `le` column for conventional histogram.
 const LE_COLUMN_NAME: &str = "le";
+
+/// Static regex for validating label names according to Prometheus specification.
+/// Label names must match the regex: [a-zA-Z_][a-zA-Z0-9_]*
+static LABEL_NAME_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").unwrap());
 
 const DEFAULT_TIME_INDEX_COLUMN: &str = "time";
 
@@ -124,7 +138,10 @@ struct PromPlannerContext {
     time_index_column: Option<String>,
     field_columns: Vec<String>,
     tag_columns: Vec<String>,
+    /// The matcher for field columns `__field__`.
     field_column_matcher: Option<Vec<Matcher>>,
+    /// The matcher for selectors (normal matchers).
+    selector_matcher: Vec<Matcher>,
     schema_name: Option<String>,
     /// The range in millisecond of range selector. None if there is no range selector.
     range: Option<Millisecond>,
@@ -148,6 +165,7 @@ impl PromPlannerContext {
         self.field_columns = vec![];
         self.tag_columns = vec![];
         self.field_column_matcher = None;
+        self.selector_matcher.clear();
         self.schema_name = None;
         self.range = None;
     }
@@ -178,25 +196,44 @@ pub fn normalize_matcher(mut matcher: Matcher) -> Matcher {
 }
 
 impl PromPlanner {
-    pub async fn stmt_to_plan(
+    pub async fn stmt_to_plan_with_alias(
         table_provider: DfTableSourceProvider,
         stmt: &EvalStmt,
-        session_state: &SessionState,
+        alias: Option<String>,
+        query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
         let mut planner = Self {
             table_provider,
             ctx: PromPlannerContext::from_eval_stmt(stmt),
         };
 
-        planner.prom_expr_to_plan(&stmt.expr, session_state).await
+        let plan = planner
+            .prom_expr_to_plan(&stmt.expr, query_engine_state)
+            .await?;
+
+        // Apply alias if provided
+        if let Some(alias_name) = alias {
+            planner.apply_alias_projection(plan, alias_name)
+        } else {
+            Ok(plan)
+        }
+    }
+
+    #[cfg(test)]
+    async fn stmt_to_plan(
+        table_provider: DfTableSourceProvider,
+        stmt: &EvalStmt,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<LogicalPlan> {
+        Self::stmt_to_plan_with_alias(table_provider, stmt, None, query_engine_state).await
     }
 
     pub async fn prom_expr_to_plan(
         &mut self,
         prom_expr: &PromExpr,
-        session_state: &SessionState,
+        query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
-        self.prom_expr_to_plan_inner(prom_expr, false, session_state)
+        self.prom_expr_to_plan_inner(prom_expr, false, query_engine_state)
             .await
     }
 
@@ -214,18 +251,28 @@ impl PromPlanner {
         &mut self,
         prom_expr: &PromExpr,
         timestamp_fn: bool,
-        session_state: &SessionState,
+        query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
         let res = match prom_expr {
-            PromExpr::Aggregate(expr) => self.prom_aggr_expr_to_plan(session_state, expr).await?,
-            PromExpr::Unary(expr) => self.prom_unary_expr_to_plan(session_state, expr).await?,
-            PromExpr::Binary(expr) => self.prom_binary_expr_to_plan(session_state, expr).await?,
+            PromExpr::Aggregate(expr) => {
+                self.prom_aggr_expr_to_plan(query_engine_state, expr)
+                    .await?
+            }
+            PromExpr::Unary(expr) => {
+                self.prom_unary_expr_to_plan(query_engine_state, expr)
+                    .await?
+            }
+            PromExpr::Binary(expr) => {
+                self.prom_binary_expr_to_plan(query_engine_state, expr)
+                    .await?
+            }
             PromExpr::Paren(ParenExpr { expr }) => {
-                self.prom_expr_to_plan_inner(expr, timestamp_fn, session_state)
+                self.prom_expr_to_plan_inner(expr, timestamp_fn, query_engine_state)
                     .await?
             }
             PromExpr::Subquery(expr) => {
-                self.prom_subquery_expr_to_plan(session_state, expr).await?
+                self.prom_subquery_expr_to_plan(query_engine_state, expr)
+                    .await?
             }
             PromExpr::NumberLiteral(lit) => self.prom_number_lit_to_plan(lit)?,
             PromExpr::StringLiteral(lit) => self.prom_string_lit_to_plan(lit)?,
@@ -236,8 +283,13 @@ impl PromPlanner {
             PromExpr::MatrixSelector(selector) => {
                 self.prom_matrix_selector_to_plan(selector).await?
             }
-            PromExpr::Call(expr) => self.prom_call_expr_to_plan(session_state, expr).await?,
-            PromExpr::Extension(expr) => self.prom_ext_expr_to_plan(session_state, expr).await?,
+            PromExpr::Call(expr) => {
+                self.prom_call_expr_to_plan(query_engine_state, expr)
+                    .await?
+            }
+            PromExpr::Extension(expr) => {
+                self.prom_ext_expr_to_plan(query_engine_state, expr).await?
+            }
         };
 
         Ok(res)
@@ -245,7 +297,7 @@ impl PromPlanner {
 
     async fn prom_subquery_expr_to_plan(
         &mut self,
-        session_state: &SessionState,
+        query_engine_state: &QueryEngineState,
         subquery_expr: &SubqueryExpr,
     ) -> Result<LogicalPlan> {
         let SubqueryExpr {
@@ -258,7 +310,7 @@ impl PromPlanner {
         }
         let current_start = self.ctx.start;
         self.ctx.start -= range.as_millis() as i64 - self.ctx.interval;
-        let input = self.prom_expr_to_plan(expr, session_state).await?;
+        let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
         self.ctx.interval = current_interval;
         self.ctx.start = current_start;
 
@@ -287,7 +339,7 @@ impl PromPlanner {
 
     async fn prom_aggr_expr_to_plan(
         &mut self,
-        session_state: &SessionState,
+        query_engine_state: &QueryEngineState,
         aggr_expr: &AggregateExpr,
     ) -> Result<LogicalPlan> {
         let AggregateExpr {
@@ -297,7 +349,7 @@ impl PromPlanner {
             param,
         } = aggr_expr;
 
-        let input = self.prom_expr_to_plan(expr, session_state).await?;
+        let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
 
         match (*op).id() {
             token::T_TOPK | token::T_BOTTOMK => {
@@ -425,12 +477,12 @@ impl PromPlanner {
 
     async fn prom_unary_expr_to_plan(
         &mut self,
-        session_state: &SessionState,
+        query_engine_state: &QueryEngineState,
         unary_expr: &UnaryExpr,
     ) -> Result<LogicalPlan> {
         let UnaryExpr { expr } = unary_expr;
         // Unary Expr in PromQL implys the `-` operator
-        let input = self.prom_expr_to_plan(expr, session_state).await?;
+        let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
         self.projection_for_each_field_column(input, |col| {
             Ok(DfExpr::Negative(Box::new(DfExpr::Column(col.into()))))
         })
@@ -438,7 +490,7 @@ impl PromPlanner {
 
     async fn prom_binary_expr_to_plan(
         &mut self,
-        session_state: &SessionState,
+        query_engine_state: &QueryEngineState,
         binary_expr: &PromBinaryExpr,
     ) -> Result<LogicalPlan> {
         let PromBinaryExpr {
@@ -493,12 +545,9 @@ impl PromPlanner {
             }
             // lhs is a literal, rhs is a column
             (Some(mut expr), None) => {
-                let input = self.prom_expr_to_plan(rhs, session_state).await?;
+                let input = self.prom_expr_to_plan(rhs, query_engine_state).await?;
                 // check if the literal is a special time expr
-                if let Some(time_expr) = Self::try_build_special_time_expr(
-                    lhs,
-                    self.ctx.time_index_column.as_ref().unwrap(),
-                ) {
+                if let Some(time_expr) = self.try_build_special_time_expr_with_context(lhs) {
                     expr = time_expr
                 }
                 let bin_expr_builder = |col: &String| {
@@ -522,12 +571,9 @@ impl PromPlanner {
             }
             // lhs is a column, rhs is a literal
             (None, Some(mut expr)) => {
-                let input = self.prom_expr_to_plan(lhs, session_state).await?;
+                let input = self.prom_expr_to_plan(lhs, query_engine_state).await?;
                 // check if the literal is a special time expr
-                if let Some(time_expr) = Self::try_build_special_time_expr(
-                    rhs,
-                    self.ctx.time_index_column.as_ref().unwrap(),
-                ) {
+                if let Some(time_expr) = self.try_build_special_time_expr_with_context(rhs) {
                     expr = time_expr
                 }
                 let bin_expr_builder = |col: &String| {
@@ -551,7 +597,7 @@ impl PromPlanner {
             }
             // both are columns. join them on time index
             (None, None) => {
-                let left_input = self.prom_expr_to_plan(lhs, session_state).await?;
+                let left_input = self.prom_expr_to_plan(lhs, query_engine_state).await?;
                 let left_field_columns = self.ctx.field_columns.clone();
                 let left_time_index_column = self.ctx.time_index_column.clone();
                 let mut left_table_ref = self
@@ -559,7 +605,7 @@ impl PromPlanner {
                     .unwrap_or_else(|_| TableReference::bare(""));
                 let left_context = self.ctx.clone();
 
-                let right_input = self.prom_expr_to_plan(rhs, session_state).await?;
+                let right_input = self.prom_expr_to_plan(rhs, query_engine_state).await?;
                 let right_field_columns = self.ctx.field_columns.clone();
                 let right_time_index_column = self.ctx.time_index_column.clone();
                 let mut right_table_ref = self
@@ -673,7 +719,7 @@ impl PromPlanner {
         self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
         self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
         self.ctx.reset_table_name_and_schema();
-        let literal_expr = df_prelude::lit(val.to_string());
+        let literal_expr = df_prelude::lit(val.clone());
 
         let plan = LogicalPlan::Extension(Extension {
             node: Arc::new(
@@ -819,24 +865,27 @@ impl PromPlanner {
 
     async fn prom_call_expr_to_plan(
         &mut self,
-        session_state: &SessionState,
+        query_engine_state: &QueryEngineState,
         call_expr: &Call,
     ) -> Result<LogicalPlan> {
         let Call { func, args } = call_expr;
         // some special functions that are not expression but a plan
         match func.name {
             SPECIAL_HISTOGRAM_QUANTILE => {
-                return self.create_histogram_plan(args, session_state).await
+                return self.create_histogram_plan(args, query_engine_state).await;
             }
             SPECIAL_VECTOR_FUNCTION => return self.create_vector_plan(args).await,
-            SCALAR_FUNCTION => return self.create_scalar_plan(args, session_state).await,
+            SCALAR_FUNCTION => return self.create_scalar_plan(args, query_engine_state).await,
+            SPECIAL_ABSENT_FUNCTION => {
+                return self.create_absent_plan(args, query_engine_state).await;
+            }
             _ => {}
         }
 
         // transform function arguments
         let args = self.create_function_args(&args.args)?;
         let input = if let Some(prom_expr) = &args.input {
-            self.prom_expr_to_plan_inner(prom_expr, func.name == "timestamp", session_state)
+            self.prom_expr_to_plan_inner(prom_expr, func.name == "timestamp", query_engine_state)
                 .await?
         } else {
             self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
@@ -858,7 +907,7 @@ impl PromPlanner {
             })
         };
         let (mut func_exprs, new_tags) =
-            self.create_function_expr(func, args.literals.clone(), session_state)?;
+            self.create_function_expr(func, args.literals.clone(), query_engine_state)?;
         func_exprs.insert(0, self.create_time_index_column_expr()?);
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
 
@@ -899,18 +948,23 @@ impl PromPlanner {
             self.ctx.tag_columns.push(tag);
         }
 
-        builder.build().context(DataFusionPlanningSnafu)
+        let plan = builder.build().context(DataFusionPlanningSnafu)?;
+        common_telemetry::debug!("Created PromQL function plan: {plan:?} for {call_expr:?}");
+
+        Ok(plan)
     }
 
     async fn prom_ext_expr_to_plan(
         &mut self,
-        session_state: &SessionState,
+        query_engine_state: &QueryEngineState,
         ext_expr: &promql_parser::parser::ast::Extension,
     ) -> Result<LogicalPlan> {
         // let promql_parser::parser::ast::Extension { expr } = ext_expr;
         let expr = &ext_expr.expr;
         let children = expr.children();
-        let plan = self.prom_expr_to_plan(&children[0], session_state).await?;
+        let plan = self
+            .prom_expr_to_plan(&children[0], query_engine_state)
+            .await?;
         // Wrapper for the explanation/analyze of the existing plan
         // https://docs.rs/datafusion-expr/latest/datafusion_expr/logical_plan/builder/struct.LogicalPlanBuilder.html#method.explain
         // if `analyze` is true, runs the actual plan and produces
@@ -995,12 +1049,13 @@ impl PromPlanner {
                 ensure!(
                     matcher.op == MatchOp::Equal,
                     UnsupportedMatcherOpSnafu {
-                        matcher: matcher.name.to_string(),
+                        matcher: matcher.name.clone(),
                         matcher_op: matcher.op.to_string(),
                     }
                 );
                 self.ctx.schema_name = Some(matcher.value.clone());
             } else if matcher.name != METRIC_NAME {
+                self.ctx.selector_matcher.push(matcher.clone());
                 let _ = matchers.insert(matcher.clone());
             }
         }
@@ -1185,12 +1240,13 @@ impl PromPlanner {
                 let mut exprs = Vec::with_capacity(labels.labels.len());
                 for label in &labels.labels {
                     // nonexistence label will be ignored
-                    if let Ok(field) = input_schema.field_with_unqualified_name(label) {
-                        exprs.push(DfExpr::Column(Column::from(field.name())));
+                    if let Some(column_name) = Self::find_case_sensitive_column(input_schema, label)
+                    {
+                        exprs.push(DfExpr::Column(Column::from_name(column_name.clone())));
 
                         if update_ctx {
                             // update the tag columns in context
-                            self.ctx.tag_columns.push(label.clone());
+                            self.ctx.tag_columns.push(column_name);
                         }
                     }
                 }
@@ -1246,43 +1302,81 @@ impl PromPlanner {
     ) -> Result<Vec<DfExpr>> {
         let mut exprs = Vec::with_capacity(label_matchers.matchers.len());
         for matcher in label_matchers.matchers {
-            let col = if table_schema
-                .field_with_unqualified_name(&matcher.name)
-                .is_err()
+            if matcher.name == SCHEMA_COLUMN_MATCHER
+                || matcher.name == DB_COLUMN_MATCHER
+                || matcher.name == FIELD_COLUMN_MATCHER
             {
-                DfExpr::Literal(ScalarValue::Utf8(Some(String::new()))).alias(matcher.name)
+                continue;
+            }
+
+            let column_name = Self::find_case_sensitive_column(table_schema, matcher.name.as_str());
+            let col = if let Some(column_name) = column_name {
+                DfExpr::Column(Column::from_name(column_name))
             } else {
-                DfExpr::Column(Column::from_name(matcher.name))
+                DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
+                    .alias(matcher.name.clone())
             };
-            let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)));
+            let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)), None);
             let expr = match matcher.op {
                 MatchOp::Equal => col.eq(lit),
                 MatchOp::NotEqual => col.not_eq(lit),
                 MatchOp::Re(re) => {
                     // TODO(ruihang): a more programmatic way to handle this in datafusion
-                    if re.as_str() == ".*" {
+
+                    // This is a hack to handle `.+` and `.*`, and is not strictly correct
+                    // `.` doesn't match newline (`\n`). Given this is in PromQL context,
+                    // most of the time it's fine.
+                    if re.as_str() == "^(?:.*)$" {
                         continue;
                     }
-                    DfExpr::BinaryExpr(BinaryExpr {
-                        left: Box::new(col),
-                        op: Operator::RegexMatch,
-                        right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
-                            re.as_str().to_string(),
-                        )))),
-                    })
+                    if re.as_str() == "^(?:.+)$" {
+                        col.not_eq(DfExpr::Literal(
+                            ScalarValue::Utf8(Some(String::new())),
+                            None,
+                        ))
+                    } else {
+                        DfExpr::BinaryExpr(BinaryExpr {
+                            left: Box::new(col),
+                            op: Operator::RegexMatch,
+                            right: Box::new(DfExpr::Literal(
+                                ScalarValue::Utf8(Some(re.as_str().to_string())),
+                                None,
+                            )),
+                        })
+                    }
                 }
-                MatchOp::NotRe(re) => DfExpr::BinaryExpr(BinaryExpr {
-                    left: Box::new(col),
-                    op: Operator::RegexNotMatch,
-                    right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
-                        re.as_str().to_string(),
-                    )))),
-                }),
+                MatchOp::NotRe(re) => {
+                    if re.as_str() == "^(?:.*)$" {
+                        DfExpr::Literal(ScalarValue::Boolean(Some(false)), None)
+                    } else if re.as_str() == "^(?:.+)$" {
+                        col.eq(DfExpr::Literal(
+                            ScalarValue::Utf8(Some(String::new())),
+                            None,
+                        ))
+                    } else {
+                        DfExpr::BinaryExpr(BinaryExpr {
+                            left: Box::new(col),
+                            op: Operator::RegexNotMatch,
+                            right: Box::new(DfExpr::Literal(
+                                ScalarValue::Utf8(Some(re.as_str().to_string())),
+                                None,
+                            )),
+                        })
+                    }
+                }
             };
             exprs.push(expr);
         }
 
         Ok(exprs)
+    }
+
+    fn find_case_sensitive_column(schema: &DFSchemaRef, column: &str) -> Option<String> {
+        schema
+            .fields()
+            .iter()
+            .find(|field| field.name() == column)
+            .map(|field| field.name().clone())
     }
 
     fn table_ref(&self) -> Result<TableReference> {
@@ -1318,16 +1412,20 @@ impl PromPlanner {
         if (end - start) / interval > MAX_SCATTER_POINTS || interval <= INTERVAL_1H {
             let single_time_range = time_index_expr
                 .clone()
-                .gt_eq(DfExpr::Literal(ScalarValue::TimestampMillisecond(
-                    Some(self.ctx.start - offset_duration - self.ctx.lookback_delta - range),
-                    None,
-                )))
-                .and(
-                    time_index_expr.lt_eq(DfExpr::Literal(ScalarValue::TimestampMillisecond(
-                        Some(self.ctx.end - offset_duration + self.ctx.lookback_delta),
+                .gt_eq(DfExpr::Literal(
+                    ScalarValue::TimestampMillisecond(
+                        Some(self.ctx.start + offset_duration - self.ctx.lookback_delta - range),
                         None,
-                    ))),
-                );
+                    ),
+                    None,
+                ))
+                .and(time_index_expr.lt_eq(DfExpr::Literal(
+                    ScalarValue::TimestampMillisecond(
+                        Some(self.ctx.end + offset_duration + self.ctx.lookback_delta),
+                        None,
+                    ),
+                    None,
+                )));
             return Ok(Some(single_time_range));
         }
 
@@ -1337,15 +1435,19 @@ impl PromPlanner {
             filters.push(
                 time_index_expr
                     .clone()
-                    .gt_eq(DfExpr::Literal(ScalarValue::TimestampMillisecond(
-                        Some(timestamp - offset_duration - lookback_delta - range),
-                        None,
-                    )))
-                    .and(time_index_expr.clone().lt_eq(DfExpr::Literal(
+                    .gt_eq(DfExpr::Literal(
                         ScalarValue::TimestampMillisecond(
-                            Some(timestamp - offset_duration + lookback_delta),
+                            Some(timestamp + offset_duration - lookback_delta - range),
                             None,
                         ),
+                        None,
+                    ))
+                    .and(time_index_expr.clone().lt_eq(DfExpr::Literal(
+                        ScalarValue::TimestampMillisecond(
+                            Some(timestamp + offset_duration + lookback_delta),
+                            None,
+                        ),
+                        None,
                     ))),
             )
         }
@@ -1408,6 +1510,7 @@ impl PromPlanner {
                             table: table_ref.to_quoted_string(),
                         })?
                         .clone(),
+                    metadata: None,
                 })))
                 .collect::<Vec<_>>();
             scan_plan = LogicalPlanBuilder::from(scan_plan)
@@ -1498,7 +1601,7 @@ impl PromPlanner {
                     self.ctx.interval,
                     SPECIAL_TIME_FUNCTION.to_string(),
                     DEFAULT_FIELD_COLUMN.to_string(),
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(0.0)))),
+                    Some(lit(0.0f64)),
                 )
                 .context(DataFusionPlanningSnafu)?,
             ),
@@ -1511,23 +1614,30 @@ impl PromPlanner {
         let mut result = FunctionArgs::default();
 
         for arg in args {
-            match *arg.clone() {
-                PromExpr::Subquery(_)
-                | PromExpr::VectorSelector(_)
-                | PromExpr::MatrixSelector(_)
-                | PromExpr::Extension(_)
-                | PromExpr::Aggregate(_)
-                | PromExpr::Paren(_)
-                | PromExpr::Call(_) => {
-                    if result.input.replace(*arg.clone()).is_some() {
-                        MultipleVectorSnafu { expr: *arg.clone() }.fail()?;
+            // First try to parse as literal expression (including binary expressions like 100.0 + 3.0)
+            if let Some(expr) = Self::try_build_literal_expr(arg) {
+                result.literals.push(expr);
+            } else {
+                // If not a literal, treat as vector input
+                match arg.as_ref() {
+                    PromExpr::Subquery(_)
+                    | PromExpr::VectorSelector(_)
+                    | PromExpr::MatrixSelector(_)
+                    | PromExpr::Extension(_)
+                    | PromExpr::Aggregate(_)
+                    | PromExpr::Paren(_)
+                    | PromExpr::Call(_)
+                    | PromExpr::Binary(_)
+                    | PromExpr::Unary(_) => {
+                        if result.input.replace(*arg.clone()).is_some() {
+                            MultipleVectorSnafu { expr: *arg.clone() }.fail()?;
+                        }
                     }
-                }
 
-                _ => {
-                    let expr =
-                        Self::get_param_as_literal_expr(&Some(Box::new(*arg.clone())), None, None)?;
-                    result.literals.push(expr);
+                    _ => {
+                        let expr = Self::get_param_as_literal_expr(&Some(arg.clone()), None, None)?;
+                        result.literals.push(expr);
+                    }
                 }
             }
         }
@@ -1544,7 +1654,7 @@ impl PromPlanner {
         &mut self,
         func: &Function,
         other_input_exprs: Vec<DfExpr>,
-        session_state: &SessionState,
+        query_engine_state: &QueryEngineState,
     ) -> Result<(Vec<DfExpr>, Vec<String>)> {
         // TODO(ruihang): check function args list
         let mut other_input_exprs: VecDeque<DfExpr> = other_input_exprs.into();
@@ -1644,13 +1754,14 @@ impl PromPlanner {
                 //     'days',
                 //     (date_trunc('month', <TIME INDEX>::date) + interval '1 month - 1 day')
                 // );
-                let day_lit_expr = DfExpr::Literal(ScalarValue::Utf8(Some("day".to_string())));
-                let month_lit_expr = DfExpr::Literal(ScalarValue::Utf8(Some("month".to_string())));
+                let day_lit_expr = "day".lit();
+                let month_lit_expr = "month".lit();
                 let interval_1month_lit_expr =
-                    DfExpr::Literal(ScalarValue::IntervalYearMonth(Some(1)));
-                let interval_1day_lit_expr = DfExpr::Literal(ScalarValue::IntervalDayTime(Some(
-                    IntervalDayTime::new(1, 0),
-                )));
+                    DfExpr::Literal(ScalarValue::IntervalYearMonth(Some(1)), None);
+                let interval_1day_lit_expr = DfExpr::Literal(
+                    ScalarValue::IntervalDayTime(Some(IntervalDayTime::new(1, 0))),
+                    None,
+                );
                 let the_1month_minus_1day_expr = DfExpr::BinaryExpr(BinaryExpr {
                     left: Box::new(interval_1month_lit_expr),
                     op: Operator::Minus,
@@ -1675,8 +1786,11 @@ impl PromPlanner {
             }
 
             "label_join" => {
-                let (concat_expr, dst_label) =
-                    Self::build_concat_labels_expr(&mut other_input_exprs, session_state)?;
+                let (concat_expr, dst_label) = Self::build_concat_labels_expr(
+                    &mut other_input_exprs,
+                    &self.ctx,
+                    query_engine_state,
+                )?;
 
                 // Reserve the current field columns except the `dst_label`.
                 for value in &self.ctx.field_columns {
@@ -1695,8 +1809,8 @@ impl PromPlanner {
                 ScalarFunc::GeneratedExpr
             }
             "label_replace" => {
-                if let Some((replace_expr, dst_label)) =
-                    self.build_regexp_replace_label_expr(&mut other_input_exprs, session_state)?
+                if let Some((replace_expr, dst_label)) = self
+                    .build_regexp_replace_label_expr(&mut other_input_exprs, query_engine_state)?
                 {
                     // Reserve the current field columns except the `dst_label`.
                     for value in &self.ctx.field_columns {
@@ -1735,14 +1849,38 @@ impl PromPlanner {
             }
             "round" => {
                 if other_input_exprs.is_empty() {
-                    other_input_exprs.push_front(DfExpr::Literal(ScalarValue::Float64(Some(0.0))));
+                    other_input_exprs.push_front(0.0f64.lit());
                 }
                 ScalarFunc::DataFusionUdf(Arc::new(Round::scalar_udf()))
             }
+            "rad" => ScalarFunc::DataFusionBuiltin(datafusion::functions::math::radians()),
+            "deg" => ScalarFunc::DataFusionBuiltin(datafusion::functions::math::degrees()),
+            "sgn" => ScalarFunc::DataFusionBuiltin(datafusion::functions::math::signum()),
+            "pi" => {
+                // pi functions doesn't accepts any arguments, needs special processing
+                let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
+                    func: datafusion::functions::math::pi(),
+                    args: vec![],
+                });
+                exprs.push(fn_expr);
 
+                ScalarFunc::GeneratedExpr
+            }
             _ => {
-                if let Some(f) = session_state.scalar_functions().get(func.name) {
+                if let Some(f) = query_engine_state
+                    .session_state()
+                    .scalar_functions()
+                    .get(func.name)
+                {
                     ScalarFunc::DataFusionBuiltin(f.clone())
+                } else if let Some(factory) = query_engine_state.scalar_function(func.name) {
+                    let func_state = query_engine_state.function_state();
+                    let query_ctx = self.table_provider.query_ctx();
+
+                    ScalarFunc::DataFusionUdf(Arc::new(factory.provide(FunctionContext {
+                        state: func_state,
+                        query_ctx: query_ctx.clone(),
+                    })))
                 } else if let Some(f) = datafusion_functions::math::functions()
                     .iter()
                     .find(|f| f.name() == func.name)
@@ -1842,29 +1980,48 @@ impl PromPlanner {
         Ok((exprs, new_tags))
     }
 
+    /// Validate label name according to Prometheus specification.
+    /// Label names must match the regex: [a-zA-Z_][a-zA-Z0-9_]*
+    /// Additionally, label names starting with double underscores are reserved for internal use.
+    fn validate_label_name(label_name: &str) -> Result<()> {
+        // Check if label name starts with double underscores (reserved)
+        if label_name.starts_with("__") {
+            return InvalidDestinationLabelNameSnafu { label_name }.fail();
+        }
+        // Check if label name matches the required pattern
+        if !LABEL_NAME_REGEX.is_match(label_name) {
+            return InvalidDestinationLabelNameSnafu { label_name }.fail();
+        }
+
+        Ok(())
+    }
+
     /// Build expr for `label_replace` function
     fn build_regexp_replace_label_expr(
         &self,
         other_input_exprs: &mut VecDeque<DfExpr>,
-        session_state: &SessionState,
+        query_engine_state: &QueryEngineState,
     ) -> Result<Option<(DfExpr, String)>> {
         // label_replace(vector, dst_label, replacement, src_label, regex)
         let dst_label = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)))) => d,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)), _)) => d,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected dst_label string literal, but found {:?}", other),
             }
             .fail()?,
         };
+
+        // Validate the destination label name
+        Self::validate_label_name(&dst_label)?;
         let replacement = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)))) => r,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)), _)) => r,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected replacement string literal, but found {:?}", other),
             }
             .fail()?,
         };
         let src_label = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(s)))) => s,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(s)), None)) => s,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected src_label string literal, but found {:?}", other),
             }
@@ -1872,12 +2029,21 @@ impl PromPlanner {
         };
 
         let regex = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)))) => r,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)), None)) => r,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected regex string literal, but found {:?}", other),
             }
             .fail()?,
         };
+
+        // Validate the regex before using it
+        // doc: https://prometheus.io/docs/prometheus/latest/querying/functions/#label_replace
+        regex::Regex::new(&regex).map_err(|_| {
+            InvalidRegularExpressionSnafu {
+                regex: regex.clone(),
+            }
+            .build()
+        })?;
 
         // If the src_label exists and regex is empty, keep everything unchanged.
         if self.ctx.tag_columns.contains(&src_label) && regex.is_empty() {
@@ -1893,7 +2059,7 @@ impl PromPlanner {
                 // the replacement is not empty, always adds dst_label with replacement value.
                 return Ok(Some((
                     // alias literal `replacement` as dst_label
-                    DfExpr::Literal(ScalarValue::Utf8(Some(replacement))).alias(&dst_label),
+                    lit(replacement).alias(&dst_label),
                     dst_label,
                 )));
             }
@@ -1903,6 +2069,7 @@ impl PromPlanner {
         // https://github.com/prometheus/prometheus/blob/d902abc50d6652ba8fe9a81ff8e5cce936114eba/promql/functions.go#L1575C32-L1575C37
         let regex = format!("^(?s:{regex})$");
 
+        let session_state = query_engine_state.session_state();
         let func = session_state
             .scalar_functions()
             .get("regexp_replace")
@@ -1913,12 +2080,12 @@ impl PromPlanner {
         // regexp_replace(src_label, regex, replacement)
         let args = vec![
             if src_label.is_empty() {
-                DfExpr::Literal(ScalarValue::Utf8(Some(String::new())))
+                DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
             } else {
                 DfExpr::Column(Column::from_name(src_label))
             },
-            DfExpr::Literal(ScalarValue::Utf8(Some(regex))),
-            DfExpr::Literal(ScalarValue::Utf8(Some(replacement))),
+            DfExpr::Literal(ScalarValue::Utf8(Some(regex)), None),
+            DfExpr::Literal(ScalarValue::Utf8(Some(replacement)), None),
         ];
 
         Ok(Some((
@@ -1934,35 +2101,49 @@ impl PromPlanner {
     /// Build expr for `label_join` function
     fn build_concat_labels_expr(
         other_input_exprs: &mut VecDeque<DfExpr>,
-        session_state: &SessionState,
+        ctx: &PromPlannerContext,
+        query_engine_state: &QueryEngineState,
     ) -> Result<(DfExpr, String)> {
         // label_join(vector, dst_label, separator, src_label_1, src_label_2, ...)
 
         let dst_label = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)))) => d,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)), _)) => d,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected dst_label string literal, but found {:?}", other),
             }
             .fail()?,
         };
         let separator = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)))) => d,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)), _)) => d,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected separator string literal, but found {:?}", other),
             }
             .fail()?,
         };
+
+        // Create a set of available columns (tag columns + field columns + time index column)
+        let available_columns: HashSet<&str> = ctx
+            .tag_columns
+            .iter()
+            .chain(ctx.field_columns.iter())
+            .chain(ctx.time_index_column.as_ref())
+            .map(|s| s.as_str())
+            .collect();
+
         let src_labels = other_input_exprs
-            .clone()
-            .into_iter()
+            .iter()
             .map(|expr| {
-                // Cast source label into column
+                // Cast source label into column or null literal
                 match expr {
-                    DfExpr::Literal(ScalarValue::Utf8(Some(label))) => {
+                    DfExpr::Literal(ScalarValue::Utf8(Some(label)), None) => {
                         if label.is_empty() {
-                            Ok(DfExpr::Literal(ScalarValue::Null))
-                        } else {
+                            Ok(DfExpr::Literal(ScalarValue::Null, None))
+                        } else if available_columns.contains(label.as_str()) {
+                            // Label exists in the table schema
                             Ok(DfExpr::Column(Column::from_name(label)))
+                        } else {
+                            // Label doesn't exist, treat as empty string (null)
+                            Ok(DfExpr::Literal(ScalarValue::Null, None))
                         }
                     }
                     other => UnexpectedPlanExprSnafu {
@@ -1982,6 +2163,7 @@ impl PromPlanner {
             }
         );
 
+        let session_state = query_engine_state.session_state();
         let func = session_state
             .scalar_functions()
             .get("concat_ws")
@@ -1989,7 +2171,7 @@ impl PromPlanner {
 
         // concat_ws(separator, src_label_1, src_label_2, ...) as dst_label
         let mut args = Vec::with_capacity(1 + src_labels.len());
-        args.push(DfExpr::Literal(ScalarValue::Utf8(Some(separator))));
+        args.push(DfExpr::Literal(ScalarValue::Utf8(Some(separator)), None));
         args.extend(src_labels);
 
         Ok((
@@ -2060,7 +2242,7 @@ impl PromPlanner {
 
         tags.iter()
             .map(|col| match col {
-                DfExpr::Literal(ScalarValue::Utf8(Some(label))) => {
+                DfExpr::Literal(ScalarValue::Utf8(Some(label)), _) => {
                     Ok(DfExpr::Column(Column::from_name(label)).sort(asc, false))
                 }
                 other => UnexpectedPlanExprSnafu {
@@ -2273,14 +2455,18 @@ impl PromPlanner {
                 // Try to ensure the relative stability of the output results.
                 sort_exprs.extend(tag_sort_exprs.clone());
 
-                DfExpr::WindowFunction(WindowFunction {
+                DfExpr::WindowFunction(Box::new(WindowFunction {
                     fun: WindowFunctionDefinition::WindowUDF(Arc::new(RowNumber::new().into())),
-                    args: vec![],
-                    partition_by: group_exprs.clone(),
-                    order_by: sort_exprs,
-                    window_frame: WindowFrame::new(Some(true)),
-                    null_treatment: None,
-                })
+                    params: WindowFunctionParams {
+                        args: vec![],
+                        partition_by: group_exprs.clone(),
+                        order_by: sort_exprs,
+                        window_frame: WindowFrame::new(Some(true)),
+                        null_treatment: None,
+                        distinct: false,
+                        filter: None,
+                    },
+                }))
             })
             .collect();
 
@@ -2315,7 +2501,7 @@ impl PromPlanner {
     async fn create_histogram_plan(
         &mut self,
         args: &PromFunctionArgs,
-        session_state: &SessionState,
+        query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
         if args.args.len() != 2 {
             return FunctionInvalidArgumentSnafu {
@@ -2331,7 +2517,7 @@ impl PromPlanner {
         })?;
 
         let input = args.args[1].as_ref().clone();
-        let input_plan = self.prom_expr_to_plan(&input, session_state).await?;
+        let input_plan = self.prom_expr_to_plan(&input, query_engine_state).await?;
 
         if !self.ctx.has_le_tag() {
             // Return empty result instead of error when 'le' column is not found
@@ -2390,7 +2576,7 @@ impl PromPlanner {
         self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
         self.ctx.reset_table_name_and_schema();
         self.ctx.tag_columns = vec![];
-        self.ctx.field_columns = vec![GREPTIME_VALUE.to_string()];
+        self.ctx.field_columns = vec![greptime_value().to_string()];
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(
                 EmptyMetric::new(
@@ -2398,7 +2584,7 @@ impl PromPlanner {
                     self.ctx.end,
                     self.ctx.interval,
                     SPECIAL_TIME_FUNCTION.to_string(),
-                    GREPTIME_VALUE.to_string(),
+                    greptime_value().to_string(),
                     Some(lit),
                 )
                 .context(DataFusionPlanningSnafu)?,
@@ -2410,7 +2596,7 @@ impl PromPlanner {
     async fn create_scalar_plan(
         &mut self,
         args: &PromFunctionArgs,
-        session_state: &SessionState,
+        query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
         ensure!(
             args.len() == 1,
@@ -2418,7 +2604,9 @@ impl PromPlanner {
                 fn_name: SCALAR_FUNCTION
             }
         );
-        let input = self.prom_expr_to_plan(&args.args[0], session_state).await?;
+        let input = self
+            .prom_expr_to_plan(&args.args[0], query_engine_state)
+            .await?;
         ensure!(
             self.ctx.field_columns.len() == 1,
             MultiFieldsNotSupportedSnafu {
@@ -2449,18 +2637,77 @@ impl PromPlanner {
         Ok(scalar_plan)
     }
 
+    /// Create a [SPECIAL_ABSENT_FUNCTION] plan
+    async fn create_absent_plan(
+        &mut self,
+        args: &PromFunctionArgs,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<LogicalPlan> {
+        if args.args.len() != 1 {
+            return FunctionInvalidArgumentSnafu {
+                fn_name: SPECIAL_ABSENT_FUNCTION.to_string(),
+            }
+            .fail();
+        }
+        let input = self
+            .prom_expr_to_plan(&args.args[0], query_engine_state)
+            .await?;
+
+        let time_index_expr = self.create_time_index_column_expr()?;
+        let first_field_expr =
+            self.create_field_column_exprs()?
+                .pop()
+                .with_context(|| ValueNotFoundSnafu {
+                    table: self.ctx.table_name.clone().unwrap_or_default(),
+                })?;
+        let first_value_expr = first_value(first_field_expr, vec![]);
+
+        let ordered_aggregated_input = LogicalPlanBuilder::from(input)
+            .aggregate(
+                vec![time_index_expr.clone()],
+                vec![first_value_expr.clone()],
+            )
+            .context(DataFusionPlanningSnafu)?
+            .sort(vec![time_index_expr.sort(true, false)])
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+
+        let fake_labels = self
+            .ctx
+            .selector_matcher
+            .iter()
+            .filter_map(|matcher| match matcher.op {
+                MatchOp::Equal => Some((matcher.name.clone(), matcher.value.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        // Create the absent plan
+        let absent_plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                Absent::try_new(
+                    self.ctx.start,
+                    self.ctx.end,
+                    self.ctx.interval,
+                    self.ctx.time_index_column.as_ref().unwrap().clone(),
+                    self.ctx.field_columns[0].clone(),
+                    fake_labels,
+                    ordered_aggregated_input,
+                )
+                .context(DataFusionPlanningSnafu)?,
+            ),
+        });
+
+        Ok(absent_plan)
+    }
+
     /// Try to build a DataFusion Literal Expression from PromQL Expr, return
     /// `None` if the input is not a literal expression.
     fn try_build_literal_expr(expr: &PromExpr) -> Option<DfExpr> {
         match expr {
-            PromExpr::NumberLiteral(NumberLiteral { val }) => {
-                let scalar_value = ScalarValue::Float64(Some(*val));
-                Some(DfExpr::Literal(scalar_value))
-            }
-            PromExpr::StringLiteral(StringLiteral { val }) => {
-                let scalar_value = ScalarValue::Utf8(Some(val.to_string()));
-                Some(DfExpr::Literal(scalar_value))
-            }
+            PromExpr::NumberLiteral(NumberLiteral { val }) => Some(val.lit()),
+            PromExpr::StringLiteral(StringLiteral { val }) => Some(val.lit()),
             PromExpr::VectorSelector(_)
             | PromExpr::MatrixSelector(_)
             | PromExpr::Extension(_)
@@ -2468,7 +2715,9 @@ impl PromPlanner {
             | PromExpr::Subquery(_) => None,
             PromExpr::Call(Call { func, .. }) => {
                 if func.name == SPECIAL_TIME_FUNCTION {
-                    Some(build_special_time_expr(SPECIAL_TIME_FUNCTION))
+                    // For time() function, don't treat it as a literal
+                    // Let it be handled as a regular function call
+                    None
                 } else {
                     None
                 }
@@ -2505,10 +2754,12 @@ impl PromPlanner {
         }
     }
 
-    fn try_build_special_time_expr(expr: &PromExpr, time_index_col: &str) -> Option<DfExpr> {
+    fn try_build_special_time_expr_with_context(&self, expr: &PromExpr) -> Option<DfExpr> {
         match expr {
             PromExpr::Call(Call { func, .. }) => {
-                if func.name == SPECIAL_TIME_FUNCTION {
+                if func.name == SPECIAL_TIME_FUNCTION
+                    && let Some(time_index_col) = self.ctx.time_index_column.as_ref()
+                {
                     Some(build_special_time_expr(time_index_col))
                 } else {
                     None
@@ -2656,7 +2907,7 @@ impl PromPlanner {
                         .collect::<Vec<_>>(),
                 ),
                 None,
-                true,
+                NullEquality::NullEqualsNull,
             )
             .context(DataFusionPlanningSnafu)?
             .build()
@@ -2792,7 +3043,7 @@ impl PromPlanner {
                     JoinType::LeftSemi,
                     (join_keys.clone(), join_keys),
                     None,
-                    true,
+                    NullEquality::NullEqualsNull,
                 )
                 .context(DataFusionPlanningSnafu)?
                 .build()
@@ -2805,7 +3056,7 @@ impl PromPlanner {
                     JoinType::LeftAnti,
                     (join_keys.clone(), join_keys),
                     None,
-                    true,
+                    NullEquality::NullEqualsNull,
                 )
                 .context(DataFusionPlanningSnafu)?
                 .build()
@@ -2911,7 +3162,7 @@ impl PromPlanner {
         // step 1: align schema using project, fill non-exist columns with null
         let left_proj_exprs = all_columns.iter().map(|col| {
             if tags_not_in_left.contains(col) {
-                DfExpr::Literal(ScalarValue::Utf8(None)).alias(col.to_string())
+                DfExpr::Literal(ScalarValue::Utf8(None), None).alias(col.clone())
             } else {
                 DfExpr::Column(Column::new(None::<String>, col))
             }
@@ -2928,8 +3179,8 @@ impl PromPlanner {
             .iter()
             .find(|(_, f)| f.name() == right_field_col)
             .map(|(q, _)| q)
-            .context(ColumnNotFoundSnafu {
-                col: right_field_col.to_string(),
+            .with_context(|| ColumnNotFoundSnafu {
+                col: right_field_col.clone(),
             })?
             .cloned();
 
@@ -2943,7 +3194,7 @@ impl PromPlanner {
                     right_field_col,
                 ))
             } else if tags_not_in_right.contains(col) {
-                DfExpr::Literal(ScalarValue::Utf8(None)).alias(col.to_string())
+                DfExpr::Literal(ScalarValue::Utf8(None), None).alias(col.clone())
             } else {
                 DfExpr::Column(Column::new(None::<String>, col))
             }
@@ -3001,7 +3252,7 @@ impl PromPlanner {
         // step 4: update context
         self.ctx.time_index_column = Some(left_time_index_column);
         self.ctx.tag_columns = all_tags.into_iter().collect();
-        self.ctx.field_columns = vec![left_field_col.to_string()];
+        self.ctx.field_columns = vec![left_field_col.clone()];
 
         Ok(result)
     }
@@ -3092,7 +3343,6 @@ impl PromPlanner {
     /// Generate an expr like `date_part("hour", <TIME_INDEX>)`. Caller should ensure the
     /// time index column in context is set
     fn date_part_on_time_index(&self, date_part: &str) -> Result<DfExpr> {
-        let lit_expr = DfExpr::Literal(ScalarValue::Utf8(Some(date_part.to_string())));
         let input_expr = datafusion::logical_expr::col(
             self.ctx
                 .time_index_column
@@ -3104,9 +3354,38 @@ impl PromPlanner {
         );
         let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
             func: datafusion_functions::datetime::date_part(),
-            args: vec![lit_expr, input_expr],
+            args: vec![date_part.lit(), input_expr],
         });
         Ok(fn_expr)
+    }
+
+    /// Apply an alias to the query result by adding a projection with the alias name
+    fn apply_alias_projection(
+        &mut self,
+        plan: LogicalPlan,
+        alias_name: String,
+    ) -> Result<LogicalPlan> {
+        let fields_expr = self.create_field_column_exprs()?;
+
+        // TODO(dennis): how to support multi-value aliasing?
+        ensure!(
+            fields_expr.len() == 1,
+            UnsupportedExprSnafu {
+                name: "alias on multi-value result"
+            }
+        );
+
+        let project_fields = fields_expr
+            .into_iter()
+            .map(|expr| expr.alias(&alias_name))
+            .chain(self.create_tag_column_exprs()?)
+            .chain(Some(self.create_time_index_column_expr()?));
+
+        LogicalPlanBuilder::from(plan)
+            .project(project_fields)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
     }
 }
 
@@ -3116,17 +3395,33 @@ struct FunctionArgs {
     literals: Vec<DfExpr>,
 }
 
+/// Represents different types of scalar functions supported in PromQL expressions.
+/// Each variant defines how the function should be processed and what arguments it expects.
 #[derive(Debug, Clone)]
 enum ScalarFunc {
+    /// DataFusion's registered(including built-in) scalar functions (e.g., abs, sqrt, round, clamp).
+    /// These are passed through directly to DataFusion's execution engine.
+    /// Processing: Simple argument insertion at the specified position.
     DataFusionBuiltin(Arc<ScalarUdfDef>),
-    /// The UDF that is defined by Datafusion itself.
+    /// User-defined functions registered in DataFusion's function registry.
+    /// Similar to DataFusionBuiltin but for custom functions not built into DataFusion.
+    /// Processing: Direct pass-through with argument positioning.
     DataFusionUdf(Arc<ScalarUdfDef>),
+    /// PromQL-specific functions that operate on time series data with temporal context.
+    /// These functions require both timestamp ranges and values to perform calculations.
+    /// Processing: Automatically injects timestamp_range and value columns as first arguments.
+    /// Examples: idelta, irate, resets, changes, deriv, *_over_time function
     Udf(Arc<ScalarUdfDef>),
-    // todo(ruihang): maybe merge with Udf later
-    /// UDF that require extra information like range length to be evaluated.
-    /// The second argument is range length.
+    /// PromQL functions requiring extrapolation calculations with explicit range information.
+    /// These functions need to know the time range length to perform rate calculations.
+    /// The second field contains the range length in milliseconds.
+    /// Processing: Injects timestamp_range, value, time_index columns and appends range_length.
+    /// Examples: increase, rate, delta
+    // TODO(ruihang): maybe merge with Udf later
     ExtrapolateUdf(Arc<ScalarUdfDef>, i64),
-    /// Func that doesn't require input, like `time()`.
+    /// Functions that generate expressions directly without external UDF calls.
+    /// The expression is constructed during function matching and requires no additional processing.
+    /// Examples: time(), minute(), hour(), month(), year() and other date/time extractors
     GeneratedExpr,
 }
 
@@ -3134,11 +3429,12 @@ enum ScalarFunc {
 mod test {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
+    use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
+    use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_query::prelude::greptime_timestamp;
     use common_query::test_util::DummyDecoder;
-    use datafusion::execution::SessionStateBuilder;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use promql_parser::label::Labels;
@@ -3148,9 +3444,20 @@ mod test {
     use table::test_util::EmptyTable;
 
     use super::*;
+    use crate::options::QueryOptions;
 
-    fn build_session_state() -> SessionState {
-        SessionStateBuilder::new().with_default_features().build()
+    fn build_query_engine_state() -> QueryEngineState {
+        QueryEngineState::new(
+            new_memory_catalog_manager().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            Plugins::default(),
+            QueryOptions::default(),
+        )
     }
 
     async fn build_test_table_provider(
@@ -3192,21 +3499,23 @@ mod test {
                 .build()
                 .unwrap();
             let table_info = TableInfoBuilder::default()
-                .name(table_name.to_string())
+                .name(table_name.clone())
                 .meta(table_meta)
                 .build()
                 .unwrap();
             let table = EmptyTable::from_table_info(&table_info);
 
-            assert!(catalog_list
-                .register_table_sync(RegisterTableRequest {
-                    catalog: DEFAULT_CATALOG_NAME.to_string(),
-                    schema: schema_name.to_string(),
-                    table_name: table_name.to_string(),
-                    table_id: 1024,
-                    table,
-                })
-                .is_ok());
+            assert!(
+                catalog_list
+                    .register_table_sync(RegisterTableRequest {
+                        catalog: DEFAULT_CATALOG_NAME.to_string(),
+                        schema: schema_name.clone(),
+                        table_name: table_name.clone(),
+                        table_id: 1024,
+                        table,
+                    })
+                    .is_ok()
+            );
         }
 
         DfTableSourceProvider::new(
@@ -3235,14 +3544,14 @@ mod test {
             }
             columns.push(
                 ColumnSchema::new(
-                    "greptime_timestamp".to_string(),
+                    greptime_timestamp().to_string(),
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     false,
                 )
                 .with_time_index(true),
             );
             columns.push(ColumnSchema::new(
-                "greptime_value".to_string(),
+                greptime_value().to_string(),
                 ConcreteDataType::float64_datatype(),
                 true,
             ));
@@ -3254,21 +3563,23 @@ mod test {
                 .build()
                 .unwrap();
             let table_info = TableInfoBuilder::default()
-                .name(table_name.to_string())
+                .name(table_name.clone())
                 .meta(table_meta)
                 .build()
                 .unwrap();
             let table = EmptyTable::from_table_info(&table_info);
 
-            assert!(catalog_list
-                .register_table_sync(RegisterTableRequest {
-                    catalog: DEFAULT_CATALOG_NAME.to_string(),
-                    schema: schema_name.to_string(),
-                    table_name: table_name.to_string(),
-                    table_id: 1024,
-                    table,
-                })
-                .is_ok());
+            assert!(
+                catalog_list
+                    .register_table_sync(RegisterTableRequest {
+                        catalog: DEFAULT_CATALOG_NAME.to_string(),
+                        schema: schema_name.clone(),
+                        table_name: table_name.clone(),
+                        table_id: 1024,
+                        table,
+                    })
+                    .is_ok()
+            );
         }
 
         DfTableSourceProvider::new(
@@ -3314,9 +3625,10 @@ mod test {
             1,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
-            .await
-            .unwrap();
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
 
         let expected = String::from(
             "Filter: TEMPLATE(field_0) IS NOT NULL [timestamp:Timestamp(Millisecond, None), TEMPLATE(field_0):Float64;N, tag_0:Utf8]\
@@ -3523,9 +3835,10 @@ mod test {
             2,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
-            .await
-            .unwrap();
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
         let expected_no_without = String::from(
             "Sort: some_metric.tag_1 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_1:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n  Aggregate: groupBy=[[some_metric.tag_1, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_1:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
@@ -3552,9 +3865,10 @@ mod test {
             2,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
-            .await
-            .unwrap();
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
         let expected_without = String::from(
             "Sort: some_metric.tag_0 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n  Aggregate: groupBy=[[some_metric.tag_0, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
@@ -3652,11 +3966,12 @@ mod test {
             1,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
-            .await
-            .unwrap();
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
 
-        let  expected = String::from(
+        let expected = String::from(
             "Projection: rhs.tag_0, rhs.timestamp, lhs.field_0 + rhs.field_0 AS lhs.field_0 + rhs.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), lhs.field_0 + rhs.field_0:Float64;N]\
             \n  Inner Join: lhs.tag_0 = rhs.tag_0, lhs.timestamp = rhs.timestamp [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n    SubqueryAlias: lhs [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
@@ -3670,13 +3985,13 @@ mod test {
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n            Filter: some_metric.tag_0 = Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]",
         );
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
 
-    async fn indie_query_plan_compare(query: &str, expected: String) {
+    async fn indie_query_plan_compare<T: AsRef<str>>(query: &str, expected: T) {
         let prom_expr = parser::parse(query).unwrap();
         let eval_stmt = EvalStmt {
             expr: prom_expr,
@@ -3700,11 +4015,12 @@ mod test {
             1,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
-            .await
-            .unwrap();
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
 
-        assert_eq!(plan.display_indent_schema().to_string(), expected);
+        assert_eq!(plan.display_indent_schema().to_string(), expected.as_ref());
     }
 
     #[tokio::test]
@@ -3716,7 +4032,7 @@ mod test {
             \n    PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        Filter: some_metric.tag_0 = Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n          TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n          TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]",
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -3725,8 +4041,8 @@ mod test {
     #[tokio::test]
     async fn binary_op_literal_literal() {
         let query = r#"1 + 1"#;
-        let expected = String::from("EmptyMetric: range=[0..100000000], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]");
-
+        let expected = r#"EmptyMetric: range=[0..100000000], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]
+  TableScan: dummy [time:Timestamp(Millisecond, None), value:Float64;N]"#;
         indie_query_plan_compare(query, expected).await;
     }
 
@@ -3739,7 +4055,7 @@ mod test {
             \n    PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n          TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n          TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]",
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -3754,7 +4070,7 @@ mod test {
             \n    PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n          TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n          TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]",
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -3769,7 +4085,7 @@ mod test {
             \n    PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n          TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n          TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]",
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -3786,7 +4102,7 @@ mod test {
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n            Filter: some_metric.timestamp >= TimestampMillisecond(-301000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]",
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -3801,7 +4117,7 @@ mod test {
             \n    PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n          TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n          TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]",
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -3818,7 +4134,7 @@ mod test {
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n            Filter: some_metric.timestamp >= TimestampMillisecond(-301000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]",
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -3855,9 +4171,10 @@ mod test {
         )
         .await;
         // Should be ok
-        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
-            .await
-            .unwrap();
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
         let expected = "Projection: http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value AS http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value\
             \n  Inner Join: http_server_requests_seconds_sum.greptime_timestamp = http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_sum.uri = http_server_requests_seconds_count.uri\
             \n    SubqueryAlias: http_server_requests_seconds_sum\
@@ -3900,7 +4217,7 @@ mod test {
         )
         .await;
         // Should be ok
-        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
             .await
             .unwrap();
     }
@@ -3940,9 +4257,10 @@ mod test {
             )
             .await;
             // Should be ok
-            let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
-                .await
-                .unwrap();
+            let _ =
+                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                    .await
+                    .unwrap();
         }
     }
 
@@ -3976,7 +4294,7 @@ mod test {
         )
         .await;
         // Should be ok
-        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
             .await
             .unwrap();
     }
@@ -4006,7 +4324,7 @@ mod test {
         )
         .await;
         eval_stmt.expr = parser::parse(case).unwrap();
-        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
             .await
             .unwrap();
 
@@ -4026,7 +4344,7 @@ mod test {
         )
         .await;
         eval_stmt.expr = parser::parse(case).unwrap();
-        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
             .await
             .unwrap();
 
@@ -4049,7 +4367,7 @@ mod test {
         )
         .await;
         eval_stmt.expr = parser::parse(case).unwrap();
-        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
             .await
             .unwrap();
 
@@ -4070,7 +4388,7 @@ mod test {
         )
         .await;
         eval_stmt.expr = parser::parse(case).unwrap();
-        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
             .await
             .unwrap();
     }
@@ -4191,7 +4509,7 @@ mod test {
             )
             .await;
             let plan =
-                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
                     .await
                     .unwrap();
             let mut fields = plan.schema().field_names();
@@ -4216,7 +4534,8 @@ mod test {
             )
             .await;
             let plan =
-                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state()).await;
+                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                    .await;
             assert!(plan.is_err(), "case: {:?}", case);
         }
     }
@@ -4229,7 +4548,7 @@ mod test {
             \n  PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n    Sort: greptime_private.some_alt_metric.tag_0 ASC NULLS FIRST, greptime_private.some_alt_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      Filter: greptime_private.some_alt_metric.timestamp >= TimestampMillisecond(-1000, None) AND greptime_private.some_alt_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n        TableScan: greptime_private.some_alt_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n        TableScan: greptime_private.some_alt_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]",
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -4240,13 +4559,14 @@ mod test {
             \n  PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n    Sort: greptime_private.some_alt_metric.tag_0 ASC NULLS FIRST, greptime_private.some_alt_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      Filter: greptime_private.some_alt_metric.timestamp >= TimestampMillisecond(-1000, None) AND greptime_private.some_alt_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n        TableScan: greptime_private.some_alt_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n        TableScan: greptime_private.some_alt_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]",
         );
 
         indie_query_plan_compare(query, expected).await;
 
         let query = "some_alt_metric{__schema__=\"greptime_private\"} / some_metric";
-        let expected = String::from("Projection: some_metric.tag_0, some_metric.timestamp, greptime_private.some_alt_metric.field_0 / some_metric.field_0 AS greptime_private.some_alt_metric.field_0 / some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), greptime_private.some_alt_metric.field_0 / some_metric.field_0:Float64;N]\
+        let expected = String::from(
+            "Projection: some_metric.tag_0, some_metric.timestamp, greptime_private.some_alt_metric.field_0 / some_metric.field_0 AS greptime_private.some_alt_metric.field_0 / some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), greptime_private.some_alt_metric.field_0 / some_metric.field_0:Float64;N]\
         \n  Inner Join: greptime_private.some_alt_metric.tag_0 = some_metric.tag_0, greptime_private.some_alt_metric.timestamp = some_metric.timestamp [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
         \n    SubqueryAlias: greptime_private.some_alt_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
         \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
@@ -4259,7 +4579,8 @@ mod test {
         \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
         \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
         \n            Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-        \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]");
+        \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]",
+        );
 
         indie_query_plan_compare(query, expected).await;
     }
@@ -4299,7 +4620,8 @@ mod test {
             .await;
 
             let plan =
-                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state()).await;
+                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                    .await;
             assert!(plan.is_err(), "query: {:?}", query);
         }
     }
@@ -4339,15 +4661,17 @@ mod test {
             .build()
             .unwrap();
         let table = EmptyTable::from_table_info(&table_info);
-        assert!(catalog_list
-            .register_table_sync(RegisterTableRequest {
-                catalog: DEFAULT_CATALOG_NAME.to_string(),
-                schema: DEFAULT_SCHEMA_NAME.to_string(),
-                table_name: "metrics".to_string(),
-                table_id: 1024,
-                table,
-            })
-            .is_ok());
+        assert!(
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: "metrics".to_string(),
+                    table_id: 1024,
+                    table,
+                })
+                .is_ok()
+        );
 
         let plan = PromPlanner::stmt_to_plan(
             DfTableSourceProvider::new(
@@ -4366,12 +4690,13 @@ mod test {
                 interval: Duration::from_secs(5),
                 lookback_delta: Duration::from_secs(1),
             },
-            &build_session_state(),
+            &build_query_engine_state(),
         )
         .await
         .unwrap();
-        assert_eq!(plan.display_indent_schema().to_string(),
-        "PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
+        assert_eq!(
+            plan.display_indent_schema().to_string(),
+            "PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
         \n  PromSeriesDivide: tags=[\"tag\"] [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
         \n    Sort: metrics.tag ASC NULLS FIRST, metrics.timestamp ASC NULLS FIRST [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
         \n      Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp >= TimestampMillisecond(-1000, None) AND metrics.timestamp <= TimestampMillisecond(100001000, None) [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
@@ -4395,12 +4720,13 @@ mod test {
                 interval: Duration::from_secs(5),
                 lookback_delta: Duration::from_secs(1),
             },
-            &build_session_state(),
+            &build_query_engine_state(),
         )
         .await
         .unwrap();
-        assert_eq!(plan.display_indent_schema().to_string(),
-        "Filter: prom_avg_over_time(timestamp_range,field) IS NOT NULL [timestamp:Timestamp(Millisecond, None), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\
+        assert_eq!(
+            plan.display_indent_schema().to_string(),
+            "Filter: prom_avg_over_time(timestamp_range,field) IS NOT NULL [timestamp:Timestamp(Millisecond, None), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\
         \n  Projection: metrics.timestamp, prom_avg_over_time(timestamp_range, field) AS prom_avg_over_time(timestamp_range,field), metrics.tag [timestamp:Timestamp(Millisecond, None), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\
         \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[5000], time index=[timestamp], values=[\"field\"] [field:Dictionary(Int64, Float64);N, tag:Utf8, timestamp:Timestamp(Millisecond, None), timestamp_range:Dictionary(Int64, Timestamp(Millisecond, None))]\
         \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
@@ -4435,7 +4761,7 @@ mod test {
         )
         .await;
         // Should be ok
-        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
             .await
             .unwrap();
     }
@@ -4459,9 +4785,10 @@ mod test {
         let table_provider =
             build_test_table_provider(&[(DEFAULT_SCHEMA_NAME.to_string(), "up".to_string())], 4, 1)
                 .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
-            .await
-            .unwrap();
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
 
         let expected = r#"
 Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
@@ -4495,9 +4822,10 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
         let table_provider =
             build_test_table_provider(&[(DEFAULT_SCHEMA_NAME.to_string(), "up".to_string())], 1, 1)
                 .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
-            .await
-            .unwrap();
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
 
         let expected = r#"
 Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
@@ -4537,9 +4865,10 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
             3,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
-            .await
-            .unwrap();
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
         let expected = "Sort: prometheus_tsdb_head_series.timestamp ASC NULLS LAST [timestamp:Timestamp(Millisecond, None), sum(prometheus_tsdb_head_series.field_0):Float64;N, sum(prometheus_tsdb_head_series.field_1):Float64;N, sum(prometheus_tsdb_head_series.field_2):Float64;N]\
         \n  Aggregate: groupBy=[[prometheus_tsdb_head_series.timestamp]], aggr=[[sum(prometheus_tsdb_head_series.field_0), sum(prometheus_tsdb_head_series.field_1), sum(prometheus_tsdb_head_series.field_2)]] [timestamp:Timestamp(Millisecond, None), sum(prometheus_tsdb_head_series.field_0):Float64;N, sum(prometheus_tsdb_head_series.field_1):Float64;N, sum(prometheus_tsdb_head_series.field_2):Float64;N]\
         \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]\
@@ -4580,9 +4909,10 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
         )
         .await;
 
-        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
-            .await
-            .unwrap();
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
         let expected = "Projection: sum(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp [sum(prometheus_tsdb_head_series.greptime_value):Float64;N, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None)]\
         \n  Sort: prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ASC NULLS LAST [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), sum(prometheus_tsdb_head_series.greptime_value):Float64;N, row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW:UInt64]\
         \n    Filter: row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW <= Float64(10) [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), sum(prometheus_tsdb_head_series.greptime_value):Float64;N, row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW:UInt64]\
@@ -4628,9 +4958,10 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
         )
         .await;
 
-        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
-            .await
-            .unwrap();
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
         let expected = "Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), series:Float64;N]\
         \n  Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, prometheus_tsdb_head_series.greptime_value ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), series:Float64;N, greptime_value:Float64;N]\
         \n    Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value AS series, prometheus_tsdb_head_series.greptime_value [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), series:Float64;N, greptime_value:Float64;N]\
@@ -4642,6 +4973,59 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
         \n                TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_value_alias() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+        let case = r#"count_values('series', prometheus_tsdb_head_series{ip=~"(10.0.160.237:8080|10.0.160.237:9090)"}) by (ip)"#;
+
+        let prom_expr = parser::parse(case).unwrap();
+        eval_stmt.expr = prom_expr;
+        let table_provider = build_test_table_provider_with_fields(
+            &[
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "prometheus_tsdb_head_series".to_string(),
+                ),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "http_server_requests_seconds_count".to_string(),
+                ),
+            ],
+            &["ip"],
+        )
+        .await;
+
+        let alias = Some("my_series".to_string());
+        let plan = PromPlanner::stmt_to_plan_with_alias(
+            table_provider,
+            &eval_stmt,
+            alias,
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+        let expected = r#"
+Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp [my_series:Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None)]
+  Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), series:Float64;N]
+    Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, prometheus_tsdb_head_series.greptime_value ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), series:Float64;N, greptime_value:Float64;N]
+      Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value AS series, prometheus_tsdb_head_series.greptime_value [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), series:Float64;N, greptime_value:Float64;N]
+        Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N, count(prometheus_tsdb_head_series.greptime_value):Int64]
+          PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+            PromSeriesDivide: tags=["ip"] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+              Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+                Filter: prometheus_tsdb_head_series.ip ~ Utf8("^(?:(10.0.160.237:8080|10.0.160.237:9090))$") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100001000, None) [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+                  TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]"#;
+        assert_eq!(format!("\n{}", plan.display_indent_schema()), expected);
     }
 
     #[tokio::test]
@@ -4674,9 +5058,10 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
         )
         .await;
 
-        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
-            .await
-            .unwrap();
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
         let expected = "Sort: prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST [greptime_timestamp:Timestamp(Millisecond, None), quantile(Float64(0.3),sum(prometheus_tsdb_head_series.greptime_value)):Float64;N]\
         \n  Aggregate: groupBy=[[prometheus_tsdb_head_series.greptime_timestamp]], aggr=[[quantile(Float64(0.3), sum(prometheus_tsdb_head_series.greptime_value))]] [greptime_timestamp:Timestamp(Millisecond, None), quantile(Float64(0.3),sum(prometheus_tsdb_head_series.greptime_value)):Float64;N]\
         \n    Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), sum(prometheus_tsdb_head_series.greptime_value):Float64;N]\
@@ -4711,24 +5096,26 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
         )
         .await;
 
-        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
-            .await
-            .unwrap();
-        let expected = "UnionDistinctOn: on col=[[\"job\"]], ts_col=[greptime_timestamp] [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8, sum(metric_exists.greptime_value):Float64;N]\
-        \n  SubqueryAlias: metric_exists [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8, sum(metric_exists.greptime_value):Float64;N]\
-        \n    Projection: metric_exists.greptime_timestamp, metric_exists.job, sum(metric_exists.greptime_value) [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8, sum(metric_exists.greptime_value):Float64;N]\
-        \n      Sort: metric_exists.job ASC NULLS LAST, metric_exists.greptime_timestamp ASC NULLS LAST [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), sum(metric_exists.greptime_value):Float64;N]\
-        \n        Aggregate: groupBy=[[metric_exists.job, metric_exists.greptime_timestamp]], aggr=[[sum(metric_exists.greptime_value)]] [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), sum(metric_exists.greptime_value):Float64;N]\
-        \n          PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
-        \n            PromSeriesDivide: tags=[\"job\"] [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
-        \n              Sort: metric_exists.job ASC NULLS FIRST, metric_exists.greptime_timestamp ASC NULLS FIRST [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
-        \n                Filter: metric_exists.greptime_timestamp >= TimestampMillisecond(-1000, None) AND metric_exists.greptime_timestamp <= TimestampMillisecond(100001000, None) [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
-        \n                  TableScan: metric_exists [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
-        \n  SubqueryAlias:  [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8;N, sum(.value):Float64;N]\
-        \n    Projection: .time AS greptime_timestamp, Utf8(NULL) AS job, sum(.value) [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8;N, sum(.value):Float64;N]\
-        \n      Sort: .time ASC NULLS LAST [time:Timestamp(Millisecond, None), sum(.value):Float64;N]\
-        \n        Aggregate: groupBy=[[.time]], aggr=[[sum(.value)]] [time:Timestamp(Millisecond, None), sum(.value):Float64;N]\
-        \n          EmptyMetric: range=[0..-1], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]";
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+        let expected = r#"UnionDistinctOn: on col=[["job"]], ts_col=[greptime_timestamp] [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8, sum(metric_exists.greptime_value):Float64;N]
+  SubqueryAlias: metric_exists [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8, sum(metric_exists.greptime_value):Float64;N]
+    Projection: metric_exists.greptime_timestamp, metric_exists.job, sum(metric_exists.greptime_value) [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8, sum(metric_exists.greptime_value):Float64;N]
+      Sort: metric_exists.job ASC NULLS LAST, metric_exists.greptime_timestamp ASC NULLS LAST [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), sum(metric_exists.greptime_value):Float64;N]
+        Aggregate: groupBy=[[metric_exists.job, metric_exists.greptime_timestamp]], aggr=[[sum(metric_exists.greptime_value)]] [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), sum(metric_exists.greptime_value):Float64;N]
+          PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+            PromSeriesDivide: tags=["job"] [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+              Sort: metric_exists.job ASC NULLS FIRST, metric_exists.greptime_timestamp ASC NULLS FIRST [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+                Filter: metric_exists.greptime_timestamp >= TimestampMillisecond(-1000, None) AND metric_exists.greptime_timestamp <= TimestampMillisecond(100001000, None) [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+                  TableScan: metric_exists [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+  SubqueryAlias:  [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8;N, sum(.value):Float64;N]
+    Projection: .time AS greptime_timestamp, Utf8(NULL) AS job, sum(.value) [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8;N, sum(.value):Float64;N]
+      Sort: .time ASC NULLS LAST [time:Timestamp(Millisecond, None), sum(.value):Float64;N]
+        Aggregate: groupBy=[[.time]], aggr=[[sum(.value)]] [time:Timestamp(Millisecond, None), sum(.value):Float64;N]
+          EmptyMetric: range=[0..-1], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]
+            TableScan: dummy [time:Timestamp(Millisecond, None), value:Float64;N]"#;
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
@@ -4763,7 +5150,8 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
 
         // Should return empty result instead of error
         let result =
-            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state()).await;
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await;
 
         // This should succeed now (returning empty result) instead of failing with "Cannot find column le"
         assert!(

@@ -25,8 +25,8 @@ use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarRef, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::{
-    Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, LogicalPrimitiveType,
-    UInt16Type, UInt32Type, UInt64Type, UInt8Type, WrapperType,
+    Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, LogicalPrimitiveType,
+    UInt8Type, UInt16Type, UInt32Type, UInt64Type, WrapperType,
 };
 use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
@@ -172,7 +172,7 @@ impl<T: LogicalPrimitiveType> Vector for PrimitiveVector<T> {
         }
     }
 
-    fn get_ref(&self, index: usize) -> ValueRef {
+    fn get_ref(&self, index: usize) -> ValueRef<'_> {
         if self.array.is_valid(index) {
             // Safety: The index have been checked by `is_valid()`.
             let wrapper = unsafe { T::Wrapper::from_native(self.array.value_unchecked(index)) };
@@ -309,7 +309,7 @@ impl<T: LogicalPrimitiveType> MutableVector for PrimitiveVectorBuilder<T> {
         Arc::new(self.finish_cloned())
     }
 
-    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
         let primitive = T::cast_value_ref(value)?;
         match primitive {
             Some(v) => self.mutable_array.append_value(v.into_native()),
@@ -549,14 +549,16 @@ mod tests {
     #[test]
     fn test_primitive_vector_builder() {
         let mut builder = Int64Type::default().create_mutable_vector(3);
-        builder.push_value_ref(ValueRef::Int64(123));
-        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.push_value_ref(&ValueRef::Int64(123));
+        assert!(builder.try_push_value_ref(&ValueRef::Int32(123)).is_err());
 
         let input = Int64Vector::from_slice([7, 8, 9]);
         builder.extend_slice_of(&input, 1, 2).unwrap();
-        assert!(builder
-            .extend_slice_of(&Int32Vector::from_slice([13]), 0, 1)
-            .is_err());
+        assert!(
+            builder
+                .extend_slice_of(&Int32Vector::from_slice([13]), 0, 1)
+                .is_err()
+        );
         let vector = builder.to_vector();
 
         let expect: VectorRef = Arc::new(Int64Vector::from_slice([123, 8, 9]));
@@ -709,8 +711,8 @@ mod tests {
     #[test]
     fn test_primitive_vector_builder_finish_cloned() {
         let mut builder = Int64Type::default().create_mutable_vector(3);
-        builder.push_value_ref(ValueRef::Int64(123));
-        builder.push_value_ref(ValueRef::Int64(456));
+        builder.push_value_ref(&ValueRef::Int64(123));
+        builder.push_value_ref(&ValueRef::Int64(456));
         let vector = builder.to_vector_cloned();
         assert_eq!(vector.len(), 2);
         assert_eq!(vector.null_count(), 0);

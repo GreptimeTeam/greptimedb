@@ -33,13 +33,13 @@ use datatypes::arrow::util::pretty;
 use datatypes::prelude::{ConcreteDataType, VectorRef};
 use datatypes::scalars::{ScalarVector, ScalarVectorBuilder};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::types::json_type_value_to_string;
+use datatypes::types::{JsonFormat, jsonb_to_string};
 use datatypes::vectors::{BinaryVector, StringVectorBuilder};
 use error::Result;
 use futures::task::{Context, Poll};
 use futures::{Stream, TryStreamExt};
 pub use recordbatch::RecordBatch;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
     fn name(&self) -> &str {
@@ -90,32 +90,34 @@ pub fn map_json_type_to_string(
 ) -> Result<RecordBatch> {
     let mut vectors = Vec::with_capacity(original_schema.column_schemas().len());
     for (vector, schema) in batch.columns.iter().zip(original_schema.column_schemas()) {
-        if let ConcreteDataType::Json(j) = schema.data_type {
-            let mut string_vector_builder = StringVectorBuilder::with_capacity(vector.len());
-            let binary_vector = vector
-                .as_any()
-                .downcast_ref::<BinaryVector>()
-                .with_context(|| error::DowncastVectorSnafu {
-                    from_type: schema.data_type.clone(),
-                    to_type: ConcreteDataType::binary_datatype(),
-                })?;
-            for value in binary_vector.iter_data() {
-                let Some(value) = value else {
-                    string_vector_builder.push(None);
-                    continue;
-                };
-                let string_value =
-                    json_type_value_to_string(value, &j.format).with_context(|_| {
-                        error::CastVectorSnafu {
+        if let ConcreteDataType::Json(j) = &schema.data_type {
+            if matches!(&j.format, JsonFormat::Jsonb) {
+                let mut string_vector_builder = StringVectorBuilder::with_capacity(vector.len());
+                let binary_vector = vector
+                    .as_any()
+                    .downcast_ref::<BinaryVector>()
+                    .with_context(|| error::DowncastVectorSnafu {
+                        from_type: schema.data_type.clone(),
+                        to_type: ConcreteDataType::binary_datatype(),
+                    })?;
+                for value in binary_vector.iter_data() {
+                    let Some(value) = value else {
+                        string_vector_builder.push(None);
+                        continue;
+                    };
+                    let string_value =
+                        jsonb_to_string(value).with_context(|_| error::CastVectorSnafu {
                             from_type: schema.data_type.clone(),
                             to_type: ConcreteDataType::string_datatype(),
-                        }
-                    })?;
-                string_vector_builder.push(Some(string_value.as_str()));
-            }
+                        })?;
+                    string_vector_builder.push(Some(string_value.as_str()));
+                }
 
-            let string_vector = string_vector_builder.finish();
-            vectors.push(Arc::new(string_vector) as VectorRef);
+                let string_vector = string_vector_builder.finish();
+                vectors.push(Arc::new(string_vector) as VectorRef);
+            } else {
+                vectors.push(vector.clone());
+            }
         } else {
             vectors.push(vector.clone());
         }
@@ -137,7 +139,7 @@ pub fn map_json_type_to_string_schema(schema: SchemaRef) -> (SchemaRef, bool) {
     for column in schema.column_schemas() {
         if matches!(column.data_type, ConcreteDataType::Json(_)) {
             new_columns.push(ColumnSchema::new(
-                column.name.to_string(),
+                column.name.clone(),
                 ConcreteDataType::string_datatype(),
                 column.is_nullable(),
             ));

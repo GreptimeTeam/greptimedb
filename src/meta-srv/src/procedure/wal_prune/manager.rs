@@ -12,25 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_set::Entry;
 use std::collections::HashSet;
+use std::collections::hash_set::Entry;
 use std::fmt::{Debug, Formatter};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, RwLock};
 
-use common_meta::key::TableMetadataManagerRef;
-use common_meta::leadership_notifier::LeadershipChangeListener;
-use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
-use common_runtime::JoinHandle;
-use common_telemetry::{error, info, warn};
+use common_procedure::{ProcedureId, ProcedureManagerRef, ProcedureWithId, watcher};
+use common_telemetry::{debug, error, info, warn};
 use futures::future::join_all;
 use snafu::{OptionExt, ResultExt};
-use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Semaphore;
-use tokio::time::{interval_at, Instant, MissedTickBehavior};
+use tokio::sync::mpsc::{Receiver, Sender};
 
+use crate::define_ticker;
 use crate::error::{self, Result};
 use crate::metrics::METRIC_META_REMOTE_WAL_PRUNE_EXECUTE;
+use crate::procedure::wal_prune::utils::{find_pruneable_entry_id_for_topic, should_trigger_prune};
 use crate::procedure::wal_prune::{Context as WalPruneContext, WalPruneProcedure};
 
 pub type WalPruneTickerRef = Arc<WalPruneTicker>;
@@ -97,81 +94,13 @@ impl Debug for Event {
     }
 }
 
-/// [WalPruneTicker] is a ticker that periodically sends [Event]s to the [WalPruneManager].
-/// It is used to trigger the [WalPruneManager] to submit [WalPruneProcedure]s.
-pub(crate) struct WalPruneTicker {
-    /// Handle of ticker thread.
-    pub(crate) tick_handle: Mutex<Option<JoinHandle<()>>>,
-    /// The interval of tick.
-    pub(crate) tick_interval: Duration,
-    /// Sends [Event]s.
-    pub(crate) sender: Sender<Event>,
-}
-
-#[async_trait::async_trait]
-impl LeadershipChangeListener for WalPruneTicker {
-    fn name(&self) -> &'static str {
-        "WalPruneTicker"
-    }
-
-    async fn on_leader_start(&self) -> common_meta::error::Result<()> {
-        self.start();
-        Ok(())
-    }
-
-    async fn on_leader_stop(&self) -> common_meta::error::Result<()> {
-        self.stop();
-        Ok(())
-    }
-}
-
-/// TODO(CookiePie): Similar to [RegionSupervisorTicker], maybe can refactor to a unified framework.
-impl WalPruneTicker {
-    pub(crate) fn new(tick_interval: Duration, sender: Sender<Event>) -> Self {
-        Self {
-            tick_handle: Mutex::new(None),
-            tick_interval,
-            sender,
-        }
-    }
-
-    /// Starts the ticker.
-    pub fn start(&self) {
-        let mut handle = self.tick_handle.lock().unwrap();
-        if handle.is_none() {
-            let sender = self.sender.clone();
-            let tick_interval = self.tick_interval;
-            let ticker_loop = tokio::spawn(async move {
-                let mut interval = interval_at(Instant::now() + tick_interval, tick_interval);
-                interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-                loop {
-                    interval.tick().await;
-                    if sender.send(Event::Tick).await.is_err() {
-                        info!("EventReceiver is dropped, tick loop is stopped");
-                        break;
-                    }
-                }
-            });
-            *handle = Some(ticker_loop);
-        }
-        info!("WalPruneTicker started.");
-    }
-
-    /// Stops the ticker.
-    pub fn stop(&self) {
-        let mut handle = self.tick_handle.lock().unwrap();
-        if let Some(handle) = handle.take() {
-            handle.abort();
-        }
-        info!("WalPruneTicker stopped.");
-    }
-}
-
-impl Drop for WalPruneTicker {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
+define_ticker!(
+    /// [WalPruneTicker] is a ticker that periodically sends [Event]s to the [WalPruneManager].
+    /// It is used to trigger the [WalPruneManager] to submit [WalPruneProcedure]s.
+    WalPruneTicker,
+    event_type = Event,
+    event_value = Event::Tick
+);
 
 /// [WalPruneManager] manages all remote WAL related tasks in metasrv.
 ///
@@ -180,8 +109,6 @@ impl Drop for WalPruneTicker {
 /// 2. Periodically receive [Event::Tick] to submit [WalPruneProcedure] to prune remote WAL.
 /// 3. Use a semaphore to limit the number of concurrent [WalPruneProcedure]s.
 pub(crate) struct WalPruneManager {
-    /// Table metadata manager to restore topics from kvbackend.
-    table_metadata_manager: TableMetadataManagerRef,
     /// Receives [Event]s.
     receiver: Receiver<Event>,
     /// Procedure manager.
@@ -193,31 +120,24 @@ pub(crate) struct WalPruneManager {
 
     /// Context for [WalPruneProcedure].
     wal_prune_context: WalPruneContext,
-    /// Trigger flush threshold for [WalPruneProcedure].
-    /// If `None`, never send flush requests.
-    trigger_flush_threshold: u64,
 }
 
 impl WalPruneManager {
-    /// Returns a new empty [WalPruneManager].
+    /// Returns a new empty [`WalPruneManager`].
     pub fn new(
-        table_metadata_manager: TableMetadataManagerRef,
-        limit: usize,
+        parallelism: usize,
         receiver: Receiver<Event>,
         procedure_manager: ProcedureManagerRef,
         wal_prune_context: WalPruneContext,
-        trigger_flush_threshold: u64,
     ) -> Self {
         Self {
-            table_metadata_manager,
             receiver,
             procedure_manager,
             wal_prune_context,
             tracker: WalPruneProcedureTracker {
                 running_procedures: Arc::new(RwLock::new(HashSet::new())),
             },
-            semaphore: Arc::new(Semaphore::new(limit)),
-            trigger_flush_threshold,
+            semaphore: Arc::new(Semaphore::new(parallelism)),
         }
     }
 
@@ -262,17 +182,21 @@ impl WalPruneManager {
     }
 
     /// Submits a [WalPruneProcedure] for the given topic name.
-    pub async fn submit_procedure(&self, topic_name: &str) -> Result<ProcedureId> {
+    pub async fn wait_procedure(
+        &self,
+        topic_name: &str,
+        prunable_entry_id: u64,
+    ) -> Result<ProcedureId> {
         let guard = self
             .tracker
             .insert_running_procedure(topic_name.to_string())
             .with_context(|| error::PruneTaskAlreadyRunningSnafu { topic: topic_name })?;
 
         let procedure = WalPruneProcedure::new(
-            topic_name.to_string(),
             self.wal_prune_context.clone(),
-            self.trigger_flush_threshold,
             Some(guard),
+            topic_name.to_string(),
+            prunable_entry_id,
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;
@@ -291,23 +215,54 @@ impl WalPruneManager {
         Ok(procedure_id)
     }
 
+    async fn try_prune(&self, topic_name: &str) -> Result<()> {
+        let table_metadata_manager = self.wal_prune_context.table_metadata_manager.clone();
+        let leader_region_registry = self.wal_prune_context.leader_region_registry.clone();
+        let prunable_entry_id = find_pruneable_entry_id_for_topic(
+            &table_metadata_manager,
+            &leader_region_registry,
+            topic_name,
+        )
+        .await?;
+        let Some(prunable_entry_id) = prunable_entry_id else {
+            debug!(
+                "No prunable entry id found for topic {}, skipping prune",
+                topic_name
+            );
+            return Ok(());
+        };
+        let current = table_metadata_manager
+            .topic_name_manager()
+            .get(topic_name)
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+            .map(|v| v.into_inner().pruned_entry_id);
+        if !should_trigger_prune(current, prunable_entry_id) {
+            debug!(
+                "No need to prune topic {}, current pruned entry id: {:?}, prunable entry id: {}",
+                topic_name, current, prunable_entry_id
+            );
+            return Ok(());
+        }
+
+        self.wait_procedure(topic_name, prunable_entry_id)
+            .await
+            .map(|_| ())
+    }
+
     async fn handle_tick_request(&self) -> Result<()> {
         let topics = self.retrieve_sorted_topics().await?;
         let mut tasks = Vec::with_capacity(topics.len());
         for topic_name in topics.iter() {
             tasks.push(async {
                 let _permit = self.semaphore.acquire().await.unwrap();
-                match self.submit_procedure(topic_name).await {
+                match self.try_prune(topic_name).await {
                     Ok(_) => {}
                     Err(error::Error::PruneTaskAlreadyRunning { topic, .. }) => {
                         warn!("Prune task for topic {} is already running", topic);
                     }
-                    Err(e) => {
-                        error!(
-                            "Failed to submit prune task for topic {}: {}",
-                            topic_name.clone(),
-                            e
-                        );
+                    Err(err) => {
+                        error!(err; "Failed to prune remote WAL for topic {}", topic_name.as_str());
                     }
                 }
             });
@@ -321,7 +276,8 @@ impl WalPruneManager {
     /// Since [WalPruneManager] submits procedures depending on the order of the topics, we should sort the topics.
     /// TODO(CookiePie): Can register topics in memory instead of retrieving from the table metadata manager every time.
     async fn retrieve_sorted_topics(&self) -> Result<Vec<String>> {
-        self.table_metadata_manager
+        self.wal_prune_context
+            .table_metadata_manager
             .topic_name_manager()
             .range()
             .await
@@ -332,16 +288,21 @@ impl WalPruneManager {
 #[cfg(test)]
 mod test {
     use std::assert_matches::assert_matches;
+    use std::time::Duration;
 
     use common_meta::key::topic_name::TopicNameKey;
-    use common_wal::test_util::run_test_with_kafka_wal;
+    use common_meta::leadership_notifier::LeadershipChangeListener;
+    use common_wal::maybe_skip_kafka_integration_test;
+    use common_wal::test_util::get_kafka_endpoints;
     use tokio::time::{sleep, timeout};
 
     use super::*;
+    use crate::procedure::test_util::new_wal_prune_metadata;
     use crate::procedure::wal_prune::test_util::TestEnv;
 
     #[tokio::test]
     async fn test_wal_prune_ticker() {
+        common_telemetry::init_default_ut_logging();
         let (tx, mut rx) = WalPruneManager::channel();
         let interval = Duration::from_millis(50);
         let ticker = WalPruneTicker::new(interval, tx);
@@ -388,12 +349,10 @@ mod test {
         (
             tx,
             WalPruneManager::new(
-                test_env.table_metadata_manager.clone(),
                 limit,
                 rx,
                 test_env.procedure_manager.clone(),
                 wal_prune_context,
-                0,
             ),
         )
     }
@@ -404,6 +363,7 @@ mod test {
             .map(|topic| TopicNameKey::new(topic))
             .collect::<Vec<_>>();
         manager
+            .wal_prune_context
             .table_metadata_manager
             .topic_name_manager()
             .batch_put(topic_name_keys)
@@ -413,27 +373,61 @@ mod test {
 
     #[tokio::test]
     async fn test_wal_prune_manager() {
-        run_test_with_kafka_wal(|broker_endpoints| {
-            Box::pin(async {
-                let limit = 6;
-                let (tx, manager) = mock_wal_prune_manager(broker_endpoints, limit).await;
-                let topics = (0..limit * 2)
-                    .map(|_| uuid::Uuid::new_v4().to_string())
-                    .collect::<Vec<_>>();
-                mock_topics(&manager, &topics).await;
+        maybe_skip_kafka_integration_test!();
+        let broker_endpoints = get_kafka_endpoints();
+        let limit = 6;
+        let (tx, manager) = mock_wal_prune_manager(broker_endpoints, limit).await;
+        let topics = (0..limit * 2)
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect::<Vec<_>>();
+        mock_topics(&manager, &topics).await;
 
-                let tracker = manager.tracker.clone();
-                let handler =
-                    common_runtime::spawn_global(async move { manager.try_start().await.unwrap() });
-                handler.await.unwrap();
+        let tracker = manager.tracker.clone();
+        let handler =
+            common_runtime::spawn_global(async move { manager.try_start().await.unwrap() });
+        handler.await.unwrap();
 
-                tx.send(Event::Tick).await.unwrap();
-                // Wait for at least one procedure to be submitted.
-                timeout(Duration::from_millis(100), async move { tracker.len() > 0 })
-                    .await
-                    .unwrap();
-            })
-        })
+        tx.send(Event::Tick).await.unwrap();
+        // Wait for at least one procedure to be submitted.
+        timeout(Duration::from_millis(100), async move { tracker.len() > 0 })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_find_pruneable_entry_id_for_topic_none() {
+        let test_env = TestEnv::new();
+        let prunable_entry_id = find_pruneable_entry_id_for_topic(
+            &test_env.table_metadata_manager,
+            &test_env.leader_region_registry,
+            "test_topic",
+        )
+        .await
+        .unwrap();
+        assert!(prunable_entry_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_find_pruneable_entry_id_for_topic_some() {
+        let test_env = TestEnv::new();
+        let topic = "test_topic";
+        let expected_prunable_entry_id = new_wal_prune_metadata(
+            test_env.table_metadata_manager.clone(),
+            test_env.leader_region_registry.clone(),
+            2,
+            5,
+            &[3, 10, 23, 50, 52, 82, 130],
+            topic.to_string(),
+        )
         .await;
+        let prunable_entry_id = find_pruneable_entry_id_for_topic(
+            &test_env.table_metadata_manager,
+            &test_env.leader_region_registry,
+            topic,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(prunable_entry_id, expected_prunable_entry_id);
     }
 }

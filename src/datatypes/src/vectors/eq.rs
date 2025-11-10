@@ -19,6 +19,7 @@ use common_time::interval::IntervalUnit;
 use crate::data_type::DataType;
 use crate::types::{DurationType, TimeType, TimestampType};
 use crate::vectors::constant::ConstantVector;
+use crate::vectors::struct_vector::StructVector;
 use crate::vectors::{
     BinaryVector, BooleanVector, DateVector, Decimal128Vector, DurationMicrosecondVector,
     DurationMillisecondVector, DurationNanosecondVector, DurationSecondVector,
@@ -109,6 +110,7 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
             }
         },
         List(_) => is_vector_eq!(ListVector, lhs, rhs),
+        Struct(_) => is_vector_eq!(StructVector, lhs, rhs),
         UInt8(_) | UInt16(_) | UInt32(_) | UInt64(_) | Int8(_) | Int16(_) | Int32(_) | Int64(_)
         | Float32(_) | Float64(_) | Dictionary(_) => {
             with_match_primitive_type_id!(lhs_type.logical_type_id(), |$T| {
@@ -162,9 +164,10 @@ mod tests {
 
     use super::*;
     use crate::vectors::{
-        list, DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
-        DurationSecondVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
-        Int8Vector, NullVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
+        DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
+        DurationSecondVector, Float32Vector, Float64Vector, Int8Vector, Int16Vector, Int32Vector,
+        Int64Vector, NullVector, UInt8Vector, UInt16Vector, UInt32Vector, UInt64Vector, VectorRef,
+        list,
     };
 
     fn assert_vector_ref_eq(vector: VectorRef) {

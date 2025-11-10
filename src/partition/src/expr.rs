@@ -17,12 +17,12 @@ use std::sync::Arc;
 
 use api::v1::meta::Partition;
 use datafusion_common::{ScalarValue, ToDFSchema};
-use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::Expr;
-use datafusion_physical_expr::{create_physical_expr, PhysicalExpr};
+use datafusion_expr::execution_props::ExecutionProps;
+use datafusion_physical_expr::{PhysicalExpr, create_physical_expr};
 use datatypes::arrow;
 use datatypes::value::{
-    duration_to_scalar_value, time_to_scalar_value, timestamp_to_scalar_value, Value,
+    Value, duration_to_scalar_value, time_to_scalar_value, timestamp_to_scalar_value,
 };
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -38,9 +38,9 @@ use crate::partition::PartitionBound;
 /// [Expr]: sqlparser::ast::Expr
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PartitionExpr {
-    pub(crate) lhs: Box<Operand>,
-    pub(crate) op: RestrictedOp,
-    pub(crate) rhs: Box<Operand>,
+    pub lhs: Box<Operand>,
+    pub op: RestrictedOp,
+    pub rhs: Box<Operand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -97,7 +97,7 @@ impl Operand {
                         return error::UnsupportedPartitionExprValueSnafu {
                             value: other.clone(),
                         }
-                        .fail()
+                        .fail();
                     }
                 };
                 Ok(datafusion_expr::lit(scalar_value))
@@ -218,13 +218,13 @@ impl PartitionExpr {
         // Otherwise it will be rejected by the parser.
         let lhs = match &*self.lhs {
             Operand::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
-            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap()),
+            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
             Operand::Expr(e) => e.to_parser_expr(),
         };
 
         let rhs = match &*self.rhs {
             Operand::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
-            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap()),
+            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
             Operand::Expr(e) => e.to_parser_expr(),
         };
 
@@ -236,6 +236,57 @@ impl PartitionExpr {
     }
 
     pub fn try_as_logical_expr(&self) -> error::Result<Expr> {
+        // Special handling for null equality.
+        // `col = NULL` -> `col IS NULL` to match SQL (DataFusion) semantics.
+        let lhs_is_null = matches!(self.lhs.as_ref(), Operand::Value(Value::Null));
+        let rhs_is_null = matches!(self.rhs.as_ref(), Operand::Value(Value::Null));
+
+        match (self.op.clone(), lhs_is_null, rhs_is_null) {
+            (RestrictedOp::Eq, _, true) => {
+                return Ok(self.lhs.try_as_logical_expr()?.is_null());
+            }
+            (RestrictedOp::Eq, true, _) => {
+                return Ok(self.rhs.try_as_logical_expr()?.is_null());
+            }
+            (RestrictedOp::NotEq, _, true) => {
+                return Ok(self.lhs.try_as_logical_expr()?.is_not_null());
+            }
+            (RestrictedOp::NotEq, true, _) => {
+                return Ok(self.rhs.try_as_logical_expr()?.is_not_null());
+            }
+            _ => {}
+        }
+
+        if matches!(
+            self.op,
+            RestrictedOp::Lt | RestrictedOp::LtEq | RestrictedOp::Gt | RestrictedOp::GtEq
+        ) {
+            if matches!(self.lhs.as_ref(), Operand::Column(_)) {
+                let column_expr = self.lhs.try_as_logical_expr()?;
+                let other_expr = self.rhs.try_as_logical_expr()?;
+                let base = match self.op {
+                    RestrictedOp::Lt => column_expr.clone().lt(other_expr),
+                    RestrictedOp::LtEq => column_expr.clone().lt_eq(other_expr),
+                    RestrictedOp::Gt => column_expr.clone().gt(other_expr),
+                    RestrictedOp::GtEq => column_expr.clone().gt_eq(other_expr),
+                    _ => unreachable!(),
+                };
+                return Ok(datafusion_expr::or(base, column_expr.is_null()));
+            } else if matches!(self.rhs.as_ref(), Operand::Column(_)) {
+                let other_expr = self.lhs.try_as_logical_expr()?;
+                let column_expr = self.rhs.try_as_logical_expr()?;
+                let base = match self.op {
+                    RestrictedOp::Lt => other_expr.lt(column_expr.clone()),
+                    RestrictedOp::LtEq => other_expr.lt_eq(column_expr.clone()),
+                    RestrictedOp::Gt => other_expr.gt(column_expr.clone()),
+                    RestrictedOp::GtEq => other_expr.gt_eq(column_expr.clone()),
+                    _ => unreachable!(),
+                };
+                return Ok(datafusion_expr::or(base, column_expr.is_null()));
+            }
+        }
+
+        // Normal cases handling, without NULL
         let lhs = self.lhs.try_as_logical_expr()?;
         let rhs = self.rhs.try_as_logical_expr()?;
 
@@ -250,6 +301,21 @@ impl PartitionExpr {
             RestrictedOp::NotEq => lhs.not_eq(rhs),
         };
         Ok(expr)
+    }
+
+    /// Get the left-hand side operand
+    pub fn lhs(&self) -> &Operand {
+        &self.lhs
+    }
+
+    /// Get the right-hand side operand
+    pub fn rhs(&self) -> &Operand {
+        &self.rhs
+    }
+
+    /// Get the operation
+    pub fn op(&self) -> &RestrictedOp {
+        &self.op
     }
 
     pub fn try_as_physical_expr(
@@ -379,6 +445,104 @@ mod tests {
             let expr = PartitionExpr::new(case.0, case.1.clone(), case.2);
             assert_eq!(case.3, expr.to_string());
         }
+    }
+
+    #[test]
+    fn test_try_as_logical_expr_null_equality() {
+        let eq_expr = PartitionExpr::new(
+            Operand::Column("a".to_string()),
+            RestrictedOp::Eq,
+            Operand::Value(Value::Null),
+        );
+        assert_eq!(
+            eq_expr.try_as_logical_expr().unwrap().to_string(),
+            "a IS NULL"
+        );
+
+        let neq_expr = PartitionExpr::new(
+            Operand::Column("a".to_string()),
+            RestrictedOp::NotEq,
+            Operand::Value(Value::Null),
+        );
+        assert_eq!(
+            neq_expr.try_as_logical_expr().unwrap().to_string(),
+            "a IS NOT NULL"
+        );
+    }
+
+    #[test]
+    fn test_try_as_logical_expr_null_range_comparison() {
+        // Test Lt with column on LHS
+        let lt_expr = PartitionExpr::new(
+            Operand::Column("a".to_string()),
+            RestrictedOp::Lt,
+            Operand::Value(Value::Int64(10)),
+        );
+        assert_eq!(
+            lt_expr.try_as_logical_expr().unwrap().to_string(),
+            "a < Int64(10) OR a IS NULL"
+        );
+
+        // Test Lt with column on RHS
+        let lt_expr_rhs_column = PartitionExpr::new(
+            Operand::Value(Value::Int64(10)),
+            RestrictedOp::Lt,
+            Operand::Column("a".to_string()),
+        );
+        assert_eq!(
+            lt_expr_rhs_column
+                .try_as_logical_expr()
+                .unwrap()
+                .to_string(),
+            "Int64(10) < a OR a IS NULL"
+        );
+
+        // Test Gt with column on LHS
+        let gt_expr = PartitionExpr::new(
+            Operand::Column("a".to_string()),
+            RestrictedOp::Gt,
+            Operand::Value(Value::Int64(10)),
+        );
+        assert_eq!(
+            gt_expr.try_as_logical_expr().unwrap().to_string(),
+            "a > Int64(10) OR a IS NULL"
+        );
+
+        // Test Gt with column on RHS
+        let gt_expr_rhs_column = PartitionExpr::new(
+            Operand::Value(Value::Int64(10)),
+            RestrictedOp::Gt,
+            Operand::Column("a".to_string()),
+        );
+        assert_eq!(
+            gt_expr_rhs_column
+                .try_as_logical_expr()
+                .unwrap()
+                .to_string(),
+            "Int64(10) > a OR a IS NULL"
+        );
+
+        // Test GtEq with column on LHS
+        let gteq_expr = PartitionExpr::new(
+            Operand::Column("a".to_string()),
+            RestrictedOp::GtEq,
+            Operand::Value(Value::Int64(10)),
+        );
+        assert_eq!(
+            gteq_expr.try_as_logical_expr().unwrap().to_string(),
+            "a >= Int64(10) OR a IS NULL"
+        );
+
+        // Test LtEq with column on LHS
+        let lteq_expr = PartitionExpr::new(
+            Operand::Column("a".to_string()),
+            RestrictedOp::LtEq,
+            Operand::Value(Value::Int64(10)),
+        );
+        assert_eq!(
+            lteq_expr.try_as_logical_expr().unwrap().to_string(),
+            "a <= Int64(10) OR a IS NULL"
+        );
     }
 
     #[test]

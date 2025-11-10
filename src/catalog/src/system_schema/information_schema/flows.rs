@@ -16,10 +16,10 @@ use std::sync::{Arc, Weak};
 
 use common_catalog::consts::INFORMATION_SCHEMA_FLOW_TABLE_ID;
 use common_error::ext::BoxedError;
+use common_meta::key::FlowId;
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_meta::key::flow::flow_state::FlowStat;
-use common_meta::key::flow::FlowMetadataManager;
-use common_meta::key::FlowId;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{DfSendableRecordBatchStream, RecordBatch, SendableRecordBatchStream};
 use datafusion::execution::TaskContext;
@@ -38,14 +38,14 @@ use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
+use crate::CatalogManager;
 use crate::error::{
     CreateRecordBatchSnafu, FlowInfoNotFoundSnafu, InternalSnafu, JsonSnafu, ListFlowsSnafu,
     Result, UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::information_schema::{Predicates, FLOWS};
+use crate::information_schema::{FLOWS, Predicates};
 use crate::system_schema::information_schema::InformationTable;
 use crate::system_schema::utils;
-use crate::CatalogManager;
 
 const INIT_CAPACITY: usize = 42;
 
@@ -254,9 +254,9 @@ impl InformationSchemaFlowsBuilder {
                 .await
                 .map_err(BoxedError::new)
                 .context(InternalSnafu)?
-                .context(FlowInfoNotFoundSnafu {
-                    catalog_name: catalog_name.to_string(),
-                    flow_name: flow_name.to_string(),
+                .with_context(|| FlowInfoNotFoundSnafu {
+                    catalog_name: catalog_name.clone(),
+                    flow_name: flow_name.clone(),
                 })?;
             self.add_flow(&predicates, flow_id.flow_id(), flow_info, &flow_stat)
                 .await?;
@@ -273,11 +273,11 @@ impl InformationSchemaFlowsBuilder {
         flow_stat: &Option<FlowStat>,
     ) -> Result<()> {
         let row = [
-            (FLOW_NAME, &Value::from(flow_info.flow_name().to_string())),
+            (FLOW_NAME, &Value::from(flow_info.flow_name().clone())),
             (FLOW_ID, &Value::from(flow_id)),
             (
                 TABLE_CATALOG,
-                &Value::from(flow_info.catalog_name().to_string()),
+                &Value::from(flow_info.catalog_name().clone()),
             ),
         ];
         if !predicates.eval(&row) {

@@ -18,7 +18,7 @@ pub mod mock {
     use std::sync::Arc;
 
     use api::v1::region::region_server::RegionServer;
-    use api::v1::region::{region_request, RegionResponse};
+    use api::v1::region::{RegionResponse, region_request};
     use api::v1::{ResponseHeader, Status as PbStatus};
     use async_trait::async_trait;
     use client::Client;
@@ -118,8 +118,8 @@ pub mod test_data {
     use common_meta::ddl::flow_meta::FlowMetadataAllocator;
     use common_meta::ddl::table_meta::TableMetadataAllocator;
     use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
-    use common_meta::key::flow::FlowMetadataManager;
     use common_meta::key::TableMetadataManager;
+    use common_meta::key::flow::FlowMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::node_manager::NodeManagerRef;
     use common_meta::peer::Peer;
@@ -195,6 +195,7 @@ pub mod test_data {
                 region_numbers: vec![1, 2, 3],
                 options: TableOptions::default(),
                 created_on: DateTime::default(),
+                updated_on: DateTime::default(),
                 partition_key_indices: vec![],
                 column_ids: vec![],
             },

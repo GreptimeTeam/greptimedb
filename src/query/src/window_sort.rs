@@ -39,8 +39,8 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
 };
 use datafusion_common::utils::bisect;
-use datafusion_common::{internal_err, DataFusionError};
-use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
+use datafusion_common::{DataFusionError, internal_err};
+use datafusion_physical_expr::PhysicalSortExpr;
 use datatypes::value::Value;
 use futures::Stream;
 use itertools::Itertools;
@@ -118,12 +118,12 @@ impl WindowedSortExec {
     ) -> Result<Self> {
         check_partition_range_monotonicity(&ranges, expression.options.descending)?;
 
+        let mut eq_properties = input.equivalence_properties().clone();
+        eq_properties.reorder(vec![expression.clone()])?;
+
         let properties = input.properties();
         let properties = PlanProperties::new(
-            input
-                .equivalence_properties()
-                .clone()
-                .with_reorder(LexOrdering::new(vec![expression.clone()])),
+            eq_properties,
             input.output_partitioning().clone(),
             properties.emission_type,
             properties.boundedness,
@@ -238,7 +238,7 @@ impl ExecutionPlan for WindowedSortExec {
     /// and is expected to run directly on storage engine's output
     /// distribution / partition.
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {
-        vec![false; self.ranges.len()]
+        vec![false]
     }
 
     fn name(&self) -> &str {
@@ -445,31 +445,24 @@ impl WindowedSortStream {
         // consume input stream
         while !self.is_terminated {
             // then we get a new RecordBatch from input stream
-            let new_input_rbs = match self.input.as_mut().poll_next(cx) {
-                Poll::Ready(Some(Ok(batch))) => {
-                    Some(split_batch_to_sorted_run(batch, &self.expression)?)
-                }
+            let SortedRunSet {
+                runs_with_batch,
+                sort_column,
+            } = match self.input.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(batch))) => split_batch_to_sorted_run(batch, &self.expression)?,
                 Poll::Ready(Some(Err(e))) => {
                     return Poll::Ready(Some(Err(e)));
                 }
                 Poll::Ready(None) => {
                     // input stream is done, we need to merge sort the remaining working set
                     self.is_terminated = true;
-                    None
+                    self.build_sorted_stream()?;
+                    self.start_new_merge_sort()?;
+                    break;
                 }
                 Poll::Pending => return Poll::Pending,
             };
 
-            let Some(SortedRunSet {
-                runs_with_batch,
-                sort_column,
-            }) = new_input_rbs
-            else {
-                // input stream is done, we need to merge sort the remaining working set
-                self.build_sorted_stream()?;
-                self.start_new_merge_sort()?;
-                continue;
-            };
             // The core logic to eargerly merge sort the working set
 
             // compare with last_value to find boundary, then merge runs if needed
@@ -498,13 +491,17 @@ impl WindowedSortStream {
                         error!("Invalid range: {:?} > {:?}", cur_range, working_range);
                         #[cfg(debug_assertions)]
                         self.check_subset_ranges(&cur_range);
-                        internal_err!("Current batch have data on the right side of working range, something is very wrong")?;
+                        internal_err!(
+                            "Current batch have data on the right side of working range, something is very wrong"
+                        )?;
                     }
                 } else if cur_range.start < working_range.start {
                     error!("Invalid range: {:?} < {:?}", cur_range, working_range);
                     #[cfg(debug_assertions)]
                     self.check_subset_ranges(&cur_range);
-                    internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
+                    internal_err!(
+                        "Current batch have data on the left side of working range, something is very wrong"
+                    )?;
                 }
 
                 if cur_range.is_subset(&working_range) {
@@ -523,7 +520,9 @@ impl WindowedSortStream {
                     )?;
 
                     if offset != 0 {
-                        internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
+                        internal_err!(
+                            "Current batch have data on the left side of working range, something is very wrong"
+                        )?;
                     }
 
                     let sliced_rb = sorted_rb.slice(offset, len);
@@ -564,8 +563,18 @@ impl WindowedSortStream {
                     last_remaining = Some((sorted_rb, run_info));
                 }
             }
+
+            // poll result stream again to see if we can emit more results
+            match self.poll_result_stream(cx) {
+                Poll::Ready(None) => {
+                    if self.is_terminated {
+                        return Poll::Ready(None);
+                    }
+                }
+                x => return x,
+            };
         }
-        // emit the merge result
+        // emit the merge result after terminated(all input stream is done)
         self.poll_result_stream(cx)
     }
 
@@ -642,12 +651,11 @@ impl WindowedSortStream {
         let reservation = MemoryConsumer::new(format!("WindowedSortStream[{}]", self.merge_count))
             .register(&self.memory_pool);
         self.merge_count += 1;
-        let lex_ordering = LexOrdering::new(vec![self.expression.clone()]);
 
         let resulting_stream = StreamingMergeBuilder::new()
             .with_streams(streams)
             .with_schema(self.schema())
-            .with_expressions(&lex_ordering)
+            .with_expressions(&[self.expression.clone()].into())
             .with_metrics(self.metrics.clone())
             .with_batch_size(self.batch_size)
             .with_fetch(fetch)
@@ -846,11 +854,7 @@ fn cmp_with_opts<T: Ord>(
     let opt = opt.unwrap_or_default();
 
     if let (Some(a), Some(b)) = (a, b) {
-        if opt.descending {
-            b.cmp(a)
-        } else {
-            a.cmp(b)
-        }
+        if opt.descending { b.cmp(a) } else { a.cmp(b) }
     } else if opt.nulls_first {
         // now we know at leatst one of them is None
         // in rust None < Some(_)
@@ -912,22 +916,22 @@ fn find_successive_runs<T: Iterator<Item = (usize, Option<N>)>, N: Ord + Copy>(
     let mut last_val: Option<N> = None;
 
     for (idx, t) in iter {
-        if let Some(last_value) = &last_value {
-            if cmp_with_opts(last_value, &t, sort_opts) == std::cmp::Ordering::Greater {
-                // we found a boundary
-                let len = idx - last_offset;
-                let run = SucRun {
-                    offset: last_offset,
-                    len,
-                    first_val,
-                    last_val,
-                };
-                runs.push(run);
-                first_val = None;
-                last_val = None;
+        if let Some(last_value) = &last_value
+            && cmp_with_opts(last_value, &t, sort_opts) == std::cmp::Ordering::Greater
+        {
+            // we found a boundary
+            let len = idx - last_offset;
+            let run = SucRun {
+                offset: last_offset,
+                len,
+                first_val,
+                last_val,
+            };
+            runs.push(run);
+            first_val = None;
+            last_val = None;
 
-                last_offset = idx;
-            }
+            last_offset = idx;
         }
         last_value = Some(t);
         if let Some(t) = t {
@@ -1253,7 +1257,7 @@ mod test {
     use serde_json::json;
 
     use super::*;
-    use crate::test_util::{new_ts_array, MockInputExec};
+    use crate::test_util::{MockInputExec, new_ts_array};
 
     #[test]
     fn test_overlapping() {

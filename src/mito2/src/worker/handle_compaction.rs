@@ -17,10 +17,14 @@ use common_telemetry::{error, info, warn};
 use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;
 
+use crate::config::IndexBuildMode;
 use crate::error::RegionNotFoundSnafu;
 use crate::metrics::COMPACTION_REQUEST_COUNT;
 use crate::region::MitoRegionRef;
-use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
+use crate::request::{
+    BuildIndexRequest, CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx,
+};
+use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -35,6 +39,7 @@ impl<S> RegionWorkerLoop<S> {
             return;
         };
         COMPACTION_REQUEST_COUNT.inc();
+        let parallelism = req.parallelism.unwrap_or(1) as usize;
         if let Err(e) = self
             .compaction_scheduler
             .schedule_compaction(
@@ -45,8 +50,7 @@ impl<S> RegionWorkerLoop<S> {
                 sender,
                 &region.manifest_ctx,
                 self.schema_metadata_manager.clone(),
-                // TODO(yingwen): expose this to frontend
-                1,
+                parallelism,
             )
             .await
         {
@@ -74,12 +78,31 @@ impl<S> RegionWorkerLoop<S> {
         };
         region.update_compaction_millis();
 
-        region
-            .version_control
-            .apply_edit(request.edit.clone(), &[], region.file_purger.clone());
+        region.version_control.apply_edit(
+            Some(request.edit.clone()),
+            &[],
+            region.file_purger.clone(),
+        );
+
+        let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
 
         // compaction finished.
         request.on_success();
+
+        // In async mode, create indexes after compact if new files are created.
+        if self.config.index.build_mode == IndexBuildMode::Async
+            && !index_build_file_metas.is_empty()
+        {
+            self.handle_rebuild_index(
+                BuildIndexRequest {
+                    region_id,
+                    build_type: IndexBuildType::Compact,
+                    file_metas: index_build_file_metas,
+                },
+                OptionOutputTx::new(None),
+            )
+            .await;
+        }
 
         // Schedule next compaction if necessary.
         self.compaction_scheduler
@@ -104,8 +127,7 @@ impl<S> RegionWorkerLoop<S> {
         let now = self.time_provider.current_time_millis();
         if now - region.last_compaction_millis()
             >= self.config.min_compaction_interval.as_millis() as i64
-        {
-            if let Err(e) = self
+            && let Err(e) = self
                 .compaction_scheduler
                 .schedule_compaction(
                     region.region_id,
@@ -115,15 +137,14 @@ impl<S> RegionWorkerLoop<S> {
                     OptionOutputTx::none(),
                     &region.manifest_ctx,
                     self.schema_metadata_manager.clone(),
-                    1,
+                    1, // Default for automatic compaction
                 )
                 .await
-            {
-                warn!(
-                    "Failed to schedule compaction for region: {}, err: {}",
-                    region.region_id, e
-                );
-            }
+        {
+            warn!(
+                "Failed to schedule compaction for region: {}, err: {}",
+                region.region_id, e
+            );
         }
     }
 }

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, RwLock};
 
 use snafu::ensure;
@@ -41,7 +41,7 @@ impl PoisonStore for InMemoryPoisonStore {
         let mut map = self.map.write().unwrap();
         match map.entry(key) {
             Entry::Vacant(v) => {
-                v.insert(token.to_string());
+                v.insert(token.clone());
             }
             Entry::Occupied(o) => {
                 let value = o.get();

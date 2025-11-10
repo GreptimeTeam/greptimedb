@@ -19,7 +19,9 @@ use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_query::error::Error as QueryResult;
 use datafusion::parquet;
+use datafusion_common::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
 use table::metadata::TableType;
@@ -35,6 +37,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to cast result: `{}`", source))]
+    Cast {
+        #[snafu(source)]
+        source: QueryResult,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("View already exists: `{name}`"))]
     ViewAlreadyExists {
         name: String,
@@ -42,15 +52,17 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to execute admin function"))]
-    ExecuteAdminFunction {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_query::error::Error,
-    },
-
     #[snafu(display("Failed to build admin function args: {msg}"))]
     BuildAdminFunctionArgs { msg: String },
+
+    #[snafu(display("Failed to execute admin function: {msg}, error: {error}"))]
+    ExecuteAdminFunction {
+        msg: String,
+        #[snafu(source)]
+        error: DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Expected {expected} args, but actual {actual}"))]
     FunctionArityMismatch { expected: usize, actual: usize },
@@ -851,6 +863,42 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "{} not supported when transforming to {} format type",
+        format,
+        file_format
+    ))]
+    TimestampFormatNotSupported {
+        file_format: String,
+        format: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Too large duration"))]
+    TooLargeDuration {
+        #[snafu(source)]
+        error: prost_types::DurationError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Not trigger querier is specified"))]
+    MissingTriggerQuerier {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Trigger querier error"))]
+    TriggerQuerier {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -858,6 +906,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
+            Error::Cast { source, .. } => source.status_code(),
             Error::InvalidSql { .. }
             | Error::InvalidConfigValue { .. }
             | Error::InvalidInsertRequest { .. }
@@ -895,8 +944,6 @@ impl ErrorExt for Error {
             | Error::CursorNotFound { .. }
             | Error::CursorExists { .. }
             | Error::CreatePartitionRules { .. } => StatusCode::InvalidArguments,
-            #[cfg(feature = "enterprise")]
-            Error::InvalidTriggerName { .. } => StatusCode::InvalidArguments,
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists
             }
@@ -926,7 +973,7 @@ impl ErrorExt for Error {
             Error::BuildDfLogicalPlan { .. }
             | Error::BuildTableMeta { .. }
             | Error::MissingInsertBody { .. } => StatusCode::Internal,
-            Error::EncodeJson { .. } => StatusCode::Unexpected,
+            Error::ExecuteAdminFunction { .. } | Error::EncodeJson { .. } => StatusCode::Unexpected,
             Error::ViewNotFound { .. }
             | Error::ViewInfoNotFound { .. }
             | Error::TableNotFound { .. } => StatusCode::TableNotFound,
@@ -969,7 +1016,6 @@ impl ErrorExt for Error {
             | Error::ParseSqlValue { .. }
             | Error::InvalidTimestampRange { .. } => StatusCode::InvalidArguments,
             Error::CreateLogicalTables { .. } => StatusCode::Unexpected,
-            Error::ExecuteAdminFunction { source, .. } => source.status_code(),
             Error::BuildRecordBatch { source, .. } => source.status_code(),
             Error::UpgradeCatalogManagerRef { .. } => StatusCode::Internal,
             Error::ColumnOptions { source, .. } => source.status_code(),
@@ -979,7 +1025,16 @@ impl ErrorExt for Error {
             Error::InvalidProcessId { .. } => StatusCode::InvalidArguments,
             Error::ProcessManagerMissing { .. } => StatusCode::Unexpected,
             Error::PathNotFound { .. } => StatusCode::InvalidArguments,
+            Error::TimestampFormatNotSupported { .. } => StatusCode::InvalidArguments,
             Error::SqlCommon { source, .. } => source.status_code(),
+            #[cfg(feature = "enterprise")]
+            Error::InvalidTriggerName { .. } => StatusCode::InvalidArguments,
+            #[cfg(feature = "enterprise")]
+            Error::TooLargeDuration { .. } => StatusCode::InvalidArguments,
+            #[cfg(feature = "enterprise")]
+            Error::MissingTriggerQuerier { .. } => StatusCode::Internal,
+            #[cfg(feature = "enterprise")]
+            Error::TriggerQuerier { source, .. } => source.status_code(),
         }
     }
 

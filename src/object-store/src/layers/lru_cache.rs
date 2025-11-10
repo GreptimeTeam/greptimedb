@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
+use opendal::Result;
 use opendal::raw::oio::Reader;
 use opendal::raw::{
     Access, Layer, LayeredAccess, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead, RpWrite,
 };
-use opendal::Result;
 mod read_cache;
 use std::time::Instant;
 
@@ -99,13 +99,9 @@ pub struct LruCacheAccess<I, C> {
 impl<I: Access, C: Access> LayeredAccess for LruCacheAccess<I, C> {
     type Inner = I;
     type Reader = Reader;
-    type BlockingReader = I::BlockingReader;
     type Writer = I::Writer;
-    type BlockingWriter = I::BlockingWriter;
     type Lister = I::Lister;
-    type BlockingLister = I::BlockingLister;
     type Deleter = CacheAwareDeleter<C, I::Deleter>;
-    type BlockingDeleter = I::BlockingDeleter;
 
     fn inner(&self) -> &Self::Inner {
         &self.inner
@@ -134,26 +130,5 @@ impl<I: Access, C: Access> LayeredAccess for LruCacheAccess<I, C> {
 
     async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
         self.inner.list(path, args).await
-    }
-
-    fn blocking_read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::BlockingReader)> {
-        // TODO(dennis): support blocking read cache
-        self.inner.blocking_read(path, args)
-    }
-
-    fn blocking_write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::BlockingWriter)> {
-        let result = self.inner.blocking_write(path, args);
-
-        self.read_cache.invalidate_entries_with_prefix(path);
-
-        result
-    }
-
-    fn blocking_list(&self, path: &str, args: OpList) -> Result<(RpList, Self::BlockingLister)> {
-        self.inner.blocking_list(path, args)
-    }
-
-    fn blocking_delete(&self) -> Result<(RpDelete, Self::BlockingDeleter)> {
-        self.inner.blocking_delete()
     }
 }

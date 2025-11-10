@@ -13,34 +13,39 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
+use api::v1::SemanticType;
 use common_telemetry::warn;
+use datatypes::arrow::array::{Array, LargeStringArray, StringArray};
+use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::{FulltextAnalyzer, FulltextBackend};
 use index::fulltext_index::create::{
     BloomFilterFulltextIndexCreator, FulltextIndexCreator, TantivyFulltextIndexCreator,
 };
 use index::fulltext_index::{Analyzer, Config};
+use index::target::IndexTarget;
 use puffin::blob_metadata::CompressionCodec;
 use puffin::puffin_manager::PutOptions;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, ConcreteDataType, RegionId};
+use store_api::storage::{ColumnId, ConcreteDataType, FileId, RegionId};
 
 use crate::error::{
-    CastVectorSnafu, CreateFulltextCreatorSnafu, DataTypeMismatchSnafu, FulltextFinishSnafu,
-    FulltextPushTextSnafu, IndexOptionsSnafu, OperateAbortedIndexSnafu, Result,
+    CastVectorSnafu, ComputeArrowSnafu, CreateFulltextCreatorSnafu, DataTypeMismatchSnafu,
+    FulltextFinishSnafu, FulltextPushTextSnafu, IndexOptionsSnafu, OperateAbortedIndexSnafu,
+    Result,
 };
 use crate::read::Batch;
-use crate::sst::file::FileId;
+use crate::sst::index::TYPE_FULLTEXT_INDEX;
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
-use crate::sst::index::TYPE_FULLTEXT_INDEX;
 
 /// `FulltextIndexer` is responsible for creating fulltext indexes for SST files.
 pub struct FulltextIndexer {
@@ -65,6 +70,17 @@ impl FulltextIndexer {
         let mut creators = HashMap::new();
 
         for column in &metadata.column_metadatas {
+            // Tag columns don't support fulltext index now.
+            // If we need to support fulltext index for tag columns, we also need to parse
+            // the codec and handle sparse encoding for flat format specially.
+            if column.semantic_type == SemanticType::Tag {
+                common_telemetry::debug!(
+                    "Skip creating fulltext index for tag column {}",
+                    column.column_schema.name
+                );
+                continue;
+            }
+
             let options = column
                 .column_schema
                 .fulltext_options()
@@ -119,6 +135,7 @@ impl FulltextIndexer {
                 column_id,
                 SingleCreator {
                     column_id,
+                    column_name: column.column_schema.name.clone(),
                     inner,
                     compress,
                 },
@@ -137,6 +154,28 @@ impl FulltextIndexer {
         ensure!(!self.aborted, OperateAbortedIndexSnafu);
 
         if let Err(update_err) = self.do_update(batch).await {
+            if let Err(err) = self.do_abort().await {
+                if cfg!(any(test, feature = "test")) {
+                    panic!("Failed to abort index creator, err: {err}");
+                } else {
+                    warn!(err; "Failed to abort index creator");
+                }
+            }
+            return Err(update_err);
+        }
+
+        Ok(())
+    }
+
+    /// Updates the fulltext index with the given flat format RecordBatch.
+    pub async fn update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        ensure!(!self.aborted, OperateAbortedIndexSnafu);
+
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+
+        if let Err(update_err) = self.do_update_flat(batch).await {
             if let Err(err) = self.do_abort().await {
                 if cfg!(any(test, feature = "test")) {
                     panic!("Failed to abort index creator, err: {err}");
@@ -204,6 +243,17 @@ impl FulltextIndexer {
         Ok(())
     }
 
+    async fn do_update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        let mut guard = self.stats.record_update();
+        guard.inc_row_count(batch.num_rows());
+
+        for creator in self.creators.values_mut() {
+            creator.update_flat(batch).await?;
+        }
+
+        Ok(())
+    }
+
     async fn do_finish(&mut self, puffin_writer: &mut SstPuffinWriter) -> Result<()> {
         let mut guard = self.stats.record_finish();
 
@@ -233,6 +283,8 @@ impl FulltextIndexer {
 struct SingleCreator {
     /// Column ID.
     column_id: ColumnId,
+    /// Column name.
+    column_name: String,
     /// Inner creator.
     inner: AltFulltextCreator,
     /// Whether the index should be compressed.
@@ -258,7 +310,7 @@ impl SingleCreator {
                 for i in 0..batch.num_rows() {
                     let data = data.get_ref(i);
                     let text = data
-                        .as_string()
+                        .try_into_string()
                         .context(DataTypeMismatchSnafu)?
                         .unwrap_or_default();
                     self.inner.push_text(text).await?;
@@ -271,6 +323,52 @@ impl SingleCreator {
                 for _ in 0..batch.num_rows() {
                     self.inner.push_text("").await?;
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        // Find the column in the RecordBatch by name
+        if let Some(column_array) = batch.column_by_name(&self.column_name) {
+            // Convert Arrow array to string array.
+            // TODO(yingwen): Use Utf8View later if possible.
+            match column_array.data_type() {
+                DataType::Utf8 => {
+                    let string_array = column_array.as_any().downcast_ref::<StringArray>().unwrap();
+                    for text_opt in string_array.iter() {
+                        let text = text_opt.unwrap_or_default();
+                        self.inner.push_text(text).await?;
+                    }
+                }
+                DataType::LargeUtf8 => {
+                    let large_string_array = column_array
+                        .as_any()
+                        .downcast_ref::<LargeStringArray>()
+                        .unwrap();
+                    for text_opt in large_string_array.iter() {
+                        let text = text_opt.unwrap_or_default();
+                        self.inner.push_text(text).await?;
+                    }
+                }
+                _ => {
+                    // For other types, cast to Utf8 as before
+                    let array = datatypes::arrow::compute::cast(column_array, &DataType::Utf8)
+                        .context(ComputeArrowSnafu)?;
+                    let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+                    for text_opt in string_array.iter() {
+                        let text = text_opt.unwrap_or_default();
+                        self.inner.push_text(text).await?;
+                    }
+                }
+            }
+        } else {
+            // If the column is not found in the batch, push empty text.
+            // Ensure that the number of texts pushed is the same as the number of rows in the SST,
+            // so that the texts are aligned with the row ids.
+            for _ in 0..batch.num_rows() {
+                self.inner.push_text("").await?;
             }
         }
 
@@ -322,16 +420,22 @@ impl AltFulltextCreator {
     ) -> Result<ByteCount> {
         match self {
             Self::Tantivy(creator) => {
-                let key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{}", column_id);
+                let blob_key = format!(
+                    "{INDEX_BLOB_TYPE_TANTIVY}-{}",
+                    IndexTarget::ColumnId(*column_id)
+                );
                 creator
-                    .finish(puffin_writer, &key, put_options)
+                    .finish(puffin_writer, &blob_key, put_options)
                     .await
                     .context(FulltextFinishSnafu)
             }
             Self::Bloom(creator) => {
-                let key = format!("{INDEX_BLOB_TYPE_BLOOM}-{}", column_id);
+                let blob_key = format!(
+                    "{INDEX_BLOB_TYPE_BLOOM}-{}",
+                    IndexTarget::ColumnId(*column_id)
+                );
                 creator
-                    .finish(puffin_writer, &key, put_options)
+                    .finish(puffin_writer, &blob_key, put_options)
                     .await
                     .context(FulltextFinishSnafu)
             }
@@ -363,25 +467,25 @@ mod tests {
     use common_base::BitVec;
     use datatypes::data_type::DataType;
     use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextOptions};
-    use datatypes::vectors::{UInt64Vector, UInt8Vector};
-    use futures::future::BoxFuture;
+    use datatypes::vectors::{UInt8Vector, UInt64Vector};
     use futures::FutureExt;
+    use futures::future::BoxFuture;
     use index::fulltext_index::search::RowId;
-    use object_store::services::Memory;
     use object_store::ObjectStore;
+    use object_store::services::Memory;
     use puffin::puffin_manager::{PuffinManager, PuffinWriter};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_request::PathType;
-    use store_api::storage::{ConcreteDataType, RegionId};
+    use store_api::storage::{ConcreteDataType, FileId, RegionId};
 
     use super::*;
     use crate::access_layer::RegionFilePathFactory;
     use crate::read::{Batch, BatchColumn};
-    use crate::sst::file::{FileId, RegionFileId};
+    use crate::sst::file::RegionFileId;
+    use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
     use crate::sst::index::fulltext_index::applier::builder::{
         FulltextQuery, FulltextRequest, FulltextTerm,
     };
-    use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     fn mock_object_store() -> ObjectStore {
@@ -477,15 +581,15 @@ mod tests {
 
         for (text_english_case_sensitive, text_english_case_insensitive, text_chinese) in rows {
             match text_english_case_sensitive {
-                Some(s) => vec_english_sensitive.push_value_ref((*s).into()),
+                Some(s) => vec_english_sensitive.push_value_ref(&(*s).into()),
                 None => vec_english_sensitive.push_null(),
             }
             match text_english_case_insensitive {
-                Some(s) => vec_english_insensitive.push_value_ref((*s).into()),
+                Some(s) => vec_english_insensitive.push_value_ref(&(*s).into()),
                 None => vec_english_insensitive.push_null(),
             }
             match text_chinese {
-                Some(s) => vec_chinese.push_value_ref((*s).into()),
+                Some(s) => vec_chinese.push_value_ref(&(*s).into()),
                 None => vec_chinese.push_null(),
             }
         }

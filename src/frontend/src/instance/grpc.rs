@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use api::helper::from_pb_time_ranges;
 use api::v1::ddl_request::{Expr as DdlExpr, Expr};
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
@@ -24,26 +25,29 @@ use api::v1::{
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_base::AffectedRows;
-use common_grpc::flight::FlightDecoder;
+use common_error::ext::BoxedError;
 use common_grpc::FlightData;
-use common_query::logical_plan::add_insert_to_logical_plan;
+use common_grpc::flight::FlightDecoder;
 use common_query::Output;
+use common_query::logical_plan::add_insert_to_logical_plan;
 use common_telemetry::tracing::{self};
+use datafusion::datasource::DefaultTableSource;
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
-use table::table_name::TableName;
+use snafu::{OptionExt, ResultExt, ensure};
 use table::TableRef;
+use table::table::adapter::DfTableProviderAdapter;
+use table::table_name::TableName;
 
 use crate::error::{
-    CatalogSnafu, DataFusionSnafu, Error, InFlightWriteBytesExceededSnafu,
-    IncompleteGrpcRequestSnafu, NotSupportedSnafu, PermissionSnafu, PlanStatementSnafu, Result,
+    CatalogSnafu, DataFusionSnafu, Error, ExternalSnafu, IncompleteGrpcRequestSnafu,
+    NotSupportedSnafu, PermissionSnafu, PlanStatementSnafu, Result,
     SubstraitDecodeLogicalPlanSnafu, TableNotFoundSnafu, TableOperationSnafu,
 };
-use crate::instance::{attach_timer, Instance};
+use crate::instance::{Instance, attach_timer};
 use crate::metrics::{
     GRPC_HANDLE_PLAN_ELAPSED, GRPC_HANDLE_PROMQL_ELAPSED, GRPC_HANDLE_SQL_ELAPSED,
 };
@@ -64,11 +68,7 @@ impl GrpcQueryHandler for Instance {
             .context(PermissionSnafu)?;
 
         let _guard = if let Some(limiter) = &self.limiter {
-            let result = limiter.limit_request(&request);
-            if result.is_none() {
-                return InFlightWriteBytesExceededSnafu.fail();
-            }
-            result
+            Some(limiter.limit_request(&request).await?)
         } else {
             None
         };
@@ -119,7 +119,8 @@ impl GrpcQueryHandler for Instance {
                             .await
                             .context(SubstraitDecodeLogicalPlanSnafu)?;
                         let output =
-                            SqlQueryHandler::do_exec_plan(self, logical_plan, ctx.clone()).await?;
+                            SqlQueryHandler::do_exec_plan(self, None, logical_plan, ctx.clone())
+                                .await?;
 
                         attach_timer(output, timer)
                     }
@@ -134,6 +135,7 @@ impl GrpcQueryHandler for Instance {
                             end: promql.end,
                             step: promql.step,
                             lookback: promql.lookback,
+                            alias: None,
                         };
                         let mut result =
                             SqlQueryHandler::do_promql_query(self, &prom_query, ctx.clone()).await;
@@ -195,8 +197,11 @@ impl GrpcQueryHandler for Instance {
                     DdlExpr::TruncateTable(expr) => {
                         let table_name =
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
+                        let time_ranges = from_pb_time_ranges(expr.time_ranges.unwrap_or_default())
+                            .map_err(BoxedError::new)
+                            .context(ExternalSnafu)?;
                         self.statement_executor
-                            .truncate_table(table_name, ctx.clone())
+                            .truncate_table(table_name, time_ranges, ctx.clone())
                             .await?
                     }
                     DdlExpr::CreateFlow(expr) => {
@@ -239,6 +244,7 @@ impl GrpcQueryHandler for Instance {
         table_ref: &mut Option<TableRef>,
         decoder: &mut FlightDecoder,
         data: FlightData,
+        ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
         let table = if let Some(table) = table_ref {
             table.clone()
@@ -259,6 +265,18 @@ impl GrpcQueryHandler for Instance {
             *table_ref = Some(table.clone());
             table
         };
+
+        let interceptor_ref = self.plugins.get::<GrpcQueryInterceptorRef<Error>>();
+        let interceptor = interceptor_ref.as_ref();
+        interceptor.pre_bulk_insert(table.clone(), ctx.clone())?;
+
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
+            .context(PermissionSnafu)?;
+
+        // do we check limit for bulk insert?
 
         self.inserter
             .handle_bulk_insert(table, decoder, data)
@@ -366,20 +384,10 @@ impl Instance {
                 ]
                 .join("."),
             })?;
+        let table_provider = Arc::new(DfTableProviderAdapter::new(table));
+        let table_source = Arc::new(DefaultTableSource::new(table_provider));
 
-        let table_info = table.table_info();
-
-        let df_schema = Arc::new(
-            table_info
-                .meta
-                .schema
-                .arrow_schema()
-                .clone()
-                .try_into()
-                .context(DataFusionSnafu)?,
-        );
-
-        let insert_into = add_insert_to_logical_plan(table_name, df_schema, logical_plan)
+        let insert_into = add_insert_to_logical_plan(table_name, table_source, logical_plan)
             .context(SubstraitDecodeLogicalPlanSnafu)?;
 
         let engine_ctx = self.query_engine().engine_context(ctx.clone());
@@ -388,16 +396,12 @@ impl Instance {
         let analyzed_plan = state
             .analyzer()
             .execute_and_check(insert_into, state.config_options(), |_, _| {})
-            .context(common_query::error::GeneralDataFusionSnafu)
-            .context(SubstraitDecodeLogicalPlanSnafu)?;
+            .context(DataFusionSnafu)?;
 
         // Optimize the plan
-        let optimized_plan = state
-            .optimize(&analyzed_plan)
-            .context(common_query::error::GeneralDataFusionSnafu)
-            .context(SubstraitDecodeLogicalPlanSnafu)?;
+        let optimized_plan = state.optimize(&analyzed_plan).context(DataFusionSnafu)?;
 
-        let output = SqlQueryHandler::do_exec_plan(self, optimized_plan, ctx.clone()).await?;
+        let output = SqlQueryHandler::do_exec_plan(self, None, optimized_plan, ctx.clone()).await?;
 
         Ok(attach_timer(output, timer))
     }

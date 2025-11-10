@@ -16,10 +16,12 @@ workspace = true
 api.workspace = true
 aquamarine.workspace = true
 async-channel = "1.9"
+common-stat.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 bytemuck.workspace = true
 bytes.workspace = true
+chrono.workspace = true
 common-base.workspace = true
 common-config.workspace = true
 common-datasource.workspace = true
@@ -41,15 +43,16 @@ datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes.workspace = true
+dashmap.workspace = true
 dotenv.workspace = true
 either.workspace = true
 futures.workspace = true
 humantime-serde.workspace = true
 index.workspace = true
 itertools.workspace = true
+greptime-proto.workspace = true
 lazy_static = "1.4"
 log-store = { workspace = true }
-memcomparable = "0.2"
 mito-codec.workspace = true
 moka = { workspace = true, features = ["sync", "future"] }
 object-store.workspace = true
@@ -58,10 +61,11 @@ paste.workspace = true
 pin-project.workspace = true
 prometheus.workspace = true
 prost.workspace = true
+partition.workspace = true
 puffin.workspace = true
 rand.workspace = true
 rayon = "1.10"
-regex = "1.5"
+regex.workspace = true
 rskafka = { workspace = true, optional = true }
 rstest = { workspace = true, optional = true }
 rstest_reuse = { workspace = true, optional = true }
@@ -114,3 +118,6 @@ required-features = ["test"]
 name = "simple_bulk_memtable"
 harness = false
 required-features = ["test"]
+
+[package.metadata.cargo-udeps.ignore]
+normal = ["aquamarine"]

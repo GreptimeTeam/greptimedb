@@ -27,8 +27,8 @@ use api::v1::{
 };
 use arrow_flight::{FlightData, Ticket};
 use async_stream::stream;
-use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
@@ -42,7 +42,7 @@ use common_telemetry::{error, warn};
 use futures::future;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 
@@ -50,7 +50,7 @@ use crate::error::{
     ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu,
     InvalidTonicMetadataValueSnafu,
 };
-use crate::{error, from_grpc_response, Client, Result};
+use crate::{Client, Result, error, from_grpc_response};
 
 type FlightDataStream = Pin<Box<dyn Stream<Item = FlightData> + Send>>;
 
@@ -75,12 +75,24 @@ pub struct Database {
 }
 
 pub struct DatabaseClient {
+    pub addr: String,
     pub inner: GreptimeDatabaseClient<Channel>,
 }
 
+impl DatabaseClient {
+    /// Returns a closure that logs the error when the request fails.
+    pub fn inspect_err<'a>(&'a self, context: &'a str) -> impl Fn(&tonic::Status) + 'a {
+        let addr = &self.addr;
+        move |status| {
+            error!("Failed to {context} request, peer: {addr}, status: {status:?}");
+        }
+    }
+}
+
 fn make_database_client(client: &Client) -> Result<DatabaseClient> {
-    let (_, channel) = client.find_channel()?;
+    let (addr, channel) = client.find_channel()?;
     Ok(DatabaseClient {
+        addr,
         inner: GreptimeDatabaseClient::new(channel)
             .max_decoding_message_size(client.max_grpc_recv_message_size())
             .max_encoding_message_size(client.max_grpc_send_message_size()),
@@ -167,14 +179,19 @@ impl Database {
         requests: InsertRequests,
         hints: &[(&str, &str)],
     ) -> Result<u32> {
-        let mut client = make_database_client(&self.client)?.inner;
+        let mut client = make_database_client(&self.client)?;
         let request = self.to_rpc_request(Request::Inserts(requests));
 
         let mut request = tonic::Request::new(request);
         let metadata = request.metadata_mut();
         Self::put_hints(metadata, hints)?;
 
-        let response = client.handle(request).await?.into_inner();
+        let response = client
+            .inner
+            .handle(request)
+            .await
+            .inspect_err(client.inspect_err("insert_with_hints"))?
+            .into_inner();
         from_grpc_response(response)
     }
 
@@ -189,14 +206,19 @@ impl Database {
         requests: RowInsertRequests,
         hints: &[(&str, &str)],
     ) -> Result<u32> {
-        let mut client = make_database_client(&self.client)?.inner;
+        let mut client = make_database_client(&self.client)?;
         let request = self.to_rpc_request(Request::RowInserts(requests));
 
         let mut request = tonic::Request::new(request);
         let metadata = request.metadata_mut();
         Self::put_hints(metadata, hints)?;
 
-        let response = client.handle(request).await?.into_inner();
+        let response = client
+            .inner
+            .handle(request)
+            .await
+            .inspect_err(client.inspect_err("row_inserts_with_hints"))?
+            .into_inner();
         from_grpc_response(response)
     }
 
@@ -217,9 +239,14 @@ impl Database {
 
     /// Make a request to the database.
     pub async fn handle(&self, request: Request) -> Result<u32> {
-        let mut client = make_database_client(&self.client)?.inner;
+        let mut client = make_database_client(&self.client)?;
         let request = self.to_rpc_request(request);
-        let response = client.handle(request).await?.into_inner();
+        let response = client
+            .inner
+            .handle(request)
+            .await
+            .inspect_err(client.inspect_err("handle"))?
+            .into_inner();
         from_grpc_response(response)
     }
 
@@ -231,7 +258,7 @@ impl Database {
         max_retries: u32,
         hints: &[(&str, &str)],
     ) -> Result<u32> {
-        let mut client = make_database_client(&self.client)?.inner;
+        let mut client = make_database_client(&self.client)?;
         let mut retries = 0;
 
         let request = self.to_rpc_request(request);
@@ -240,7 +267,11 @@ impl Database {
             let mut tonic_request = tonic::Request::new(request.clone());
             let metadata = tonic_request.metadata_mut();
             Self::put_hints(metadata, hints)?;
-            let raw_response = client.handle(tonic_request).await;
+            let raw_response = client
+                .inner
+                .handle(tonic_request)
+                .await
+                .inspect_err(client.inspect_err("handle"));
             match (raw_response, retries < max_retries) {
                 (Ok(resp), _) => return from_grpc_response(resp.into_inner()),
                 (Err(err), true) => {
@@ -348,11 +379,10 @@ impl Database {
                 tonic_code,
                 e
             );
-            let error = Err(BoxedError::new(e)).with_context(|_| FlightGetSnafu {
+            Err(BoxedError::new(e)).with_context(|_| FlightGetSnafu {
                 addr: client.addr().to_string(),
                 tonic_code,
-            });
-            error
+            })
         })?;
 
         let flight_data_stream = response.into_inner();
@@ -442,8 +472,8 @@ impl Database {
         }) = &self.ctx.auth_header
         {
             let encoded = BASE64_STANDARD.encode(format!("{username}:{password}"));
-            let value =
-                MetadataValue::from_str(&encoded).context(InvalidTonicMetadataValueSnafu)?;
+            let value = MetadataValue::from_str(&format!("Basic {encoded}"))
+                .context(InvalidTonicMetadataValueSnafu)?;
             request.metadata_mut().insert("x-greptime-auth", value);
         }
 

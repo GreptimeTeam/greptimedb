@@ -19,26 +19,28 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use common_telemetry::debug;
+use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
-use common_time::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::{
     ArrayRef, BooleanArray, RecordBatch, RecordBatchOptions, TimestampMicrosecondArray,
     TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
 };
 use datatypes::arrow::buffer::{BooleanBuffer, MutableBuffer};
-use datatypes::arrow::datatypes::{DataType, Int64Type};
+use datatypes::arrow::datatypes::{DataType, Int64Type, SchemaRef};
 use mito_codec::key_values::KeyValue;
-use smallvec::{smallvec, SmallVec};
+use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
+use smallvec::{SmallVec, smallvec};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 
 use crate::error;
 use crate::error::{InvalidRequestSnafu, Result};
-use crate::memtable::bulk::part::BulkPart;
+use crate::memtable::bulk::part::{BulkPart, BulkPartConverter};
 use crate::memtable::version::SmallMemtableVec;
 use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
+use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
 /// Initial time window if not specified.
 const INITIAL_TIME_WINDOW: Duration = Duration::from_days(1);
@@ -187,8 +189,8 @@ pub fn filter_record_batch(part: &BulkPart, min: i64, max: i64) -> Result<Option
     .context(error::NewRecordBatchSnafu)?;
     Ok(Some(BulkPart {
         batch,
-        max_ts,
-        min_ts,
+        max_timestamp: max_ts,
+        min_timestamp: min_ts,
         sequence: part.sequence,
         timestamp_index: part.timestamp_index,
         raw_data: None,
@@ -208,6 +210,12 @@ pub struct TimePartitions {
     metadata: RegionMetadataRef,
     /// Builder of memtables.
     builder: MemtableBuilderRef,
+    /// Primary key encoder.
+    primary_key_codec: Arc<dyn PrimaryKeyCodec>,
+
+    /// Cached schema for bulk insert.
+    /// This field is Some if the memtable uses bulk insert.
+    bulk_schema: Option<SchemaRef>,
 }
 
 pub type TimePartitionsRef = Arc<TimePartitions>;
@@ -221,11 +229,19 @@ impl TimePartitions {
         part_duration: Option<Duration>,
     ) -> Self {
         let inner = PartitionsInner::new(next_memtable_id);
+        let primary_key_codec = build_primary_key_codec(&metadata);
+        let bulk_schema = builder.use_bulk_insert(&metadata).then(|| {
+            let opts = FlatSchemaOptions::from_encoding(metadata.primary_key_encoding);
+            to_flat_sst_arrow_schema(&metadata, &opts)
+        });
+
         Self {
             inner: Mutex::new(inner),
             part_duration: part_duration.unwrap_or(INITIAL_TIME_WINDOW),
             metadata,
             builder,
+            primary_key_codec,
+            bulk_schema,
         }
     }
 
@@ -233,6 +249,21 @@ impl TimePartitions {
     ///
     /// It creates new partitions if necessary.
     pub fn write(&self, kvs: &KeyValues) -> Result<()> {
+        if let Some(bulk_schema) = &self.bulk_schema {
+            let mut converter = BulkPartConverter::new(
+                &self.metadata,
+                bulk_schema.clone(),
+                kvs.num_rows(),
+                self.primary_key_codec.clone(),
+                // Always store primary keys for bulk mode.
+                true,
+            );
+            converter.append_key_values(kvs)?;
+            let part = converter.convert()?;
+
+            return self.write_bulk(part);
+        }
+
         // Get all parts.
         let parts = self.list_partitions();
 
@@ -242,7 +273,7 @@ impl TimePartitions {
             let mut all_in_partition = true;
             for kv in kvs.iter() {
                 // Safety: We checked the schema in the write request.
-                let ts = kv.timestamp().as_timestamp().unwrap().unwrap();
+                let ts = kv.timestamp().try_into_timestamp().unwrap().unwrap();
                 if !part.contains_timestamp(ts) {
                     all_in_partition = false;
                     break;
@@ -274,8 +305,8 @@ impl TimePartitions {
         let (matching_parts, missing_parts) = self.find_partitions_by_time_range(
             part.timestamps(),
             &parts,
-            time_type.create_timestamp(part.min_ts),
-            time_type.create_timestamp(part.max_ts),
+            time_type.create_timestamp(part.min_timestamp),
+            time_type.create_timestamp(part.max_timestamp),
         )?;
 
         if matching_parts.len() == 1 && missing_parts.is_empty() {
@@ -322,13 +353,13 @@ impl TimePartitions {
                     .builder
                     .build(inner.alloc_memtable_id(), &self.metadata);
                 debug!(
-                        "Create time partition {:?} for region {}, duration: {:?}, memtable_id: {}, parts_total: {}",
-                        range,
-                        self.metadata.region_id,
-                        self.part_duration,
-                        memtable.id(),
-                        inner.parts.len() + 1
-                    );
+                    "Create time partition {:?} for region {}, duration: {:?}, memtable_id: {}, parts_total: {}",
+                    range,
+                    self.metadata.region_id,
+                    self.part_duration,
+                    memtable.id(),
+                    inner.parts.len() + 1
+                );
                 let pos = inner.parts.len();
                 inner.parts.push(TimePartition {
                     memtable,
@@ -413,6 +444,8 @@ impl TimePartitions {
             part_duration,
             metadata: metadata.clone(),
             builder: self.builder.clone(),
+            primary_key_codec: self.primary_key_codec.clone(),
+            bulk_schema: self.bulk_schema.clone(),
         }
     }
 
@@ -601,7 +634,7 @@ impl TimePartitions {
         for kv in kvs.iter() {
             let mut part_found = false;
             // Safety: We used the timestamp before.
-            let ts = kv.timestamp().as_timestamp().unwrap().unwrap();
+            let ts = kv.timestamp().try_into_timestamp().unwrap().unwrap();
             for part in parts {
                 if part.contains_timestamp(ts) {
                     parts_to_write
@@ -1162,8 +1195,8 @@ mod tests {
         let min_ts = ts.iter().min().copied().unwrap();
         BulkPart {
             batch,
-            max_ts,
-            min_ts,
+            max_timestamp: max_ts,
+            min_timestamp: min_ts,
             sequence,
             timestamp_index: 0,
             raw_data: None,
@@ -1275,8 +1308,8 @@ mod tests {
 
         let part = BulkPart {
             batch,
-            max_ts: 8000,
-            min_ts: 1000,
+            max_timestamp: 8000,
+            min_timestamp: 1000,
             sequence: 0,
             timestamp_index: 0,
             raw_data: None,
@@ -1286,16 +1319,16 @@ mod tests {
         assert!(result.is_some());
         let filtered = result.unwrap();
         assert_eq!(filtered.num_rows(), 1);
-        assert_eq!(filtered.min_ts, 1000);
-        assert_eq!(filtered.max_ts, 1000);
+        assert_eq!(filtered.min_timestamp, 1000);
+        assert_eq!(filtered.max_timestamp, 1000);
 
         // Test splitting with range [3000, 6000)
         let result = filter_record_batch(&part, 3000, 6000).unwrap();
         assert!(result.is_some());
         let filtered = result.unwrap();
         assert_eq!(filtered.num_rows(), 1);
-        assert_eq!(filtered.min_ts, 5000);
-        assert_eq!(filtered.max_ts, 5000);
+        assert_eq!(filtered.min_timestamp, 5000);
+        assert_eq!(filtered.max_timestamp, 5000);
 
         // Test splitting with range that includes no points
         let result = filter_record_batch(&part, 3000, 4000).unwrap();
@@ -1306,7 +1339,7 @@ mod tests {
         assert!(result.is_some());
         let filtered = result.unwrap();
         assert_eq!(filtered.num_rows(), 5);
-        assert_eq!(filtered.min_ts, 1000);
-        assert_eq!(filtered.max_ts, 8000);
+        assert_eq!(filtered.min_timestamp, 1000);
+        assert_eq!(filtered.max_timestamp, 8000);
     }
 }

@@ -16,10 +16,10 @@ use std::any::Any;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use common_meta::RegionIdent;
 use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
 use common_meta::key::datanode_table::RegionInfo;
-use common_meta::RegionIdent;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -78,7 +78,7 @@ impl OpenCandidateRegion {
             engine,
         } = datanode_table_value.region_info.clone();
 
-        let open_instruction = Instruction::OpenRegion(OpenRegion::new(
+        let open_instruction = Instruction::OpenRegions(vec![OpenRegion::new(
             RegionIdent {
                 datanode_id: candidate_id,
                 table_id,
@@ -89,7 +89,7 @@ impl OpenCandidateRegion {
             region_options,
             region_wal_options,
             true,
-        ));
+        )]);
 
         Ok(open_instruction)
     }
@@ -155,7 +155,7 @@ impl OpenCandidateRegion {
                     region_id,
                     now.elapsed()
                 );
-                let InstructionReply::OpenRegion(SimpleReply { result, error }) = reply else {
+                let InstructionReply::OpenRegions(SimpleReply { result, error }) = reply else {
                     return error::UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
                         reason: "expect open region reply",
@@ -195,16 +195,16 @@ mod tests {
     use std::collections::HashMap;
 
     use common_catalog::consts::MITO2_ENGINE;
+    use common_meta::DatanodeId;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
-    use common_meta::DatanodeId;
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::error::Error;
-    use crate::procedure::region_migration::test_util::{self, new_procedure_context, TestingEnv};
+    use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
     use crate::procedure::test_util::{
         new_close_region_reply, new_open_region_reply, send_mock_reply,
@@ -215,7 +215,7 @@ mod tests {
     }
 
     fn new_mock_open_instruction(datanode_id: DatanodeId, region_id: RegionId) -> Instruction {
-        Instruction::OpenRegion(OpenRegion {
+        Instruction::OpenRegions(vec![OpenRegion {
             region_ident: RegionIdent {
                 datanode_id,
                 table_id: region_id.table_id(),
@@ -226,7 +226,7 @@ mod tests {
             region_options: Default::default(),
             region_wal_options: Default::default(),
             skip_wal_replay: true,
-        })
+        }])
     }
 
     #[tokio::test]

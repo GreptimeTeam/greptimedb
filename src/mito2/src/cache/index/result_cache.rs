@@ -19,10 +19,9 @@ use index::bloom_filter::applier::InListPredicate;
 use index::inverted_index::search::predicate::{Predicate, RangePredicate};
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, FileId};
 
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
-use crate::sst::file::FileId;
 use crate::sst::index::fulltext_index::applier::builder::{
     FulltextQuery, FulltextRequest, FulltextTerm,
 };
@@ -64,6 +63,7 @@ impl IndexResultCache {
                     .with_label_values(&[INDEX_RESULT_TYPE, to_str(cause)])
                     .inc();
             })
+            .support_invalidation_closures()
             .build();
         Self { cache }
     }
@@ -97,6 +97,13 @@ impl IndexResultCache {
     /// Calculates the memory usage of a cache entry.
     fn index_result_cache_weight(k: &(PredicateKey, FileId), v: &Arc<RowGroupSelection>) -> u32 {
         k.0.mem_usage() as u32 + v.mem_usage() as u32
+    }
+
+    /// Removes cached results for the given file.
+    pub fn invalidate_file(&self, file_id: FileId) {
+        self.cache
+            .invalidate_entries_if(move |(_, cached_file_id), _| *cached_file_id == file_id)
+            .expect("cache should support invalidation closures");
     }
 }
 

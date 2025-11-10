@@ -17,7 +17,7 @@ use std::sync::Arc;
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
-use axum::{http, Router};
+use axum::{Router, http};
 use common_query::Output;
 use common_test_util::ports;
 use datafusion_expr::LogicalPlan;
@@ -28,9 +28,10 @@ use servers::http::header::constants::GREPTIME_DB_HEADER_NAME;
 use servers::http::test_helpers::TestClient;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::influxdb::InfluxdbRequest;
-use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::InfluxdbLineProtocolHandler;
+use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
+use sql::statements::statement::Statement;
 use tokio::sync::mpsc;
 
 struct DummyInstance {
@@ -59,6 +60,7 @@ impl SqlQueryHandler for DummyInstance {
 
     async fn do_exec_plan(
         &self,
+        _stmt: Option<Statement>,
         _plan: LogicalPlan,
         _query_ctx: QueryContextRef,
     ) -> std::result::Result<Output, Self::Error> {

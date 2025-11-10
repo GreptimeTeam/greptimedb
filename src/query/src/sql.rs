@@ -17,32 +17,31 @@ mod show_create_table;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::information_schema::{
-    columns, flows, key_column_usage, process_list, region_peers, schemata, tables, CHARACTER_SETS,
-    COLLATIONS, COLUMNS, FLOWS, KEY_COLUMN_USAGE, REGION_PEERS, SCHEMATA, TABLES, VIEWS,
-};
 use catalog::CatalogManagerRef;
+use catalog::information_schema::{
+    CHARACTER_SETS, COLLATIONS, COLUMNS, FLOWS, KEY_COLUMN_USAGE, REGION_PEERS, SCHEMATA, TABLES,
+    VIEWS, columns, flows, key_column_usage, process_list, region_peers, schemata, tables,
+};
 use common_catalog::consts::{
     INFORMATION_SCHEMA_NAME, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY,
     SEMANTIC_TYPE_TIME_INDEX,
 };
 use common_catalog::format_full_table_name;
-use common_datasource::file_format::{infer_schemas, FileFormat, Format};
+use common_datasource::file_format::{FileFormat, Format, infer_schemas};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
-use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_meta::SchemaOptions;
-use common_query::prelude::GREPTIME_TIMESTAMP;
+use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_query::Output;
-use common_recordbatch::adapter::RecordBatchStreamAdapter;
+use common_query::prelude::greptime_timestamp;
 use common_recordbatch::RecordBatches;
-use common_time::timezone::get_timezone;
+use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_time::Timestamp;
+use common_time::timezone::get_timezone;
 use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
-use datafusion_expr::expr::WildcardOptions;
-use datafusion_expr::{case, col, lit, Expr, SortExpr};
+use datafusion_expr::{Expr, SortExpr, case, col, lit};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
 use datatypes::vectors::StringVector;
@@ -52,25 +51,25 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use session::context::{Channel, QueryContextRef};
 pub use show_create_table::create_table_stmt;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::Ident;
 use sql::parser::ParserContext;
+use sql::statements::OptionMap;
 use sql::statements::create::{CreateDatabase, CreateFlow, CreateView, Partitions, SqlOrTql};
 use sql::statements::show::{
     ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion,
     ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use sql::statements::statement::Statement;
-use sql::statements::OptionMap;
 use sqlparser::ast::ObjectName;
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
-use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
+use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 
+use crate::QueryEngineRef;
 use crate::dataframe::DataFrame;
 use crate::error::{self, Result, UnsupportedVariableSnafu};
 use crate::planner::DfLogicalPlanner;
-use crate::QueryEngineRef;
 
 const SCHEMAS_COLUMN: &str = "Database";
 const OPTIONS_COLUMN: &str = "Options";
@@ -250,13 +249,6 @@ async fn query_from_information_schema_table(
 
     let DataFrame::DataFusion(dataframe) = query_engine.read_table(table)?;
 
-    // Apply select
-    let dataframe = if select.is_empty() {
-        dataframe
-    } else {
-        dataframe.select(select).context(error::PlanSqlSnafu)?
-    };
-
     // Apply filters
     let dataframe = filters.into_iter().try_fold(dataframe, |df, expr| {
         df.filter(expr).context(error::PlanSqlSnafu)
@@ -272,11 +264,26 @@ async fn query_from_information_schema_table(
     };
 
     // Apply sorting
-    let dataframe = dataframe
-        .sort(sort)
-        .context(error::PlanSqlSnafu)?
-        .select_columns(&projects.iter().map(|(c, _)| *c).collect::<Vec<_>>())
-        .context(error::PlanSqlSnafu)?;
+    let dataframe = if sort.is_empty() {
+        dataframe
+    } else {
+        dataframe.sort(sort).context(error::PlanSqlSnafu)?
+    };
+
+    // Apply select
+    let dataframe = if select.is_empty() {
+        if projects.is_empty() {
+            dataframe
+        } else {
+            let projection = projects
+                .iter()
+                .map(|x| col(x.0).alias(x.1))
+                .collect::<Vec<_>>();
+            dataframe.select(projection).context(error::PlanSqlSnafu)?
+        }
+    } else {
+        dataframe.select(select).context(error::PlanSqlSnafu)?
+    };
 
     // Apply projection
     let dataframe = projects
@@ -400,8 +407,12 @@ pub async fn show_index(
     };
 
     let select = vec![
+        col(key_column_usage::TABLE_NAME).alias(INDEX_TABLE_COLUMN),
         // 1 as `Non_unique`: contain duplicates
         lit(1).alias(INDEX_NONT_UNIQUE_COLUMN),
+        col(key_column_usage::CONSTRAINT_NAME).alias(INDEX_KEY_NAME_COLUMN),
+        col(key_column_usage::ORDINAL_POSITION).alias(INDEX_SEQ_IN_INDEX_COLUMN),
+        col(key_column_usage::COLUMN_NAME).alias(INDEX_COLUMN_NAME_COLUMN),
         // How the column is sorted in the index: A (ascending).
         lit("A").alias(COLUMN_COLLATION_COLUMN),
         null().alias(INDEX_CARDINALITY_COLUMN),
@@ -416,14 +427,11 @@ pub async fn show_index(
             .otherwise(lit(YES_STR))
             .context(error::PlanSqlSnafu)?
             .alias(COLUMN_NULLABLE_COLUMN),
+        col(key_column_usage::GREPTIME_INDEX_TYPE).alias(INDEX_INDEX_TYPE_COLUMN),
         lit("").alias(COLUMN_COMMENT_COLUMN),
         lit("").alias(INDEX_COMMENT_COLUMN),
         lit(YES_STR).alias(INDEX_VISIBLE_COLUMN),
         null().alias(INDEX_EXPRESSION_COLUMN),
-        Expr::Wildcard {
-            qualifier: None,
-            options: Box::new(WildcardOptions::default()),
-        },
     ];
 
     let projects = vec![
@@ -765,7 +773,7 @@ pub async fn show_search_path(_query_ctx: QueryContextRef) -> Result<Output> {
 
 pub fn show_create_database(database_name: &str, options: OptionMap) -> Result<Output> {
     let stmt = CreateDatabase {
-        name: ObjectName(vec![Ident::new(database_name)]),
+        name: ObjectName::from(vec![Ident::new(database_name)]),
         if_not_exists: true,
         options,
     };
@@ -1005,12 +1013,13 @@ pub fn show_create_flow(
 
     let stmt = CreateFlow {
         flow_name,
-        sink_table_name: ObjectName(vec![Ident::new(&flow_val.sink_table_name().table_name)]),
+        sink_table_name: ObjectName::from(vec![Ident::new(&flow_val.sink_table_name().table_name)]),
         // notice we don't want `OR REPLACE` and `IF NOT EXISTS` in same sql since it's unclear what to do
         // so we set `or_replace` to false.
         or_replace: false,
         if_not_exists: true,
         expire_after: flow_val.expire_after(),
+        eval_interval: flow_val.eval_interval(),
         comment,
         query,
     };
@@ -1075,11 +1084,7 @@ fn describe_column_keys(
 fn describe_column_nullables(columns_schemas: &[ColumnSchema]) -> VectorRef {
     Arc::new(StringVector::from_iterator(columns_schemas.iter().map(
         |cs| {
-            if cs.is_nullable() {
-                YES_STR
-            } else {
-                NO_STR
-            }
+            if cs.is_nullable() { YES_STR } else { NO_STR }
         },
     )))
 }
@@ -1190,14 +1195,14 @@ pub fn file_column_schemas_to_table(
 
     let timestamp_type = ConcreteDataType::timestamp_millisecond_datatype();
     let default_zero = Value::Timestamp(Timestamp::new_millisecond(0));
-    let timestamp_column_schema = ColumnSchema::new(GREPTIME_TIMESTAMP, timestamp_type, false)
+    let timestamp_column_schema = ColumnSchema::new(greptime_timestamp(), timestamp_type, false)
         .with_time_index(true)
         .with_default_constraint(Some(ColumnDefaultConstraint::Value(default_zero)))
         .unwrap();
 
     if let Some(column_schema) = column_schemas
         .iter_mut()
-        .find(|column_schema| column_schema.name == GREPTIME_TIMESTAMP)
+        .find(|column_schema| column_schema.name == greptime_timestamp())
     {
         // Replace the column schema with the default one
         *column_schema = timestamp_column_schema;
@@ -1205,7 +1210,7 @@ pub fn file_column_schemas_to_table(
         column_schemas.push(timestamp_column_schema);
     }
 
-    (column_schemas, GREPTIME_TIMESTAMP.to_string())
+    (column_schemas, greptime_timestamp().to_string())
 }
 
 /// This function checks if the column schemas from a file can be matched with
@@ -1312,8 +1317,8 @@ mod test {
 
     use common_query::{Output, OutputData};
     use common_recordbatch::{RecordBatch, RecordBatches};
-    use common_time::timestamp::TimeUnit;
     use common_time::Timezone;
+    use common_time::timestamp::TimeUnit;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt32Vector, VectorRef};
@@ -1321,15 +1326,15 @@ mod test {
     use snafu::ResultExt;
     use sql::ast::{Ident, ObjectName};
     use sql::statements::show::ShowVariables;
-    use table::test_util::MemTable;
     use table::TableRef;
+    use table::test_util::MemTable;
 
     use super::show_variable;
     use crate::error;
     use crate::error::Result;
     use crate::sql::{
-        describe_table, DESCRIBE_TABLE_OUTPUT_SCHEMA, NO_STR, SEMANTIC_TYPE_FIELD,
-        SEMANTIC_TYPE_TIME_INDEX, YES_STR,
+        DESCRIBE_TABLE_OUTPUT_SCHEMA, NO_STR, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_TIME_INDEX,
+        YES_STR, describe_table,
     };
 
     #[test]
@@ -1422,7 +1427,7 @@ mod test {
 
     fn exec_show_variable(variable: &str, tz: &str) -> Result<String> {
         let stmt = ShowVariables {
-            variable: ObjectName(vec![Ident::new(variable)]),
+            variable: ObjectName::from(vec![Ident::new(variable)]),
         };
         let ctx = Arc::new(
             QueryContextBuilder::default()

@@ -16,30 +16,30 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::Extension;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::Extension;
 use axum_extra::TypedHeader;
 use common_error::ext::ErrorExt;
 use common_telemetry::{debug, error};
 use headers::ContentType;
 use once_cell::sync::Lazy;
 use pipeline::{
-    GreptimePipelineParams, PipelineDefinition, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GreptimePipelineParams, PipelineDefinition,
 };
-use serde_json::{json, Deserializer, Value};
+use serde_json::{Deserializer, Value, json};
 use session::context::{Channel, QueryContext};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use vrl::value::Value as VrlValue;
 
 use crate::error::{
-    status_code_to_http_status, InvalidElasticsearchInputSnafu, ParseJsonSnafu,
-    Result as ServersResult,
+    InvalidElasticsearchInputSnafu, ParseJsonSnafu, Result as ServersResult,
+    status_code_to_http_status,
 };
 use crate::http::event::{
-    extract_pipeline_params_map_from_headers, ingest_logs_inner, LogIngesterQueryParams, LogState,
-    PipelineIngestRequest,
+    LogIngesterQueryParams, LogState, PipelineIngestRequest,
+    extract_pipeline_params_map_from_headers, ingest_logs_inner,
 };
 use crate::http::header::constants::GREPTIME_PIPELINE_NAME_HEADER_NAME;
 use crate::metrics::{
@@ -572,8 +572,8 @@ mod tests {
 
         for (input, index, msg_field, expected) in test_cases {
             let requests = parse_bulk_request(input, &index, &msg_field);
-            if expected.is_ok() {
-                assert_eq!(requests.unwrap(), expected.unwrap());
+            if let Ok(expected) = expected {
+                assert_eq!(requests.unwrap(), expected);
             } else {
                 assert!(requests.is_err());
             }

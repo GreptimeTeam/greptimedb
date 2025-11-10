@@ -18,8 +18,8 @@ use serde::Serialize;
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
-use crate::statements::statement::Statement;
 use crate::statements::OptionMap;
+use crate::statements::statement::Statement;
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum Copy {
@@ -151,14 +151,14 @@ impl CopyTableArgument {
     pub fn format(&self) -> Option<String> {
         self.with
             .get(common_datasource::file_format::FORMAT_TYPE)
-            .cloned()
+            .map(|v| v.to_string())
             .or_else(|| Some("PARQUET".to_string()))
     }
 
     pub fn pattern(&self) -> Option<String> {
         self.with
             .get(common_datasource::file_format::FILE_PATTERN)
-            .cloned()
+            .map(|v| v.to_string())
     }
 }
 

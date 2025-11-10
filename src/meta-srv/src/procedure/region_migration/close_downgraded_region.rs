@@ -16,10 +16,10 @@ use std::any::Any;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use common_meta::RegionIdent;
 use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::key::datanode_table::RegionInfo;
-use common_meta::RegionIdent;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -80,12 +80,12 @@ impl CloseDowngradedRegion {
 
         let RegionInfo { engine, .. } = datanode_table_value.region_info.clone();
 
-        Ok(Instruction::CloseRegion(RegionIdent {
+        Ok(Instruction::CloseRegions(vec![RegionIdent {
             datanode_id: downgrade_leader_datanode_id,
             table_id,
             region_number,
             engine,
-        }))
+        }]))
     }
 
     /// Closes the downgraded leader region.
@@ -121,7 +121,7 @@ impl CloseDowngradedRegion {
                     "Received close downgraded leade region reply: {:?}, region: {}",
                     reply, region_id
                 );
-                let InstructionReply::CloseRegion(SimpleReply { result, error }) = reply else {
+                let InstructionReply::CloseRegions(SimpleReply { result, error }) = reply else {
                     return error::UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
                         reason: "expect close region reply",

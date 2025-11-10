@@ -13,8 +13,22 @@
 // limitations under the License.
 
 pub use sqlparser::ast::{
-    visit_expressions_mut, visit_statements_mut, BinaryOperator, ColumnDef, ColumnOption,
-    ColumnOptionDef, DataType, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-    Ident, ObjectName, SqlOption, TableConstraint, TimezoneInfo, Value, Visit, VisitMut, Visitor,
-    VisitorMut,
+    BinaryOperator, ColumnDef, ColumnOption, ColumnOptionDef, DataType, Expr, Function,
+    FunctionArg, FunctionArgExpr, FunctionArguments, Ident, ObjectName, ObjectNamePart, SqlOption,
+    TableConstraint, TimezoneInfo, Value, ValueWithSpan, Visit, VisitMut, Visitor, VisitorMut,
+    visit_expressions_mut, visit_statements_mut,
 };
+
+pub trait ObjectNamePartExt {
+    fn to_string_unquoted(&self) -> String;
+}
+
+impl ObjectNamePartExt for ObjectNamePart {
+    fn to_string_unquoted(&self) -> String {
+        let ObjectNamePart::Identifier(ident) = self else {
+            // If it's not an ident, just return it as a string.
+            return self.to_string();
+        };
+        ident.value.clone()
+    }
+}

@@ -26,18 +26,16 @@ use arrow_flight::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::{Output, OutputData};
 use common_telemetry::tracing::info_span;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use futures::{future, ready, Stream};
+use futures::{Stream, future, ready};
 use futures_util::{StreamExt, TryStreamExt};
 use prost::Message;
 use session::context::{QueryContext, QueryContextRef};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use table::table_name::TableName;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -45,10 +43,10 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::error::{InvalidParameterSnafu, ParseJsonSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
-use crate::grpc::greptime_handler::{get_request_type, GreptimeRequestHandler};
-use crate::grpc::{FlightCompression, TonicResult};
-use crate::http::header::constants::GREPTIME_DB_HEADER_NAME;
-use crate::http::AUTHORIZATION_HEADER;
+use crate::grpc::greptime_handler::{GreptimeRequestHandler, get_request_type};
+use crate::grpc::{FlightCompression, TonicResult, context_auth};
+use crate::metrics::{METRIC_GRPC_MEMORY_USAGE_BYTES, METRIC_GRPC_REQUESTS_REJECTED_TOTAL};
+use crate::request_limiter::{RequestMemoryGuard, RequestMemoryLimiter};
 use crate::{error, hint_headers};
 
 pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + 'static>>;
@@ -189,7 +187,6 @@ impl FlightCraft for GreptimeRequestHandler {
         let ticket = request.into_inner().ticket;
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
-        let query_ctx = QueryContext::arc();
 
         // The Grpc protocol pass query by Flight. It needs to be wrapped under a span, in order to record stream
         let span = info_span!(
@@ -204,7 +201,7 @@ impl FlightCraft for GreptimeRequestHandler {
                 output,
                 TracingContext::from_current_span(),
                 flight_compression,
-                query_ctx,
+                QueryContext::arc(),
             );
             Ok(Response::new(stream))
         }
@@ -216,36 +213,25 @@ impl FlightCraft for GreptimeRequestHandler {
         &self,
         request: Request<Streaming<FlightData>>,
     ) -> TonicResult<Response<TonicStream<PutResult>>> {
-        let (headers, _, stream) = request.into_parts();
+        let (headers, extensions, stream) = request.into_parts();
 
-        let header = |key: &str| -> TonicResult<Option<&str>> {
-            let Some(v) = headers.get(key) else {
-                return Ok(None);
-            };
-            let Ok(v) = std::str::from_utf8(v.as_bytes()) else {
-                return Err(InvalidParameterSnafu {
-                    reason: "expect valid UTF-8 value",
-                }
-                .build()
-                .into());
-            };
-            Ok(Some(v))
-        };
+        let limiter = extensions.get::<RequestMemoryLimiter>().cloned();
 
-        let username_and_password = header(AUTHORIZATION_HEADER)?;
-        let db = header(GREPTIME_DB_HEADER_NAME)?;
-        if !self.validate_auth(username_and_password, db).await? {
-            return Err(Status::unauthenticated("auth failed"));
-        }
+        let query_ctx = context_auth::create_query_context_from_grpc_metadata(&headers)?;
+        context_auth::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
 
         const MAX_PENDING_RESPONSES: usize = 32;
         let (tx, rx) = mpsc::channel::<TonicResult<DoPutResponse>>(MAX_PENDING_RESPONSES);
 
         let stream = PutRecordBatchRequestStream {
             flight_data_stream: stream,
-            state: PutRecordBatchRequestStreamState::Init(db.map(ToString::to_string)),
+            state: PutRecordBatchRequestStreamState::Init(
+                query_ctx.current_catalog().to_string(),
+                query_ctx.current_schema(),
+            ),
+            limiter,
         };
-        self.put_record_batches(stream, tx).await;
+        self.put_record_batches(stream, tx, query_ctx).await;
 
         let response = ReceiverStream::new(rx)
             .and_then(|response| {
@@ -267,10 +253,15 @@ pub(crate) struct PutRecordBatchRequest {
     pub(crate) table_name: TableName,
     pub(crate) request_id: i64,
     pub(crate) data: FlightData,
+    pub(crate) _guard: Option<RequestMemoryGuard>,
 }
 
 impl PutRecordBatchRequest {
-    fn try_new(table_name: TableName, flight_data: FlightData) -> Result<Self> {
+    fn try_new(
+        table_name: TableName,
+        flight_data: FlightData,
+        limiter: Option<&RequestMemoryLimiter>,
+    ) -> Result<Self> {
         let request_id = if !flight_data.app_metadata.is_empty() {
             let metadata: DoPutMetadata =
                 serde_json::from_slice(&flight_data.app_metadata).context(ParseJsonSnafu)?;
@@ -278,10 +269,30 @@ impl PutRecordBatchRequest {
         } else {
             0
         };
+
+        let _guard = limiter
+            .filter(|limiter| limiter.is_enabled())
+            .map(|limiter| {
+                let message_size = flight_data.encoded_len();
+                limiter
+                    .try_acquire(message_size)
+                    .map(|guard| {
+                        guard.inspect(|g| {
+                            METRIC_GRPC_MEMORY_USAGE_BYTES.set(g.current_usage() as i64);
+                        })
+                    })
+                    .inspect_err(|_| {
+                        METRIC_GRPC_REQUESTS_REJECTED_TOTAL.inc();
+                    })
+            })
+            .transpose()?
+            .flatten();
+
         Ok(Self {
             table_name,
             request_id,
             data: flight_data,
+            _guard,
         })
     }
 }
@@ -289,10 +300,11 @@ impl PutRecordBatchRequest {
 pub(crate) struct PutRecordBatchRequestStream {
     flight_data_stream: Streaming<FlightData>,
     state: PutRecordBatchRequestStreamState,
+    limiter: Option<RequestMemoryLimiter>,
 }
 
 enum PutRecordBatchRequestStreamState {
-    Init(Option<String>),
+    Init(String, String),
     Started(TableName),
 }
 
@@ -317,30 +329,25 @@ impl Stream for PutRecordBatchRequestStream {
         }
 
         let poll = ready!(self.flight_data_stream.poll_next_unpin(cx));
+        let limiter = self.limiter.clone();
 
         let result = match &mut self.state {
-            PutRecordBatchRequestStreamState::Init(db) => match poll {
+            PutRecordBatchRequestStreamState::Init(catalog, schema) => match poll {
                 Some(Ok(mut flight_data)) => {
                     let flight_descriptor = flight_data.flight_descriptor.take();
                     let result = if let Some(descriptor) = flight_descriptor {
-                        let table_name = extract_table_name(descriptor).map(|x| {
-                            let (catalog, schema) = if let Some(db) = db {
-                                parse_catalog_and_schema_from_db_string(db)
-                            } else {
-                                (
-                                    DEFAULT_CATALOG_NAME.to_string(),
-                                    DEFAULT_SCHEMA_NAME.to_string(),
-                                )
-                            };
-                            TableName::new(catalog, schema, x)
-                        });
+                        let table_name = extract_table_name(descriptor)
+                            .map(|x| TableName::new(catalog.clone(), schema.clone(), x));
                         let table_name = match table_name {
                             Ok(table_name) => table_name,
                             Err(e) => return Poll::Ready(Some(Err(e.into()))),
                         };
 
-                        let request =
-                            PutRecordBatchRequest::try_new(table_name.clone(), flight_data);
+                        let request = PutRecordBatchRequest::try_new(
+                            table_name.clone(),
+                            flight_data,
+                            limiter.as_ref(),
+                        );
                         let request = match request {
                             Ok(request) => request,
                             Err(e) => return Poll::Ready(Some(Err(e.into()))),
@@ -361,8 +368,12 @@ impl Stream for PutRecordBatchRequestStream {
             },
             PutRecordBatchRequestStreamState::Started(table_name) => poll.map(|x| {
                 x.and_then(|flight_data| {
-                    PutRecordBatchRequest::try_new(table_name.clone(), flight_data)
-                        .map_err(Into::into)
+                    PutRecordBatchRequest::try_new(
+                        table_name.clone(),
+                        flight_data,
+                        limiter.as_ref(),
+                    )
+                    .map_err(Into::into)
                 })
             }),
         };

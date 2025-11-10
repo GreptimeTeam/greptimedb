@@ -1,14 +1,14 @@
 services:
 
   zookeeper:
-    image: docker.io/bitnami/zookeeper:3.7
+    image: greptime/zookeeper:3.7
     ports:
       - '2181:2181'
     environment:
       - ALLOW_ANONYMOUS_LOGIN=yes
 
   kafka:
-    image: docker.io/bitnami/kafka:3.9.0
+    image: greptime/kafka:3.9.0-debian-12-r1
     container_name: kafka
     ports:
       - 9092:9092
@@ -32,7 +32,7 @@ services:
         condition: service_started
 
   etcd:
-    image: docker.io/bitnami/etcd:3.5
+    image: greptime/etcd:3.6.1-debian-12-r3
     ports:
       - "2379:2379"
       - "2380:2380"
@@ -43,8 +43,35 @@ services:
       ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
       ETCD_MAX_REQUEST_BYTES: 10485760
 
+  etcd-tls:
+    image: greptime/etcd:3.6.1-debian-12-r3
+    ports:
+      - "2378:2378"
+      - "2381:2381"
+    environment:
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      ETCD_NAME: etcd-tls
+      ETCD_LISTEN_CLIENT_URLS: https://0.0.0.0:2378
+      ETCD_ADVERTISE_CLIENT_URLS: https://etcd-tls:2378
+      ETCD_LISTEN_PEER_URLS: https://0.0.0.0:2381
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: https://etcd-tls:2381
+      ETCD_INITIAL_CLUSTER: etcd-tls=https://etcd-tls:2381
+      ETCD_INITIAL_CLUSTER_TOKEN: etcd-tls-cluster
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_CERT_FILE: /certs/server.crt
+      ETCD_KEY_FILE: /certs/server-key.pem
+      ETCD_TRUSTED_CA_FILE: /certs/ca.crt
+      ETCD_PEER_CERT_FILE: /certs/server.crt
+      ETCD_PEER_KEY_FILE: /certs/server-key.pem
+      ETCD_PEER_TRUSTED_CA_FILE: /certs/ca.crt
+      ETCD_CLIENT_CERT_AUTH: "true"
+      ETCD_PEER_CLIENT_CERT_AUTH: "true"
+      ETCD_MAX_REQUEST_BYTES: 10485760
+    volumes:
+      - ./etcd-tls-certs:/certs:ro
+
   minio:
-    image: docker.io/bitnami/minio:2024
+    image: greptime/minio:2024
     ports:
       - '9000:9000'
       - '9001:9001'
@@ -62,17 +89,46 @@ services:
       - 5432:5432
     volumes:
       - ~/apps/postgres:/var/lib/postgresql/data
+      - ./certs:/tmp/certs:ro
+      - ./postgres/tls/pg_hba.conf:/var/lib/postgresql/pg_hba.conf
     environment:
       - POSTGRES_USER=greptimedb
       - POSTGRES_DB=postgres
       - POSTGRES_PASSWORD=admin
+    # Hack: Ensures certs are owned by database user with 600 permissions.
+    command: >
+      bash -c "
+        mkdir -p /certs &&
+        cp /tmp/certs/* /certs &&
+        chown -R postgres:postgres /certs &&
+        chmod 600 /certs/*.key &&
+        chmod 644 /certs/*.crt &&
+        exec docker-entrypoint.sh postgres
+        -c hba_file=/var/lib/postgresql/pg_hba.conf
+        -c ssl=on
+        -c ssl_cert_file=/certs/server.crt
+        -c ssl_key_file=/certs/server.key
+        -c ssl_ca_file=/certs/root.crt"
+
+  postgres15:
+    image: docker.io/postgres:15-alpine
+    ports:
+        - 5433:5432
+    volumes:
+        - ~/apps/postgres15:/var/lib/postgresql/data
+        - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    environment:
+        - POSTGRES_USER=greptimedb
+        - POSTGRES_DB=postgres
+        - POSTGRES_PASSWORD=admin
 
   mysql:
-    image: bitnami/mysql:5.7
+    image: greptime/mysql:5.7
     ports:
       - 3306:3306
     volumes:
-      - ~/apps/mysql:/var/lib/mysql
+      - ./certs:/certs:ro
+      - ./mysql/my.cnf:/opt/bitnami/mysql/conf/my_custom.cnf:ro
     environment:
       - MYSQL_DATABASE=mysql
       - MYSQL_USER=greptimedb

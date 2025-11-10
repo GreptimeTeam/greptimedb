@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use common_telemetry::{debug, info};
 use snafu::ensure;
 use store_api::storage::{RegionId, RegionNumber, TableId};
@@ -23,11 +22,11 @@ use store_api::storage::{RegionId, RegionNumber, TableId};
 use crate::ddl::TableMetadata;
 use crate::error::{Result, UnsupportedSnafu};
 use crate::key::table_route::PhysicalTableRouteValue;
-use crate::peer::Peer;
+use crate::peer::{NoopPeerAllocator, PeerAllocatorRef};
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{Region, RegionRoute};
 use crate::sequence::SequenceRef;
-use crate::wal_options_allocator::{allocate_region_wal_options, WalOptionsAllocatorRef};
+use crate::wal_options_allocator::{WalOptionsAllocatorRef, allocate_region_wal_options};
 
 pub type TableMetadataAllocatorRef = Arc<TableMetadataAllocator>;
 
@@ -181,22 +180,8 @@ impl TableMetadataAllocator {
             region_wal_options,
         })
     }
-}
 
-pub type PeerAllocatorRef = Arc<dyn PeerAllocator>;
-
-/// [`PeerAllocator`] allocates [`Peer`]s for creating regions.
-#[async_trait]
-pub trait PeerAllocator: Send + Sync {
-    /// Allocates `regions` size [`Peer`]s.
-    async fn alloc(&self, regions: usize) -> Result<Vec<Peer>>;
-}
-
-struct NoopPeerAllocator;
-
-#[async_trait]
-impl PeerAllocator for NoopPeerAllocator {
-    async fn alloc(&self, regions: usize) -> Result<Vec<Peer>> {
-        Ok(vec![Peer::default(); regions])
+    pub fn table_id_sequence(&self) -> SequenceRef {
+        self.table_id_sequence.clone()
     }
 }

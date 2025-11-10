@@ -12,31 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::ops::Deref;
 use std::slice;
 
 use api::prom_store::remote::Sample;
 use bytes::{Buf, Bytes};
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::warn;
 use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition};
-use prost::encoding::message::merge;
-use prost::encoding::{decode_key, decode_varint, WireType};
 use prost::DecodeError;
+use prost::encoding::message::merge;
+use prost::encoding::{WireType, decode_key, decode_varint};
 use session::context::QueryContextRef;
 use snafu::OptionExt;
 use vrl::prelude::NotNan;
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::InternalSnafu;
-use crate::http::event::PipelineIngestRequest;
 use crate::http::PromValidationMode;
+use crate::http::event::PipelineIngestRequest;
 use crate::pipeline::run_pipeline;
 use crate::prom_row_builder::{PromCtx, TablesBuilder};
 use crate::prom_store::{
-    DATABASE_LABEL_BYTES, METRIC_NAME_LABEL_BYTES, PHYSICAL_TABLE_LABEL_BYTES,
+    DATABASE_LABEL_BYTES, METRIC_NAME_LABEL_BYTES, PHYSICAL_TABLE_LABEL_BYTES, SCHEMA_LABEL_BYTES,
 };
 use crate::query_handler::PipelineHandlerRef;
 use crate::repeated_field::{Clear, RepeatedField};
@@ -201,8 +201,15 @@ impl PromTimeSeries {
                         self.table_name = prom_validation_mode.decode_string(&label.value)?;
                         self.labels.truncate(self.labels.len() - 1); // remove last label
                     }
-                    DATABASE_LABEL_BYTES => {
+                    SCHEMA_LABEL_BYTES => {
                         self.schema = Some(prom_validation_mode.decode_string(&label.value)?);
+                        self.labels.truncate(self.labels.len() - 1); // remove last label
+                    }
+                    DATABASE_LABEL_BYTES => {
+                        // Only set schema from __database__ if __schema__ hasn't been set yet
+                        if self.schema.is_none() {
+                            self.schema = Some(prom_validation_mode.decode_string(&label.value)?);
+                        }
                         self.labels.truncate(self.labels.len() - 1); // remove last label
                     }
                     PHYSICAL_TABLE_LABEL_BYTES => {
@@ -400,10 +407,10 @@ impl PromSeriesProcessor {
 
             let timestamp = s.timestamp;
             pipeline_map.insert(
-                KeyString::from(GREPTIME_TIMESTAMP),
+                KeyString::from(greptime_timestamp()),
                 VrlValue::Integer(timestamp),
             );
-            pipeline_map.insert(KeyString::from(GREPTIME_VALUE), VrlValue::Float(value));
+            pipeline_map.insert(KeyString::from(greptime_value()), VrlValue::Float(value));
             if one_sample {
                 vec_pipeline_map.push(VrlValue::Object(pipeline_map));
                 break;

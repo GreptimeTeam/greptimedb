@@ -14,13 +14,13 @@
 
 use std::sync::Arc;
 
-use common_telemetry::debug;
+use common_telemetry::{debug, trace};
 use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
 use moka::policy::EvictionPolicy;
 use opendal::raw::oio::{Read, Reader, Write};
-use opendal::raw::{oio, Access, OpDelete, OpRead, OpStat, OpWrite, RpRead};
+use opendal::raw::{Access, OpDelete, OpRead, OpStat, OpWrite, RpRead, oio};
 use opendal::{Error as OpendalError, ErrorKind, OperatorBuilder, Result};
 
 use crate::metrics::{
@@ -160,7 +160,8 @@ impl<C: Access> ReadCache<C> {
             .map_ok(|entry| async {
                 let (path, mut meta) = entry.into_parts();
 
-                if !cloned_op.info().full_capability().list_has_content_length {
+                // TODO(dennis): Use a better API, see https://github.com/apache/opendal/issues/6522
+                if meta.content_length() == 0 {
                     meta = cloned_op.stat(&path).await?;
                 }
 
@@ -180,7 +181,7 @@ impl<C: Access> ReadCache<C> {
             OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
 
             self.mem_cache
-                .insert(read_key.to_string(), ReadResult::Success(size as u32))
+                .insert(read_key.clone(), ReadResult::Success(size as u32))
                 .await;
         }
 
@@ -288,6 +289,11 @@ impl<C: Access> ReadCache<C> {
 
         let (_, reader) = inner.read(path, args).await?;
         let result = self.try_write_cache::<I>(reader, read_key).await;
+
+        trace!(
+            "Read cache miss for key '{}' and fetch file '{}' from object store",
+            read_key, path,
+        );
 
         match result {
             Ok(read_bytes) => {

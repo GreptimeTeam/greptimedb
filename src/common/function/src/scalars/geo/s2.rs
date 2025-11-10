@@ -12,66 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, TypeSignature};
-use datafusion::logical_expr::Volatility;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::value::Value;
-use datatypes::vectors::{MutableVector, StringVectorBuilder, UInt64VectorBuilder, VectorRef};
+use std::sync::{Arc, LazyLock};
+
+use common_query::error::InvalidFuncArgsSnafu;
+use datafusion_common::ScalarValue;
+use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder, UInt64Builder};
+use datafusion_common::arrow::datatypes::{DataType, Float64Type};
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use derive_more::Display;
-use once_cell::sync::Lazy;
 use s2::cellid::{CellID, MAX_LEVEL};
 use s2::latlng::LatLng;
 use snafu::ensure;
 
-use crate::function::{Function, FunctionContext};
-use crate::scalars::geo::helpers::{ensure_and_coerce, ensure_columns_len, ensure_columns_n};
+use crate::function::{Function, extract_args};
+use crate::scalars::geo::helpers;
+use crate::scalars::geo::helpers::ensure_and_coerce;
 
-static CELL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
-    vec![
-        ConcreteDataType::int64_datatype(),
-        ConcreteDataType::uint64_datatype(),
-    ]
-});
+static CELL_TYPES: LazyLock<Vec<DataType>> =
+    LazyLock::new(|| vec![DataType::Int64, DataType::UInt64]);
 
-static COORDINATE_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
-    vec![
-        ConcreteDataType::float32_datatype(),
-        ConcreteDataType::float64_datatype(),
-    ]
-});
+static COORDINATE_TYPES: LazyLock<Vec<DataType>> =
+    LazyLock::new(|| vec![DataType::Float32, DataType::Float64]);
 
-static LEVEL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
-    vec![
-        ConcreteDataType::int8_datatype(),
-        ConcreteDataType::int16_datatype(),
-        ConcreteDataType::int32_datatype(),
-        ConcreteDataType::int64_datatype(),
-        ConcreteDataType::uint8_datatype(),
-        ConcreteDataType::uint16_datatype(),
-        ConcreteDataType::uint32_datatype(),
-        ConcreteDataType::uint64_datatype(),
-    ]
-});
+static LEVEL_TYPES: &[DataType] = datafusion_expr::type_coercion::aggregates::INTEGERS;
 
 /// Function that returns [s2] encoding cellid for a given geospatial coordinate.
 ///
 /// [s2]: http://s2geometry.io
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct S2LatLngToCell;
+pub(crate) struct S2LatLngToCell {
+    signature: Signature,
+}
 
-impl Function for S2LatLngToCell {
-    fn name(&self) -> &str {
-        "s2_latlng_to_cell"
-    }
-
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
-    }
-
-    fn signature(&self) -> Signature {
+impl Default for S2LatLngToCell {
+    fn default() -> Self {
         let mut signatures = Vec::with_capacity(COORDINATE_TYPES.len());
         for coord_type in COORDINATE_TYPES.as_slice() {
             signatures.push(TypeSignature::Exact(vec![
@@ -81,21 +56,42 @@ impl Function for S2LatLngToCell {
                 coord_type.clone(),
             ]));
         }
-        Signature::one_of(signatures, Volatility::Stable)
+        Self {
+            signature: Signature::one_of(signatures, Volatility::Stable),
+        }
+    }
+}
+
+impl Function for S2LatLngToCell {
+    fn name(&self) -> &str {
+        "s2_latlng_to_cell"
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::UInt64)
+    }
 
-        let lat_vec = &columns[0];
-        let lon_vec = &columns[1];
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
+
+        let arg0 = helpers::cast::<Float64Type>(&arg0)?;
+        let lat_vec = arg0.as_primitive::<Float64Type>();
+        let arg1 = helpers::cast::<Float64Type>(&arg1)?;
+        let lon_vec = arg1.as_primitive::<Float64Type>();
 
         let size = lat_vec.len();
-        let mut results = UInt64VectorBuilder::with_capacity(size);
+        let mut builder = UInt64Builder::with_capacity(size);
 
         for i in 0..size {
-            let lat = lat_vec.get(i).as_f64_lossy();
-            let lon = lon_vec.get(i).as_f64_lossy();
+            let lat = lat_vec.is_valid(i).then(|| lat_vec.value(i));
+            let lon = lon_vec.is_valid(i).then(|| lon_vec.value(i));
 
             let result = match (lat, lon) {
                 (Some(lat), Some(lon)) => {
@@ -113,120 +109,159 @@ impl Function for S2LatLngToCell {
                 _ => None,
             };
 
-            results.push(result);
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
 /// Return the level of current s2 cell
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct S2CellLevel;
+pub(crate) struct S2CellLevel {
+    signature: Signature,
+}
+
+impl Default for S2CellLevel {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell(),
+        }
+    }
+}
 
 impl Function for S2CellLevel {
     fn name(&self) -> &str {
         "s2_cell_level"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 1);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [cell_vec] = extract_args(self.name(), &args)?;
 
-        let cell_vec = &columns[0];
         let size = cell_vec.len();
-        let mut results = UInt64VectorBuilder::with_capacity(size);
+        let mut builder = UInt64Builder::with_capacity(size);
 
         for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i));
-            let res = cell.map(|cell| cell.level());
+            let v = ScalarValue::try_from_array(&cell_vec, i)?;
+            let v = cell_from_value(v).map(|x| x.level());
 
-            results.push(res);
+            builder.append_option(v);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
 /// Return the string presentation of the cell
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct S2CellToToken;
+pub(crate) struct S2CellToToken {
+    signature: Signature,
+}
+
+impl Default for S2CellToToken {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell(),
+        }
+    }
+}
 
 impl Function for S2CellToToken {
     fn name(&self) -> &str {
         "s2_cell_to_token"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 1);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [cell_vec] = extract_args(self.name(), &args)?;
 
-        let cell_vec = &columns[0];
         let size = cell_vec.len();
-        let mut results = StringVectorBuilder::with_capacity(size);
+        let mut builder = StringViewBuilder::with_capacity(size);
 
         for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i));
-            let res = cell.map(|cell| cell.to_token());
+            let v = ScalarValue::try_from_array(&cell_vec, i)?;
+            let v = cell_from_value(v).map(|x| x.to_token());
 
-            results.push(res.as_deref());
+            builder.append_option(v.as_deref());
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
 /// Return parent at given level of current s2 cell
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct S2CellParent;
+pub(crate) struct S2CellParent {
+    signature: Signature,
+}
+
+impl Default for S2CellParent {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell_and_level(),
+        }
+    }
+}
 
 impl Function for S2CellParent {
     fn name(&self) -> &str {
         "s2_cell_parent"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell_and_level()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [cell_vec, levels] = extract_args(self.name(), &args)?;
 
-        let cell_vec = &columns[0];
-        let level_vec = &columns[1];
         let size = cell_vec.len();
-        let mut results = UInt64VectorBuilder::with_capacity(size);
+        let mut builder = UInt64Builder::with_capacity(size);
 
         for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i));
-            let level = value_to_level(level_vec.get(i))?;
-            let result = cell.map(|cell| cell.parent(level).0);
+            let cell = ScalarValue::try_from_array(&cell_vec, i).map(cell_from_value)?;
+            let level = ScalarValue::try_from_array(&levels, i).and_then(value_to_level)?;
+            let result = if let (Some(cell), Some(level)) = (cell, level) {
+                Some(cell.parent(level).0)
+            } else {
+                None
+            };
 
-            results.push(result);
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -242,7 +277,7 @@ fn signature_of_cell() -> Signature {
 fn signature_of_cell_and_level() -> Signature {
     let mut signatures = Vec::with_capacity(CELL_TYPES.len() * LEVEL_TYPES.len());
     for cell_type in CELL_TYPES.as_slice() {
-        for level_type in LEVEL_TYPES.as_slice() {
+        for level_type in LEVEL_TYPES {
             signatures.push(TypeSignature::Exact(vec![
                 cell_type.clone(),
                 level_type.clone(),
@@ -252,24 +287,30 @@ fn signature_of_cell_and_level() -> Signature {
     Signature::one_of(signatures, Volatility::Stable)
 }
 
-fn cell_from_value(v: Value) -> Option<CellID> {
+fn cell_from_value(v: ScalarValue) -> Option<CellID> {
     match v {
-        Value::Int64(v) => Some(CellID(v as u64)),
-        Value::UInt64(v) => Some(CellID(v)),
+        ScalarValue::Int64(v) => v.map(|x| CellID(x as u64)),
+        ScalarValue::UInt64(v) => v.map(CellID),
         _ => None,
     }
 }
 
-fn value_to_level(v: Value) -> Result<u64> {
+fn value_to_level(v: ScalarValue) -> datafusion_common::Result<Option<u64>> {
     match v {
-        Value::Int8(v) => ensure_and_coerce!(v >= 0 && v <= MAX_LEVEL as i8, v as u64),
-        Value::Int16(v) => ensure_and_coerce!(v >= 0 && v <= MAX_LEVEL as i16, v as u64),
-        Value::Int32(v) => ensure_and_coerce!(v >= 0 && v <= MAX_LEVEL as i32, v as u64),
-        Value::Int64(v) => ensure_and_coerce!(v >= 0 && v <= MAX_LEVEL as i64, v as u64),
-        Value::UInt8(v) => ensure_and_coerce!(v <= MAX_LEVEL as u8, v as u64),
-        Value::UInt16(v) => ensure_and_coerce!(v <= MAX_LEVEL as u16, v as u64),
-        Value::UInt32(v) => ensure_and_coerce!(v <= MAX_LEVEL as u32, v as u64),
-        Value::UInt64(v) => ensure_and_coerce!(v <= MAX_LEVEL, v),
-        _ => unreachable!(),
+        ScalarValue::Int8(Some(v)) => ensure_and_coerce!(v >= 0 && v <= MAX_LEVEL as i8, v as u64),
+        ScalarValue::Int16(Some(v)) => {
+            ensure_and_coerce!(v >= 0 && v <= MAX_LEVEL as i16, v as u64)
+        }
+        ScalarValue::Int32(Some(v)) => {
+            ensure_and_coerce!(v >= 0 && v <= MAX_LEVEL as i32, v as u64)
+        }
+        ScalarValue::Int64(Some(v)) => {
+            ensure_and_coerce!(v >= 0 && v <= MAX_LEVEL as i64, v as u64)
+        }
+        ScalarValue::UInt8(Some(v)) => ensure_and_coerce!(v <= MAX_LEVEL as u8, v as u64),
+        ScalarValue::UInt16(Some(v)) => ensure_and_coerce!(v <= MAX_LEVEL as u16, v as u64),
+        ScalarValue::UInt32(Some(v)) => ensure_and_coerce!(v <= MAX_LEVEL as u32, v as u64),
+        ScalarValue::UInt64(Some(v)) => ensure_and_coerce!(v <= MAX_LEVEL, v),
+        _ => Ok(None),
     }
 }

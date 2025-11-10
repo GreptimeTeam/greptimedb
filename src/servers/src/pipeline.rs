@@ -17,12 +17,13 @@ use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt};
 use api::greptime_proto;
-use api::v1::{ColumnDataType, ColumnSchema, RowInsertRequest, Rows, SemanticType};
+use api::v1::helper::time_index_column_schema;
+use api::v1::{ColumnDataType, RowInsertRequest, Rows};
 use common_time::timestamp::TimeUnit;
 use pipeline::{
-    identity_pipeline, unwrap_or_continue_if_err, ContextReq, DispatchedTo, Pipeline,
-    PipelineContext, PipelineDefinition, PipelineExecOutput, SchemaInfo, TransformedOutput,
-    TransformerMode, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    ContextReq, DispatchedTo, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, Pipeline, PipelineContext,
+    PipelineDefinition, PipelineExecOutput, SchemaInfo, TransformedOutput, TransformerMode,
+    identity_pipeline, unwrap_or_continue_if_err,
 };
 use session::context::{Channel, QueryContextRef};
 use snafu::ResultExt;
@@ -133,13 +134,9 @@ async fn run_custom_pipeline(
             };
 
             let mut schema_info = SchemaInfo::default();
-            schema_info.schema.push(ColumnSchema {
-                column_name: ts_name.clone(),
-                datatype: timeunit.into(),
-                semantic_type: SemanticType::Timestamp as i32,
-                datatype_extension: None,
-                options: None,
-            });
+            schema_info
+                .schema
+                .push(time_index_column_schema(ts_name, timeunit));
 
             schema_info
         }

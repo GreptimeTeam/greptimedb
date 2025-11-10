@@ -14,7 +14,7 @@
 
 use common_telemetry::debug;
 use datatypes::data_type::DataType;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlx::MySqlPool;
 
 use crate::error::{self, Result, UnexpectedSnafu};
@@ -85,7 +85,7 @@ impl PartialEq<Column> for ColumnEntry {
                 }
                 let default_value = match default_value_opt.unwrap() {
                     ColumnOption::DefaultValue(v) => v.to_string(),
-                    ColumnOption::DefaultFn(f) => f.to_string(),
+                    ColumnOption::DefaultFn(f) => f.clone(),
                     _ => unreachable!(),
                 };
                 if &default_value != value {
@@ -204,8 +204,8 @@ pub async fn fetch_columns(
 ) -> Result<Vec<ColumnEntry>> {
     let sql = "SELECT table_schema, table_name, column_name, greptime_data_type as data_type, semantic_type, column_default, is_nullable FROM information_schema.columns WHERE table_schema = ? AND table_name = ?";
     sqlx::query_as::<_, ColumnEntry>(sql)
-        .bind(schema_name.value.to_string())
-        .bind(table_name.value.to_string())
+        .bind(schema_name.value.clone())
+        .bind(table_name.value.clone())
         .fetch_all(db)
         .await
         .context(error::ExecuteQuerySnafu { sql })

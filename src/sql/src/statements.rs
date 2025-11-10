@@ -32,24 +32,28 @@ pub mod tql;
 pub(crate) mod transform;
 pub mod truncate;
 
+use std::sync::Arc;
+
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::SemanticType;
 use common_sql::default_constraint::parse_column_default_constraint;
 use common_time::timezone::Timezone;
+use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
+use datatypes::schema::{COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::TimestampType;
 use datatypes::value::Value;
 use snafu::ResultExt;
-use sqlparser::ast::{ExactNumberInfo, Ident, ObjectName};
+use sqlparser::ast::{ExactNumberInfo, Ident};
 
 use crate::ast::{
-    ColumnDef, ColumnOption, DataType as SqlDataType, TimezoneInfo, Value as SqlValue,
+    ColumnDef, ColumnOption, DataType as SqlDataType, ObjectNamePartExt, TimezoneInfo,
+    Value as SqlValue,
 };
 use crate::error::{
     self, ConvertToGrpcDataTypeSnafu, ConvertValueSnafu, Result,
-    SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
-    SqlCommonSnafu,
+    SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu, SetJsonStructureSettingsSnafu,
+    SetSkippingIndexOptionSnafu, SqlCommonSnafu,
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
@@ -126,7 +130,7 @@ pub fn column_to_schema(
     }) {
         let _ = column_schema
             .mut_metadata()
-            .insert(COMMENT_KEY.to_string(), c.to_string());
+            .insert(COMMENT_KEY.to_string(), c.clone());
     }
 
     if let Some(options) = column.extensions.build_fulltext_options()? {
@@ -142,6 +146,21 @@ pub fn column_to_schema(
     }
 
     column_schema.set_inverted_index(column.extensions.inverted_index_options.is_some());
+
+    if matches!(column.data_type(), SqlDataType::JSON) {
+        let settings = column
+            .extensions
+            .build_json_structure_settings()?
+            .unwrap_or_default();
+        let extension = JsonExtensionType::new(Arc::new(JsonMetadata {
+            json_structure_settings: Some(settings.clone()),
+        }));
+        column_schema
+            .with_extension_type(&extension)
+            .with_context(|_| SetJsonStructureSettingsSnafu {
+                value: format!("{settings:?}"),
+            })?;
+    }
 
     Ok(column_schema)
 }
@@ -201,15 +220,15 @@ pub fn sql_column_def_to_grpc_column_def(
 pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
     match data_type {
         SqlDataType::BigInt(_) | SqlDataType::Int64 => Ok(ConcreteDataType::int64_datatype()),
-        SqlDataType::UnsignedBigInt(_) => Ok(ConcreteDataType::uint64_datatype()),
+        SqlDataType::BigIntUnsigned(_) => Ok(ConcreteDataType::uint64_datatype()),
         SqlDataType::Int(_) | SqlDataType::Integer(_) => Ok(ConcreteDataType::int32_datatype()),
-        SqlDataType::UnsignedInt(_) | SqlDataType::UnsignedInteger(_) => {
+        SqlDataType::IntUnsigned(_) | SqlDataType::UnsignedInteger => {
             Ok(ConcreteDataType::uint32_datatype())
         }
         SqlDataType::SmallInt(_) => Ok(ConcreteDataType::int16_datatype()),
-        SqlDataType::UnsignedSmallInt(_) => Ok(ConcreteDataType::uint16_datatype()),
+        SqlDataType::SmallIntUnsigned(_) => Ok(ConcreteDataType::uint16_datatype()),
         SqlDataType::TinyInt(_) | SqlDataType::Int8(_) => Ok(ConcreteDataType::int8_datatype()),
-        SqlDataType::UnsignedTinyInt(_) | SqlDataType::UnsignedInt8(_) => {
+        SqlDataType::TinyIntUnsigned(_) | SqlDataType::Int8Unsigned(_) => {
             Ok(ConcreteDataType::uint8_datatype())
         }
         SqlDataType::Char(_)
@@ -254,7 +273,10 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         // Vector type
         SqlDataType::Custom(name, d)
             if name.0.as_slice().len() == 1
-                && name.0.as_slice()[0].value.to_ascii_uppercase() == VECTOR_TYPE_NAME
+                && name.0.as_slice()[0]
+                    .to_string_unquoted()
+                    .to_ascii_uppercase()
+                    == VECTOR_TYPE_NAME
                 && d.len() == 1 =>
         {
             let dim = d[0].parse().map_err(|e| {
@@ -275,13 +297,13 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
 pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Result<SqlDataType> {
     match data_type {
         ConcreteDataType::Int64(_) => Ok(SqlDataType::BigInt(None)),
-        ConcreteDataType::UInt64(_) => Ok(SqlDataType::UnsignedBigInt(None)),
+        ConcreteDataType::UInt64(_) => Ok(SqlDataType::BigIntUnsigned(None)),
         ConcreteDataType::Int32(_) => Ok(SqlDataType::Int(None)),
-        ConcreteDataType::UInt32(_) => Ok(SqlDataType::UnsignedInt(None)),
+        ConcreteDataType::UInt32(_) => Ok(SqlDataType::IntUnsigned(None)),
         ConcreteDataType::Int16(_) => Ok(SqlDataType::SmallInt(None)),
-        ConcreteDataType::UInt16(_) => Ok(SqlDataType::UnsignedSmallInt(None)),
+        ConcreteDataType::UInt16(_) => Ok(SqlDataType::SmallIntUnsigned(None)),
         ConcreteDataType::Int8(_) => Ok(SqlDataType::TinyInt(None)),
-        ConcreteDataType::UInt8(_) => Ok(SqlDataType::UnsignedTinyInt(None)),
+        ConcreteDataType::UInt8(_) => Ok(SqlDataType::TinyIntUnsigned(None)),
         ConcreteDataType::String(_) => Ok(SqlDataType::String(None)),
         ConcreteDataType::Float32(_) => Ok(SqlDataType::Float(None)),
         ConcreteDataType::Float64(_) => Ok(SqlDataType::Double(ExactNumberInfo::None)),
@@ -302,12 +324,13 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         )),
         ConcreteDataType::Json(_) => Ok(SqlDataType::JSON),
         ConcreteDataType::Vector(v) => Ok(SqlDataType::Custom(
-            ObjectName(vec![Ident::new(VECTOR_TYPE_NAME)]),
+            vec![Ident::new(VECTOR_TYPE_NAME)].into(),
             vec![v.dim.to_string()],
         )),
         ConcreteDataType::Duration(_)
         | ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
+        | ConcreteDataType::Struct(_)
         | ConcreteDataType::Dictionary(_) => error::ConcreteTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -317,18 +340,16 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use api::v1::ColumnDataType;
     use datatypes::schema::{
-        FulltextAnalyzer, COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
+        COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, FulltextAnalyzer,
     };
     use sqlparser::ast::{ColumnOptionDef, Expr};
 
     use super::*;
     use crate::ast::TimezoneInfo;
-    use crate::statements::create::ColumnExtensions;
     use crate::statements::ColumnOption;
+    use crate::statements::create::ColumnExtensions;
 
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
         assert_eq!(
@@ -381,19 +402,19 @@ mod tests {
             ConcreteDataType::binary_datatype(),
         );
         check_type(
-            SqlDataType::UnsignedBigInt(None),
+            SqlDataType::BigIntUnsigned(None),
             ConcreteDataType::uint64_datatype(),
         );
         check_type(
-            SqlDataType::UnsignedInt(None),
+            SqlDataType::IntUnsigned(None),
             ConcreteDataType::uint32_datatype(),
         );
         check_type(
-            SqlDataType::UnsignedSmallInt(None),
+            SqlDataType::SmallIntUnsigned(None),
             ConcreteDataType::uint16_datatype(),
         );
         check_type(
-            SqlDataType::UnsignedTinyInt(None),
+            SqlDataType::TinyIntUnsigned(None),
             ConcreteDataType::uint8_datatype(),
         );
         check_type(
@@ -407,7 +428,7 @@ mod tests {
         check_type(SqlDataType::JSON, ConcreteDataType::json_datatype());
         check_type(
             SqlDataType::Custom(
-                ObjectName(vec![Ident::new(VECTOR_TYPE_NAME)]),
+                vec![Ident::new(VECTOR_TYPE_NAME)].into(),
                 vec!["3".to_string()],
             ),
             ConcreteDataType::vector_datatype(3),
@@ -420,7 +441,6 @@ mod tests {
         let column_def = ColumnDef {
             name: "col".into(),
             data_type: SqlDataType::Double(ExactNumberInfo::None),
-            collation: None,
             options: vec![],
         };
 
@@ -436,7 +456,6 @@ mod tests {
         let column_def = ColumnDef {
             name: "col".into(),
             data_type: SqlDataType::Double(ExactNumberInfo::None),
-            collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
                 option: ColumnOption::NotNull,
@@ -450,7 +469,6 @@ mod tests {
         let column_def = ColumnDef {
             name: "col".into(),
             data_type: SqlDataType::Double(ExactNumberInfo::None),
-            collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
                 option: ColumnOption::Unique {
@@ -470,12 +488,11 @@ mod tests {
             name: "col".into(),
             // MILLISECOND
             data_type: SqlDataType::Timestamp(Some(3), TimezoneInfo::None),
-            collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
-                option: ColumnOption::Default(Expr::Value(SqlValue::SingleQuotedString(
-                    "2024-01-30T00:01:01".to_string(),
-                ))),
+                option: ColumnOption::Default(Expr::Value(
+                    SqlValue::SingleQuotedString("2024-01-30T00:01:01".to_string()).into(),
+                )),
             }],
         };
 
@@ -523,7 +540,6 @@ mod tests {
         let column_def = ColumnDef {
             name: "col".into(),
             data_type: SqlDataType::Double(ExactNumberInfo::None),
-            collation: None,
             options: vec![],
         };
         assert!(!has_primary_key_option(&column_def));
@@ -531,7 +547,6 @@ mod tests {
         let column_def = ColumnDef {
             name: "col".into(),
             data_type: SqlDataType::Double(ExactNumberInfo::None),
-            collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
                 option: ColumnOption::Unique {
@@ -549,7 +564,6 @@ mod tests {
             column_def: ColumnDef {
                 name: "col".into(),
                 data_type: SqlDataType::Double(ExactNumberInfo::None),
-                collation: None,
                 options: vec![],
             },
             extensions: ColumnExtensions::default(),
@@ -579,7 +593,6 @@ mod tests {
             column_def: ColumnDef {
                 name: "col2".into(),
                 data_type: SqlDataType::String(None),
-                collation: None,
                 options: vec![
                     ColumnOptionDef {
                         name: None,
@@ -613,12 +626,11 @@ mod tests {
                 name: "col".into(),
                 // MILLISECOND
                 data_type: SqlDataType::Timestamp(Some(3), TimezoneInfo::None),
-                collation: None,
                 options: vec![ColumnOptionDef {
                     name: None,
-                    option: ColumnOption::Default(Expr::Value(SqlValue::SingleQuotedString(
-                        "2024-01-30T00:01:01".to_string(),
-                    ))),
+                    option: ColumnOption::Default(Expr::Value(
+                        SqlValue::SingleQuotedString("2024-01-30T00:01:01".to_string()).into(),
+                    )),
                 }],
             },
             extensions: ColumnExtensions::default(),
@@ -669,26 +681,23 @@ mod tests {
             column_def: ColumnDef {
                 name: "col".into(),
                 data_type: SqlDataType::Text,
-                collation: None,
                 options: vec![],
             },
             extensions: ColumnExtensions {
-                fulltext_index_options: Some(
-                    HashMap::from_iter([
-                        (
-                            COLUMN_FULLTEXT_OPT_KEY_ANALYZER.to_string(),
-                            "English".to_string(),
-                        ),
-                        (
-                            COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE.to_string(),
-                            "true".to_string(),
-                        ),
-                    ])
-                    .into(),
-                ),
+                fulltext_index_options: Some(OptionMap::from([
+                    (
+                        COLUMN_FULLTEXT_OPT_KEY_ANALYZER.to_string(),
+                        "English".to_string(),
+                    ),
+                    (
+                        COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE.to_string(),
+                        "true".to_string(),
+                    ),
+                ])),
                 vector_options: None,
                 skipping_index_options: None,
                 inverted_index_options: None,
+                json_datatype_options: None,
             },
         };
 

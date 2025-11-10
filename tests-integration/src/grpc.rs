@@ -13,10 +13,11 @@
 // limitations under the License.
 
 mod flight;
+mod network;
 
+use api::v1::QueryRequest;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
-use api::v1::QueryRequest;
 use common_query::OutputData;
 use common_recordbatch::RecordBatches;
 use frontend::instance::Instance;
@@ -42,6 +43,7 @@ async fn query_and_expect(instance: &Instance, sql: &str, expected: &str) {
 #[cfg(test)]
 mod test {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use api::v1::column::Values;
     use api::v1::column_data_type_extension::TypeExt;
@@ -50,21 +52,25 @@ mod test {
     use api::v1::query_request::Query;
     use api::v1::region::QueryRequest as RegionQueryRequest;
     use api::v1::{
-        alter_table_expr, AddColumn, AddColumns, AlterTableExpr, Column, ColumnDataType,
-        ColumnDataTypeExtension, ColumnDef, CreateDatabaseExpr, CreateTableExpr, DdlRequest,
-        DeleteRequest, DeleteRequests, DropTableExpr, InsertRequest, InsertRequests, QueryRequest,
-        SemanticType, VectorTypeExtension,
+        AddColumn, AddColumns, AlterTableExpr, Column, ColumnDataType, ColumnDataTypeExtension,
+        ColumnDef, CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DeleteRequests,
+        DropTableExpr, InsertRequest, InsertRequests, QueryRequest, SemanticType,
+        VectorTypeExtension, alter_table_expr,
     };
     use client::OutputData;
     use common_catalog::consts::MITO_ENGINE;
     use common_meta::rpc::router::region_distribution;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
+    use common_test_util::recordbatch::check_output_stream;
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
     use query::query_engine::DefaultSerializer;
+    use rstest::rstest;
+    use rstest_reuse::apply;
     use servers::query_handler::grpc::GrpcQueryHandler;
-    use session::context::QueryContext;
+    use session::context::{QueryContext, QueryContextBuilder};
+    use store_api::mito_engine_options::TWCS_TIME_WINDOW;
     use store_api::storage::RegionId;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
@@ -72,6 +78,9 @@ mod test {
     use crate::standalone::GreptimeDbStandaloneBuilder;
     use crate::tests;
     use crate::tests::MockDistributedInstance;
+    use crate::tests::test_util::{
+        MockInstance, both_instances_cases, distributed, execute_sql, standalone,
+    };
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_distributed_handle_ddl_request() {
@@ -363,18 +372,20 @@ mod test {
     }
 
     async fn verify_table_is_dropped(instance: &MockDistributedInstance) {
-        assert!(instance
-            .frontend()
-            .catalog_manager()
-            .table(
-                "greptime",
-                "database_created_through_grpc",
-                "table_created_through_grpc",
-                None,
-            )
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            instance
+                .frontend()
+                .catalog_manager()
+                .table(
+                    "greptime",
+                    "database_created_through_grpc",
+                    "table_created_through_grpc",
+                    None,
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -489,7 +500,9 @@ CREATE TABLE {table_name} (
         let instance = standalone.fe_instance();
 
         let table_name = "my_table";
-        let sql = format!("CREATE TABLE {table_name} (a INT, b STRING, c JSON, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY (a, b, c))");
+        let sql = format!(
+            "CREATE TABLE {table_name} (a INT, b STRING, c JSON, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY (a, b, c))"
+        );
         create_table(instance, sql).await;
 
         test_insert_delete_and_query_on_existing_table(instance, table_name).await;
@@ -1067,7 +1080,9 @@ CREATE TABLE {table_name} (
         let instance = standalone.fe_instance();
 
         let table_name = "my_table";
-        let sql = format!("CREATE TABLE {table_name} (h string, a double, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY(h))");
+        let sql = format!(
+            "CREATE TABLE {table_name} (h string, a double, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY(h))"
+        );
         create_table(instance, sql).await;
 
         let insert = InsertRequest {
@@ -1158,5 +1173,93 @@ CREATE TABLE {table_name} (
 | t | 55.0 | 2023-01-01T07:26:18 |
 +---+------+---------------------+";
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+    }
+
+    #[apply(both_instances_cases)]
+    async fn test_extra_external_table_options(instance: Arc<dyn MockInstance>) {
+        common_telemetry::init_default_ut_logging();
+        let frontend = instance.frontend();
+        let instance = frontend.as_ref();
+
+        let insert = InsertRequest {
+            table_name: "auto_created_table".to_string(),
+            columns: vec![
+                Column {
+                    column_name: "a".to_string(),
+                    values: Some(Values {
+                        i32_values: vec![4, 6],
+                        ..Default::default()
+                    }),
+                    null_mask: vec![2],
+                    semantic_type: SemanticType::Field as i32,
+                    datatype: ColumnDataType::Int32 as i32,
+                    ..Default::default()
+                },
+                Column {
+                    column_name: "c".to_string(),
+                    values: Some(Values {
+                        string_values: vec![
+                            r#"{ "id": 1, "name": "Alice", "age": 30, "active": true }"#
+                                .to_string(),
+                            r#"{ "id": 2, "name": "Bob", "balance": 1234.56, "active": false }"#
+                                .to_string(),
+                        ],
+                        ..Default::default()
+                    }),
+                    null_mask: vec![2],
+                    semantic_type: SemanticType::Field as i32,
+                    datatype: ColumnDataType::Json as i32,
+                    ..Default::default()
+                },
+                Column {
+                    column_name: "ts".to_string(),
+                    values: Some(Values {
+                        timestamp_millisecond_values: vec![
+                            1672557975000,
+                            1672557976000,
+                            1672557977000,
+                        ],
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Timestamp as i32,
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    ..Default::default()
+                },
+            ],
+            row_count: 3,
+        };
+        let request = Request::Inserts(InsertRequests {
+            inserts: vec![insert],
+        });
+
+        let ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(TWCS_TIME_WINDOW.to_string(), "1d".to_string())
+                .build(),
+        );
+        let output = GrpcQueryHandler::do_query(instance, request, ctx)
+            .await
+            .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(3)));
+
+        let output = execute_sql(&frontend, "show create table auto_created_table").await;
+
+        let expected = r#"+--------------------+---------------------------------------------------+
+| Table              | Create Table                                      |
++--------------------+---------------------------------------------------+
+| auto_created_table | CREATE TABLE IF NOT EXISTS "auto_created_table" ( |
+|                    |   "a" INT NULL,                                   |
+|                    |   "c" JSON NULL,                                  |
+|                    |   "ts" TIMESTAMP(3) NOT NULL,                     |
+|                    |   TIME INDEX ("ts")                               |
+|                    | )                                                 |
+|                    |                                                   |
+|                    | ENGINE=mito                                       |
+|                    | WITH(                                             |
+|                    |   'compaction.twcs.time_window' = '1d',           |
+|                    |   'compaction.type' = 'twcs'                      |
+|                    | )                                                 |
++--------------------+---------------------------------------------------+"#;
+        check_output_stream(output.data, expected).await;
     }
 }

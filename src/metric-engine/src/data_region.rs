@@ -215,7 +215,10 @@ impl DataRegion {
             AlterKind::SetRegionOptions { options: _ }
             | AlterKind::UnsetRegionOptions { keys: _ }
             | AlterKind::SetIndexes { options: _ }
-            | AlterKind::UnsetIndexes { options: _ } => {
+            | AlterKind::UnsetIndexes { options: _ }
+            | AlterKind::SyncColumns {
+                column_metadatas: _,
+            } => {
                 let region_id = utils::to_data_region_id(region_id);
                 self.mito
                     .handle_request(region_id, RegionRequest::Alter(request))
@@ -224,7 +227,9 @@ impl DataRegion {
                     .map(|result| result.affected_rows)
             }
             _ => {
-                info!("Metric region received alter request {request:?} on physical region {region_id:?}");
+                info!(
+                    "Metric region received alter request {request:?} on physical region {region_id:?}"
+                );
                 FORBIDDEN_OPERATION_COUNT.inc();
 
                 ForbiddenPhysicalAlterSnafu.fail()
@@ -235,6 +240,7 @@ impl DataRegion {
 
 #[cfg(test)]
 mod test {
+    use common_query::prelude::{greptime_timestamp, greptime_value};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
 
@@ -295,8 +301,8 @@ mod test {
             .map(|c| &c.column_schema.name)
             .collect::<Vec<_>>();
         let expected = vec![
-            "greptime_timestamp",
-            "greptime_value",
+            greptime_timestamp(),
+            greptime_value(),
             "__table_id",
             "__tsid",
             "job",

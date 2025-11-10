@@ -15,11 +15,14 @@
 #![feature(assert_matches)]
 #![feature(try_blocks)]
 #![feature(exclusive_wrapper)]
-#![feature(let_chains)]
 #![feature(if_let_guard)]
 
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;
+use sql::statements::statement::Statement;
+// Re-export for use in add_service! macro
+#[doc(hidden)]
+pub use tower;
 
 pub mod addrs;
 pub mod configurator;
@@ -47,6 +50,7 @@ pub mod prometheus_handler;
 pub mod proto;
 pub mod query_handler;
 pub mod repeated_field;
+pub mod request_limiter;
 mod row_writer;
 pub mod server;
 pub mod tls;
@@ -55,6 +59,8 @@ pub mod tls;
 #[derive(Clone)]
 pub struct SqlPlan {
     query: String,
+    // Store the parsed statement to determine if it is a query and whether to track it.
+    statement: Option<Statement>,
     plan: Option<LogicalPlan>,
     schema: Option<Schema>,
 }

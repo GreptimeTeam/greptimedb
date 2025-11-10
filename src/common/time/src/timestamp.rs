@@ -29,7 +29,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::error;
 use crate::error::{ArithmeticOverflowSnafu, ParseTimestampSnafu, Result, TimestampOverflowSnafu};
 use crate::interval::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
-use crate::timezone::{get_timezone, Timezone};
+use crate::timezone::{Timezone, get_timezone};
 use crate::util::{datetime_to_utc, div_ceil};
 
 /// Timestamp represents the value of units(seconds/milliseconds/microseconds/nanoseconds) elapsed
@@ -308,12 +308,12 @@ impl Timestamp {
     fn from_splits(sec: i64, nsec: u32) -> Option<Self> {
         if nsec == 0 {
             Some(Timestamp::new_second(sec))
-        } else if nsec % 1_000_000 == 0 {
+        } else if nsec.is_multiple_of(1_000_000) {
             let millis = nsec / 1_000_000;
             sec.checked_mul(1000)
                 .and_then(|v| v.checked_add(millis as i64))
                 .map(Timestamp::new_millisecond)
-        } else if nsec % 1000 == 0 {
+        } else if nsec.is_multiple_of(1_000) {
             let micros = nsec / 1000;
             sec.checked_mul(1_000_000)
                 .and_then(|v| v.checked_add(micros as i64))
@@ -558,7 +558,7 @@ impl fmt::Debug for Timestamp {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TimeUnit {
     Second,
     #[default]
@@ -1018,9 +1018,11 @@ mod tests {
                 .unwrap()
         );
 
-        assert!(Timestamp::new(i64::MAX, TimeUnit::Second)
-            .convert_to(TimeUnit::Millisecond)
-            .is_none());
+        assert!(
+            Timestamp::new(i64::MAX, TimeUnit::Second)
+                .convert_to(TimeUnit::Millisecond)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1179,7 +1181,9 @@ mod tests {
     // $TZ doesn't take effort.
     #[test]
     fn test_parse_in_timezone() {
-        std::env::set_var("TZ", "Asia/Shanghai");
+        unsafe {
+            std::env::set_var("TZ", "Asia/Shanghai");
+        }
         assert_eq!(
             Timestamp::new(28800, TimeUnit::Second),
             Timestamp::from_str_utc("1970-01-01 08:00:00.000").unwrap()
@@ -1232,7 +1236,9 @@ mod tests {
     #[test]
     fn test_to_timezone_aware_string() {
         set_default_timezone(Some("Asia/Shanghai")).unwrap();
-        std::env::set_var("TZ", "Asia/Shanghai");
+        unsafe {
+            std::env::set_var("TZ", "Asia/Shanghai");
+        }
         assert_eq!(
             "1970-01-01 08:00:00.001",
             Timestamp::new(1, TimeUnit::Millisecond)

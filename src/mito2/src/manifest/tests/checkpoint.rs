@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_datasource::compression::CompressionType;
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 use strum::IntoEnumIterator;
 
 use crate::error::Error::ChecksumMismatch;
@@ -25,8 +25,10 @@ use crate::manifest::action::{
     RegionCheckpoint, RegionEdit, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
+use crate::manifest::storage::CheckpointMetadata;
 use crate::manifest::tests::utils::basic_region_metadata;
-use crate::sst::file::{FileId, FileMeta};
+use crate::region::{RegionLeaderState, RegionRoleState};
+use crate::sst::file::FileMeta;
 use crate::test_util::TestEnv;
 
 async fn build_manager(
@@ -71,9 +73,11 @@ fn nop_action() -> RegionMetaActionList {
     RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
         files_to_add: vec![],
         files_to_remove: vec![],
+        timestamp_ms: None,
         compaction_time_window: None,
         flushed_entry_id: None,
         flushed_sequence: None,
+        committed_sequence: None,
     })])
 }
 
@@ -83,16 +87,24 @@ async fn manager_without_checkpoint() {
 
     // apply 10 actions
     for _ in 0..10 {
-        manager.update(nop_action()).await.unwrap();
+        manager
+            .update(
+                nop_action(),
+                RegionRoleState::Leader(RegionLeaderState::Writable),
+            )
+            .await
+            .unwrap();
     }
 
     // no checkpoint
-    assert!(manager
-        .store()
-        .load_last_checkpoint()
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // check files
     let mut expected = vec![
@@ -112,7 +124,7 @@ async fn manager_without_checkpoint() {
     expected.sort_unstable();
     let mut paths = manager
         .store()
-        .get_paths(|e| Some(e.name().to_string()))
+        .get_paths(|e| Some(e.name().to_string()), false)
         .await
         .unwrap();
     paths.sort_unstable();
@@ -126,7 +138,13 @@ async fn manager_with_checkpoint_distance_1() {
 
     // apply 10 actions
     for _ in 0..10 {
-        manager.update(nop_action()).await.unwrap();
+        manager
+            .update(
+                nop_action(),
+                RegionRoleState::Leader(RegionLeaderState::Writable),
+            )
+            .await
+            .unwrap();
 
         while manager.checkpointer().is_doing_checkpoint() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -134,12 +152,14 @@ async fn manager_with_checkpoint_distance_1() {
     }
 
     // has checkpoint
-    assert!(manager
-        .store()
-        .load_last_checkpoint()
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // check files
     let mut expected = vec![
@@ -152,7 +172,7 @@ async fn manager_with_checkpoint_distance_1() {
     expected.sort_unstable();
     let mut paths = manager
         .store()
-        .get_paths(|e| Some(e.name().to_string()))
+        .get_paths(|e| Some(e.name().to_string()), false)
         .await
         .unwrap();
     paths.sort_unstable();
@@ -165,9 +185,11 @@ async fn manager_with_checkpoint_distance_1() {
         .await
         .unwrap();
     let raw_json = std::str::from_utf8(&raw_bytes).unwrap();
-    let expected_json =
-        "{\"size\":879,\"version\":10,\"checksum\":2245967096,\"extend_metadata\":{}}";
-    assert_eq!(expected_json, raw_json);
+    let checkpoint_metadata: CheckpointMetadata =
+        serde_json::from_str(raw_json).expect("Failed to parse checkpoint metadata");
+
+    // size and checksum vary due to different machine time, so we only check version
+    assert_eq!(checkpoint_metadata.version, 10);
 
     // reopen the manager
     manager.stop().await;
@@ -183,7 +205,13 @@ async fn test_corrupted_data_causing_checksum_error() {
 
     // Apply actions
     for _ in 0..10 {
-        manager.update(nop_action()).await.unwrap();
+        manager
+            .update(
+                nop_action(),
+                RegionRoleState::Leader(RegionLeaderState::Writable),
+            )
+            .await
+            .unwrap();
     }
 
     // Wait for the checkpoint to finish.
@@ -192,12 +220,14 @@ async fn test_corrupted_data_causing_checksum_error() {
     }
 
     // Check if there is a checkpoint
-    assert!(manager
-        .store()
-        .load_last_checkpoint()
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // Corrupt the last checkpoint data
     let mut corrupted_bytes = manager
@@ -235,16 +265,21 @@ async fn checkpoint_with_different_compression_types() {
             file_size: 1024000,
             available_indexes: Default::default(),
             index_file_size: 0,
+            index_file_id: None,
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
+            partition_expr: None,
+            num_series: 0,
         };
         let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
             files_to_add: vec![file_meta],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         })]);
         actions.push(action);
     }
@@ -266,7 +301,10 @@ async fn generate_checkpoint_with_compression_types(
     let (_env, mut manager) = build_manager(1, compress_type).await;
 
     for action in actions {
-        manager.update(action).await.unwrap();
+        manager
+            .update(action, RegionRoleState::Leader(RegionLeaderState::Writable))
+            .await
+            .unwrap();
 
         while manager.checkpointer().is_doing_checkpoint() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -294,16 +332,21 @@ fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>)
             file_size: 1024000,
             available_indexes: Default::default(),
             index_file_size: 0,
+            index_file_id: None,
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
+            partition_expr: None,
+            num_series: 0,
         };
         let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
             files_to_add: vec![file_meta],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         })]);
         actions.push(action);
     }
@@ -316,7 +359,10 @@ async fn manifest_install_manifest_to() {
     let (env, mut manager) = build_manager(0, CompressionType::Uncompressed).await;
     let (files, actions) = generate_action_lists(10);
     for action in actions {
-        manager.update(action).await.unwrap();
+        manager
+            .update(action, RegionRoleState::Leader(RegionLeaderState::Writable))
+            .await
+            .unwrap();
     }
 
     // Nothing to install
@@ -354,7 +400,10 @@ async fn manifest_install_manifest_to_with_checkpoint() {
     let (env, mut manager) = build_manager(3, CompressionType::Uncompressed).await;
     let (files, actions) = generate_action_lists(10);
     for action in actions {
-        manager.update(action).await.unwrap();
+        manager
+            .update(action, RegionRoleState::Leader(RegionLeaderState::Writable))
+            .await
+            .unwrap();
 
         while manager.checkpointer().is_doing_checkpoint() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -362,12 +411,14 @@ async fn manifest_install_manifest_to_with_checkpoint() {
     }
 
     // has checkpoint
-    assert!(manager
-        .store()
-        .load_last_checkpoint()
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // check files
     let mut expected = vec![
@@ -383,7 +434,7 @@ async fn manifest_install_manifest_to_with_checkpoint() {
     expected.sort_unstable();
     let mut paths = manager
         .store()
-        .get_paths(|e| Some(e.name().to_string()))
+        .get_paths(|e| Some(e.name().to_string()), false)
         .await
         .unwrap();
 
@@ -415,4 +466,58 @@ async fn manifest_install_manifest_to_with_checkpoint() {
         assert!(another_manager.manifest().files.contains_key(file_id));
     }
     assert!(another_manager.store().total_manifest_size() > 4000);
+}
+
+#[tokio::test]
+async fn test_checkpoint_bypass_in_staging_mode() {
+    common_telemetry::init_default_ut_logging();
+    let (_env, mut manager) = build_manager(1, CompressionType::Uncompressed).await;
+
+    // Apply actions in staging mode - checkpoint should be bypassed
+    for _ in 0..15 {
+        manager
+            .update(
+                nop_action(),
+                RegionRoleState::Leader(RegionLeaderState::Staging),
+            )
+            .await
+            .unwrap();
+    }
+    assert!(!manager.checkpointer().is_doing_checkpoint());
+
+    // Verify no checkpoint was created in staging mode
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Now switch to normal mode and apply one more action
+    manager
+        .update(
+            nop_action(),
+            RegionRoleState::Leader(RegionLeaderState::Writable),
+        )
+        .await
+        .unwrap();
+
+    // Wait for potential checkpoint
+    while manager.checkpointer().is_doing_checkpoint() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // Now checkpoint should exist because we switched to writable mode
+    let checkpoint_result = manager.store().load_last_checkpoint().await.unwrap();
+
+    assert!(
+        checkpoint_result.is_some(),
+        "Checkpoint should exist after switching to writable mode"
+    );
+    let (last_version, _checkpoint_data) = checkpoint_result.unwrap();
+
+    // Checkpoint should include all 16 actions (15 from staging + 1 from writable)
+    assert_eq!(last_version, 16);
 }

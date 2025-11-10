@@ -30,6 +30,8 @@ curl https://raw.githubusercontent.com/brendangregg/FlameGraph/master/flamegraph
 
 ## Profiling
 
+### Enable memory profiling for greptimedb binary
+
 Start GreptimeDB instance with environment variables:
 
 ```bash
@@ -39,6 +41,48 @@ MALLOC_CONF=prof:true ./target/debug/greptime standalone start
 # for macOS
 _RJEM_MALLOC_CONF=prof:true ./target/debug/greptime standalone start
 ```
+
+### Memory profiling for greptimedb docker image
+
+We have memory profiling enabled and activated by default in our official docker
+image.
+
+This behavior is controlled by configuration `enable_heap_profiling`:
+
+```toml
+[memory]
+# Whether to enable heap profiling activation during startup.
+# Default is true.
+enable_heap_profiling = true
+```
+
+To disable memory profiling, set `enable_heap_profiling` to `false`.
+
+### Memory profiling control
+
+You can control heap profiling activation using the new HTTP APIs:
+
+```bash
+# Check current profiling status
+curl -X GET localhost:4000/debug/prof/mem/status
+
+# Activate heap profiling (if not already active)
+curl -X POST localhost:4000/debug/prof/mem/activate
+
+# Deactivate heap profiling
+curl -X POST localhost:4000/debug/prof/mem/deactivate
+
+# Activate gdump feature that dumps memory profiling data every time virtual memory usage exceeds previous maximum value.
+curl -X POST localhost:4000/debug/prof/mem/gdump -d 'activate=true'
+
+# Deactivate gdump.
+curl -X POST localhost:4000/debug/prof/mem/gdump -d 'activate=false'
+
+# Retrieve current gdump status.
+curl -X GET localhost:4000/debug/prof/mem/gdump
+```
+
+### Dump memory profiling data
 
 Dump memory profiling data through HTTP API:
 

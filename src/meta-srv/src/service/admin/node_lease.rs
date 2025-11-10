@@ -14,19 +14,56 @@
 
 use std::collections::HashMap;
 
+use axum::Json;
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tonic::codegen::http;
 
 use crate::cluster::MetaPeerClientRef;
+use crate::discovery::lease::{LeaseValueAccessor, LeaseValueType};
 use crate::error::{self, Result};
 use crate::key::{DatanodeLeaseKey, LeaseValue};
-use crate::lease;
 use crate::service::admin::HttpHandler;
+use crate::service::admin::util::ErrorHandler;
 
 #[derive(Clone)]
 pub struct NodeLeaseHandler {
     pub meta_peer_client: MetaPeerClientRef,
+}
+
+impl NodeLeaseHandler {
+    async fn get_node_lease(&self) -> Result<LeaseValues> {
+        let leases = self
+            .meta_peer_client
+            .lease_values(LeaseValueType::Datanode)
+            .await?
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+
+        let leases = leases
+            .into_iter()
+            .map(|(k, v)| HumanLease {
+                name: DatanodeLeaseKey { node_id: k },
+                human_time: common_time::Timestamp::new_millisecond(v.timestamp_millis)
+                    .to_local_string(),
+                lease: v,
+            })
+            .collect::<Vec<_>>();
+        Ok(LeaseValues { leases })
+    }
+}
+
+/// Get the node lease handler.
+#[axum_macros::debug_handler]
+pub(crate) async fn get(State(handler): State<NodeLeaseHandler>) -> Response {
+    handler
+        .get_node_lease()
+        .await
+        .map_err(ErrorHandler::new)
+        .map(Json)
+        .into_response()
 }
 
 #[async_trait::async_trait]
@@ -37,17 +74,7 @@ impl HttpHandler for NodeLeaseHandler {
         _: http::Method,
         _: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let leases = lease::alive_datanodes(&self.meta_peer_client, u64::MAX).await?;
-        let leases = leases
-            .into_iter()
-            .map(|(k, v)| HumanLease {
-                name: k,
-                human_time: common_time::Timestamp::new_millisecond(v.timestamp_millis)
-                    .to_local_string(),
-                lease: v,
-            })
-            .collect::<Vec<_>>();
-        let result = LeaseValues { leases }.try_into()?;
+        let result = self.get_node_lease().await?.try_into()?;
 
         http::Response::builder()
             .status(http::StatusCode::OK)

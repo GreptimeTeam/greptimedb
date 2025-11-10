@@ -25,9 +25,9 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::types::TimestampType;
 use datatypes::value::{self, Value};
 use itertools::Itertools;
-use opensrv_mysql::{to_naive_datetime, ParamValue, ValueInner};
+use opensrv_mysql::{ParamValue, ValueInner, to_naive_datetime};
 use snafu::ResultExt;
-use sql::ast::{visit_expressions_mut, Expr, Value as ValueExpr, VisitMut};
+use sql::ast::{Expr, Value as ValueExpr, ValueWithSpan, VisitMut, visit_expressions_mut};
 use sql::statements::statement::Statement;
 
 use crate::error::{self, DataFusionSnafu, Result};
@@ -119,7 +119,11 @@ where
 {
     let mut index = 1;
     let _ = visit_expressions_mut(v, |expr| {
-        if let Expr::Value(ValueExpr::Placeholder(s)) = expr {
+        if let Expr::Value(ValueWithSpan {
+            value: ValueExpr::Placeholder(s),
+            ..
+        }) = expr
+        {
             *s = format_placeholder(index);
             index += 1;
         }
@@ -197,9 +201,14 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
         },
         ValueInner::NULL => value::to_null_scalar_value(t).context(error::ConvertScalarValueSnafu),
         ValueInner::Bytes(b) => match t {
-            ConcreteDataType::String(_) => Ok(ScalarValue::Utf8(Some(
-                String::from_utf8_lossy(b).to_string(),
-            ))),
+            ConcreteDataType::String(t) => {
+                let s = String::from_utf8_lossy(b).to_string();
+                if t.is_large() {
+                    Ok(ScalarValue::LargeUtf8(Some(s)))
+                } else {
+                    Ok(ScalarValue::Utf8(Some(s)))
+                }
+            }
             ConcreteDataType::Binary(_) => Ok(ScalarValue::Binary(Some(b.to_vec()))),
             ConcreteDataType::Timestamp(ts_type) => covert_bytes_to_timestamp(b, ts_type),
             _ => error::PreparedStmtTypeMismatchSnafu {
@@ -246,7 +255,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
 pub fn convert_expr_to_scalar_value(param: &Expr, t: &ConcreteDataType) -> Result<ScalarValue> {
     match param {
         Expr::Value(v) => {
-            let v = sql_value_to_value("", t, v, None, None, true);
+            let v = sql_value_to_value("", t, &v.value, None, None, true);
             match v {
                 Ok(v) => v
                     .try_to_scalar_value(t)
@@ -258,7 +267,7 @@ pub fn convert_expr_to_scalar_value(param: &Expr, t: &ConcreteDataType) -> Resul
             }
         }
         Expr::UnaryOp { op, expr } if let Expr::Value(v) = &**expr => {
-            let v = sql_value_to_value("", t, v, None, Some(*op), true);
+            let v = sql_value_to_value("", t, &v.value, None, Some(*op), true);
             match v {
                 Ok(v) => v
                     .try_to_scalar_value(t)
@@ -336,7 +345,10 @@ mod tests {
 
         let query = "select from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?";
         let (sql, index) = replace_placeholders(query);
-        assert_eq!("select from demo where host=$1 and idc in (select idc from idcs where name=$2) and cpu>$3", sql);
+        assert_eq!(
+            "select from demo where host=$1 and idc in (select idc from idcs where name=$2) and cpu>$3",
+            sql
+        );
         assert_eq!(4, index);
     }
 
@@ -367,26 +379,31 @@ mod tests {
             delete.inner.to_string()
         );
 
-        let select = parse_sql("select * from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?");
+        let select = parse_sql(
+            "select * from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?",
+        );
         let Statement::Query(select) = transform_placeholders(select) else {
             unreachable!()
         };
-        assert_eq!("SELECT * FROM demo WHERE host = $1 AND idc IN (SELECT idc FROM idcs WHERE name = $2) AND cpu > $3", select.inner.to_string());
+        assert_eq!(
+            "SELECT * FROM demo WHERE host = $1 AND idc IN (SELECT idc FROM idcs WHERE name = $2) AND cpu > $3",
+            select.inner.to_string()
+        );
     }
 
     #[test]
     fn test_convert_expr_to_scalar_value() {
-        let expr = Expr::Value(ValueExpr::Number("123".to_string(), false));
+        let expr = Expr::Value(ValueExpr::Number("123".to_string(), false).into());
         let t = ConcreteDataType::int32_datatype();
         let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
         assert_eq!(ScalarValue::Int32(Some(123)), v);
 
-        let expr = Expr::Value(ValueExpr::Number("123.456789".to_string(), false));
+        let expr = Expr::Value(ValueExpr::Number("123.456789".to_string(), false).into());
         let t = ConcreteDataType::float64_datatype();
         let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
         assert_eq!(ScalarValue::Float64(Some(123.456789)), v);
 
-        let expr = Expr::Value(ValueExpr::SingleQuotedString("2001-01-02".to_string()));
+        let expr = Expr::Value(ValueExpr::SingleQuotedString("2001-01-02".to_string()).into());
         let t = ConcreteDataType::date_datatype();
         let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
         let scalar_v = ScalarValue::Utf8(Some("2001-01-02".to_string()))
@@ -394,9 +411,8 @@ mod tests {
             .unwrap();
         assert_eq!(scalar_v, v);
 
-        let expr = Expr::Value(ValueExpr::SingleQuotedString(
-            "2001-01-02 03:04:05".to_string(),
-        ));
+        let expr =
+            Expr::Value(ValueExpr::SingleQuotedString("2001-01-02 03:04:05".to_string()).into());
         let t = ConcreteDataType::timestamp_microsecond_datatype();
         let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
         let scalar_v = ScalarValue::Utf8(Some("2001-01-02 03:04:05".to_string()))
@@ -407,12 +423,12 @@ mod tests {
             .unwrap();
         assert_eq!(scalar_v, v);
 
-        let expr = Expr::Value(ValueExpr::SingleQuotedString("hello".to_string()));
+        let expr = Expr::Value(ValueExpr::SingleQuotedString("hello".to_string()).into());
         let t = ConcreteDataType::string_datatype();
         let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
         assert_eq!(ScalarValue::Utf8(Some("hello".to_string())), v);
 
-        let expr = Expr::Value(ValueExpr::Null);
+        let expr = Expr::Value(ValueExpr::Null.into());
         let t = ConcreteDataType::time_microsecond_datatype();
         let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
         assert_eq!(ScalarValue::Time64Microsecond(None), v);

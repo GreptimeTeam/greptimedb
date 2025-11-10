@@ -19,8 +19,8 @@ use etcd_client::{
 
 use crate::error::{self, Result};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse, TxnResponse};
-use crate::rpc::store::{DeleteRangeResponse, PutResponse, RangeResponse};
 use crate::rpc::KeyValue;
+use crate::rpc::store::{DeleteRangeResponse, PutResponse, RangeResponse};
 
 impl From<Txn> for EtcdTxn {
     fn from(txn: Txn) -> Self {

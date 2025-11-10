@@ -17,7 +17,7 @@
 use std::sync::{Arc, Mutex};
 
 use common_time::Timestamp;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use store_api::region_engine::PartitionRange;
 use store_api::storage::TimeSeriesDistribution;
 
@@ -25,12 +25,12 @@ use crate::cache::CacheStrategy;
 use crate::error::Result;
 use crate::memtable::{MemtableRange, MemtableStats};
 use crate::read::scan_region::ScanInput;
-use crate::sst::file::{overlaps, FileHandle, FileTimeRange};
+use crate::sst::file::{FileHandle, FileTimeRange, overlaps};
+use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::file_range::{FileRange, FileRangeContextRef};
 use crate::sst::parquet::format::parquet_row_group_time_range;
 use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
-use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
 const ALL_ROW_GROUPS: i64 = -1;
 
@@ -91,17 +91,17 @@ impl RangeMeta {
     }
 
     /// Creates a list of ranges from the `input` for seq scan.
-    /// If `compaction` is true, it doesn't split the ranges.
-    pub(crate) fn seq_scan_ranges(input: &ScanInput, compaction: bool) -> Vec<RangeMeta> {
+    /// If `input.compaction` is true, it doesn't split the ranges.
+    pub(crate) fn seq_scan_ranges(input: &ScanInput) -> Vec<RangeMeta> {
         let mut ranges = Vec::with_capacity(input.memtables.len() + input.files.len());
         Self::push_seq_mem_ranges(&input.memtables, &mut ranges);
         Self::push_seq_file_ranges(input.memtables.len(), &input.files, &mut ranges);
 
         #[cfg(feature = "enterprise")]
-        Self::push_extension_ranges(input.extension_ranges(), &mut ranges);
+        Self::push_extension_ranges(input, &mut ranges);
 
         let ranges = group_ranges_for_seq_scan(ranges);
-        if compaction || input.distribution == Some(TimeSeriesDistribution::PerSeries) {
+        if input.compaction || input.distribution == Some(TimeSeriesDistribution::PerSeries) {
             // We don't split ranges in compaction or TimeSeriesDistribution::PerSeries.
             return ranges;
         }
@@ -120,7 +120,7 @@ impl RangeMeta {
         );
 
         #[cfg(feature = "enterprise")]
-        Self::push_extension_ranges(input.extension_ranges(), &mut ranges);
+        Self::push_extension_ranges(input, &mut ranges);
 
         ranges
     }
@@ -135,10 +135,11 @@ impl RangeMeta {
     fn merge(&mut self, mut other: RangeMeta) {
         debug_assert!(self.overlaps(&other));
         debug_assert!(self.indices.iter().all(|idx| !other.indices.contains(idx)));
-        debug_assert!(self
-            .row_group_indices
-            .iter()
-            .all(|idx| !other.row_group_indices.contains(idx)));
+        debug_assert!(
+            self.row_group_indices
+                .iter()
+                .all(|idx| !other.row_group_indices.contains(idx))
+        );
 
         self.time_range = (
             self.time_range.0.min(other.time_range.0),
@@ -320,12 +321,9 @@ impl RangeMeta {
     }
 
     #[cfg(feature = "enterprise")]
-    fn push_extension_ranges(
-        ranges: &[crate::extension::BoxedExtensionRange],
-        metas: &mut Vec<RangeMeta>,
-    ) {
-        for range in ranges.iter() {
-            let index = metas.len();
+    fn push_extension_ranges(input: &ScanInput, metas: &mut Vec<RangeMeta>) {
+        for (i, range) in input.extension_ranges().iter().enumerate() {
+            let index = input.num_memtables() + input.num_files() + i;
             metas.push(RangeMeta {
                 time_range: range.time_range(),
                 indices: smallvec![SourceIndex {
@@ -527,8 +525,8 @@ impl RangeBuilderList {
 
 #[cfg(test)]
 mod tests {
-    use common_time::timestamp::TimeUnit;
     use common_time::Timestamp;
+    use common_time::timestamp::TimeUnit;
 
     use super::*;
 

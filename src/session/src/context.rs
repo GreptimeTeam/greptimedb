@@ -18,19 +18,21 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use api::v1::region::RegionRequestHeader;
 use api::v1::ExplainOptions;
+use api::v1::region::RegionRequestHeader;
 use arc_swap::ArcSwap;
 use auth::UserInfoRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
 use common_recordbatch::cursor::RecordBatchStreamCursor;
 use common_telemetry::warn;
-use common_time::timezone::parse_timezone;
 use common_time::Timezone;
+use common_time::timezone::parse_timezone;
+use datafusion_common::config::ConfigOptions;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
+use crate::protocol_ctx::ProtocolCtx;
 use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
 use crate::{MutableInner, ReadPreference};
 
@@ -70,6 +72,9 @@ pub struct QueryContext {
     /// Connection information
     #[builder(default)]
     conn_info: ConnInfo,
+    /// Protocol specific context
+    #[builder(default)]
+    protocol_ctx: ProtocolCtx,
 }
 
 /// This fields hold data that is only valid to current query context
@@ -217,6 +222,13 @@ impl QueryContext {
         Arc::new(QueryContextBuilder::default().build())
     }
 
+    /// Create a new  datafusion's ConfigOptions instance based on the current QueryContext.
+    pub fn create_config_options(&self) -> ConfigOptions {
+        let mut config = ConfigOptions::default();
+        config.execution.time_zone = self.timezone().to_string();
+        config
+    }
+
     pub fn with(catalog: &str, schema: &str) -> QueryContext {
         QueryContextBuilder::default()
             .current_catalog(catalog.to_string())
@@ -246,7 +258,7 @@ impl QueryContext {
             });
         QueryContextBuilder::default()
             .current_catalog(catalog)
-            .current_schema(schema.to_string())
+            .current_schema(schema.clone())
             .build()
     }
 
@@ -447,6 +459,14 @@ impl QueryContext {
     pub fn conn_info(&self) -> &ConnInfo {
         &self.conn_info
     }
+
+    pub fn protocol_ctx(&self) -> &ProtocolCtx {
+        &self.protocol_ctx
+    }
+
+    pub fn set_protocol_ctx(&mut self, protocol_ctx: ProtocolCtx) {
+        self.protocol_ctx = protocol_ctx;
+    }
 }
 
 impl QueryContextBuilder {
@@ -470,6 +490,7 @@ impl QueryContextBuilder {
             channel,
             process_id: self.process_id.unwrap_or_default(),
             conn_info: self.conn_info.unwrap_or_default(),
+            protocol_ctx: self.protocol_ctx.unwrap_or_default(),
         }
     }
 
@@ -593,6 +614,7 @@ impl AsRef<str> for Channel {
 pub struct ConfigurationVariables {
     postgres_bytea_output: ArcSwap<PGByteaOutputValue>,
     pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
+    allow_query_fallback: ArcSwap<bool>,
 }
 
 impl Clone for ConfigurationVariables {
@@ -600,6 +622,7 @@ impl Clone for ConfigurationVariables {
         Self {
             postgres_bytea_output: ArcSwap::new(self.postgres_bytea_output.load().clone()),
             pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
+            allow_query_fallback: ArcSwap::new(self.allow_query_fallback.load().clone()),
         }
     }
 }
@@ -624,6 +647,14 @@ impl ConfigurationVariables {
     pub fn set_pg_datetime_style(&self, style: PGDateTimeStyle, order: PGDateOrder) {
         self.pg_datestyle_format.swap(Arc::new((style, order)));
     }
+
+    pub fn allow_query_fallback(&self) -> bool {
+        **self.allow_query_fallback.load()
+    }
+
+    pub fn set_allow_query_fallback(&self, allow: bool) {
+        self.allow_query_fallback.swap(Arc::new(allow));
+    }
 }
 
 #[cfg(test)]
@@ -631,8 +662,8 @@ mod test {
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
 
     use super::*;
-    use crate::context::Channel;
     use crate::Session;
+    use crate::context::Channel;
 
     #[test]
     fn test_session() {

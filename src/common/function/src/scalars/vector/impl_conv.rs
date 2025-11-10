@@ -13,40 +13,20 @@
 // limitations under the License.
 
 use std::borrow::Cow;
-use std::sync::Arc;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use datatypes::prelude::ConcreteDataType;
-use datatypes::value::ValueRef;
-use datatypes::vectors::Vector;
-
-/// Convert a constant string or binary literal to a vector literal.
-pub fn as_veclit_if_const(arg: &Arc<dyn Vector>) -> Result<Option<Cow<'_, [f32]>>> {
-    if !arg.is_const() {
-        return Ok(None);
-    }
-    if arg.data_type() != ConcreteDataType::string_datatype()
-        && arg.data_type() != ConcreteDataType::binary_datatype()
-    {
-        return Ok(None);
-    }
-    as_veclit(arg.get_ref(0))
-}
+use datafusion_common::ScalarValue;
 
 /// Convert a string or binary literal to a vector literal.
-pub fn as_veclit(arg: ValueRef<'_>) -> Result<Option<Cow<'_, [f32]>>> {
-    match arg.data_type() {
-        ConcreteDataType::Binary(_) => arg
-            .as_binary()
-            .unwrap() // Safe: checked if it is a binary
-            .map(binlit_as_veclit)
+pub fn as_veclit(arg: &ScalarValue) -> Result<Option<Cow<'_, [f32]>>> {
+    match arg {
+        ScalarValue::Binary(b) | ScalarValue::BinaryView(b) => {
+            b.as_ref().map(|x| binlit_as_veclit(x)).transpose()
+        }
+        ScalarValue::Utf8(s) | ScalarValue::Utf8View(s) => s
+            .as_ref()
+            .map(|x| parse_veclit_from_strlit(x).map(Cow::Owned))
             .transpose(),
-        ConcreteDataType::String(_) => arg
-            .as_string()
-            .unwrap() // Safe: checked if it is a string
-            .map(|s| Ok(Cow::Owned(parse_veclit_from_strlit(s)?)))
-            .transpose(),
-        ConcreteDataType::Null(_) => Ok(None),
         _ => InvalidFuncArgsSnafu {
             err_msg: format!("Unsupported data type: {:?}", arg.data_type()),
         }
@@ -56,7 +36,7 @@ pub fn as_veclit(arg: ValueRef<'_>) -> Result<Option<Cow<'_, [f32]>>> {
 
 /// Convert a u8 slice to a vector literal.
 pub fn binlit_as_veclit(bytes: &[u8]) -> Result<Cow<'_, [f32]>> {
-    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+    if !bytes.len().is_multiple_of(size_of::<f32>()) {
         return InvalidFuncArgsSnafu {
             err_msg: format!("Invalid binary length of vector: {}", bytes.len()),
         }

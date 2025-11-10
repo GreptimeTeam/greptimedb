@@ -16,9 +16,7 @@
 //!
 //! Mito is the a region engine to store timeseries data.
 
-#![feature(let_chains)]
 #![feature(assert_matches)]
-#![feature(result_flattening)]
 #![feature(int_roundings)]
 #![feature(debug_closure_helpers)]
 #![feature(duration_constructors)]
@@ -36,18 +34,20 @@ pub mod error;
 #[cfg(feature = "enterprise")]
 pub mod extension;
 pub mod flush;
+pub mod gc;
 pub mod manifest;
 pub mod memtable;
 mod metrics;
 pub mod read;
 pub mod region;
 mod region_write_ctx;
+pub mod remap_manifest;
 pub mod request;
 pub mod schedule;
 pub mod sst;
 mod time_provider;
 pub mod wal;
-mod worker;
+pub mod worker;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Mito developer document

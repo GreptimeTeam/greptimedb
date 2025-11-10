@@ -14,7 +14,7 @@
 
 use std::str::FromStr;
 
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use sqlparser::ast::{Ident, Query, Value};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
@@ -22,7 +22,7 @@ use sqlparser::parser::{Parser, ParserError, ParserOptions};
 use sqlparser::tokenizer::{Token, TokenWithSpan};
 
 use crate::ast::{Expr, ObjectName};
-use crate::error::{self, Result, SyntaxSnafu};
+use crate::error::{self, InvalidSqlSnafu, Result, SyntaxSnafu};
 use crate::parsers::tql_parser;
 use crate::statements::kill::Kill;
 use crate::statements::statement::Statement;
@@ -106,7 +106,7 @@ impl ParserContext<'_> {
                     expected: "a table name",
                     actual: self.parser.peek_token().to_string(),
                 })?;
-        Ok(Self::canonicalize_object_name(raw_table_name))
+        Self::canonicalize_object_name(raw_table_name)
     }
 
     pub fn parse_function(sql: &str, dialect: &dyn Dialect) -> Result<Expr> {
@@ -117,7 +117,7 @@ impl ParserContext<'_> {
 
         let function_name = parser.parse_identifier().context(SyntaxSnafu)?;
         parser
-            .parse_function(ObjectName(vec![function_name]))
+            .parse_function(vec![function_name].into())
             .context(SyntaxSnafu)
     }
 
@@ -170,7 +170,7 @@ impl ParserContext<'_> {
                 Keyword::NoKeyword
                     if w.quote_style.is_none() && w.value.to_uppercase() == tql_parser::TQL =>
                 {
-                    self.parse_tql()
+                    self.parse_tql(false)
                 }
 
                 Keyword::DECLARE => self.parse_declare_cursor(),
@@ -204,7 +204,7 @@ impl ParserContext<'_> {
                                     actual: self.peek_token_as_string(),
                                 }
                             })?;
-                        let Value::Number(s, _) = connection_id_exp else {
+                        let Value::Number(s, _) = connection_id_exp.value else {
                             return error::UnexpectedTokenSnafu {
                                 expected: "MySQL numeric connection id",
                                 actual: connection_id_exp.to_string(),
@@ -303,14 +303,20 @@ impl ParserContext<'_> {
     }
 
     /// Like [canonicalize_identifier] but for [ObjectName].
-    pub fn canonicalize_object_name(object_name: ObjectName) -> ObjectName {
-        ObjectName(
-            object_name
-                .0
-                .into_iter()
-                .map(Self::canonicalize_identifier)
-                .collect(),
-        )
+    pub(crate) fn canonicalize_object_name(object_name: ObjectName) -> Result<ObjectName> {
+        object_name
+            .0
+            .into_iter()
+            .map(|x| {
+                x.as_ident()
+                    .cloned()
+                    .map(Self::canonicalize_identifier)
+                    .with_context(|| InvalidSqlSnafu {
+                        msg: format!("not an ident: '{x}'"),
+                    })
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Into::into)
     }
 
     /// Simply a shortcut for sqlparser's same name method `parse_object_name`,

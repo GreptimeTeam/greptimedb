@@ -32,9 +32,10 @@ use snafu::OptionExt;
 use tonic::{Request, Response};
 
 use crate::error::InvalidQuerySnafu;
-use crate::grpc::greptime_handler::{auth, create_query_context};
 use crate::grpc::TonicResult;
-use crate::http::prometheus::{retrieve_metric_name_and_result_type, PrometheusJsonResponse};
+use crate::grpc::context_auth::auth;
+use crate::grpc::greptime_handler::create_query_context;
+use crate::http::prometheus::{PrometheusJsonResponse, retrieve_metric_name_and_result_type};
 use crate::prometheus_handler::PrometheusHandlerRef;
 
 pub struct PrometheusGatewayService {
@@ -58,6 +59,7 @@ impl PrometheusGateway for PrometheusGatewayService {
                     end: range_query.end,
                     step: range_query.step,
                     lookback: range_query.lookback,
+                    alias: None,
                 }
             }
             Promql::InstantQuery(instant_query) => {
@@ -72,6 +74,7 @@ impl PrometheusGateway for PrometheusGatewayService {
                     end: time,
                     step: String::from("1s"),
                     lookback: instant_query.lookback,
+                    alias: None,
                 }
             }
         };
@@ -122,9 +125,9 @@ impl PrometheusGatewayService {
         let result = self.handler.do_query(&query, ctx).await;
         let (metric_name, mut result_type) =
             match retrieve_metric_name_and_result_type(&query.query) {
-                Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
+                Ok((metric_name, result_type)) => (metric_name, result_type),
                 Err(err) => {
-                    return PrometheusJsonResponse::error(err.status_code(), err.output_msg())
+                    return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
                 }
             };
         // range query only returns matrix

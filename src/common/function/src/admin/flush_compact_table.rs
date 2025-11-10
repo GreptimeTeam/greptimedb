@@ -14,19 +14,20 @@
 
 use std::str::FromStr;
 
-use api::v1::region::{compact_request, StrictWindow};
+use api::v1::region::{StrictWindow, compact_request};
+use arrow::datatypes::DataType as ArrowDataType;
 use common_error::ext::BoxedError;
 use common_macro::admin_fn;
 use common_query::error::{
     InvalidFuncArgsSnafu, MissingTableMutationHandlerSnafu, Result, TableMutationSnafu,
     UnsupportedInputDataTypeSnafu,
 };
-use common_query::prelude::{Signature, Volatility};
 use common_telemetry::info;
+use datafusion_expr::{Signature, Volatility};
 use datatypes::prelude::*;
 use session::context::QueryContextRef;
 use session::table_name::table_name_to_full_name;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use table::requests::{CompactTableRequest, FlushTableRequest};
 
 use crate::handlers::TableMutationHandlerRef;
@@ -35,6 +36,8 @@ use crate::handlers::TableMutationHandlerRef;
 const COMPACT_TYPE_STRICT_WINDOW: &str = "strict_window";
 /// Compact type: strict window (short name).
 const COMPACT_TYPE_STRICT_WINDOW_SHORT: &str = "swcs";
+
+const DEFAULT_COMPACTION_PARALLELISM: u32 = 1;
 
 #[admin_fn(
     name = FlushTableFunction,
@@ -94,7 +97,7 @@ pub(crate) async fn compact_table(
     query_ctx: &QueryContextRef,
     params: &[ValueRef<'_>],
 ) -> Result<Value> {
-    let request = parse_compact_params(params, query_ctx)?;
+    let request = parse_compact_request(params, query_ctx)?;
     info!("Compact table request: {:?}", request);
 
     let affected_rows = table_mutation_handler
@@ -105,56 +108,64 @@ pub(crate) async fn compact_table(
 }
 
 fn flush_signature() -> Signature {
-    Signature::uniform(
-        1,
-        vec![ConcreteDataType::string_datatype()],
-        Volatility::Immutable,
-    )
+    Signature::uniform(1, vec![ArrowDataType::Utf8], Volatility::Immutable)
 }
 
 fn compact_signature() -> Signature {
-    Signature::variadic(
-        vec![ConcreteDataType::string_datatype()],
-        Volatility::Immutable,
-    )
+    Signature::variadic(vec![ArrowDataType::Utf8], Volatility::Immutable)
 }
 
 /// Parses `compact_table` UDF parameters. This function accepts following combinations:
 /// - `[<table_name>]`: only tables name provided, using default compaction type: regular
 /// - `[<table_name>, <type>]`: specify table name and compaction type. The compaction options will be default.
 /// - `[<table_name>, <type>, <options>]`: provides both type and type-specific options.
-fn parse_compact_params(
+///   - For `twcs`, it accepts `parallelism=[N]` where N is an unsigned 32 bits number
+///   - For `swcs`, it accepts two numeric parameter: `parallelism` and `window`.
+fn parse_compact_request(
     params: &[ValueRef<'_>],
     query_ctx: &QueryContextRef,
 ) -> Result<CompactTableRequest> {
     ensure!(
-        !params.is_empty(),
+        !params.is_empty() && params.len() <= 3,
         InvalidFuncArgsSnafu {
-            err_msg: "Args cannot be empty",
+            err_msg: format!(
+                "The length of the args is not correct, expect 1-4, have: {}",
+                params.len()
+            ),
         }
     );
 
-    let (table_name, compact_type) = match params {
+    let (table_name, compact_type, parallelism) = match params {
+        // 1. Only table name, strategy defaults to twcs and default parallelism.
         [ValueRef::String(table_name)] => (
             table_name,
             compact_request::Options::Regular(Default::default()),
+            DEFAULT_COMPACTION_PARALLELISM,
         ),
-        [ValueRef::String(table_name), ValueRef::String(compact_ty_str)] => {
-            let compact_type = parse_compact_type(compact_ty_str, None)?;
-            (table_name, compact_type)
+        // 2. Both table name and strategy are provided.
+        [
+            ValueRef::String(table_name),
+            ValueRef::String(compact_ty_str),
+        ] => {
+            let (compact_type, parallelism) = parse_compact_options(compact_ty_str, None)?;
+            (table_name, compact_type, parallelism)
         }
-
-        [ValueRef::String(table_name), ValueRef::String(compact_ty_str), ValueRef::String(options_str)] =>
-        {
-            let compact_type = parse_compact_type(compact_ty_str, Some(options_str))?;
-            (table_name, compact_type)
+        // 3. Table name, strategy and strategy specific options
+        [
+            ValueRef::String(table_name),
+            ValueRef::String(compact_ty_str),
+            ValueRef::String(options_str),
+        ] => {
+            let (compact_type, parallelism) =
+                parse_compact_options(compact_ty_str, Some(options_str))?;
+            (table_name, compact_type, parallelism)
         }
         _ => {
             return UnsupportedInputDataTypeSnafu {
                 function: "compact_table",
                 datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
             }
-            .fail()
+            .fail();
         }
     };
 
@@ -167,35 +178,126 @@ fn parse_compact_params(
         schema_name,
         table_name,
         compact_options: compact_type,
+        parallelism,
     })
 }
 
-/// Parses compaction strategy type. For `strict_window` or `swcs` strict window compaction is chose,
+/// Parses compaction strategy type. For `strict_window` or `swcs` strict window compaction is chosen,
 /// otherwise choose regular (TWCS) compaction.
-fn parse_compact_type(type_str: &str, option: Option<&str>) -> Result<compact_request::Options> {
+fn parse_compact_options(
+    type_str: &str,
+    option: Option<&str>,
+) -> Result<(compact_request::Options, u32)> {
     if type_str.eq_ignore_ascii_case(COMPACT_TYPE_STRICT_WINDOW)
         | type_str.eq_ignore_ascii_case(COMPACT_TYPE_STRICT_WINDOW_SHORT)
     {
-        let window_seconds = option
-            .map(|v| {
-                i64::from_str(v).map_err(|_| {
-                    InvalidFuncArgsSnafu {
-                        err_msg: format!(
-                            "Compact window is expected to be a valid number, provided: {}",
-                            v
-                        ),
-                    }
-                    .build()
-                })
-            })
-            .transpose()?
-            .unwrap_or(0);
+        let Some(option_str) = option else {
+            return Ok((
+                compact_request::Options::StrictWindow(StrictWindow { window_seconds: 0 }),
+                DEFAULT_COMPACTION_PARALLELISM,
+            ));
+        };
 
-        Ok(compact_request::Options::StrictWindow(StrictWindow {
-            window_seconds,
-        }))
+        // For compatibility, accepts single number as window size.
+        if let Ok(window_seconds) = i64::from_str(option_str) {
+            return Ok((
+                compact_request::Options::StrictWindow(StrictWindow { window_seconds }),
+                DEFAULT_COMPACTION_PARALLELISM,
+            ));
+        };
+
+        // Parse keyword arguments in forms: `key1=value1,key2=value2`
+        let mut window_seconds = 0i64;
+        let mut parallelism = DEFAULT_COMPACTION_PARALLELISM;
+
+        let pairs: Vec<&str> = option_str.split(',').collect();
+        for pair in pairs {
+            let kv: Vec<&str> = pair.trim().split('=').collect();
+            if kv.len() != 2 {
+                return InvalidFuncArgsSnafu {
+                    err_msg: format!("Invalid key-value pair: {}", pair.trim()),
+                }
+                .fail();
+            }
+
+            let key = kv[0].trim();
+            let value = kv[1].trim();
+
+            match key {
+                "window" | "window_seconds" => {
+                    window_seconds = i64::from_str(value).map_err(|_| {
+                        InvalidFuncArgsSnafu {
+                            err_msg: format!("Invalid value for window: {}", value),
+                        }
+                        .build()
+                    })?;
+                }
+                "parallelism" => {
+                    parallelism = value.parse::<u32>().map_err(|_| {
+                        InvalidFuncArgsSnafu {
+                            err_msg: format!("Invalid value for parallelism: {}", value),
+                        }
+                        .build()
+                    })?;
+                }
+                _ => {
+                    return InvalidFuncArgsSnafu {
+                        err_msg: format!("Unknown parameter: {}", key),
+                    }
+                    .fail();
+                }
+            }
+        }
+
+        Ok((
+            compact_request::Options::StrictWindow(StrictWindow { window_seconds }),
+            parallelism,
+        ))
     } else {
-        Ok(compact_request::Options::Regular(Default::default()))
+        // TWCS strategy
+        let Some(option_str) = option else {
+            return Ok((
+                compact_request::Options::Regular(Default::default()),
+                DEFAULT_COMPACTION_PARALLELISM,
+            ));
+        };
+
+        let mut parallelism = DEFAULT_COMPACTION_PARALLELISM;
+        let pairs: Vec<&str> = option_str.split(',').collect();
+        for pair in pairs {
+            let kv: Vec<&str> = pair.trim().split('=').collect();
+            if kv.len() != 2 {
+                return InvalidFuncArgsSnafu {
+                    err_msg: format!("Invalid key-value pair: {}", pair.trim()),
+                }
+                .fail();
+            }
+
+            let key = kv[0].trim();
+            let value = kv[1].trim();
+
+            match key {
+                "parallelism" => {
+                    parallelism = value.parse::<u32>().map_err(|_| {
+                        InvalidFuncArgsSnafu {
+                            err_msg: format!("Invalid value for parallelism: {}", value),
+                        }
+                        .build()
+                    })?;
+                }
+                _ => {
+                    return InvalidFuncArgsSnafu {
+                        err_msg: format!("Unknown parameter: {}", key),
+                    }
+                    .fail();
+                }
+            }
+        }
+
+        Ok((
+            compact_request::Options::Regular(Default::default()),
+            parallelism,
+        ))
     }
 }
 
@@ -204,66 +306,87 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::region::compact_request::Options;
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType, Field};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_query::prelude::TypeSignature;
-    use datatypes::vectors::{StringVector, UInt64Vector};
+    use datafusion_expr::ColumnarValue;
     use session::context::QueryContext;
 
     use super::*;
-    use crate::function::{AsyncFunction, FunctionContext};
+    use crate::function::FunctionContext;
+    use crate::function_factory::ScalarFunctionFactory;
 
     macro_rules! define_table_function_test {
         ($name: ident, $func: ident) => {
             paste::paste!{
                 #[test]
                 fn [<test_ $name _misc>]() {
-                    let f = $func;
+                    let factory: ScalarFunctionFactory = $func::factory().into();
+                    let f = factory.provide(FunctionContext::mock());
                     assert_eq!(stringify!($name), f.name());
                     assert_eq!(
-                        ConcreteDataType::uint64_datatype(),
+                        DataType::UInt64,
                         f.return_type(&[]).unwrap()
                     );
                     assert!(matches!(f.signature(),
-                                     Signature {
-                                         type_signature: TypeSignature::Uniform(1, valid_types),
-                                         volatility: Volatility::Immutable
-                                     } if valid_types == vec![ConcreteDataType::string_datatype()]));
+                                     datafusion_expr::Signature {
+                                         type_signature: datafusion_expr::TypeSignature::Uniform(1, valid_types),
+                                         volatility: datafusion_expr::Volatility::Immutable
+                                     } if valid_types == &vec![ArrowDataType::Utf8]));
                 }
 
                 #[tokio::test]
                 async fn [<test_ $name _missing_table_mutation>]() {
-                    let f = $func;
+                    let factory: ScalarFunctionFactory = $func::factory().into();
+                    let provider = factory.provide(FunctionContext::default());
+                    let f = provider.as_async().unwrap();
 
-                    let args = vec!["test"];
-
-                    let args = args
-                        .into_iter()
-                        .map(|arg| Arc::new(StringVector::from(vec![arg])) as _)
-                        .collect::<Vec<_>>();
-
-                    let result = f.eval(FunctionContext::default(), &args).await.unwrap_err();
+                    let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+                        args: vec![
+                            ColumnarValue::Array(Arc::new(StringArray::from(vec!["test"]))),
+                        ],
+                        arg_fields: vec![
+                            Arc::new(Field::new("arg_0", DataType::Utf8, false)),
+                        ],
+                        return_field: Arc::new(Field::new("result", DataType::UInt64, true)),
+                        number_rows: 1,
+                        config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+                    };
+                    let result = f.invoke_async_with_args(func_args).await.unwrap_err();
                     assert_eq!(
-                        "Missing TableMutationHandler, not expected",
+                        "Execution error: Handler error: Missing TableMutationHandler, not expected",
                         result.to_string()
                     );
                 }
 
                 #[tokio::test]
                 async fn [<test_ $name>]() {
-                    let f = $func;
+                    let factory: ScalarFunctionFactory = $func::factory().into();
+                    let provider = factory.provide(FunctionContext::mock());
+                    let f = provider.as_async().unwrap();
 
+                    let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+                        args: vec![
+                            ColumnarValue::Array(Arc::new(StringArray::from(vec!["test"]))),
+                        ],
+                        arg_fields: vec![
+                            Arc::new(Field::new("arg_0", DataType::Utf8, false)),
+                        ],
+                        return_field: Arc::new(Field::new("result", DataType::UInt64, true)),
+                        number_rows: 1,
+                        config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+                    };
+                    let result = f.invoke_async_with_args(func_args).await.unwrap();
 
-                    let args = vec!["test"];
-
-                    let args = args
-                        .into_iter()
-                        .map(|arg| Arc::new(StringVector::from(vec![arg])) as _)
-                        .collect::<Vec<_>>();
-
-                    let result = f.eval(FunctionContext::mock(), &args).await.unwrap();
-
-                    let expect: VectorRef = Arc::new(UInt64Vector::from_slice([42]));
-                    assert_eq!(expect, result);
+                    match result {
+                        ColumnarValue::Array(array) => {
+                            let result_array = array.as_any().downcast_ref::<arrow::array::UInt64Array>().unwrap();
+                            assert_eq!(result_array.value(0), 42u64);
+                        }
+                        ColumnarValue::Scalar(scalar) => {
+                            assert_eq!(scalar, datafusion_common::ScalarValue::UInt64(Some(42)));
+                        }
+                    }
                 }
             }
         }
@@ -280,7 +403,7 @@ mod tests {
 
             assert_eq!(
                 expected,
-                &parse_compact_params(&params, &QueryContext::arc()).unwrap()
+                &parse_compact_request(&params, &QueryContext::arc()).unwrap()
             );
         }
     }
@@ -295,6 +418,7 @@ mod tests {
                     schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
+                    parallelism: 1,
                 },
             ),
             (
@@ -304,6 +428,7 @@ mod tests {
                     schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
+                    parallelism: 1,
                 },
             ),
             (
@@ -316,6 +441,7 @@ mod tests {
                     schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
+                    parallelism: 1,
                 },
             ),
             (
@@ -325,6 +451,7 @@ mod tests {
                     schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
+                    parallelism: 1,
                 },
             ),
             (
@@ -334,6 +461,7 @@ mod tests {
                     schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::StrictWindow(StrictWindow { window_seconds: 0 }),
+                    parallelism: 1,
                 },
             ),
             (
@@ -345,15 +473,7 @@ mod tests {
                     compact_options: Options::StrictWindow(StrictWindow {
                         window_seconds: 3600,
                     }),
-                },
-            ),
-            (
-                &["table", "regular", "abcd"],
-                CompactTableRequest {
-                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-                    table_name: "table".to_string(),
-                    compact_options: Options::Regular(Default::default()),
+                    parallelism: 1,
                 },
             ),
             (
@@ -365,26 +485,183 @@ mod tests {
                     compact_options: Options::StrictWindow(StrictWindow {
                         window_seconds: 120,
                     }),
+                    parallelism: 1,
+                },
+            ),
+            // Test with parallelism parameter
+            (
+                &["table", "regular", "parallelism=4"],
+                CompactTableRequest {
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::Regular(Default::default()),
+                    parallelism: 4,
+                },
+            ),
+            (
+                &["table", "strict_window", "window=3600,parallelism=2"],
+                CompactTableRequest {
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::StrictWindow(StrictWindow {
+                        window_seconds: 3600,
+                    }),
+                    parallelism: 2,
+                },
+            ),
+            (
+                &["table", "strict_window", "window=3600"],
+                CompactTableRequest {
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::StrictWindow(StrictWindow {
+                        window_seconds: 3600,
+                    }),
+                    parallelism: 1,
+                },
+            ),
+            (
+                &["table", "strict_window", "window_seconds=7200"],
+                CompactTableRequest {
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::StrictWindow(StrictWindow {
+                        window_seconds: 7200,
+                    }),
+                    parallelism: 1,
+                },
+            ),
+            (
+                &["table", "strict_window", "window=1800"],
+                CompactTableRequest {
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::StrictWindow(StrictWindow {
+                        window_seconds: 1800,
+                    }),
+                    parallelism: 1,
+                },
+            ),
+            (
+                &["table", "regular", "parallelism=8"],
+                CompactTableRequest {
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::Regular(Default::default()),
+                    parallelism: 8,
                 },
             ),
         ]);
 
-        assert!(parse_compact_params(
-            &["table", "strict_window", "abc"]
-                .into_iter()
-                .map(ValueRef::String)
-                .collect::<Vec<_>>(),
-            &QueryContext::arc(),
-        )
-        .is_err());
+        assert!(
+            parse_compact_request(
+                &["table", "strict_window", "abc"]
+                    .into_iter()
+                    .map(ValueRef::String)
+                    .collect::<Vec<_>>(),
+                &QueryContext::arc(),
+            )
+            .is_err()
+        );
 
-        assert!(parse_compact_params(
-            &["a.b.table", "strict_window", "abc"]
-                .into_iter()
-                .map(ValueRef::String)
-                .collect::<Vec<_>>(),
-            &QueryContext::arc(),
-        )
-        .is_err());
+        assert!(
+            parse_compact_request(
+                &["a.b.table", "strict_window", "abc"]
+                    .into_iter()
+                    .map(ValueRef::String)
+                    .collect::<Vec<_>>(),
+                &QueryContext::arc(),
+            )
+            .is_err()
+        );
+
+        // Test invalid parallelism
+        assert!(
+            parse_compact_request(
+                &["table", "regular", "options", "invalid"]
+                    .into_iter()
+                    .map(ValueRef::String)
+                    .collect::<Vec<_>>(),
+                &QueryContext::arc(),
+            )
+            .is_err()
+        );
+
+        // Test too many parameters
+        assert!(
+            parse_compact_request(
+                &["table", "regular", "options", "4", "extra"]
+                    .into_iter()
+                    .map(ValueRef::String)
+                    .collect::<Vec<_>>(),
+                &QueryContext::arc(),
+            )
+            .is_err()
+        );
+
+        // Test invalid keyword argument format
+        assert!(
+            parse_compact_request(
+                &["table", "strict_window", "window"]
+                    .into_iter()
+                    .map(ValueRef::String)
+                    .collect::<Vec<_>>(),
+                &QueryContext::arc(),
+            )
+            .is_err()
+        );
+
+        // Test invalid keyword
+        assert!(
+            parse_compact_request(
+                &["table", "strict_window", "invalid_key=123"]
+                    .into_iter()
+                    .map(ValueRef::String)
+                    .collect::<Vec<_>>(),
+                &QueryContext::arc(),
+            )
+            .is_err()
+        );
+
+        assert!(
+            parse_compact_request(
+                &["table", "regular", "abcd"]
+                    .into_iter()
+                    .map(ValueRef::String)
+                    .collect::<Vec<_>>(),
+                &QueryContext::arc(),
+            )
+            .is_err()
+        );
+
+        // Test invalid window value
+        assert!(
+            parse_compact_request(
+                &["table", "strict_window", "window=abc"]
+                    .into_iter()
+                    .map(ValueRef::String)
+                    .collect::<Vec<_>>(),
+                &QueryContext::arc(),
+            )
+            .is_err()
+        );
+
+        // Test invalid parallelism in options string
+        assert!(
+            parse_compact_request(
+                &["table", "strict_window", "parallelism=abc"]
+                    .into_iter()
+                    .map(ValueRef::String)
+                    .collect::<Vec<_>>(),
+                &QueryContext::arc(),
+            )
+            .is_err()
+        );
     }
 }

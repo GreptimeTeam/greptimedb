@@ -18,19 +18,20 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
+use api::v1::helper::{tag_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{self, ColumnDataType, Mutation, OpType, Row, Rows, SemanticType};
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 
 use crate::manifest::action::RegionEdit;
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::{KeyValues, MemtableBuilderRef};
 use crate::region::version::{Version, VersionBuilder, VersionControl};
-use crate::sst::file::{FileId, FileMeta};
+use crate::sst::file::FileMeta;
 use crate::sst::file_purger::FilePurgerRef;
 use crate::test_util::memtable_util::EmptyMemtableBuilder;
 use crate::test_util::{new_noop_file_purger, ts_ms_value};
@@ -102,9 +103,16 @@ impl VersionControlBuilder {
                 file_size: 0, // We don't care file size.
                 available_indexes: Default::default(),
                 index_file_size: 0,
+                index_file_id: None,
                 num_rows: 0,
                 num_row_groups: 0,
+                num_series: 0,
                 sequence: NonZeroU64::new(start_ms as u64),
+                partition_expr: match &self.metadata.partition_expr {
+                    Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
+                        .expect("partition expression should be valid JSON"),
+                    None => None,
+                },
             },
         );
         self
@@ -148,18 +156,8 @@ pub(crate) fn write_rows_to_version(
         rows.push(Row { values });
     }
     let schema = vec![
-        v1::ColumnSchema {
-            column_name: "ts".to_string(),
-            datatype: ColumnDataType::TimestampMillisecond as i32,
-            semantic_type: SemanticType::Timestamp as i32,
-            ..Default::default()
-        },
-        v1::ColumnSchema {
-            column_name: "tag_0".to_string(),
-            datatype: ColumnDataType::String as i32,
-            semantic_type: SemanticType::Tag as i32,
-            ..Default::default()
-        },
+        time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+        tag_column_schema("tag_0", ColumnDataType::String),
     ];
     let rows = Rows { rows, schema };
     let mutation = Mutation {
@@ -195,21 +193,30 @@ pub(crate) fn apply_edit(
                 file_size: 0, // We don't care file size.
                 available_indexes: Default::default(),
                 index_file_size: 0,
+                index_file_id: None,
                 num_rows: 0,
                 num_row_groups: 0,
+                num_series: 0,
                 sequence: NonZeroU64::new(*start_ms as u64),
+                partition_expr: match &version_control.current().version.metadata.partition_expr {
+                    Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
+                        .expect("partition expression should be valid JSON"),
+                    None => None,
+                },
             }
         })
         .collect();
 
     version_control.apply_edit(
-        RegionEdit {
+        Some(RegionEdit {
             files_to_add,
             files_to_remove: files_to_remove.to_vec(),
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
-        },
+            committed_sequence: None,
+        }),
         &[],
         purger,
     );

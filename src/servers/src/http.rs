@@ -24,25 +24,26 @@ use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::serve::ListenerExt;
-use axum::{middleware, routing, Router};
-use common_base::readable_size::ReadableSize;
+use axum::{Router, middleware, routing};
 use common_base::Plugins;
+use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatch;
 use common_telemetry::{debug, error, info};
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use datatypes::data_type::DataType;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
-use datatypes::value::transform_value_ref_to_json_value;
+use datatypes::types::jsonb_to_serde_json;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
 use http::{HeaderValue, Method};
 use prost::DecodeError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::{ensure, ResultExt};
-use tokio::sync::oneshot::{self, Sender};
+use snafu::{ResultExt, ensure};
 use tokio::sync::Mutex;
+use tokio::sync::oneshot::{self, Sender};
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -54,10 +55,11 @@ use self::result::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
 use crate::elasticsearch;
 use crate::error::{
-    AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu, Result,
-    ToJsonSnafu,
+    AddressBindSnafu, AlreadyStartedSnafu, ConvertSqlValueSnafu, Error, InternalIoSnafu,
+    InvalidHeaderValueSnafu, Result, ToJsonSnafu,
 };
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
+use crate::http::otlp::OtlpState;
 use crate::http::prom_store::PromStoreState;
 use crate::http::prometheus::{
     build_info_query, format_query, instant_query, label_values_query, labels_query, parse_query,
@@ -80,6 +82,7 @@ use crate::query_handler::{
     OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef, PipelineHandlerRef,
     PromStoreProtocolHandlerRef,
 };
+use crate::request_limiter::RequestMemoryLimiter;
 use crate::server::Server;
 
 pub mod authorize;
@@ -96,6 +99,7 @@ pub mod jaeger;
 pub mod logs;
 pub mod loki;
 pub mod mem_prof;
+mod memory_limit;
 pub mod opentsdb;
 pub mod otlp;
 pub mod pprof;
@@ -103,6 +107,7 @@ pub mod prom_store;
 pub mod prometheus;
 pub mod result;
 mod timeout;
+pub mod utils;
 
 pub(crate) use timeout::DynamicTimeoutLayer;
 
@@ -127,6 +132,7 @@ pub struct HttpServer {
     router: StdMutex<Router>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
+    memory_limiter: RequestMemoryLimiter,
 
     // plugins
     plugins: Plugins,
@@ -148,6 +154,9 @@ pub struct HttpOptions {
     pub disable_dashboard: bool,
 
     pub body_limit: ReadableSize,
+
+    /// Maximum total memory for all concurrent HTTP request bodies. 0 disables the limit.
+    pub max_total_body_memory: ReadableSize,
 
     /// Validation mode while decoding Prometheus remote write requests.
     pub prom_validation_mode: PromValidationMode,
@@ -193,6 +202,7 @@ impl Default for HttpOptions {
             timeout: Duration::from_secs(0),
             disable_dashboard: false,
             body_limit: DEFAULT_BODY_LIMIT,
+            max_total_body_memory: ReadableSize(0),
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
             prom_validation_mode: PromValidationMode::Strict,
@@ -298,8 +308,16 @@ impl HttpRecordsOutput {
                     // safety here: schemas length is equal to the number of columns in the recordbatch
                     let schema = &schemas[col_idx];
                     for row_idx in 0..recordbatch.num_rows() {
-                        let value = transform_value_ref_to_json_value(col.get_ref(row_idx), schema)
-                            .context(ToJsonSnafu)?;
+                        let value = col.get(row_idx);
+                        // TODO(sunng87): is this duplicated with `map_json_type_to_string` in recordbatch?
+                        let value = if let ConcreteDataType::Json(_json_type) = &schema.data_type
+                            && let datatypes::value::Value::Binary(bytes) = value
+                        {
+                            jsonb_to_serde_json(bytes.as_ref()).context(ConvertSqlValueSnafu)?
+                        } else {
+                            serde_json::Value::try_from(col.get(row_idx)).context(ToJsonSnafu)?
+                        };
+
                         rows[row_idx + finished_row_cursor].push(value);
                     }
                 }
@@ -632,11 +650,15 @@ impl HttpServerBuilder {
         }
     }
 
-    pub fn with_otlp_handler(self, handler: OpenTelemetryProtocolHandlerRef) -> Self {
+    pub fn with_otlp_handler(
+        self,
+        handler: OpenTelemetryProtocolHandlerRef,
+        with_metric_engine: bool,
+    ) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/otlp"),
-                HttpServer::route_otlp(handler),
+                HttpServer::route_otlp(handler, with_metric_engine),
             ),
             ..self
         }
@@ -732,6 +754,8 @@ impl HttpServerBuilder {
     }
 
     pub fn build(self) -> HttpServer {
+        let memory_limiter =
+            RequestMemoryLimiter::new(self.options.max_total_body_memory.as_bytes() as usize);
         HttpServer {
             options: self.options,
             user_provider: self.user_provider,
@@ -739,6 +763,7 @@ impl HttpServerBuilder {
             plugins: self.plugins,
             router: StdMutex::new(self.router),
             bind_addr: None,
+            memory_limiter,
         }
     }
 }
@@ -863,6 +888,11 @@ impl HttpServer {
                     .option_layer(cors_layer)
                     .option_layer(timeout_layer)
                     .option_layer(body_limit_layer)
+                    // memory limit layer - must be before body is consumed
+                    .layer(middleware::from_fn_with_state(
+                        self.memory_limiter.clone(),
+                        memory_limit::memory_limit_middleware,
+                    ))
                     // auth layer
                     .layer(middleware::from_fn_with_state(
                         AuthState::new(self.user_provider.clone()),
@@ -884,7 +914,24 @@ impl HttpServer {
                         "/prof",
                         Router::new()
                             .route("/cpu", routing::post(pprof::pprof_handler))
-                            .route("/mem", routing::post(mem_prof::mem_prof_handler)),
+                            .route("/mem", routing::post(mem_prof::mem_prof_handler))
+                            .route(
+                                "/mem/activate",
+                                routing::post(mem_prof::activate_heap_prof_handler),
+                            )
+                            .route(
+                                "/mem/deactivate",
+                                routing::post(mem_prof::deactivate_heap_prof_handler),
+                            )
+                            .route(
+                                "/mem/status",
+                                routing::get(mem_prof::heap_prof_status_handler),
+                            ) // jemalloc gdump flag status and toggle
+                            .route(
+                                "/mem/gdump",
+                                routing::get(mem_prof::gdump_status_handler)
+                                    .post(mem_prof::gdump_toggle_handler),
+                            ),
                     ),
             ))
     }
@@ -1013,6 +1060,10 @@ impl HttpServer {
                 routing::get(event::query_pipeline),
             )
             .route(
+                "/pipelines/{pipeline_name}/ddl",
+                routing::get(event::query_pipeline_ddl),
+            )
+            .route(
                 "/pipelines/{pipeline_name}",
                 routing::post(event::add_pipeline),
             )
@@ -1036,6 +1087,10 @@ impl HttpServer {
                 routing::get(handler::sql_parse).post(handler::sql_parse),
             )
             .route(
+                "/sql/format",
+                routing::get(handler::sql_format).post(handler::sql_format),
+            )
+            .route(
                 "/promql",
                 routing::get(handler::promql).post(handler::promql),
             )
@@ -1051,7 +1106,7 @@ impl HttpServer {
     /// Route Prometheus [HTTP API].
     ///
     /// [HTTP API]: https://prometheus.io/docs/prometheus/latest/querying/api/
-    fn route_prometheus<S>(prometheus_handler: PrometheusHandlerRef) -> Router<S> {
+    pub fn route_prometheus<S>(prometheus_handler: PrometheusHandlerRef) -> Router<S> {
         Router::new()
             .route(
                 "/format_query",
@@ -1102,7 +1157,10 @@ impl HttpServer {
             .with_state(opentsdb_handler)
     }
 
-    fn route_otlp<S>(otlp_handler: OpenTelemetryProtocolHandlerRef) -> Router<S> {
+    fn route_otlp<S>(
+        otlp_handler: OpenTelemetryProtocolHandlerRef,
+        with_metric_engine: bool,
+    ) -> Router<S> {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
             .route("/v1/traces", routing::post(otlp::traces))
@@ -1111,7 +1169,10 @@ impl HttpServer {
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
-            .with_state(otlp_handler)
+            .with_state(OtlpState {
+                with_metric_engine,
+                handler: otlp_handler,
+            })
     }
 
     fn route_config<S>(state: GreptimeOptionsConfigState) -> Router<S> {
@@ -1146,10 +1207,10 @@ pub const HTTP_SERVER: &str = "HTTP_SERVER";
 impl Server for HttpServer {
     async fn shutdown(&self) -> Result<()> {
         let mut shutdown_tx = self.shutdown_tx.lock().await;
-        if let Some(tx) = shutdown_tx.take() {
-            if tx.send(()).is_err() {
-                info!("Receiver dropped, the HTTP server has already exited");
-            }
+        if let Some(tx) = shutdown_tx.take()
+            && tx.send(()).is_err()
+        {
+            info!("Receiver dropped, the HTTP server has already exited");
         }
         info!("Shutdown HTTP server");
 
@@ -1247,6 +1308,7 @@ mod test {
     use query::parser::PromQuery;
     use query::query_engine::DescribeResult;
     use session::context::QueryContextRef;
+    use sql::statements::statement::Statement;
     use tokio::sync::mpsc;
     use tokio::time::Instant;
 
@@ -1277,6 +1339,7 @@ mod test {
 
         async fn do_exec_plan(
             &self,
+            _stmt: Option<Statement>,
             _plan: LogicalPlan,
             _query_ctx: QueryContextRef,
         ) -> std::result::Result<Output, Self::Error> {
@@ -1406,9 +1469,10 @@ mod test {
             .await;
 
         assert_eq!(res.status(), StatusCode::OK);
-        assert!(!res
-            .headers()
-            .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN));
+        assert!(
+            !res.headers()
+                .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        );
     }
 
     #[tokio::test]
@@ -1427,9 +1491,10 @@ mod test {
         let res = client.get("/health").send().await;
 
         assert_eq!(res.status(), StatusCode::OK);
-        assert!(!res
-            .headers()
-            .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN));
+        assert!(
+            !res.headers()
+                .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        );
     }
 
     #[test]

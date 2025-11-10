@@ -38,6 +38,8 @@ impl<S> RegionWorkerLoop<S> {
         self.flush_scheduler.on_region_closed(region_id);
         // Clean compaction status.
         self.compaction_scheduler.on_region_closed(region_id);
+        // clean index build status.
+        self.index_build_scheduler.on_region_closed(region_id).await;
 
         info!("Region {} closed, worker: {}", region_id, self.id);
 

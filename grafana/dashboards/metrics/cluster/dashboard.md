@@ -21,14 +21,14 @@
 # Resources
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
-| Datanode Memory per Instance | `sum(process_resident_memory_bytes{instance=~"$datanode"}) by (instance, pod)` | `timeseries` | Current memory usage by instance | `prometheus` | `decbytes` | `[{{instance}}]-[{{ pod }}]` |
-| Datanode CPU Usage per Instance | `sum(rate(process_cpu_seconds_total{instance=~"$datanode"}[$__rate_interval]) * 1000) by (instance, pod)` | `timeseries` | Current cpu usage by instance | `prometheus` | `none` | `[{{ instance }}]-[{{ pod }}]` |
-| Frontend Memory per Instance | `sum(process_resident_memory_bytes{instance=~"$frontend"}) by (instance, pod)` | `timeseries` | Current memory usage by instance | `prometheus` | `decbytes` | `[{{ instance }}]-[{{ pod }}]` |
-| Frontend CPU Usage per Instance | `sum(rate(process_cpu_seconds_total{instance=~"$frontend"}[$__rate_interval]) * 1000) by (instance, pod)` | `timeseries` | Current cpu usage by instance | `prometheus` | `none` | `[{{ instance }}]-[{{ pod }}]-cpu` |
-| Metasrv Memory per Instance | `sum(process_resident_memory_bytes{instance=~"$metasrv"}) by (instance, pod)` | `timeseries` | Current memory usage by instance | `prometheus` | `decbytes` | `[{{ instance }}]-[{{ pod }}]-resident` |
-| Metasrv CPU Usage per Instance | `sum(rate(process_cpu_seconds_total{instance=~"$metasrv"}[$__rate_interval]) * 1000) by (instance, pod)` | `timeseries` | Current cpu usage by instance | `prometheus` | `none` | `[{{ instance }}]-[{{ pod }}]` |
-| Flownode Memory per Instance | `sum(process_resident_memory_bytes{instance=~"$flownode"}) by (instance, pod)` | `timeseries` | Current memory usage by instance | `prometheus` | `decbytes` | `[{{ instance }}]-[{{ pod }}]` |
-| Flownode CPU Usage per Instance | `sum(rate(process_cpu_seconds_total{instance=~"$flownode"}[$__rate_interval]) * 1000) by (instance, pod)` | `timeseries` | Current cpu usage by instance | `prometheus` | `none` | `[{{ instance }}]-[{{ pod }}]` |
+| Datanode Memory per Instance | `sum(process_resident_memory_bytes{instance=~"$datanode"}) by (instance, pod)`<br/>`max(greptime_memory_limit_in_bytes{instance=~"$datanode"})` | `timeseries` | Current memory usage by instance | `prometheus` | `bytes` | `[{{instance}}]-[{{ pod }}]` |
+| Datanode CPU Usage per Instance | `sum(rate(process_cpu_seconds_total{instance=~"$datanode"}[$__rate_interval]) * 1000) by (instance, pod)`<br/>`max(greptime_cpu_limit_in_millicores{instance=~"$datanode"})` | `timeseries` | Current cpu usage by instance | `prometheus` | `none` | `[{{ instance }}]-[{{ pod }}]` |
+| Frontend Memory per Instance | `sum(process_resident_memory_bytes{instance=~"$frontend"}) by (instance, pod)`<br/>`max(greptime_memory_limit_in_bytes{instance=~"$frontend"})` | `timeseries` | Current memory usage by instance | `prometheus` | `bytes` | `[{{ instance }}]-[{{ pod }}]` |
+| Frontend CPU Usage per Instance | `sum(rate(process_cpu_seconds_total{instance=~"$frontend"}[$__rate_interval]) * 1000) by (instance, pod)`<br/>`max(greptime_cpu_limit_in_millicores{instance=~"$frontend"})` | `timeseries` | Current cpu usage by instance | `prometheus` | `none` | `[{{ instance }}]-[{{ pod }}]-cpu` |
+| Metasrv Memory per Instance | `sum(process_resident_memory_bytes{instance=~"$metasrv"}) by (instance, pod)`<br/>`max(greptime_memory_limit_in_bytes{instance=~"$metasrv"})` | `timeseries` | Current memory usage by instance | `prometheus` | `bytes` | `[{{ instance }}]-[{{ pod }}]-resident` |
+| Metasrv CPU Usage per Instance | `sum(rate(process_cpu_seconds_total{instance=~"$metasrv"}[$__rate_interval]) * 1000) by (instance, pod)`<br/>`max(greptime_cpu_limit_in_millicores{instance=~"$metasrv"})` | `timeseries` | Current cpu usage by instance | `prometheus` | `none` | `[{{ instance }}]-[{{ pod }}]` |
+| Flownode Memory per Instance | `sum(process_resident_memory_bytes{instance=~"$flownode"}) by (instance, pod)`<br/>`max(greptime_memory_limit_in_bytes{instance=~"$flownode"})` | `timeseries` | Current memory usage by instance | `prometheus` | `bytes` | `[{{ instance }}]-[{{ pod }}]` |
+| Flownode CPU Usage per Instance | `sum(rate(process_cpu_seconds_total{instance=~"$flownode"}[$__rate_interval]) * 1000) by (instance, pod)`<br/>`max(greptime_cpu_limit_in_millicores{instance=~"$flownode"})` | `timeseries` | Current cpu usage by instance | `prometheus` | `none` | `[{{ instance }}]-[{{ pod }}]` |
 # Frontend Requests
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -72,6 +72,7 @@
 | Region Worker Handle Bulk Insert Requests | `histogram_quantile(0.95, sum by(le,instance, stage, pod) (rate(greptime_region_worker_handle_write_bucket[$__rate_interval])))`<br/>`sum by(instance, stage, pod) (rate(greptime_region_worker_handle_write_sum[$__rate_interval]))/sum by(instance, stage, pod) (rate(greptime_region_worker_handle_write_count[$__rate_interval]))` | `timeseries` | Per-stage elapsed time for region worker to handle bulk insert region requests. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{stage}}]-P95` |
 | Active Series and Field Builders Count | `sum by(instance, pod) (greptime_mito_memtable_active_series_count)`<br/>`sum by(instance, pod) (greptime_mito_memtable_field_builder_count)` | `timeseries` | Compaction oinput output bytes | `prometheus` | `none` | `[{{instance}}]-[{{pod}}]-series` |
 | Region Worker Convert Requests | `histogram_quantile(0.95, sum by(le, instance, stage, pod) (rate(greptime_datanode_convert_region_request_bucket[$__rate_interval])))`<br/>`sum by(le,instance, stage, pod) (rate(greptime_datanode_convert_region_request_sum[$__rate_interval]))/sum by(le,instance, stage, pod) (rate(greptime_datanode_convert_region_request_count[$__rate_interval]))` | `timeseries` | Per-stage elapsed time for region worker to decode requests. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{stage}}]-P95` |
+| Cache Miss | `sum by (instance,pod, type) (rate(greptime_mito_cache_miss{instance=~"$datanode"}[$__rate_interval]))` | `timeseries` | The local cache miss of the datanode. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]-[{{type}}]` |
 # OpenDAL
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -86,6 +87,13 @@
 | Other Request P99 per Instance | `histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{instance=~"$datanode", operation!~"read\|write\|list\|Writer::write\|Writer::close\|Reader::read"}[$__rate_interval])))` | `timeseries` | Other Request P99 per Instance. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]` |
 | Opendal traffic | `sum by(instance, pod, scheme, operation) (rate(opendal_operation_bytes_sum{instance=~"$datanode"}[$__rate_interval]))` | `timeseries` | Total traffic as in bytes by instance and operation | `prometheus` | `decbytes` | `[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]` |
 | OpenDAL errors per Instance | `sum by(instance, pod, scheme, operation, error) (rate(opendal_operation_errors_total{instance=~"$datanode", error!="NotFound"}[$__rate_interval]))` | `timeseries` | OpenDAL error counts per Instance. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]-[{{error}}]` |
+# Remote WAL
+| Title | Query | Type | Description | Datasource | Unit | Legend Format |
+| --- | --- | --- | --- | --- | --- | --- |
+| Triggered region flush total | `meta_triggered_region_flush_total` | `timeseries` | Triggered region flush total | `prometheus` | `none` | `{{pod}}-{{topic_name}}` |
+| Triggered region checkpoint total | `meta_triggered_region_checkpoint_total` | `timeseries` | Triggered region checkpoint total | `prometheus` | `none` | `{{pod}}-{{topic_name}}` |
+| Topic estimated replay size | `meta_topic_estimated_replay_size` | `timeseries` | Topic estimated max replay size | `prometheus` | `bytes` | `{{pod}}-{{topic_name}}` |
+| Kafka logstore's bytes traffic | `rate(greptime_logstore_kafka_client_bytes_total[$__rate_interval])` | `timeseries` | Kafka logstore's bytes traffic | `prometheus` | `bytes` | `{{pod}}-{{logstore}}` |
 # Metasrv
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -102,6 +110,8 @@
 | Meta KV Ops Latency | `histogram_quantile(0.99, sum by(pod, le, op, target) (greptime_meta_kv_request_elapsed_bucket))` | `timeseries` | Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads. | `prometheus` | `s` | `{{pod}}-{{op}} p99` |
 | Rate of meta KV Ops | `rate(greptime_meta_kv_request_elapsed_count[$__rate_interval])` | `timeseries` | Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads. | `prometheus` | `none` | `{{pod}}-{{op}} p99` |
 | DDL Latency | `histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_tables_bucket))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_table))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_view))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_flow))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_drop_table))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_alter_table))` | `timeseries` | Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads. | `prometheus` | `s` | `CreateLogicalTables-{{step}} p90` |
+| Reconciliation stats | `greptime_meta_reconciliation_stats` | `timeseries` | Reconciliation stats | `prometheus` | `s` | `{{pod}}-{{table_type}}-{{type}}` |
+| Reconciliation steps | `histogram_quantile(0.9, greptime_meta_reconciliation_procedure_bucket)` | `timeseries` | Elapsed of Reconciliation steps  | `prometheus` | `s` | `{{procedure_name}}-{{step}}-P90` |
 # Flownode
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |

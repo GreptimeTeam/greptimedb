@@ -17,20 +17,31 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use client::OutputData;
+use common_meta::kv_backend::KvBackendRef;
+use common_meta::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
+use common_meta::rpc::KeyValue;
+use common_meta::rpc::store::{BatchPutRequest, DeleteRangeRequest, RangeRequest};
+use common_procedure::{ProcedureId, ProcedureManagerRef, watcher};
 use common_query::Output;
 use common_recordbatch::util;
+use common_telemetry::tracing::info;
 use common_telemetry::warn;
 use common_test_util::find_workspace_path;
 use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
 use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
+use frontend::error::Result;
 use frontend::instance::Instance;
+use futures::TryStreamExt;
+use meta_srv::metasrv::Metasrv;
 use rstest_reuse::{self, template};
+use servers::query_handler::sql::SqlQueryHandler;
+use session::context::{QueryContext, QueryContextRef};
 
 use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
 use crate::test_util::StorageType;
-use crate::tests::{create_distributed_instance, MockDistributedInstance};
+use crate::tests::{MockDistributedInstance, create_distributed_instance};
 
 #[async_trait::async_trait]
 pub(crate) trait RebuildableMockInstance: MockInstance {
@@ -77,6 +88,15 @@ pub(crate) enum MockInstanceImpl {
     Distributed(GreptimeDbCluster),
 }
 
+impl MockInstanceImpl {
+    pub(crate) fn metasrv(&self) -> &Arc<Metasrv> {
+        match self {
+            MockInstanceImpl::Standalone(_) => unreachable!(),
+            MockInstanceImpl::Distributed(instance) => &instance.metasrv,
+        }
+    }
+}
+
 impl MockInstance for MockInstanceImpl {
     fn frontend(&self) -> Arc<Instance> {
         match self {
@@ -97,7 +117,7 @@ impl MockInstanceBuilder {
                 MockInstanceImpl::Standalone(builder.build().await)
             }
             MockInstanceBuilder::Distributed(builder) => {
-                MockInstanceImpl::Distributed(builder.build().await)
+                MockInstanceImpl::Distributed(builder.build(false).await)
             }
         }
     }
@@ -128,10 +148,20 @@ impl MockInstanceBuilder {
                 let GreptimeDbCluster {
                     guards,
                     datanode_options,
+                    mut datanode_instances,
                     ..
                 } = instance;
+                for (id, instance) in datanode_instances.iter_mut() {
+                    instance
+                        .shutdown()
+                        .await
+                        .unwrap_or_else(|_| panic!("Failed to shutdown datanode {}", id));
+                }
 
-                MockInstanceImpl::Distributed(builder.build_with(datanode_options, guards).await)
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                MockInstanceImpl::Distributed(
+                    builder.build_with(datanode_options, false, guards).await,
+                )
             }
         }
     }
@@ -143,7 +173,7 @@ pub(crate) struct TestContext {
 }
 
 impl TestContext {
-    async fn new(builder: MockInstanceBuilder) -> Self {
+    pub(crate) async fn new(builder: MockInstanceBuilder) -> Self {
         let instance = builder.build().await;
 
         Self {
@@ -151,11 +181,16 @@ impl TestContext {
             builder,
         }
     }
+
+    pub(crate) fn metasrv(&self) -> &Arc<Metasrv> {
+        self.instance.as_ref().unwrap().metasrv()
+    }
 }
 
 #[async_trait::async_trait]
 impl RebuildableMockInstance for TestContext {
     async fn rebuild(&mut self) {
+        info!("Rebuilding the instance");
         let instance = self.builder.rebuild(self.instance.take().unwrap()).await;
         self.instance = Some(instance);
     }
@@ -207,7 +242,7 @@ pub(crate) async fn distributed_with_multiple_object_stores() -> Arc<dyn MockIns
     let cluster = GreptimeDbClusterBuilder::new(&test_name)
         .await
         .with_store_providers(storage_types)
-        .build()
+        .build(false)
         .await;
     Arc::new(MockDistributedInstance(cluster))
 }
@@ -240,7 +275,7 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
                 ..Default::default()
             },
             kafka_topic: KafkaTopicConfig {
-                topic_name_prefix: test_name.to_string(),
+                topic_name_prefix: test_name.clone(),
                 num_topics: 3,
                 ..Default::default()
             },
@@ -279,7 +314,7 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
                 ..Default::default()
             },
             kafka_topic: KafkaTopicConfig {
-                topic_name_prefix: test_name.to_string(),
+                topic_name_prefix: test_name.clone(),
                 num_topics: 3,
                 ..Default::default()
             },
@@ -384,4 +419,59 @@ pub fn find_testing_resource(path: &str) -> String {
     let p = find_workspace_path(path).display().to_string();
 
     prepare_path(&p)
+}
+
+pub async fn execute_sql(instance: &Arc<Instance>, sql: &str) -> Output {
+    execute_sql_with(instance, sql, QueryContext::arc()).await
+}
+
+pub async fn try_execute_sql(instance: &Arc<Instance>, sql: &str) -> Result<Output> {
+    try_execute_sql_with(instance, sql, QueryContext::arc()).await
+}
+
+pub async fn try_execute_sql_with(
+    instance: &Arc<Instance>,
+    sql: &str,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    instance.do_query(sql, query_ctx).await.remove(0)
+}
+
+pub async fn execute_sql_with(
+    instance: &Arc<Instance>,
+    sql: &str,
+    query_ctx: QueryContextRef,
+) -> Output {
+    try_execute_sql_with(instance, sql, query_ctx)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to execute sql: {sql}, error: {e:?}"))
+}
+
+/// Dump the kv backend to a vector of key-value pairs.
+pub async fn dump_kvbackend(kv_backend: &KvBackendRef) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let req = RangeRequest::new().with_range(vec![0], vec![0]);
+    let stream = PaginationStream::new(kv_backend.clone(), req, DEFAULT_PAGE_SIZE, |kv| {
+        Ok((kv.key, kv.value))
+    })
+    .into_stream();
+    stream.try_collect::<Vec<_>>().await.unwrap()
+}
+
+/// Clear the kv backend and restore the key-value pairs.
+pub async fn restore_kvbackend(kv_backend: &KvBackendRef, keyvalues: Vec<(Vec<u8>, Vec<u8>)>) {
+    // Clear the kv backend before restoring.
+    let req = DeleteRangeRequest::new().with_range(vec![0], vec![0]);
+    kv_backend.delete_range(req).await.unwrap();
+
+    let mut req = BatchPutRequest::default();
+    for (key, value) in keyvalues {
+        req.kvs.push(KeyValue { key, value });
+    }
+    kv_backend.batch_put(req).await.unwrap();
+}
+
+/// Wait for the procedure to complete.
+pub async fn wait_procedure(procedure_manager: &ProcedureManagerRef, procedure_id: ProcedureId) {
+    let mut watcher = procedure_manager.procedure_watcher(procedure_id).unwrap();
+    watcher::wait(&mut watcher).await.unwrap();
 }

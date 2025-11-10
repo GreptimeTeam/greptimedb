@@ -29,7 +29,7 @@ use tokio::time::sleep;
 
 use crate::error::{OpenDalSnafu, Result};
 use crate::region::{RegionLeaderState, RegionMapRef};
-use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
+use crate::worker::{DROPPING_MARKER_FILE, RegionWorkerLoop};
 
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
 const MAX_RETRY_TIMES: u64 = 12; // 1 hours (5m * 12)
@@ -42,7 +42,7 @@ where
         &mut self,
         region_id: RegionId,
     ) -> Result<AffectedRows> {
-        let region = self.regions.writable_region(region_id)?;
+        let region = self.regions.writable_non_staging_region(region_id)?;
 
         info!("Try to drop region: {}, worker: {}", region_id, self.id);
 
@@ -83,6 +83,10 @@ where
         self.flush_scheduler.on_region_dropped(region_id);
         // Notifies compaction scheduler.
         self.compaction_scheduler.on_region_dropped(region_id);
+        // notifies index build scheduler.
+        self.index_build_scheduler
+            .on_region_dropped(region_id)
+            .await;
 
         // Marks region version as dropped
         region
@@ -99,6 +103,7 @@ where
         let object_store = region.access_layer.object_store().clone();
         let dropping_regions = self.dropping_regions.clone();
         let listener = self.listener.clone();
+        let intm_manager = self.intermediate_manager.clone();
         common_runtime::spawn_global(async move {
             let gc_duration = listener
                 .on_later_drop_begin(region_id)
@@ -111,6 +116,9 @@ where
                 gc_duration,
             )
             .await;
+            if let Err(err) = intm_manager.prune_region_dir(&region_id).await {
+                warn!(err; "Failed to prune intermediate region directory, region_id: {}", region_id);
+            }
             listener.on_later_drop_end(region_id, removed);
         });
 

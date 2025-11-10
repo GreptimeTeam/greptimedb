@@ -18,9 +18,9 @@ use std::sync::{Arc, Mutex};
 
 use common_base::Plugins;
 use common_datasource::compression::CompressionType;
-use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use object_store::services::Fs;
+use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use object_store::ObjectStore;
+use object_store::services::Fs;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use tokio::sync::mpsc::Sender;
@@ -33,8 +33,10 @@ use crate::error::Result;
 use crate::flush::FlushScheduler;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::region::{ManifestContext, ManifestContextRef, RegionLeaderState, RegionRoleState};
-use crate::request::{WorkerRequest, WorkerRequestWithTime};
+use crate::request::WorkerRequestWithTime;
 use crate::schedule::scheduler::{Job, LocalScheduler, Scheduler, SchedulerRef};
+use crate::sst::FormatType;
+use crate::sst::index::IndexBuildScheduler;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::worker::WorkerListener;
@@ -42,7 +44,7 @@ use crate::worker::WorkerListener;
 /// Scheduler mocker.
 pub(crate) struct SchedulerEnv {
     #[allow(unused)]
-    path: TempDir,
+    pub(crate) path: TempDir,
     /// Mock access layer for test.
     pub(crate) access_layer: AccessLayerRef,
     scheduler: Option<SchedulerRef>,
@@ -108,6 +110,13 @@ impl SchedulerEnv {
         FlushScheduler::new(scheduler)
     }
 
+    /// Creates a new index build scheduler.
+    pub(crate) fn mock_index_build_scheduler(&self, files_limit: usize) -> IndexBuildScheduler {
+        let scheduler = self.get_scheduler();
+
+        IndexBuildScheduler::new(scheduler, files_limit)
+    }
+
     /// Creates a new manifest context.
     pub(crate) async fn mock_manifest_context(
         &self,
@@ -116,14 +125,17 @@ impl SchedulerEnv {
         Arc::new(ManifestContext::new(
             RegionManifestManager::new(
                 metadata,
+                0,
                 RegionManifestOptions {
                     manifest_dir: "".to_string(),
                     object_store: self.access_layer.object_store().clone(),
                     compress_type: CompressionType::Uncompressed,
                     checkpoint_distance: 10,
+                    remove_file_options: Default::default(),
                 },
                 Default::default(),
                 Default::default(),
+                FormatType::PrimaryKey,
             )
             .await
             .unwrap(),

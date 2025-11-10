@@ -16,7 +16,7 @@ use common_error::define_from_tonic_status;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use snafu::{location, Location, Snafu};
+use snafu::{Location, Snafu};
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]

@@ -30,7 +30,7 @@ use crate::statements::cursor::{CloseCursor, DeclareCursor, FetchCursor};
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
 use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
-use crate::statements::explain::Explain;
+use crate::statements::explain::ExplainStatement;
 use crate::statements::insert::Insert;
 use crate::statements::kill::Kill;
 use crate::statements::query::Query;
@@ -83,6 +83,9 @@ pub enum Statement {
     AlterTable(AlterTable),
     /// ALTER DATABASE
     AlterDatabase(AlterDatabase),
+    /// ALTER TRIGGER
+    #[cfg(feature = "enterprise")]
+    AlterTrigger(crate::statements::alter::trigger::AlterTrigger),
     // Databases.
     ShowDatabases(ShowDatabases),
     // SHOW TABLES
@@ -105,6 +108,8 @@ pub enum Statement {
     ShowCreateTable(ShowCreateTable),
     // SHOW CREATE FLOW
     ShowCreateFlow(ShowCreateFlow),
+    #[cfg(feature = "enterprise")]
+    ShowCreateTrigger(crate::statements::show::trigger::ShowCreateTrigger),
     /// SHOW FLOWS
     ShowFlows(ShowFlows),
     // SHOW TRIGGERS
@@ -121,7 +126,7 @@ pub enum Statement {
     // DESCRIBE TABLE
     DescribeTable(DescribeTable),
     // EXPLAIN QUERY
-    Explain(Explain),
+    Explain(Box<ExplainStatement>),
     // COPY
     Copy(Copy),
     // Telemetry Query Language
@@ -177,6 +182,8 @@ impl Statement {
             | Statement::Tql(_) => true,
 
             #[cfg(feature = "enterprise")]
+            Statement::ShowCreateTrigger(_) => true,
+            #[cfg(feature = "enterprise")]
             Statement::ShowTriggers(_) => true,
 
             // Write operations
@@ -202,6 +209,9 @@ impl Statement {
             | Statement::CloseCursor(_)
             | Statement::Kill(_)
             | Statement::Admin(_) => false,
+
+            #[cfg(feature = "enterprise")]
+            Statement::AlterTrigger(_) => false,
 
             #[cfg(feature = "enterprise")]
             Statement::CreateTrigger(_) | Statement::DropTrigger(_) => false,
@@ -230,6 +240,8 @@ impl Display for Statement {
             Statement::CreateDatabase(s) => s.fmt(f),
             Statement::AlterTable(s) => s.fmt(f),
             Statement::AlterDatabase(s) => s.fmt(f),
+            #[cfg(feature = "enterprise")]
+            Statement::AlterTrigger(s) => s.fmt(f),
             Statement::ShowDatabases(s) => s.fmt(f),
             Statement::ShowTables(s) => s.fmt(f),
             Statement::ShowTableStatus(s) => s.fmt(f),
@@ -238,6 +250,8 @@ impl Display for Statement {
             Statement::ShowRegion(s) => s.fmt(f),
             Statement::ShowCreateTable(s) => s.fmt(f),
             Statement::ShowCreateFlow(s) => s.fmt(f),
+            #[cfg(feature = "enterprise")]
+            Statement::ShowCreateTrigger(s) => s.fmt(f),
             Statement::ShowFlows(s) => s.fmt(f),
             #[cfg(feature = "enterprise")]
             Statement::ShowTriggers(s) => s.fmt(f),
@@ -287,7 +301,6 @@ impl TryFrom<&Statement> for DfStatement {
     fn try_from(s: &Statement) -> Result<Self, Self::Error> {
         let s = match s {
             Statement::Query(query) => SpStatement::Query(Box::new(query.inner.clone())),
-            Statement::Explain(explain) => explain.inner.clone(),
             Statement::Insert(insert) => insert.inner.clone(),
             Statement::Delete(delete) => delete.inner.clone(),
             _ => {
@@ -297,6 +310,6 @@ impl TryFrom<&Statement> for DfStatement {
                 .fail();
             }
         };
-        Ok(DfStatement::Statement(Box::new(s.into())))
+        Ok(DfStatement::Statement(Box::new(s)))
     }
 }

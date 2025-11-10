@@ -17,9 +17,9 @@ mod metadata;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use api::v1::ExpireAfter;
 use api::v1::flow::flow_request::Body as PbFlowRequest;
 use api::v1::flow::{CreateRequest, FlowRequest, FlowRequestHeader};
-use api::v1::ExpireAfter;
 use async_trait::async_trait;
 use common_catalog::format_full_flow_name;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
@@ -31,13 +31,13 @@ use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use strum::AsRefStr;
 use table::metadata::TableId;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::ddl::DdlContext;
+use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::error::{self, Result, UnexpectedSnafu};
 use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
 use crate::key::flow::flow_info::FlowInfoValue;
@@ -47,7 +47,7 @@ use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
 use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
 use crate::metrics;
 use crate::peer::Peer;
-use crate::rpc::ddl::{CreateFlowTask, QueryContext};
+use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext};
 
 /// The procedure of flow creation.
 pub struct CreateFlowProcedure {
@@ -67,7 +67,7 @@ impl CreateFlowProcedure {
                 flow_id: None,
                 peers: vec![],
                 source_table_ids: vec![],
-                query_context,
+                flow_context: query_context.into(), // Convert to FlowQueryContext
                 state: CreateFlowState::Prepare,
                 prev_flow_info_value: None,
                 did_replace: false,
@@ -204,7 +204,8 @@ impl CreateFlowProcedure {
             let request = FlowRequest {
                 header: Some(FlowRequestHeader {
                     tracing_context: TracingContext::from_current_span().to_w3c(),
-                    query_context: Some(self.data.query_context.clone().into()),
+                    // Convert FlowQueryContext to QueryContext
+                    query_context: Some(QueryContext::from(self.data.flow_context.clone()).into()),
                 }),
                 body: Some(PbFlowRequest::Create((&self.data).into())),
             };
@@ -378,9 +379,10 @@ pub enum CreateFlowState {
 }
 
 /// The type of flow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum FlowType {
     /// The flow is a batching task.
+    #[default]
     Batching,
     /// The flow is a streaming task.
     Streaming,
@@ -390,12 +392,6 @@ impl FlowType {
     pub const BATCHING: &str = "batching";
     pub const STREAMING: &str = "streaming";
     pub const FLOW_TYPE_KEY: &str = "flow_type";
-}
-
-impl Default for FlowType {
-    fn default() -> Self {
-        Self::Batching
-    }
 }
 
 impl fmt::Display for FlowType {
@@ -415,7 +411,9 @@ pub struct CreateFlowData {
     pub(crate) flow_id: Option<FlowId>,
     pub(crate) peers: Vec<Peer>,
     pub(crate) source_table_ids: Vec<TableId>,
-    pub(crate) query_context: QueryContext,
+    /// Use alias for backward compatibility with QueryContext serialized data
+    #[serde(alias = "query_context")]
+    pub(crate) flow_context: FlowQueryContext,
     /// For verify if prev value is consistent when need to update flow metadata.
     /// only set when `or_replace` is true.
     pub(crate) prev_flow_info_value: Option<DeserializedValueWithBytes<FlowInfoValue>>,
@@ -442,6 +440,10 @@ impl From<&CreateFlowData> for CreateRequest {
             create_if_not_exists: true,
             or_replace: value.task.or_replace,
             expire_after: value.task.expire_after.map(|value| ExpireAfter { value }),
+            eval_interval: value
+                .task
+                .eval_interval_secs
+                .map(|seconds| api::v1::EvalInterval { seconds }),
             comment: value.task.comment.clone(),
             sql: value.task.sql.clone(),
             flow_options: value.task.flow_options.clone(),
@@ -461,6 +463,7 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             flow_name,
             sink_table_name,
             expire_after,
+            eval_interval_secs: eval_interval,
             comment,
             sql,
             flow_options: mut options,
@@ -495,10 +498,12 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             sink_table_name,
             flownode_ids,
             catalog_name,
-            query_context: Some(value.query_context.clone()),
+            // Convert FlowQueryContext back to QueryContext for storage
+            query_context: Some(QueryContext::from(value.flow_context.clone())),
             flow_name,
             raw_sql: sql,
             expire_after,
+            eval_interval_secs: eval_interval,
             comment,
             options,
             created_time: create_time,

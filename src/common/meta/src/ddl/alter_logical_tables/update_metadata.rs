@@ -13,24 +13,26 @@
 // limitations under the License.
 
 use common_grpc_expr::alter_expr_to_request;
-use itertools::Itertools;
 use snafu::ResultExt;
 use table::metadata::{RawTableInfo, TableInfo};
 
-use crate::ddl::alter_logical_tables::executor::AlterLogicalTablesExecutor;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
+use crate::ddl::alter_logical_tables::executor::AlterLogicalTablesExecutor;
+use crate::ddl::utils::table_info::batch_update_table_info_values;
 use crate::error;
 use crate::error::{ConvertAlterTableRequestSnafu, Result};
-use crate::key::table_info::TableInfoValue;
 use crate::key::DeserializedValueWithBytes;
+use crate::key::table_info::TableInfoValue;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::region_distribution;
 
 impl AlterLogicalTablesProcedure {
     pub(crate) async fn update_physical_table_metadata(&mut self) -> Result<()> {
+        self.fetch_physical_table_route_if_non_exist().await?;
         // Safety: must exist.
         let physical_table_info = self.data.physical_table_info.as_ref().unwrap();
-        let physical_table_route = self.data.physical_table_route.as_ref().unwrap();
+        // Safety: fetched in `fetch_physical_table_route_if_non_exist`.
+        let physical_table_route = self.physical_table_route.as_ref().unwrap();
         let region_distribution = region_distribution(&physical_table_route.region_routes);
 
         // Updates physical table's metadata.
@@ -48,25 +50,8 @@ impl AlterLogicalTablesProcedure {
 
     pub(crate) async fn update_logical_tables_metadata(&mut self) -> Result<()> {
         let table_info_values = self.build_update_metadata()?;
-        let manager = &self.context.table_metadata_manager;
-        let chunk_size = manager.batch_update_table_info_value_chunk_size();
-        if table_info_values.len() > chunk_size {
-            let chunks = table_info_values
-                .into_iter()
-                .chunks(chunk_size)
-                .into_iter()
-                .map(|check| check.collect::<Vec<_>>())
-                .collect::<Vec<_>>();
-            for chunk in chunks {
-                manager.batch_update_table_info_values(chunk).await?;
-            }
-        } else {
-            manager
-                .batch_update_table_info_values(table_info_values)
-                .await?;
-        }
-
-        Ok(())
+        batch_update_table_info_values(&self.context.table_metadata_manager, table_info_values)
+            .await
     }
 
     pub(crate) fn build_update_metadata(
@@ -94,9 +79,12 @@ impl AlterLogicalTablesProcedure {
         let table_info = TableInfo::try_from(table.table_info.clone())
             .context(error::ConvertRawTableInfoSnafu)?;
         let table_ref = task.table_ref();
-        let request =
-            alter_expr_to_request(table.table_info.ident.table_id, task.alter_table.clone())
-                .context(ConvertAlterTableRequestSnafu)?;
+        let request = alter_expr_to_request(
+            table.table_info.ident.table_id,
+            task.alter_table.clone(),
+            Some(&table_info.meta),
+        )
+        .context(ConvertAlterTableRequestSnafu)?;
         let new_meta = table_info
             .meta
             .builder_with_alter_kind(table_ref.table, &request.alter_kind)

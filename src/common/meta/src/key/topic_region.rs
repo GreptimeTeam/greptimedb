@@ -12,20 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Copyright 2023 Greptime Team
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use std::collections::HashMap;
 use std::fmt::{self, Display};
 
@@ -37,11 +23,13 @@ use table::metadata::TableId;
 
 use crate::ddl::utils::parse_region_wal_options;
 use crate::error::{Error, InvalidMetadataSnafu, Result};
-use crate::key::{MetadataKey, TOPIC_REGION_PATTERN, TOPIC_REGION_PREFIX};
-use crate::kv_backend::txn::{Txn, TxnOp};
+use crate::key::{MetadataKey, MetadataValue, TOPIC_REGION_PATTERN, TOPIC_REGION_PREFIX};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{BatchDeleteRequest, BatchPutRequest, PutRequest, RangeRequest};
+use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::rpc::KeyValue;
+use crate::rpc::store::{
+    BatchDeleteRequest, BatchGetRequest, BatchPutRequest, PutRequest, RangeRequest,
+};
 
 // The TopicRegionKey is a key for the topic-region mapping in the kvbackend.
 // The layout of the key is `__topic_region/{topic_name}/{region_id}`.
@@ -51,8 +39,20 @@ pub struct TopicRegionKey<'a> {
     pub topic: &'a str,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TopicRegionValue;
+/// Represents additional information for a region when using a shared WAL.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct TopicRegionValue {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<ReplayCheckpoint>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ReplayCheckpoint {
+    #[serde(default)]
+    pub entry_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_entry_id: Option<u64>,
+}
 
 impl<'a> TopicRegionKey<'a> {
     pub fn new(region_id: RegionId, topic: &'a str) -> Self {
@@ -118,9 +118,47 @@ impl<'a> TryFrom<&'a str> for TopicRegionKey<'a> {
     }
 }
 
-fn topic_region_decoder(value: &KeyValue) -> Result<TopicRegionKey<'_>> {
+impl ReplayCheckpoint {
+    /// Creates a new [`ReplayCheckpoint`] with the given entry id and metadata entry id.
+    pub fn new(entry_id: u64, metadata_entry_id: Option<u64>) -> Self {
+        Self {
+            entry_id,
+            metadata_entry_id,
+        }
+    }
+}
+
+impl TopicRegionValue {
+    /// Creates a new [`TopicRegionValue`] with the given checkpoint.
+    pub fn new(checkpoint: Option<ReplayCheckpoint>) -> Self {
+        Self { checkpoint }
+    }
+
+    /// Returns the minimum entry id of the region.
+    ///
+    /// If the metadata entry id is not set, it returns the entry id.
+    pub fn min_entry_id(&self) -> Option<u64> {
+        match self.checkpoint {
+            Some(ReplayCheckpoint {
+                entry_id,
+                metadata_entry_id,
+            }) => match metadata_entry_id {
+                Some(metadata_entry_id) => Some(entry_id.min(metadata_entry_id)),
+                None => Some(entry_id),
+            },
+            None => None,
+        }
+    }
+}
+
+fn topic_region_decoder(value: &KeyValue) -> Result<(TopicRegionKey<'_>, TopicRegionValue)> {
     let key = TopicRegionKey::from_bytes(&value.key)?;
-    Ok(key)
+    let value = if value.value.is_empty() {
+        TopicRegionValue::default()
+    } else {
+        TopicRegionValue::try_from_raw_value(&value.value)?
+    };
+    Ok((key, value))
 }
 
 /// Manages map of topics and regions in kvbackend.
@@ -143,21 +181,59 @@ impl TopicRegionManager {
         Ok(())
     }
 
-    pub async fn batch_put(&self, keys: Vec<TopicRegionKey<'_>>) -> Result<()> {
+    pub async fn batch_get(
+        &self,
+        keys: Vec<TopicRegionKey<'_>>,
+    ) -> Result<HashMap<RegionId, TopicRegionValue>> {
+        let raw_keys = keys.iter().map(|key| key.to_bytes()).collect::<Vec<_>>();
+        let req = BatchGetRequest { keys: raw_keys };
+        let resp = self.kv_backend.batch_get(req).await?;
+
+        let v = resp
+            .kvs
+            .into_iter()
+            .map(|kv| topic_region_decoder(&kv).map(|(key, value)| (key.region_id, value)))
+            .collect::<Result<HashMap<_, _>>>()?;
+
+        Ok(v)
+    }
+
+    pub async fn get(&self, key: TopicRegionKey<'_>) -> Result<Option<TopicRegionValue>> {
+        let key_bytes = key.to_bytes();
+        let resp = self.kv_backend.get(&key_bytes).await?;
+        let value = resp
+            .map(|kv| topic_region_decoder(&kv).map(|(_, value)| value))
+            .transpose()?;
+
+        Ok(value)
+    }
+
+    pub async fn batch_put(
+        &self,
+        keys: &[(TopicRegionKey<'_>, Option<TopicRegionValue>)],
+    ) -> Result<()> {
         let req = BatchPutRequest {
             kvs: keys
-                .into_iter()
-                .map(|key| KeyValue {
-                    key: key.to_bytes(),
-                    value: vec![],
+                .iter()
+                .map(|(key, value)| {
+                    let value = value
+                        .map(|v| v.try_as_raw_value())
+                        .transpose()?
+                        .unwrap_or_default();
+
+                    Ok(KeyValue {
+                        key: key.to_bytes(),
+                        value,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>>>()?,
             prev_kv: false,
         };
         self.kv_backend.batch_put(req).await?;
         Ok(())
     }
 
+    /// Build a create topic region mapping transaction. It only executes while the primary keys comparing successes.
     pub fn build_create_txn(
         &self,
         table_id: TableId,
@@ -176,8 +252,8 @@ impl TopicRegionManager {
         Ok(Txn::new().and_then(operations))
     }
 
-    /// Returns the list of region ids using specified topic.
-    pub async fn regions(&self, topic: &str) -> Result<Vec<RegionId>> {
+    /// Returns the map of [`RegionId`] to their corresponding topic [`TopicRegionValue`].
+    pub async fn regions(&self, topic: &str) -> Result<HashMap<RegionId, TopicRegionValue>> {
         let prefix = TopicRegionKey::range_topic_key(topic);
         let req = RangeRequest::new().with_prefix(prefix.as_bytes());
         let resp = self.kv_backend.range(req).await?;
@@ -186,7 +262,10 @@ impl TopicRegionManager {
             .iter()
             .map(topic_region_decoder)
             .collect::<Result<Vec<_>>>()?;
-        Ok(region_ids.iter().map(|key| key.region_id).collect())
+        Ok(region_ids
+            .into_iter()
+            .map(|(key, value)| (key.region_id, value))
+            .collect())
     }
 
     pub async fn delete(&self, key: TopicRegionKey<'_>) -> Result<()> {
@@ -248,15 +327,24 @@ mod tests {
 
         let topics = (0..16).map(|i| format!("topic_{}", i)).collect::<Vec<_>>();
         let keys = (0..64)
-            .map(|i| TopicRegionKey::new(RegionId::from_u64(i), &topics[(i % 16) as usize]))
+            .map(|i| {
+                (
+                    TopicRegionKey::new(RegionId::from_u64(i), &topics[(i % 16) as usize]),
+                    None,
+                )
+            })
             .collect::<Vec<_>>();
 
-        manager.batch_put(keys.clone()).await.unwrap();
-
-        let mut key_values = manager.regions(&topics[0]).await.unwrap();
+        manager.batch_put(&keys).await.unwrap();
+        let mut key_values = manager
+            .regions(&topics[0])
+            .await
+            .unwrap()
+            .into_keys()
+            .collect::<Vec<_>>();
         let expected = keys
             .iter()
-            .filter_map(|key| {
+            .filter_map(|(key, _)| {
                 if key.topic == topics[0] {
                     Some(key.region_id)
                 } else {
@@ -269,10 +357,15 @@ mod tests {
 
         let key = TopicRegionKey::new(RegionId::from_u64(0), "topic_0");
         manager.delete(key.clone()).await.unwrap();
-        let mut key_values = manager.regions(&topics[0]).await.unwrap();
+        let mut key_values = manager
+            .regions(&topics[0])
+            .await
+            .unwrap()
+            .into_keys()
+            .collect::<Vec<_>>();
         let expected = keys
             .iter()
-            .filter_map(|key| {
+            .filter_map(|(key, _)| {
                 if key.topic == topics[0] && key.region_id != RegionId::from_u64(0) {
                     Some(key.region_id)
                 } else {
@@ -323,5 +416,19 @@ mod tests {
             .collect::<Vec<_>>();
         expected.sort_by_key(|(region_id, _)| region_id.as_u64());
         assert_eq!(topic_region_map, expected);
+    }
+
+    #[test]
+    fn test_topic_region_key_is_match() {
+        let key = "__topic_region/6f153a64-7fac-4cf6-8b0b-a7967dd73879_2/4410931412992";
+        let topic_region_key = TopicRegionKey::try_from(key).unwrap();
+        assert_eq!(
+            topic_region_key.topic,
+            "6f153a64-7fac-4cf6-8b0b-a7967dd73879_2"
+        );
+        assert_eq!(
+            topic_region_key.region_id,
+            RegionId::from_u64(4410931412992)
+        );
     }
 }

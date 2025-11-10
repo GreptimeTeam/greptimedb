@@ -35,7 +35,7 @@ use tokio::sync::Semaphore;
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
-    BatchRegionDdlRequest, RegionOpenRequest, RegionRequest, RegionSequencesRequest,
+    BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
 };
 use crate::storage::{RegionId, ScanRequest, SequenceNumber};
 
@@ -44,6 +44,10 @@ use crate::storage::{RegionId, ScanRequest, SequenceNumber};
 pub enum SettableRegionRoleState {
     Follower,
     DowngradingLeader,
+    /// Exit staging mode and return to normal leader state. Only allowed from staging state.
+    Leader,
+    /// Enter staging mode. Region remains writable but disables checkpoint and compaction. Only allowed from normal leader state.
+    StagingLeader,
 }
 
 impl Display for SettableRegionRoleState {
@@ -51,6 +55,8 @@ impl Display for SettableRegionRoleState {
         match self {
             SettableRegionRoleState::Follower => write!(f, "Follower"),
             SettableRegionRoleState::DowngradingLeader => write!(f, "Leader(Downgrading)"),
+            SettableRegionRoleState::Leader => write!(f, "Leader"),
+            SettableRegionRoleState::StagingLeader => write!(f, "Leader(Staging)"),
         }
     }
 }
@@ -60,6 +66,8 @@ impl From<SettableRegionRoleState> for RegionRole {
         match value {
             SettableRegionRoleState::Follower => RegionRole::Follower,
             SettableRegionRoleState::DowngradingLeader => RegionRole::DowngradingLeader,
+            SettableRegionRoleState::Leader => RegionRole::Leader,
+            SettableRegionRoleState::StagingLeader => RegionRole::Leader, // Still a leader role
         }
     }
 }
@@ -128,10 +136,11 @@ impl SetRegionRoleStateSuccess {
 }
 
 /// The response of setting region role state.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum SetRegionRoleStateResponse {
     Success(SetRegionRoleStateSuccess),
     NotFound,
+    InvalidTransition(BoxedError),
 }
 
 impl SetRegionRoleStateResponse {
@@ -140,9 +149,19 @@ impl SetRegionRoleStateResponse {
         Self::Success(success)
     }
 
+    /// Returns a [SetRegionRoleStateResponse::InvalidTransition] with the error.
+    pub fn invalid_transition(error: BoxedError) -> Self {
+        Self::InvalidTransition(error)
+    }
+
     /// Returns true if the response is a [SetRegionRoleStateResponse::NotFound].
     pub fn is_not_found(&self) -> bool {
         matches!(self, SetRegionRoleStateResponse::NotFound)
+    }
+
+    /// Returns true if the response is a [SetRegionRoleStateResponse::InvalidTransition].
+    pub fn is_invalid_transition(&self) -> bool {
+        matches!(self, SetRegionRoleStateResponse::InvalidTransition(_))
     }
 }
 
@@ -390,6 +409,13 @@ impl PrepareRequest {
     }
 }
 
+/// Necessary context of the query for the scanner.
+#[derive(Clone, Default)]
+pub struct QueryScanContext {
+    /// Whether the query is EXPLAIN ANALYZE VERBOSE.
+    pub explain_verbose: bool,
+}
+
 /// A scanner that provides a way to scan the region concurrently.
 ///
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
@@ -415,12 +441,13 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Panics if the `partition` is out of bound.
     fn scan_partition(
         &self,
+        ctx: &QueryScanContext,
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
 
-    /// Check if there is any predicate that may be executed in this scanner.
-    fn has_predicate(&self) -> bool;
+    /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
+    fn has_predicate_without_region(&self) -> bool;
 
     /// Sets whether the scanner is reading a logical region.
     fn set_logical_region(&mut self, logical_region: bool);
@@ -452,6 +479,9 @@ pub struct RegionStatistic {
     /// The details of the region.
     #[serde(default)]
     pub manifest: RegionManifestInfo,
+    #[serde(default)]
+    /// The total bytes written of the region since region opened.
+    pub written_bytes: u64,
     /// The latest entry id of the region's remote WAL since last flush.
     /// For metric engine, there're two latest entry ids, one for data and one for metadata.
     /// TODO(weny): remove this two fields and use single instead.
@@ -687,6 +717,30 @@ pub trait RegionEngine: Send + Sync {
         Ok(join_all(tasks).await)
     }
 
+    async fn handle_batch_catchup_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<BatchResponses, BoxedError> {
+        let semaphore = Arc::new(Semaphore::new(parallelism));
+        let mut tasks = Vec::with_capacity(requests.len());
+
+        for (region_id, request) in requests {
+            let semaphore_moved = semaphore.clone();
+
+            tasks.push(async move {
+                // Safety: semaphore must exist
+                let _permit = semaphore_moved.acquire().await.unwrap();
+                let result = self
+                    .handle_request(region_id, RegionRequest::Catchup(request))
+                    .await;
+                (region_id, result)
+            });
+        }
+
+        Ok(join_all(tasks).await)
+    }
+
     async fn handle_batch_ddl_requests(
         &self,
         request: BatchRegionDdlRequest,
@@ -716,25 +770,11 @@ pub trait RegionEngine: Send + Sync {
         request: RegionRequest,
     ) -> Result<RegionResponse, BoxedError>;
 
-    /// Returns the last sequence number of the region.
-    async fn get_last_seq_num(
+    /// Returns the committed sequence (sequence of latest written data).
+    async fn get_committed_sequence(
         &self,
         region_id: RegionId,
-    ) -> Result<Option<SequenceNumber>, BoxedError>;
-
-    async fn get_region_sequences(
-        &self,
-        seqs: RegionSequencesRequest,
-    ) -> Result<HashMap<u64, u64>, BoxedError> {
-        let mut results = HashMap::with_capacity(seqs.region_ids.len());
-
-        for region_id in seqs.region_ids {
-            let seq = self.get_last_seq_num(region_id).await?.unwrap_or_default();
-            results.insert(region_id.as_u64(), seq);
-        }
-
-        Ok(results)
-    }
+    ) -> Result<SequenceNumber, BoxedError>;
 
     /// Handles query and return a scanner that can be used to scan the region concurrently.
     async fn handle_query(
@@ -832,6 +872,7 @@ impl RegionScanner for SinglePartitionScanner {
 
     fn scan_partition(
         &self,
+        _ctx: &QueryScanContext,
         _metrics_set: &ExecutionPlanMetricsSet,
         _partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
@@ -842,7 +883,7 @@ impl RegionScanner for SinglePartitionScanner {
         Ok(result.unwrap())
     }
 
-    fn has_predicate(&self) -> bool {
+    fn has_predicate_without_region(&self) -> bool {
         false
     }
 

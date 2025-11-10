@@ -18,13 +18,14 @@ use std::time::Duration;
 use common_time::Timezone;
 use lazy_static::lazy_static;
 use regex::Regex;
+use session::ReadPreference;
 use session::context::Channel::Postgres;
 use session::context::QueryContextRef;
 use session::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
-use session::ReadPreference;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::{Expr, Ident, Value};
 use sql::statements::set_variables::SetVariables;
+use sqlparser::ast::ValueWithSpan;
 
 use crate::error::{InvalidConfigValueSnafu, InvalidSqlSnafu, NotSupportedSnafu, Result};
 
@@ -43,8 +44,14 @@ pub fn set_read_preference(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()>
     })?;
 
     match read_preference_expr {
-        Expr::Value(Value::SingleQuotedString(expr))
-        | Expr::Value(Value::DoubleQuotedString(expr)) => {
+        Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(expr),
+            ..
+        })
+        | Expr::Value(ValueWithSpan {
+            value: Value::DoubleQuotedString(expr),
+            ..
+        }) => {
             match ReadPreference::from_str(expr.as_str().to_lowercase().as_str()) {
                 Ok(read_preference) => ctx.set_read_preference(read_preference),
                 Err(_) => {
@@ -54,7 +61,7 @@ pub fn set_read_preference(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()>
                             expr,
                         ),
                     }
-                    .fail()
+                    .fail();
                 }
             }
             Ok(())
@@ -74,14 +81,21 @@ pub fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
         feat: "No timezone find in set variable statement",
     })?;
     match tz_expr {
-        Expr::Value(Value::SingleQuotedString(tz)) | Expr::Value(Value::DoubleQuotedString(tz)) => {
+        Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(tz),
+            ..
+        })
+        | Expr::Value(ValueWithSpan {
+            value: Value::DoubleQuotedString(tz),
+            ..
+        }) => {
             match Timezone::from_tz_string(tz.as_str()) {
                 Ok(timezone) => ctx.set_timezone(timezone),
                 Err(_) => {
                     return NotSupportedSnafu {
                         feat: format!("Invalid timezone expr {} in set variable statement", tz),
                     }
-                    .fail()
+                    .fail();
                 }
             }
             Ok(())
@@ -110,7 +124,7 @@ pub fn set_bytea_output(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
         .fail();
     };
     ctx.configuration_parameter().set_postgres_bytea_output(
-        PGByteaOutputValue::try_from(value.clone()).context(InvalidConfigValueSnafu)?,
+        PGByteaOutputValue::try_from(value.value.clone()).context(InvalidConfigValueSnafu)?,
     );
     Ok(())
 }
@@ -120,8 +134,14 @@ pub fn set_search_path(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
         feat: "No search path find in set variable statement",
     })?;
     match search_expr {
-        Expr::Value(Value::SingleQuotedString(search_path))
-        | Expr::Value(Value::DoubleQuotedString(search_path)) => {
+        Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(search_path),
+            ..
+        })
+        | Expr::Value(ValueWithSpan {
+            value: Value::DoubleQuotedString(search_path),
+            ..
+        }) => {
             ctx.set_current_schema(search_path);
             Ok(())
         }
@@ -147,7 +167,10 @@ pub fn validate_client_encoding(set: SetVariables) -> Result<()> {
         .fail();
     };
     let encoding = match encoding {
-        Expr::Value(Value::SingleQuotedString(x))
+        Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(x),
+            ..
+        })
         | Expr::Identifier(Ident {
             value: x,
             quote_style: _,
@@ -210,21 +233,47 @@ fn try_parse_datestyle(expr: &Expr) -> Result<(Option<PGDateTimeStyle>, Option<P
             quote_style: _,
             span: _,
         })
-        | Expr::Value(Value::SingleQuotedString(s))
-        | Expr::Value(Value::DoubleQuotedString(s)) => {
-            s.split(',')
-                .map(|s| s.trim())
-                .try_fold((None, None), |(style, order), s| match try_parse_str(s)? {
-                    ParsedDateStyle::Order(o) => {
-                        Ok((style, merge_datestyle_value(order, Some(o))?))
-                    }
-                    ParsedDateStyle::Style(s) => {
-                        Ok((merge_datestyle_value(style, Some(s))?, order))
-                    }
-                })
-        }
+        | Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(s),
+            ..
+        })
+        | Expr::Value(ValueWithSpan {
+            value: Value::DoubleQuotedString(s),
+            ..
+        }) => s
+            .split(',')
+            .map(|s| s.trim())
+            .try_fold((None, None), |(style, order), s| match try_parse_str(s)? {
+                ParsedDateStyle::Order(o) => Ok((style, merge_datestyle_value(order, Some(o))?)),
+                ParsedDateStyle::Style(s) => Ok((merge_datestyle_value(style, Some(s))?, order)),
+            }),
         _ => NotSupportedSnafu {
             feat: "Not supported expression for datestyle",
+        }
+        .fail(),
+    }
+}
+
+/// Set the allow query fallback configuration parameter to true or false based on the provided expressions.
+///
+pub fn set_allow_query_fallback(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let allow_fallback_expr = exprs.first().context(NotSupportedSnafu {
+        feat: "No allow query fallback value find in set variable statement",
+    })?;
+    match allow_fallback_expr {
+        Expr::Value(ValueWithSpan {
+            value: Value::Boolean(allow),
+            span: _,
+        }) => {
+            ctx.configuration_parameter()
+                .set_allow_query_fallback(*allow);
+            Ok(())
+        }
+        expr => NotSupportedSnafu {
+            feat: format!(
+                "Unsupported allow query fallback expr {} in set variable statement",
+                expr
+            ),
         }
         .fail(),
     }
@@ -257,21 +306,30 @@ pub fn set_query_timeout(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
         feat: "No timeout value find in set query timeout statement",
     })?;
     match timeout_expr {
-        Expr::Value(Value::Number(timeout, _)) => {
+        Expr::Value(ValueWithSpan {
+            value: Value::Number(timeout, _),
+            ..
+        }) => {
             match timeout.parse::<u64>() {
                 Ok(timeout) => ctx.set_query_timeout(Duration::from_millis(timeout)),
                 Err(_) => {
                     return NotSupportedSnafu {
                         feat: format!("Invalid timeout expr {} in set variable statement", timeout),
                     }
-                    .fail()
+                    .fail();
                 }
             }
             Ok(())
         }
         // postgres support time units i.e. SET STATEMENT_TIMEOUT = '50ms';
-        Expr::Value(Value::SingleQuotedString(timeout))
-        | Expr::Value(Value::DoubleQuotedString(timeout)) => {
+        Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(timeout),
+            ..
+        })
+        | Expr::Value(ValueWithSpan {
+            value: Value::DoubleQuotedString(timeout),
+            ..
+        }) => {
             if ctx.channel() != Postgres {
                 return NotSupportedSnafu {
                     feat: format!("Invalid timeout expr {} in set variable statement", timeout),

@@ -355,7 +355,7 @@ impl LastFieldsBuilder {
             // Builds last fields.
             for (builder, value) in self.builders.iter_mut().zip(&self.last_fields) {
                 // Safety: Vectors of the batch has the same type.
-                builder.push_value_ref(value.as_value_ref());
+                builder.push_value_ref(&value.as_value_ref());
             }
             let fields = self
                 .builders
@@ -586,11 +586,11 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::OpType;
-    use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
+    use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array};
 
     use super::*;
     use crate::read::BatchBuilder;
-    use crate::test_util::{check_reader_result, new_batch, VecBatchReader};
+    use crate::test_util::{VecBatchReader, check_reader_result, new_batch};
 
     #[tokio::test]
     async fn test_dedup_reader_no_duplications() {

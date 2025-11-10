@@ -13,46 +13,57 @@
 // limitations under the License.
 
 use std::fmt;
-use std::sync::Arc;
 
-use common_query::error::Result;
-use common_query::prelude::{Signature, Volatility};
-use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::VectorRef;
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_expr::{ScalarFunctionArgs, Signature, Volatility};
+use datatypes::arrow::datatypes::DataType;
+use datatypes::vectors::{Helper, Vector};
 
-use crate::function::{Function, FunctionContext};
-use crate::scalars::expression::{scalar_binary_op, EvalContext};
+use crate::function::{Function, extract_args};
+use crate::scalars::expression::{EvalContext, scalar_binary_op};
 
-#[derive(Clone, Default)]
-pub(crate) struct TestAndFunction;
+#[derive(Clone)]
+pub(crate) struct TestAndFunction {
+    signature: Signature,
+}
+
+impl Default for TestAndFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::exact(
+                vec![DataType::Boolean, DataType::Boolean],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
 
 impl Function for TestAndFunction {
     fn name(&self) -> &str {
         "test_and"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::exact(
-            vec![
-                ConcreteDataType::boolean_datatype(),
-                ConcreteDataType::boolean_datatype(),
-            ],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
+        let columns = Helper::try_into_vectors(&[arg0, arg1]).unwrap();
         let col = scalar_binary_op::<bool, bool, bool, _>(
             &columns[0],
             &columns[1],
             scalar_and,
             &mut EvalContext::default(),
         )?;
-        Ok(Arc::new(col))
+        Ok(ColumnarValue::Array(col.to_arrow_array()))
     }
 }
 

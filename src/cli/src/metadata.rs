@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod common;
 mod control;
 mod repair;
 mod snapshot;
@@ -21,10 +20,10 @@ mod utils;
 use clap::Subcommand;
 use common_error::ext::BoxedError;
 
+use crate::Tool;
 use crate::metadata::control::{DelCommand, GetCommand};
 use crate::metadata::repair::RepairLogicalTablesCommand;
 use crate::metadata::snapshot::SnapshotCommand;
-use crate::Tool;
 
 /// Command for managing metadata operations,
 /// including saving and restoring metadata snapshots,

@@ -150,9 +150,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table options value is not valid, key: `{}`, value: `{}`", key, value))]
-    InvalidTableOptionValue { key: String, value: String },
-
     #[snafu(display("Invalid column option, column name: {}, error: {}", column_name, msg))]
     InvalidColumnOption {
         column_name: String,
@@ -195,6 +192,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Sql common error"))]
+    SqlCommon {
+        source: common_sql::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -211,6 +215,7 @@ impl ErrorExt for Error {
             Error::CastDefaultValue { source, .. } => source.status_code(),
             Error::TablesRecordBatch { .. } => StatusCode::Unexpected,
             Error::ColumnExists { .. } => StatusCode::TableColumnExists,
+            Error::SqlCommon { source, .. } => source.status_code(),
             Error::SchemaBuild { source, .. } | Error::SetFulltextOptions { source, .. } => {
                 source.status_code()
             }
@@ -220,8 +225,7 @@ impl ErrorExt for Error {
             Error::Unsupported { .. } => StatusCode::Unsupported,
             Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
             Error::MissingTimeIndexColumn { .. } => StatusCode::IllegalState,
-            Error::InvalidTableOptionValue { .. }
-            | Error::SetSkippingOptions { .. }
+            Error::SetSkippingOptions { .. }
             | Error::UnsetSkippingOptions { .. }
             | Error::InvalidTableName { .. } => StatusCode::InvalidArguments,
         }

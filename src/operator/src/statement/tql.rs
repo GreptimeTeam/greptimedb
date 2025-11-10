@@ -18,8 +18,8 @@ use common_query::Output;
 use common_telemetry::tracing;
 use datafusion_expr::LogicalPlan;
 use query::parser::{
-    PromQuery, QueryLanguageParser, ANALYZE_NODE_NAME, ANALYZE_VERBOSE_NODE_NAME,
-    DEFAULT_LOOKBACK_STRING, EXPLAIN_NODE_NAME, EXPLAIN_VERBOSE_NODE_NAME,
+    ANALYZE_NODE_NAME, ANALYZE_VERBOSE_NODE_NAME, DEFAULT_LOOKBACK_STRING, EXPLAIN_NODE_NAME,
+    EXPLAIN_VERBOSE_NODE_NAME, PromQuery, QueryLanguageParser,
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -42,6 +42,7 @@ impl StatementExecutor {
                     lookback: eval
                         .lookback
                         .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
+                    alias: eval.alias,
                 };
                 QueryLanguageParser::parse_promql(&promql, query_ctx).context(ParseQuerySnafu)?
             }
@@ -82,6 +83,7 @@ impl StatementExecutor {
                     lookback: analyze
                         .lookback
                         .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
+                    alias: analyze.alias,
                 };
                 let analyze_node_name = if analyze.is_verbose {
                     ANALYZE_VERBOSE_NODE_NAME

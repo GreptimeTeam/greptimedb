@@ -41,4 +41,5 @@ SELECT uddsketch_calc(0.1, uddsketch_merge(128, 0.1, `state`)) FROM grouped_udds
 SELECT uddsketch_calc(0.1, uddsketch_merge(64, 0.01, `state`)) FROM grouped_uddsketch;
 
 drop table test_uddsketch;
+
 drop table grouped_uddsketch;

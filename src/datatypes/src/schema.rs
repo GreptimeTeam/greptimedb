@@ -22,18 +22,18 @@ use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion_common::DFSchemaRef;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result};
 use crate::prelude::ConcreteDataType;
 pub use crate::schema::column_schema::{
-    ColumnExtType, ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions, Metadata,
-    SkippingIndexOptions, SkippingIndexType, COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE,
-    COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
-    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
-    COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
-    COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY,
-    FULLTEXT_KEY, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY, TIME_INDEX_KEY,
+    COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE, COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
+    COLUMN_FULLTEXT_OPT_KEY_BACKEND, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
+    COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE, COLUMN_FULLTEXT_OPT_KEY_GRANULARITY,
+    COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE, COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY,
+    COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY, ColumnExtType, ColumnSchema, FULLTEXT_KEY,
+    FulltextAnalyzer, FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata,
+    SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType, TIME_INDEX_KEY,
 };
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
@@ -329,7 +329,7 @@ impl TryFrom<Arc<ArrowSchema>> for Schema {
         let mut name_to_index = HashMap::with_capacity(arrow_schema.fields.len());
         for field in &arrow_schema.fields {
             let column_schema = ColumnSchema::try_from(field.as_ref())?;
-            let _ = name_to_index.insert(field.name().to_string(), column_schemas.len());
+            let _ = name_to_index.insert(field.name().clone(), column_schemas.len());
             column_schemas.push(column_schema);
         }
 
@@ -368,8 +368,7 @@ impl TryFrom<DFSchemaRef> for Schema {
     type Error = Error;
 
     fn try_from(value: DFSchemaRef) -> Result<Self> {
-        let s: ArrowSchema = value.as_ref().into();
-        s.try_into()
+        value.inner().clone().try_into()
     }
 }
 
@@ -487,10 +486,12 @@ mod tests {
                 .with_time_index(true),
             ColumnSchema::new("col2", ConcreteDataType::float64_datatype(), false),
         ];
-        assert!(SchemaBuilder::try_from(column_schemas)
-            .unwrap()
-            .build()
-            .is_err());
+        assert!(
+            SchemaBuilder::try_from(column_schemas)
+                .unwrap()
+                .build()
+                .is_err()
+        );
 
         let column_schemas = vec![
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
@@ -498,9 +499,11 @@ mod tests {
                 .with_time_index(true),
         ];
 
-        assert!(SchemaBuilder::try_from(column_schemas)
-            .unwrap()
-            .build()
-            .is_err());
+        assert!(
+            SchemaBuilder::try_from(column_schemas)
+                .unwrap()
+                .build()
+                .is_err()
+        );
     }
 }

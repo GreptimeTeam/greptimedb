@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -23,7 +24,7 @@ use index::error::Result as IndexResult;
 use index::external_provider::ExternalTempFileProvider;
 use object_store::util::{self, normalize_dir};
 use snafu::ResultExt;
-use store_api::storage::{ColumnId, RegionId};
+use store_api::storage::{ColumnId, FileId, RegionId};
 use uuid::Uuid;
 
 use crate::access_layer::new_fs_cache_store;
@@ -33,7 +34,6 @@ use crate::metrics::{
     INDEX_INTERMEDIATE_READ_OP_TOTAL, INDEX_INTERMEDIATE_SEEK_OP_TOTAL,
     INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL, INDEX_INTERMEDIATE_WRITE_OP_TOTAL,
 };
-use crate::sst::file::FileId;
 use crate::sst::index::store::InstrumentedStore;
 
 const INTERMEDIATE_DIR: &str = "__intm";
@@ -54,13 +54,27 @@ impl IntermediateManager {
             aux_path.as_ref()
         );
 
+        // Remove the intermediate directory on bankground
+        let aux_pb = PathBuf::from(aux_path.as_ref());
+        let intm_dir = aux_pb.join(INTERMEDIATE_DIR);
+        let deleted_dir = intm_dir.with_extension(format!("deleted-{}", Uuid::new_v4()));
+        match tokio::fs::rename(&intm_dir, &deleted_dir).await {
+            Ok(_) => {
+                tokio::spawn(async move {
+                    if let Err(err) = tokio::fs::remove_dir_all(deleted_dir).await {
+                        warn!(err; "Failed to remove intermediate directory");
+                    }
+                });
+            }
+            Err(err) => {
+                if err.kind() != ErrorKind::NotFound {
+                    warn!(err; "Failed to rename intermediate directory");
+                }
+            }
+        }
+
         let store = new_fs_cache_store(&normalize_dir(aux_path.as_ref())).await?;
         let store = InstrumentedStore::new(store);
-
-        // Remove all garbage intermediate files from previous runs.
-        if let Err(err) = store.remove_all(INTERMEDIATE_DIR).await {
-            warn!(err; "Failed to remove garbage intermediate files");
-        }
 
         Ok(Self {
             base_dir: PathBuf::from(aux_path.as_ref()),
@@ -93,6 +107,24 @@ impl IntermediateManager {
             .join(region_id.as_u64().to_string())
             .join(sst_file_id.to_string())
             .join(format!("fulltext-{column_id}-{uuid}"))
+    }
+
+    /// Prunes the intermediate directory for SST files.
+    pub(crate) async fn prune_sst_dir(
+        &self,
+        region_id: &RegionId,
+        sst_file_id: &FileId,
+    ) -> Result<()> {
+        let region_id = region_id.as_u64();
+        let sst_dir = format!("{INTERMEDIATE_DIR}/{region_id}/{sst_file_id}/");
+        self.store.remove_all(&sst_dir).await
+    }
+
+    /// Prunes the intermediate directory for region files.
+    pub(crate) async fn prune_region_dir(&self, region_id: &RegionId) -> Result<()> {
+        let region_id = region_id.as_u64();
+        let region_dir = format!("{INTERMEDIATE_DIR}/{region_id}/");
+        self.store.remove_all(&region_dir).await
     }
 }
 
@@ -242,10 +274,9 @@ mod tests {
     use common_test_util::temp_dir;
     use futures::{AsyncReadExt, AsyncWriteExt};
     use regex::Regex;
-    use store_api::storage::RegionId;
+    use store_api::storage::{FileId, RegionId};
 
     use super::*;
-    use crate::sst::file::FileId;
 
     #[tokio::test]
     async fn test_manager() {
@@ -263,9 +294,65 @@ mod tests {
         let _manager = IntermediateManager::init_fs(path).await.unwrap();
 
         // cleaned up by `init_fs`
-        assert!(!tokio::fs::try_exists(format!("{path}/{INTERMEDIATE_DIR}"))
+        assert!(
+            !tokio::fs::try_exists(format!("{path}/{INTERMEDIATE_DIR}"))
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_dir() {
+        let temp_dir = temp_dir::create_temp_dir("test_cleanup_dir_");
+
+        let region_id = RegionId::new(0, 0);
+        let sst_file_id = FileId::random();
+        let region_dir = temp_dir
+            .path()
+            .join(INTERMEDIATE_DIR)
+            .join(region_id.as_u64().to_string());
+        let sst_dir = region_dir.join(sst_file_id.to_string());
+
+        let path = temp_dir.path().to_str().unwrap();
+        let manager = IntermediateManager::init_fs(path).await.unwrap();
+
+        let location = IntermediateLocation::new(&region_id, &sst_file_id);
+        let temp_file_provider = TempFileProvider::new(location, manager.clone());
+
+        let mut f1 = temp_file_provider
+            .create("sky", "000000000000")
             .await
-            .unwrap());
+            .unwrap();
+        f1.write_all(b"hello").await.unwrap();
+        f1.flush().await.unwrap();
+        f1.close().await.unwrap();
+
+        let mut f2 = temp_file_provider
+            .create("sky", "000000000001")
+            .await
+            .unwrap();
+        f2.write_all(b"world").await.unwrap();
+        f2.flush().await.unwrap();
+        f2.close().await.unwrap();
+
+        temp_file_provider.cleanup().await.unwrap();
+
+        // sst_dir and region_dir still exists
+        assert!(tokio::fs::try_exists(&sst_dir).await.unwrap());
+        assert!(tokio::fs::try_exists(&region_dir).await.unwrap());
+
+        // sst_dir should be deleted, region_dir still exists
+        manager
+            .prune_sst_dir(&region_id, &sst_file_id)
+            .await
+            .unwrap();
+        assert!(tokio::fs::try_exists(&region_dir).await.unwrap());
+        assert!(!tokio::fs::try_exists(&sst_dir).await.unwrap());
+
+        // sst_dir, region_dir should be deleted
+        manager.prune_region_dir(&region_id).await.unwrap();
+        assert!(!tokio::fs::try_exists(&sst_dir).await.unwrap());
+        assert!(!tokio::fs::try_exists(&region_dir).await.unwrap());
     }
 
     #[test]
@@ -316,9 +403,11 @@ mod tests {
         assert_eq!(pi.next().unwrap(), INTERMEDIATE_DIR);
         assert_eq!(pi.next().unwrap(), "0"); // region id
         assert_eq!(pi.next().unwrap(), OsStr::new(&sst_file_id.to_string())); // sst file id
-        assert!(Regex::new(r"fulltext-1-\w{8}-\w{4}-\w{4}-\w{4}-\w{12}")
-            .unwrap()
-            .is_match(&pi.next().unwrap().to_string_lossy())); // fulltext path
+        assert!(
+            Regex::new(r"fulltext-1-\w{8}-\w{4}-\w{4}-\w{4}-\w{12}")
+                .unwrap()
+                .is_match(&pi.next().unwrap().to_string_lossy())
+        ); // fulltext path
         assert!(pi.next().is_none());
     }
 
@@ -368,12 +457,14 @@ mod tests {
 
         provider.cleanup().await.unwrap();
 
-        assert!(provider
-            .manager
-            .store()
-            .list(location.dir_to_cleanup())
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            provider
+                .manager
+                .store()
+                .list(location.dir_to_cleanup())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

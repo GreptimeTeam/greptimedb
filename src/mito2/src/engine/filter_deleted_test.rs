@@ -21,15 +21,25 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
-    build_rows, delete_rows, flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
+    CreateRequestBuilder, TestEnv, build_rows, delete_rows, flush_region, put_rows, rows_schema,
 };
 
 #[tokio::test]
 async fn test_scan_without_filtering_deleted() {
+    test_scan_without_filtering_deleted_with_format(false).await;
+    test_scan_without_filtering_deleted_with_format(true).await;
+}
+
+async fn test_scan_without_filtering_deleted_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
 

@@ -13,6 +13,8 @@
 // limitations under the License.
 
 pub mod builder;
+#[allow(clippy::print_stdout)]
+mod objbench;
 
 use std::path::Path;
 use std::time::Duration;
@@ -20,20 +22,23 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::Parser;
 use common_config::Configurable;
-use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
+use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_telemetry::{info, warn};
 use common_wal::config::DatanodeWalConfig;
+use datanode::config::RegionEngineConfig;
 use datanode::datanode::Datanode;
 use meta_client::MetaClientOptions;
-use snafu::{ensure, ResultExt};
+use serde::{Deserialize, Serialize};
+use snafu::{ResultExt, ensure};
 use tracing_appender::non_blocking::WorkerGuard;
 
+use crate::App;
 use crate::datanode::builder::InstanceBuilder;
+use crate::datanode::objbench::ObjbenchCommand;
 use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::App;
 
 pub const APP_NAME: &str = "greptime-datanode";
 
@@ -89,7 +94,7 @@ impl App for Instance {
 #[derive(Parser)]
 pub struct Command {
     #[clap(subcommand)]
-    subcmd: SubCommand,
+    pub subcmd: SubCommand,
 }
 
 impl Command {
@@ -100,13 +105,26 @@ impl Command {
     pub fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
         match &self.subcmd {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
+            SubCommand::Objbench(_) => {
+                // For objbench command, we don't need to load DatanodeOptions
+                // It's a standalone utility command
+                let mut opts = datanode::config::DatanodeOptions::default();
+                opts.sanitize();
+                Ok(DatanodeOptions {
+                    runtime: Default::default(),
+                    plugins: Default::default(),
+                    component: opts,
+                })
+            }
         }
     }
 }
 
 #[derive(Parser)]
-enum SubCommand {
+pub enum SubCommand {
     Start(StartCommand),
+    /// Object storage benchmark tool
+    Objbench(ObjbenchCommand),
 }
 
 impl SubCommand {
@@ -116,12 +134,33 @@ impl SubCommand {
                 info!("Building datanode with {:#?}", cmd);
                 builder.build().await
             }
+            SubCommand::Objbench(cmd) => {
+                cmd.run().await?;
+                std::process::exit(0);
+            }
         }
     }
 }
 
+/// Storage engine config
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct StorageConfig {
+    /// The working directory of database
+    pub data_home: String,
+    #[serde(flatten)]
+    pub store: object_store::config::ObjectStoreConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+struct StorageConfigWrapper {
+    storage: StorageConfig,
+    region_engine: Vec<RegionEngineConfig>,
+}
+
 #[derive(Debug, Parser, Default)]
-struct StartCommand {
+pub struct StartCommand {
     #[clap(long)]
     node_id: Option<u64>,
     /// The address to bind the gRPC server.
@@ -149,7 +188,7 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
         let mut opts = DatanodeOptions::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
@@ -187,29 +226,39 @@ impl StartCommand {
         if let Some(addr) = &self.rpc_bind_addr {
             opts.grpc.bind_addr.clone_from(addr);
         } else if let Some(addr) = &opts.rpc_addr {
-            warn!("Use the deprecated attribute `DatanodeOptions.rpc_addr`, please use `grpc.addr` instead.");
+            warn!(
+                "Use the deprecated attribute `DatanodeOptions.rpc_addr`, please use `grpc.addr` instead."
+            );
             opts.grpc.bind_addr.clone_from(addr);
         }
 
         if let Some(server_addr) = &self.rpc_server_addr {
             opts.grpc.server_addr.clone_from(server_addr);
         } else if let Some(server_addr) = &opts.rpc_hostname {
-            warn!("Use the deprecated attribute `DatanodeOptions.rpc_hostname`, please use `grpc.hostname` instead.");
+            warn!(
+                "Use the deprecated attribute `DatanodeOptions.rpc_hostname`, please use `grpc.hostname` instead."
+            );
             opts.grpc.server_addr.clone_from(server_addr);
         }
 
         if let Some(runtime_size) = opts.rpc_runtime_size {
-            warn!("Use the deprecated attribute `DatanodeOptions.rpc_runtime_size`, please use `grpc.runtime_size` instead.");
+            warn!(
+                "Use the deprecated attribute `DatanodeOptions.rpc_runtime_size`, please use `grpc.runtime_size` instead."
+            );
             opts.grpc.runtime_size = runtime_size;
         }
 
         if let Some(max_recv_message_size) = opts.rpc_max_recv_message_size {
-            warn!("Use the deprecated attribute `DatanodeOptions.rpc_max_recv_message_size`, please use `grpc.max_recv_message_size` instead.");
+            warn!(
+                "Use the deprecated attribute `DatanodeOptions.rpc_max_recv_message_size`, please use `grpc.max_recv_message_size` instead."
+            );
             opts.grpc.max_recv_message_size = max_recv_message_size;
         }
 
         if let Some(max_send_message_size) = opts.rpc_max_send_message_size {
-            warn!("Use the deprecated attribute `DatanodeOptions.rpc_max_send_message_size`, please use `grpc.max_send_message_size` instead.");
+            warn!(
+                "Use the deprecated attribute `DatanodeOptions.rpc_max_send_message_size`, please use `grpc.max_send_message_size` instead."
+            );
             opts.grpc.max_send_message_size = max_send_message_size;
         }
 
@@ -430,20 +479,24 @@ mod tests {
 
     #[test]
     fn test_try_from_cmd() {
-        assert!((StartCommand {
-            metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
-            ..Default::default()
-        })
-        .load_options(&GlobalOptions::default())
-        .is_err());
+        assert!(
+            (StartCommand {
+                metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
+                ..Default::default()
+            })
+            .load_options(&GlobalOptions::default())
+            .is_err()
+        );
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
-        assert!((StartCommand {
-            node_id: Some(42),
-            ..Default::default()
-        })
-        .load_options(&GlobalOptions::default())
-        .is_ok());
+        assert!(
+            (StartCommand {
+                node_id: Some(42),
+                ..Default::default()
+            })
+            .load_options(&GlobalOptions::default())
+            .is_ok()
+        );
     }
 
     #[test]

@@ -15,25 +15,25 @@
 use std::fmt::Debug;
 use std::sync::Exclusive;
 
-use ::auth::{userinfo_by_name, Identity, Password, UserInfoRef, UserProviderRef};
+use ::auth::{Identity, Password, UserInfoRef, UserProviderRef, userinfo_by_name};
 use async_trait::async_trait;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use futures::{Sink, SinkExt};
 use pgwire::api::auth::StartupHandler;
-use pgwire::api::{auth, ClientInfo, PgWireConnectionState};
+use pgwire::api::{ClientInfo, PgWireConnectionState, auth};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
-use pgwire::messages::startup::Authentication;
+use pgwire::messages::startup::{Authentication, SecretKey};
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use session::Session;
 use snafu::IntoError;
 
 use crate::error::{AuthSnafu, Result};
 use crate::metrics::METRIC_AUTH_FAILURE;
+use crate::postgres::PostgresServerHandlerInner;
 use crate::postgres::types::PgErrorCode;
 use crate::postgres::utils::convert_err;
-use crate::postgres::PostgresServerHandlerInner;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 pub(crate) struct PgLoginVerifier {
@@ -127,7 +127,8 @@ where
 
     // pass generated process id and secret key to client, this information will
     // be sent to postgres client for query cancellation.
-    client.set_pid_and_secret_key(session.process_id() as i32, rand::random::<i32>());
+    // use all 0 before we actually supported query cancellation
+    client.set_pid_and_secret_key(0, SecretKey::I32(0));
     // set userinfo outside
 }
 

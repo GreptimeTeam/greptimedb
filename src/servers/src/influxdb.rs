@@ -15,8 +15,9 @@
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
 use common_grpc::precision::Precision;
+use common_query::prelude::greptime_timestamp;
 use hyper::Request;
-use influxdb_line_protocol::{parse_lines, FieldValue};
+use influxdb_line_protocol::{FieldValue, parse_lines};
 use snafu::ResultExt;
 
 use crate::error::{Error, InfluxdbLineProtocolSnafu};
@@ -24,7 +25,6 @@ use crate::row_writer::{self, MultiTableData};
 
 const INFLUXDB_API_PATH_NAME: &str = "influxdb";
 const INFLUXDB_API_V2_PATH_NAME: &str = "influxdb/api/v2";
-const INFLUXDB_TIMESTAMP_COLUMN_NAME: &str = "ts";
 const DEFAULT_TIME_PRECISION: Precision = Precision::Nanosecond;
 
 #[inline]
@@ -91,7 +91,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             // timestamp
             row_writer::write_ts_to_nanos(
                 table_data,
-                INFLUXDB_TIMESTAMP_COLUMN_NAME,
+                greptime_timestamp(),
                 ts,
                 precision,
                 &mut one_row,
@@ -117,6 +117,7 @@ fn unwrap_or_default_precision(precision: Option<Precision>) -> Precision {
 mod tests {
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, RowInsertRequests, Rows, SemanticType};
+    use common_query::prelude::greptime_timestamp;
 
     use crate::influxdb::InfluxdbRequest;
 
@@ -193,7 +194,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                         }
                     }
                 }
-                "ts" => {
+                _ if column_schema.column_name == greptime_timestamp() => {
                     assert_eq!(
                         ColumnDataType::TimestampNanosecond as i32,
                         column_schema.datatype
@@ -268,7 +269,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                         }
                     }
                 }
-                "ts" => {
+                _ if column_schema.column_name == greptime_timestamp() => {
                     assert_eq!(
                         ColumnDataType::TimestampNanosecond as i32,
                         column_schema.datatype

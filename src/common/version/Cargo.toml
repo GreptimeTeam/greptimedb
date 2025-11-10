@@ -11,11 +11,11 @@ workspace = true
 codec = ["dep:serde"]
 
 [dependencies]
-const_format = "0.2"
+const_format.workspace = true
 serde = { workspace = true, optional = true }
-shadow-rs.workspace = true
+shadow-rs = { version = "1.2.1", default-features = false }
 
 [build-dependencies]
 build-data = "0.2"
 cargo-manifest = "0.19"
-shadow-rs.workspace = true
+shadow-rs = { version = "1.2.1", default-features = false, features = ["build"] }

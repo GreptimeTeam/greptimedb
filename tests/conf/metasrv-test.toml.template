@@ -21,3 +21,6 @@ topic_name_prefix = "distributed_test_greptimedb_wal_topic"
 auto_prune_interval = "30s"
 trigger_flush_threshold = 100
 {{ endif }}
+
+[stats_persistence]
+ttl = "0s"

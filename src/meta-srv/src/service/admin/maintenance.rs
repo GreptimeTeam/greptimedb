@@ -14,19 +14,21 @@
 
 use std::collections::HashMap;
 
+use axum::Json;
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
-use tonic::codegen::http::Response;
 
 use crate::error::{
     self, MissingRequiredParameterSnafu, ParseBoolSnafu, Result, RuntimeSwitchManagerSnafu,
     UnsupportedSnafu,
 };
-use crate::service::admin::util::{to_json_response, to_not_found_response};
 use crate::service::admin::HttpHandler;
+use crate::service::admin::util::{ErrorHandler, to_json_response, to_not_found_response};
 
 #[derive(Clone)]
 pub struct MaintenanceHandler {
@@ -36,6 +38,39 @@ pub struct MaintenanceHandler {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct MaintenanceResponse {
     enabled: bool,
+}
+
+/// Get the maintenance mode.
+#[axum_macros::debug_handler]
+pub(crate) async fn status(State(handler): State<MaintenanceHandler>) -> Response {
+    handler
+        .get_maintenance()
+        .await
+        .map(Json)
+        .map_err(ErrorHandler::new)
+        .into_response()
+}
+
+/// Set the maintenance mode.
+#[axum_macros::debug_handler]
+pub(crate) async fn set(State(handler): State<MaintenanceHandler>) -> Response {
+    handler
+        .set_maintenance()
+        .await
+        .map(Json)
+        .map_err(ErrorHandler::new)
+        .into_response()
+}
+
+/// Unset the maintenance mode.
+#[axum_macros::debug_handler]
+pub(crate) async fn unset(State(handler): State<MaintenanceHandler>) -> Response {
+    handler
+        .unset_maintenance()
+        .await
+        .map(Json)
+        .map_err(ErrorHandler::new)
+        .into_response()
 }
 
 impl TryFrom<MaintenanceResponse> for String {
@@ -115,7 +150,7 @@ impl HttpHandler for MaintenanceHandler {
         path: &str,
         method: http::Method,
         params: &HashMap<String, String>,
-    ) -> crate::Result<Response<String>> {
+    ) -> crate::Result<http::Response<String>> {
         match method {
             http::Method::GET => {
                 if path.ends_with(STATUS_SUFFIX) {
@@ -142,7 +177,9 @@ impl HttpHandler for MaintenanceHandler {
             http::Method::PUT => {
                 // Handle PUT request to '/admin/maintenance' with URL parameters. (The legacy version)
                 if path.ends_with(MAINTENANCE_PATH) {
-                    warn!("Found PUT request to '/admin/maintenance', it's deprecated, will be removed in the future");
+                    warn!(
+                        "Found PUT request to '/admin/maintenance', it's deprecated, will be removed in the future"
+                    );
                     let response = self.handle_legacy_maintenance(params).await?;
                     to_json_response(response)
                 } else {
@@ -160,7 +197,9 @@ impl HttpHandler for MaintenanceHandler {
                     to_json_response(response)
                 } else if path.ends_with(MAINTENANCE_PATH) {
                     // Handle POST request to '/admin/maintenance' with URL parameters. (The legacy version)
-                    warn!("Found PUT request to '/admin/maintenance', it's deprecated, will be removed in the future");
+                    warn!(
+                        "Found PUT request to '/admin/maintenance', it's deprecated, will be removed in the future"
+                    );
                     let response = self.handle_legacy_maintenance(params).await?;
                     to_json_response(response)
                 } else {

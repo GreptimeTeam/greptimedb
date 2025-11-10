@@ -12,17 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod authorize;
 pub mod builder;
 mod cancellation;
+pub mod context_auth;
 mod database;
 pub mod flight;
 pub mod frontend_grpc_handler;
 pub mod greptime_handler;
+pub mod memory_limit;
 pub mod prom_query_gateway;
 pub mod region_server;
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use api::v1::health_check_server::{HealthCheck, HealthCheckServer};
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
@@ -33,31 +35,31 @@ use common_grpc::channel_manager::{
 };
 use common_telemetry::{error, info, warn};
 use futures::FutureExt;
-use otel_arrow_rust::opentelemetry::ArrowMetricsServiceServer;
+use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsServiceServer;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
-use tonic::service::interceptor::InterceptedService;
+use tokio::sync::oneshot::{self, Receiver, Sender};
 use tonic::service::Routes;
-use tonic::transport::server::TcpIncoming;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::ServerTlsConfig;
+use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
-use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
+use tonic_reflection::server::v1::{ServerReflection, ServerReflectionServer};
 
-use crate::error::{
-    AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu,
-};
+use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
 use crate::metrics::MetricsMiddlewareLayer;
 use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
+use crate::request_limiter::RequestMemoryLimiter;
 use crate::server::Server;
 use crate::tls::TlsOption;
 
 type TonicResult<T> = std::result::Result<T, Status>;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct GrpcOptions {
     /// The address to bind the gRPC server.
     pub bind_addr: String,
@@ -67,11 +69,18 @@ pub struct GrpcOptions {
     pub max_recv_message_size: ReadableSize,
     /// Max gRPC sending(encoding) message size
     pub max_send_message_size: ReadableSize,
+    /// Maximum total memory for all concurrent gRPC request messages. 0 disables the limit.
+    pub max_total_message_memory: ReadableSize,
     /// Compression mode in Arrow Flight service.
     pub flight_compression: FlightCompression,
     pub runtime_size: usize,
     #[serde(default = "Default::default")]
     pub tls: TlsOption,
+    /// Maximum time that a channel may exist.
+    /// Useful when the server wants to control the reconnection of its clients.
+    /// Default to `None`, means infinite.
+    #[serde(with = "humantime_serde")]
+    pub max_connection_age: Option<Duration>,
 }
 
 impl GrpcOptions {
@@ -111,12 +120,16 @@ impl GrpcOptions {
         GrpcServerConfig {
             max_recv_message_size: self.max_recv_message_size.as_bytes() as usize,
             max_send_message_size: self.max_send_message_size.as_bytes() as usize,
+            max_total_message_memory: self.max_total_message_memory.as_bytes() as usize,
             tls: self.tls.clone(),
+            max_connection_age: self.max_connection_age,
         }
     }
 }
 
 const DEFAULT_GRPC_ADDR_PORT: &str = "4001";
+
+const DEFAULT_INTERNAL_GRPC_ADDR_PORT: &str = "4010";
 
 impl Default for GrpcOptions {
     fn default() -> Self {
@@ -126,14 +139,34 @@ impl Default for GrpcOptions {
             server_addr: String::new(),
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+            max_total_message_memory: ReadableSize(0),
             flight_compression: FlightCompression::ArrowIpc,
             runtime_size: 8,
             tls: TlsOption::default(),
+            max_connection_age: None,
         }
     }
 }
 
 impl GrpcOptions {
+    /// Default options for internal gRPC server.
+    /// The internal gRPC server is used for communication between different nodes in cluster.
+    /// It is not exposed to the outside world.
+    pub fn internal_default() -> Self {
+        Self {
+            bind_addr: format!("127.0.0.1:{}", DEFAULT_INTERNAL_GRPC_ADDR_PORT),
+            // If hostname is not set, the server will use the local ip address as the hostname.
+            server_addr: format!("127.0.0.1:{}", DEFAULT_INTERNAL_GRPC_ADDR_PORT),
+            max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
+            max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+            max_total_message_memory: ReadableSize(0),
+            flight_compression: FlightCompression::ArrowIpc,
+            runtime_size: 8,
+            tls: TlsOption::default(),
+            max_connection_age: None,
+        }
+    }
+
     pub fn with_bind_addr(mut self, bind_addr: &str) -> Self {
         self.bind_addr = bind_addr.to_string();
         self
@@ -189,6 +222,9 @@ pub struct GrpcServer {
         >,
     >,
     bind_addr: Option<SocketAddr>,
+    name: Option<String>,
+    config: GrpcServerConfig,
+    memory_limiter: RequestMemoryLimiter,
 }
 
 /// Grpc Server configuration
@@ -198,7 +234,13 @@ pub struct GrpcServerConfig {
     pub max_recv_message_size: usize,
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: usize,
+    /// Maximum total memory for all concurrent gRPC request messages. 0 disables the limit.
+    pub max_total_message_memory: usize,
     pub tls: TlsOption,
+    /// Maximum time that a channel may exist.
+    /// Useful when the server wants to control the reconnection of its clients.
+    /// Default to `None`, means infinite.
+    pub max_connection_age: Option<Duration>,
 }
 
 impl Default for GrpcServerConfig {
@@ -206,7 +248,9 @@ impl Default for GrpcServerConfig {
         Self {
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE.as_bytes() as usize,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE.as_bytes() as usize,
+            max_total_message_memory: 0,
             tls: TlsOption::default(),
+            max_connection_age: None,
         }
     }
 }
@@ -244,6 +288,11 @@ impl GrpcServer {
         }
         Ok(())
     }
+
+    /// Get the memory limiter for monitoring current memory usage
+    pub fn memory_limiter(&self) -> &RequestMemoryLimiter {
+        &self.memory_limiter
+    }
 }
 
 pub struct HealthCheckHandler;
@@ -264,10 +313,10 @@ pub const GRPC_SERVER: &str = "GRPC_SERVER";
 impl Server for GrpcServer {
     async fn shutdown(&self) -> Result<()> {
         let mut shutdown_tx = self.shutdown_tx.lock().await;
-        if let Some(tx) = shutdown_tx.take() {
-            if tx.send(()).is_err() {
-                info!("Receiver dropped, the grpc server has already exited");
-            }
+        if let Some(tx) = shutdown_tx.take()
+            && tx.send(()).is_err()
+        {
+            info!("Receiver dropped, the grpc server has already exited");
         }
         info!("Shutdown grpc server");
 
@@ -298,9 +347,8 @@ impl Server for GrpcServer {
                 .await
                 .context(TcpBindSnafu { addr })?;
             let addr = listener.local_addr().context(TcpBindSnafu { addr })?;
-            let incoming =
-                TcpIncoming::from_listener(listener, true, None).context(TcpIncomingSnafu)?;
-            info!("gRPC server is bound to {}", addr);
+            let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
+            info!("gRPC server(name={}) is bound to {}", self.name(), addr);
 
             *shutdown_tx = Some(tx);
 
@@ -314,6 +362,10 @@ impl Server for GrpcServer {
         let mut builder = tonic::transport::Server::builder().layer(metrics_layer);
         if let Some(tls_config) = self.tls_config.clone() {
             builder = builder.tls_config(tls_config).context(StartGrpcSnafu)?;
+        }
+
+        if let Some(max_connection_age) = self.config.max_connection_age {
+            builder = builder.max_connection_age(max_connection_age);
         }
 
         let mut builder = builder
@@ -342,7 +394,11 @@ impl Server for GrpcServer {
     }
 
     fn name(&self) -> &str {
-        GRPC_SERVER
+        if let Some(name) = &self.name {
+            name
+        } else {
+            GRPC_SERVER
+        }
     }
 
     fn bind_addr(&self) -> Option<SocketAddr> {

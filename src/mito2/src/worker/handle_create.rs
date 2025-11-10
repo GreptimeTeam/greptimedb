@@ -23,7 +23,7 @@ use store_api::region_request::{AffectedRows, RegionCreateRequest};
 use store_api::storage::RegionId;
 
 use crate::error::Result;
-use crate::region::opener::{check_recovered_region, RegionOpener};
+use crate::region::opener::{RegionOpener, check_recovered_region};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -51,6 +51,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             builder.push_column_metadata(column);
         }
         builder.primary_key(request.primary_key);
+        if let Some(expr_json) = request.partition_expr_json.as_ref() {
+            builder.partition_expr_json(Some(expr_json.clone()));
+        }
 
         // Create a MitoRegion from the RegionMetadata.
         let region = RegionOpener::new(
@@ -63,6 +66,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.puffin_manager_factory.clone(),
             self.intermediate_manager.clone(),
             self.time_provider.clone(),
+            self.file_ref_manager.clone(),
+            self.partition_expr_fetcher.clone(),
         )
         .metadata_builder(builder)
         .parse_options(request.options)?

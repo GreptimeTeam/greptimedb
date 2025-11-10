@@ -31,18 +31,18 @@ use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::{find_leaders, RegionRoute};
+use common_meta::rpc::router::{RegionRoute, find_leaders};
 use common_telemetry::{error, info, warn};
 use futures::TryStreamExt;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use store_api::storage::TableId;
 
+use crate::Tool;
+use crate::common::StoreConfig;
 use crate::error::{
     InvalidArgumentsSnafu, Result, SendRequestToDatanodeSnafu, TableMetadataSnafu, UnexpectedSnafu,
 };
-use crate::metadata::common::StoreConfig;
 use crate::metadata::utils::{FullTableMetadata, IteratorInput, TableMetadataIterator};
-use crate::Tool;
 
 /// Repair metadata of logical tables.
 #[derive(Debug, Default, Parser)]
@@ -138,13 +138,7 @@ impl RepairTool {
 
             let table_names = table_names
                 .iter()
-                .map(|table_name| {
-                    (
-                        catalog.to_string(),
-                        schema_name.to_string(),
-                        table_name.to_string(),
-                    )
-                })
+                .map(|table_name| (catalog.clone(), schema_name.clone(), table_name.clone()))
                 .collect::<Vec<_>>();
             return Ok(IteratorInput::new_table_names(table_names));
         } else if !self.table_ids.is_empty() {
@@ -301,7 +295,10 @@ impl RepairTool {
         warn!(
             "Sending alter table requests to datanodes for table: {} failed for the datanodes: {:?}",
             full_table_name,
-            failed_peers.iter().map(|(peer, _)| peer.id).collect::<Vec<_>>()
+            failed_peers
+                .iter()
+                .map(|(peer, _)| peer.id)
+                .collect::<Vec<_>>()
         );
 
         let create_table_expr =
@@ -320,8 +317,7 @@ impl RepairTool {
             }
             info!(
                 "Region not found for table: {}, datanode: {}, trying to create the logical table on that datanode",
-                full_table_name,
-                peer.id
+                full_table_name, peer.id
             );
 
             // If the alter table request fails for any datanode, we attempt to create the table on that datanode

@@ -19,17 +19,21 @@ use std::path::Path;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
+use common_stat::{get_total_cpu_cores, get_total_memory_readable};
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 use crate::error::Result;
+use crate::gc::GcConfig;
 use crate::memtable::MemtableConfig;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
 /// Default channel size for parallel scan task.
 pub(crate) const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
+/// Default maximum number of SST files to scan concurrently.
+pub(crate) const DEFAULT_MAX_CONCURRENT_SCAN_FILES: usize = 384;
 
 // Use `1/GLOBAL_WRITE_BUFFER_SIZE_FACTOR` of OS memory as global write buffer size in default mode
 const GLOBAL_WRITE_BUFFER_SIZE_FACTOR: u64 = 8;
@@ -63,10 +67,23 @@ pub struct MitoConfig {
     /// Number of meta action updated to trigger a new checkpoint
     /// for the manifest (default 10).
     pub manifest_checkpoint_distance: u64,
+    /// Number of removed files to keep in manifest's `removed_files` field before also
+    /// remove them from `removed_files`. Mostly for debugging purpose.
+    /// If set to 0, it will only use `keep_removed_file_ttl` to decide when to remove files
+    /// from `removed_files` field.
+    pub experimental_manifest_keep_removed_file_count: usize,
+    /// How long to keep removed files in the `removed_files` field of manifest
+    /// after they are removed from manifest.
+    /// files will only be removed from `removed_files` field
+    /// if both `keep_removed_file_count` and `keep_removed_file_ttl` is reached.
+    #[serde(with = "humantime_serde")]
+    pub experimental_manifest_keep_removed_file_ttl: Duration,
     /// Whether to compress manifest and checkpoint file by gzip (default false).
     pub compress_manifest: bool,
 
     // Background job configs:
+    /// Max number of running background index build jobs (default: 1/8 of cpu cores).
+    pub max_background_index_builds: usize,
     /// Max number of running background flush jobs (default: 1/2 of cpu cores).
     pub max_background_flushes: usize,
     /// Max number of running background compaction jobs (default: 1/4 of cpu cores).
@@ -107,6 +124,8 @@ pub struct MitoConfig {
     pub sst_write_buffer_size: ReadableSize,
     /// Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
     pub parallel_scan_channel_size: usize,
+    /// Maximum number of SST files to scan concurrently (default 384).
+    pub max_concurrent_scan_files: usize,
     /// Whether to allow stale entries read during replay.
     pub allow_stale_entries: bool,
 
@@ -126,6 +145,12 @@ pub struct MitoConfig {
     /// To align with the old behavior, the default value is 0 (no restrictions).
     #[serde(with = "humantime_serde")]
     pub min_compaction_interval: Duration,
+
+    /// Whether to enable experimental flat format as the default format.
+    /// When enabled, forces using BulkMemtable and BulkMemtableBuilder.
+    pub default_experimental_flat_format: bool,
+
+    pub gc: GcConfig,
 }
 
 impl Default for MitoConfig {
@@ -135,10 +160,13 @@ impl Default for MitoConfig {
             worker_channel_size: 128,
             worker_request_batch_size: 64,
             manifest_checkpoint_distance: 10,
+            experimental_manifest_keep_removed_file_count: 256,
+            experimental_manifest_keep_removed_file_ttl: Duration::from_secs(60 * 60),
             compress_manifest: false,
+            max_background_index_builds: divide_num_cpus(8),
             max_background_flushes: divide_num_cpus(2),
             max_background_compactions: divide_num_cpus(4),
-            max_background_purges: common_config::utils::get_cpus(),
+            max_background_purges: get_total_cpu_cores(),
             auto_flush_interval: Duration::from_secs(30 * 60),
             global_write_buffer_size: ReadableSize::gb(1),
             global_write_buffer_reject_size: ReadableSize::gb(2),
@@ -152,6 +180,7 @@ impl Default for MitoConfig {
             write_cache_ttl: None,
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
+            max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             allow_stale_entries: false,
             index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),
@@ -159,10 +188,12 @@ impl Default for MitoConfig {
             bloom_filter_index: BloomFilterConfig::default(),
             memtable: MemtableConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
+            default_experimental_flat_format: false,
+            gc: GcConfig::default(),
         };
 
         // Adjust buffer and cache size according to system memory if we can.
-        if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+        if let Some(sys_memory) = get_total_memory_readable() {
             mito_config.adjust_buffer_and_cache_size(sys_memory);
         }
 
@@ -201,11 +232,9 @@ impl MitoConfig {
             self.max_background_compactions = divide_num_cpus(4);
         }
         if self.max_background_purges == 0 {
-            warn!(
-                "Sanitize max background purges 0 to {}",
-                common_config::utils::get_cpus()
-            );
-            self.max_background_purges = common_config::utils::get_cpus();
+            let cpu_cores = get_total_cpu_cores();
+            warn!("Sanitize max background purges 0 to {}", cpu_cores);
+            self.max_background_purges = cpu_cores;
         }
 
         if self.global_write_buffer_reject_size <= self.global_write_buffer_size {
@@ -285,6 +314,17 @@ impl MitoConfig {
     }
 }
 
+/// Index build mode.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexBuildMode {
+    /// Build index synchronously.
+    #[default]
+    Sync,
+    /// Build index asynchronously.
+    Async,
+}
+
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
@@ -308,6 +348,9 @@ pub struct IndexConfig {
     #[serde(with = "humantime_serde")]
     pub staging_ttl: Option<Duration>,
 
+    /// Index Build Mode
+    pub build_mode: IndexBuildMode,
+
     /// Write buffer size for creating the index.
     pub write_buffer_size: ReadableSize,
 
@@ -327,6 +370,7 @@ impl Default for IndexConfig {
             aux_path: String::new(),
             staging_size: ReadableSize::gb(2),
             staging_ttl: Some(Duration::from_secs(7 * 24 * 60 * 60)),
+            build_mode: IndexBuildMode::default(),
             write_buffer_size: ReadableSize::mb(8),
             metadata_cache_size: ReadableSize::mb(64),
             content_cache_size: ReadableSize::mb(128),
@@ -463,7 +507,7 @@ impl InvertedIndexConfig {
     pub fn mem_threshold_on_create(&self) -> Option<usize> {
         match self.mem_threshold_on_create {
             MemoryThreshold::Auto => {
-                if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+                if let Some(sys_memory) = get_total_memory_readable() {
                     Some((sys_memory / INDEX_CREATE_MEM_THRESHOLD_FACTOR).as_bytes() as usize)
                 } else {
                     Some(ReadableSize::mb(64).as_bytes() as usize)
@@ -508,7 +552,7 @@ impl FulltextIndexConfig {
     pub fn mem_threshold_on_create(&self) -> usize {
         match self.mem_threshold_on_create {
             MemoryThreshold::Auto => {
-                if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+                if let Some(sys_memory) = get_total_memory_readable() {
                     (sys_memory / INDEX_CREATE_MEM_THRESHOLD_FACTOR).as_bytes() as _
                 } else {
                     ReadableSize::mb(64).as_bytes() as _
@@ -550,7 +594,7 @@ impl BloomFilterConfig {
     pub fn mem_threshold_on_create(&self) -> Option<usize> {
         match self.mem_threshold_on_create {
             MemoryThreshold::Auto => {
-                if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+                if let Some(sys_memory) = get_total_memory_readable() {
                     Some((sys_memory / INDEX_CREATE_MEM_THRESHOLD_FACTOR).as_bytes() as usize)
                 } else {
                     Some(ReadableSize::mb(64).as_bytes() as usize)
@@ -565,7 +609,7 @@ impl BloomFilterConfig {
 /// Divide cpu num by a non-zero `divisor` and returns at least 1.
 fn divide_num_cpus(divisor: usize) -> usize {
     debug_assert!(divisor > 0);
-    let cores = common_config::utils::get_cpus();
+    let cores = get_total_cpu_cores();
     debug_assert!(cores > 0);
 
     cores.div_ceil(divisor)

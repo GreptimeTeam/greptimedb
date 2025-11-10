@@ -15,14 +15,14 @@
 pub mod cached_kv;
 
 use api::v1::meta::{
-    store_server, BatchDeleteRequest as PbBatchDeleteRequest,
-    BatchDeleteResponse as PbBatchDeleteResponse, BatchGetRequest as PbBatchGetRequest,
-    BatchGetResponse as PbBatchGetResponse, BatchPutRequest as PbBatchPutRequest,
-    BatchPutResponse as PbBatchPutResponse, CompareAndPutRequest as PbCompareAndPutRequest,
+    BatchDeleteRequest as PbBatchDeleteRequest, BatchDeleteResponse as PbBatchDeleteResponse,
+    BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse,
+    BatchPutRequest as PbBatchPutRequest, BatchPutResponse as PbBatchPutResponse,
+    CompareAndPutRequest as PbCompareAndPutRequest,
     CompareAndPutResponse as PbCompareAndPutResponse, DeleteRangeRequest as PbDeleteRangeRequest,
     DeleteRangeResponse as PbDeleteRangeResponse, PutRequest as PbPutRequest,
     PutResponse as PbPutResponse, RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse,
-    ResponseHeader,
+    ResponseHeader, store_server,
 };
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchGetRequest, BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest,
@@ -97,7 +97,7 @@ impl store_server::Store for Metasrv {
         let req = req.into_inner();
 
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
-            .with_label_values(&[self.kv_backend().name(), "batch_pub"])
+            .with_label_values(&[self.kv_backend().name(), "batch_put"])
             .start_timer();
 
         let req: BatchPutRequest = req.into();
@@ -189,8 +189,8 @@ mod tests {
     use common_telemetry::tracing_context::W3cTrace;
     use tonic::IntoRequest;
 
-    use crate::metasrv::builder::MetasrvBuilder;
     use crate::metasrv::Metasrv;
+    use crate::metasrv::builder::MetasrvBuilder;
 
     async fn new_metasrv() -> Metasrv {
         MetasrvBuilder::new()

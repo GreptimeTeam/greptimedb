@@ -21,12 +21,12 @@ use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
     RowInsertRequest, Rows, SemanticType, Value as GreptimeValue,
 };
-use axum::extract::State;
 use axum::Extension;
+use axum::extract::State;
 use axum_extra::TypedHeader;
 use bytes::Bytes;
 use chrono::DateTime;
-use common_query::prelude::GREPTIME_TIMESTAMP;
+use common_query::prelude::greptime_timestamp;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use headers::ContentType;
@@ -39,17 +39,17 @@ use pipeline::{ContextReq, PipelineContext, PipelineDefinition, SchemaInfo};
 use prost::Message;
 use quoted_string::test_utils::TestSpec;
 use session::context::{Channel, QueryContext};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
     DecodeOtlpRequestSnafu, InvalidLokiLabelsSnafu, InvalidLokiPayloadSnafu, ParseJsonSnafu,
     PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
-use crate::http::event::{LogState, PipelineIngestRequest, JSON_CONTENT_TYPE, PB_CONTENT_TYPE};
+use crate::http::HttpResponse;
+use crate::http::event::{JSON_CONTENT_TYPE, LogState, PB_CONTENT_TYPE, PipelineIngestRequest};
 use crate::http::extractor::{LogTableName, PipelineInfo};
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
-use crate::http::HttpResponse;
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_LOKI_LOGS_INGESTION_COUNTER, METRIC_LOKI_LOGS_INGESTION_ELAPSED,
     METRIC_SUCCESS_VALUE,
@@ -73,7 +73,7 @@ const LINES_KEY: &str = "values";
 lazy_static! {
     static ref LOKI_INIT_SCHEMAS: Vec<ColumnSchema> = vec![
         ColumnSchema {
-            column_name: GREPTIME_TIMESTAMP.to_string(),
+            column_name: greptime_timestamp().to_string(),
             datatype: ColumnDataType::TimestampNanosecond.into(),
             semantic_type: SemanticType::Timestamp.into(),
             datatype_extension: None,
@@ -453,7 +453,7 @@ impl From<LokiMiddleItem<VrlValue>> for LokiPipeline {
 
         let mut map = BTreeMap::new();
         map.insert(
-            KeyString::from(GREPTIME_TIMESTAMP),
+            KeyString::from(greptime_timestamp()),
             VrlValue::Timestamp(DateTime::from_timestamp_nanos(ts)),
         );
         map.insert(
@@ -586,7 +586,7 @@ impl From<LokiMiddleItem<Vec<LabelPairAdapter>>> for LokiPipeline {
 
         let mut map = BTreeMap::new();
         map.insert(
-            KeyString::from(GREPTIME_TIMESTAMP),
+            KeyString::from(greptime_timestamp()),
             VrlValue::Timestamp(DateTime::from_timestamp_nanos(ts)),
         );
         map.insert(

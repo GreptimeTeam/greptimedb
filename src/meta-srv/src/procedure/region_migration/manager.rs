@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt::Display;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -22,10 +22,10 @@ use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
-use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
+use common_procedure::{ProcedureId, ProcedureManagerRef, ProcedureWithId, watcher};
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::RegionId;
 use table::table_name::TableName;
 
@@ -554,7 +554,10 @@ mod test {
 
         let err = manager.submit_procedure(task).await.unwrap_err();
         assert_matches!(err, error::Error::LeaderPeerChanged { .. });
-        assert_eq!(err.to_string(), "Region's leader peer changed: Region's leader peer(3) is not the `from_peer`(1), region: 4398046511105(1024, 1)");
+        assert_eq!(
+            err.to_string(),
+            "Region's leader peer changed: Region's leader peer(3) is not the `from_peer`(1), region: 4398046511105(1024, 1)"
+        );
     }
 
     #[tokio::test]

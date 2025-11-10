@@ -12,23 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
-use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use lazy_static::lazy_static;
-use snafu::{OptionExt, ResultExt};
+use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{
     Certificate, Channel as InnerChannel, ClientTlsConfig, Endpoint, Identity, Uri,
 };
 use tower::Service;
 
-use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, InvalidTlsConfigSnafu, Result};
+use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, Result};
 
 const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_GRPC_REQUEST_TIMEOUT_SECS: u64 = 10;
@@ -90,39 +91,16 @@ impl ChannelManager {
         Default::default()
     }
 
-    pub fn with_config(config: ChannelConfig) -> Self {
-        let inner = Inner::with_config(config);
+    /// unified with config function that support tls config
+    /// use [`load_tls_config`] to load tls config from file system
+    pub fn with_config(config: ChannelConfig, tls_config: Option<ClientTlsConfig>) -> Self {
+        let mut inner = Inner::with_config(config.clone());
+        if let Some(tls_config) = tls_config {
+            inner.client_tls_config = Some(tls_config);
+        }
         Self {
             inner: Arc::new(inner),
         }
-    }
-
-    pub fn with_tls_config(config: ChannelConfig) -> Result<Self> {
-        let mut inner = Inner::with_config(config.clone());
-
-        // setup tls
-        let path_config = config.client_tls.context(InvalidTlsConfigSnafu {
-            msg: "no config input",
-        })?;
-
-        let server_root_ca_cert = std::fs::read_to_string(path_config.server_ca_cert_path)
-            .context(InvalidConfigFilePathSnafu)?;
-        let server_root_ca_cert = Certificate::from_pem(server_root_ca_cert);
-        let client_cert = std::fs::read_to_string(path_config.client_cert_path)
-            .context(InvalidConfigFilePathSnafu)?;
-        let client_key = std::fs::read_to_string(path_config.client_key_path)
-            .context(InvalidConfigFilePathSnafu)?;
-        let client_identity = Identity::from_pem(client_cert, client_key);
-
-        inner.client_tls_config = Some(
-            ClientTlsConfig::new()
-                .ca_certificate(server_root_ca_cert)
-                .identity(client_identity),
-        );
-
-        Ok(Self {
-            inner: Arc::new(inner),
-        })
     }
 
     pub fn config(&self) -> &ChannelConfig {
@@ -270,11 +248,41 @@ impl ChannelManager {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+pub fn load_tls_config(tls_option: Option<&ClientTlsOption>) -> Result<Option<ClientTlsConfig>> {
+    let path_config = match tls_option {
+        Some(path_config) if path_config.enabled => path_config,
+        _ => return Ok(None),
+    };
+
+    let mut tls_config = ClientTlsConfig::new();
+
+    if let Some(server_ca) = &path_config.server_ca_cert_path {
+        let server_root_ca_cert =
+            std::fs::read_to_string(server_ca).context(InvalidConfigFilePathSnafu)?;
+        let server_root_ca_cert = Certificate::from_pem(server_root_ca_cert);
+        tls_config = tls_config.ca_certificate(server_root_ca_cert);
+    }
+
+    if let (Some(client_cert_path), Some(client_key_path)) =
+        (&path_config.client_cert_path, &path_config.client_key_path)
+    {
+        let client_cert =
+            std::fs::read_to_string(client_cert_path).context(InvalidConfigFilePathSnafu)?;
+        let client_key =
+            std::fs::read_to_string(client_key_path).context(InvalidConfigFilePathSnafu)?;
+        let client_identity = Identity::from_pem(client_cert, client_key);
+        tls_config = tls_config.identity(client_identity);
+    }
+    Ok(Some(tls_config))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientTlsOption {
-    pub server_ca_cert_path: String,
-    pub client_cert_path: String,
-    pub client_key_path: String,
+    /// Whether to enable TLS for client.
+    pub enabled: bool,
+    pub server_ca_cert_path: Option<String>,
+    pub client_cert_path: Option<String>,
+    pub client_key_path: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -460,7 +468,7 @@ impl Pool {
         })
     }
 
-    fn entry(&self, addr: String) -> Entry<String, Channel> {
+    fn entry(&self, addr: String) -> Entry<'_, String, Channel> {
         self.channels.entry(addr)
     }
 
@@ -590,9 +598,10 @@ mod tests {
             .tcp_keepalive(Duration::from_secs(2))
             .tcp_nodelay(false)
             .client_tls_config(ClientTlsOption {
-                server_ca_cert_path: "some_server_path".to_string(),
-                client_cert_path: "some_cert_path".to_string(),
-                client_key_path: "some_key_path".to_string(),
+                enabled: true,
+                server_ca_cert_path: Some("some_server_path".to_string()),
+                client_cert_path: Some("some_cert_path".to_string()),
+                client_key_path: Some("some_key_path".to_string()),
             });
 
         assert_eq!(
@@ -610,9 +619,10 @@ mod tests {
                 tcp_keepalive: Some(Duration::from_secs(2)),
                 tcp_nodelay: false,
                 client_tls: Some(ClientTlsOption {
-                    server_ca_cert_path: "some_server_path".to_string(),
-                    client_cert_path: "some_cert_path".to_string(),
-                    client_key_path: "some_key_path".to_string(),
+                    enabled: true,
+                    server_ca_cert_path: Some("some_server_path".to_string()),
+                    client_cert_path: Some("some_cert_path".to_string()),
+                    client_key_path: Some("some_key_path".to_string()),
                 }),
                 max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
                 max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
@@ -638,7 +648,7 @@ mod tests {
             .http2_adaptive_window(true)
             .tcp_keepalive(Duration::from_secs(2))
             .tcp_nodelay(true);
-        let mgr = ChannelManager::with_config(config);
+        let mgr = ChannelManager::with_config(config, None);
 
         let res = mgr.build_endpoint("test_addr");
 

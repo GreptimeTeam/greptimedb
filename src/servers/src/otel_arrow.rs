@@ -12,25 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use auth::UserProviderRef;
 use common_error::ext::ErrorExt;
 use common_error::status_code::status_to_tonic_code;
 use common_telemetry::error;
 use futures::SinkExt;
-use otel_arrow_rust::opentelemetry::{ArrowMetricsService, BatchArrowRecords, BatchStatus};
 use otel_arrow_rust::Consumer;
-use session::context::QueryContext;
+use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsService;
+use otel_arrow_rust::proto::opentelemetry::arrow::v1::{BatchArrowRecords, BatchStatus};
 use tonic::metadata::{Entry, MetadataValue};
 use tonic::service::Interceptor;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::error;
+use crate::grpc::context_auth;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
-pub struct OtelArrowServiceHandler<T>(pub T);
+pub struct OtelArrowServiceHandler<T> {
+    handler: T,
+    user_provider: Option<UserProviderRef>,
+}
 
 impl<T> OtelArrowServiceHandler<T> {
-    pub fn new(handler: T) -> Self {
-        Self(handler)
+    pub fn new(handler: T, user_provider: Option<UserProviderRef>) -> Self {
+        Self {
+            handler,
+            user_provider,
+        }
     }
 }
 
@@ -42,9 +50,14 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
         request: Request<Streaming<BatchArrowRecords>>,
     ) -> Result<Response<Self::ArrowMetricsStream>, Status> {
         let (mut sender, receiver) = futures::channel::mpsc::channel(100);
-        let mut incoming_requests = request.into_inner();
-        let handler = self.0.clone();
-        let query_context = QueryContext::arc();
+
+        let (headers, _, mut incoming_requests) = request.into_parts();
+
+        let query_ctx = context_auth::create_query_context_from_grpc_metadata(&headers)?;
+        context_auth::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
+
+        let handler = self.handler.clone();
+
         // handles incoming requests
         common_runtime::spawn_global(async move {
             let mut consumer = Consumer::default();
@@ -65,7 +78,7 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                     status_code: 0,
                     status_message: Default::default(),
                 };
-                let request = match consumer.consume_batches(&mut batch).map_err(|e| {
+                let request = match consumer.consume_metrics_batches(&mut batch).map_err(|e| {
                     error::HandleOtelArrowRequestSnafu {
                         err_msg: e.to_string(),
                     }
@@ -85,7 +98,8 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                         return;
                     }
                 };
-                if let Err(e) = handler.metrics(request, query_context.clone()).await {
+                // use metric engine by default
+                if let Err(e) = handler.metrics(request, query_ctx.clone()).await {
                     let _ = sender
                         .send(Err(Status::new(
                             status_to_tonic_code(e.status_code()),

@@ -2,7 +2,7 @@
 linker = "aarch64-linux-gnu-gcc"
 
 [alias]
-sqlness = "run --bin sqlness-runner --"
+sqlness = "run --bin sqlness-runner --target-dir target/sqlness --"
 
 [unstable.git]
 shallow_index = true

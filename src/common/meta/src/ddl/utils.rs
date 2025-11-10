@@ -24,8 +24,8 @@ use std::fmt::Debug;
 use api::region::RegionResponse;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{
-    region_request, MetricManifestInfo, MitoManifestInfo, RegionRequest, RegionRequestHeader,
-    SyncRequest,
+    MetricManifestInfo, MitoManifestInfo, RegionRequest, RegionRequestHeader, SyncRequest,
+    region_request,
 };
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE};
 use common_error::ext::BoxedError;
@@ -34,7 +34,7 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
 use common_wal::options::WalOptions;
 use futures::future::join_all;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, MANIFEST_INFO_EXTENSION_KEY};
 use store_api::region_engine::RegionManifestInfo;
@@ -53,7 +53,7 @@ use crate::key::table_route::TableRouteValue;
 use crate::key::{TableMetadataManager, TableMetadataManagerRef};
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
-use crate::rpc::router::{find_follower_regions, find_followers, RegionRoute};
+use crate::rpc::router::{RegionRoute, find_follower_regions, find_followers};
 
 /// Adds [Peer] context if the error is unretryable.
 pub fn add_peer_context_if_needed(datanode: Peer) -> impl FnOnce(Error) -> Error {
@@ -442,7 +442,7 @@ pub fn extract_column_metadatas(
     results: &mut [RegionResponse],
     key: &str,
 ) -> Result<Option<Vec<ColumnMetadata>>> {
-    let schemas = results
+    let mut schemas = results
         .iter_mut()
         .map(|r| r.extensions.remove(key))
         .collect::<Vec<_>>();
@@ -454,20 +454,24 @@ pub fn extract_column_metadatas(
 
     // Verify all the physical schemas are the same
     // Safety: previous check ensures this vec is not empty
-    let first = schemas.first().unwrap();
-    ensure!(
-        schemas.iter().all(|x| x == first),
-        MetadataCorruptionSnafu {
-            err_msg: "The table column metadata schemas from datanodes are not the same."
-        }
-    );
+    let first_column_metadatas = schemas
+        .swap_remove(0)
+        .map(|first_bytes| ColumnMetadata::decode_list(&first_bytes).context(DecodeJsonSnafu))
+        .transpose()?;
 
-    if let Some(first) = first {
-        let column_metadatas = ColumnMetadata::decode_list(first).context(DecodeJsonSnafu)?;
-        Ok(Some(column_metadatas))
-    } else {
-        Ok(None)
+    for s in schemas {
+        // check decoded column metadata instead of bytes because it contains extension map.
+        let column_metadata = s
+            .map(|bytes| ColumnMetadata::decode_list(&bytes).context(DecodeJsonSnafu))
+            .transpose()?;
+        ensure!(
+            column_metadata == first_column_metadatas,
+            MetadataCorruptionSnafu {
+                err_msg: "The table column metadata schemas from datanodes are not the same."
+            }
+        );
     }
+    Ok(first_column_metadatas)
 }
 
 #[cfg(test)]

@@ -100,7 +100,9 @@ where
         weight_of_metadata: fn(&K, &Arc<M>) -> u32,
         weight_of_content: fn(&(K, PageKey), &Bytes) -> u32,
     ) -> Self {
-        common_telemetry::debug!("Building IndexCache with metadata size: {index_metadata_cap}, content size: {index_content_cap}, page size: {page_size}, index type: {index_type}");
+        common_telemetry::debug!(
+            "Building IndexCache with metadata size: {index_metadata_cap}, content size: {index_content_cap}, page size: {page_size}, index type: {index_type}"
+        );
         let index_metadata = moka::sync::CacheBuilder::new(index_metadata_cap)
             .name(&format!("index_metadata_{}", index_type))
             .weigher(weight_of_metadata)
@@ -110,6 +112,7 @@ where
                     .with_label_values(&[INDEX_METADATA_TYPE])
                     .sub(size.into());
             })
+            .support_invalidation_closures()
             .build();
         let index_cache = moka::sync::CacheBuilder::new(index_content_cap)
             .name(&format!("index_content_{}", index_type))
@@ -120,6 +123,7 @@ where
                     .with_label_values(&[INDEX_CONTENT_TYPE])
                     .sub(size.into());
             })
+            .support_invalidation_closures()
             .build();
         Self {
             index_metadata,
@@ -216,6 +220,23 @@ where
             .with_label_values(&[INDEX_CONTENT_TYPE])
             .add((self.weight_of_content)(&(key, page_key), &value).into());
         self.index.insert((key, page_key), value);
+    }
+
+    /// Invalidates all cache entries whose keys satisfy `predicate`.
+    pub fn invalidate_if<F>(&self, predicate: F)
+    where
+        F: Fn(&K) -> bool + Send + Sync + 'static,
+    {
+        let predicate = Arc::new(predicate);
+        let metadata_predicate = Arc::clone(&predicate);
+
+        self.index_metadata
+            .invalidate_entries_if(move |key, _| metadata_predicate(key))
+            .expect("cache should support invalidation closures");
+
+        self.index
+            .invalidate_entries_if(move |(key, _), _| predicate(key))
+            .expect("cache should support invalidation closures");
     }
 }
 

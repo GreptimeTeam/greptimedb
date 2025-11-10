@@ -23,7 +23,7 @@ use api::v1::Row;
 use common_time::timestamp::TimeUnit;
 use itertools::Itertools;
 use processor::{Processor, Processors};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use transform::Transforms;
 use vrl::core::Value as VrlValue;
 use yaml_rust::{Yaml, YamlLoader};
@@ -218,7 +218,7 @@ impl From<&Rule> for DispatchedTo {
 impl DispatchedTo {
     /// Generate destination table name from input
     pub fn dispatched_to_table_name(&self, original: &str) -> String {
-        format!("{}_{}", &original, self.table_suffix)
+        [original, &self.table_suffix].concat()
     }
 }
 
@@ -312,7 +312,7 @@ impl Pipeline {
 
                 // Create pipeline context with the found timestamp
                 let def = crate::PipelineDefinition::GreptimeIdentityPipeline(Some(
-                    IdentityTimeIndex::Epoch(ts_name.to_string(), *time_unit, false),
+                    IdentityTimeIndex::Epoch(ts_name.clone(), *time_unit, false),
                 ));
                 let n_ctx =
                     PipelineContext::new(&def, pipeline_ctx.pipeline_param, pipeline_ctx.channel);
@@ -341,6 +341,12 @@ impl Pipeline {
             TransformerMode::GreptimeTransformer(t) => Some(t.schemas()),
             TransformerMode::AutoTransform(_, _) => None,
         }
+    }
+
+    pub fn is_variant_table_name(&self) -> bool {
+        // even if the pipeline doesn't have dispatcher or table_suffix,
+        // it can still be a variant because of VRL processor and hint
+        self.dispatcher.is_some() || self.tablesuffix.is_some()
     }
 }
 
@@ -499,7 +505,7 @@ transform:
             .unwrap();
 
         assert_eq!(schema_info.schema.len(), result.0.values.len());
-        let test = vec![
+        let test = [
             (
                 ColumnDataType::String as i32,
                 Some(ValueData::StringValue("129.37.245.88".into())),

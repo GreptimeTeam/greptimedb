@@ -20,17 +20,13 @@ use common_time::util as time_util;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_engine::{RegionRole, RegionStatistic};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
-use crate::error;
-use crate::error::Result;
+use crate::error::{self, DeserializeFromJsonSnafu, Result};
 use crate::heartbeat::utils::get_datanode_workloads;
-
-pub(crate) const DATANODE_LEASE_PREFIX: &str = "__meta_datanode_lease";
-const INACTIVE_REGION_PREFIX: &str = "__meta_inactive_region";
 
 const DATANODE_STAT_PREFIX: &str = "__meta_datanode_stat";
 
@@ -38,13 +34,11 @@ pub const REGION_STATISTIC_KEY: &str = "__region_statistic";
 
 lazy_static! {
     pub(crate) static ref DATANODE_LEASE_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{DATANODE_LEASE_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
+        Regex::new("^__meta_datanode_lease-([0-9]+)-([0-9]+)$").unwrap();
     static ref DATANODE_STAT_KEY_PATTERN: Regex =
         Regex::new(&format!("^{DATANODE_STAT_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
-    static ref INACTIVE_REGION_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{INACTIVE_REGION_PREFIX}-([0-9]+)-([0-9]+)-([0-9]+)$"
-    ))
-    .unwrap();
+    static ref INACTIVE_REGION_KEY_PATTERN: Regex =
+        Regex::new("^__meta_inactive_region-([0-9]+)-([0-9]+)-([0-9]+)$").unwrap();
 }
 
 /// The key of the datanode stat in the storage.
@@ -63,15 +57,20 @@ pub struct Stat {
     pub wcus: i64,
     /// How many regions on this node
     pub region_num: u64,
+    /// The region stats of the datanode.
     pub region_stats: Vec<RegionStat>,
+    /// The topic stats of the datanode.
+    pub topic_stats: Vec<TopicStat>,
     // The node epoch is used to check whether the node has restarted or redeployed.
     pub node_epoch: u64,
     /// The datanode workloads.
     pub datanode_workloads: DatanodeWorkloads,
+    /// The GC statistics of the datanode.
+    pub gc_stat: Option<GcStat>,
 }
 
 /// The statistics of a region.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegionStat {
     /// The region_id.
     pub id: RegionId,
@@ -99,6 +98,8 @@ pub struct RegionStat {
     pub index_size: u64,
     /// The manifest infoof the region.
     pub region_manifest: RegionManifestInfo,
+    /// The total bytes written of the region since region opened.
+    pub written_bytes: u64,
     /// The latest entry id of topic used by data.
     /// **Only used by remote WAL prune.**
     pub data_topic_latest_entry_id: u64,
@@ -108,7 +109,25 @@ pub struct RegionStat {
     pub metadata_topic_latest_entry_id: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicStat {
+    /// The topic name.
+    pub topic: String,
+    /// The latest entry id of the topic.
+    pub latest_entry_id: u64,
+    /// The total size in bytes of records appended to the topic.
+    pub record_size: u64,
+    /// The total number of records appended to the topic.
+    pub record_num: u64,
+}
+
+/// Trait for reporting statistics about topics.
+pub trait TopicStatsReporter: Send + Sync {
+    /// Returns a list of topic statistics that can be reported.
+    fn reportable_topics(&mut self) -> Vec<TopicStat>;
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum RegionManifestInfo {
     Mito {
         manifest_version: u64,
@@ -203,17 +222,28 @@ impl TryFrom<&HeartbeatRequest> for Stat {
             region_stats,
             node_epoch,
             node_workloads,
+            topic_stats,
+            extensions,
             ..
         } = value;
 
         match (header, peer) {
-            (Some(_header), Some(peer)) => {
+            (Some(header), Some(peer)) => {
                 let region_stats = region_stats
                     .iter()
                     .map(RegionStat::from)
                     .collect::<Vec<_>>();
+                let topic_stats = topic_stats.iter().map(TopicStat::from).collect::<Vec<_>>();
 
                 let datanode_workloads = get_datanode_workloads(node_workloads.as_ref());
+
+                let gc_stat = GcStat::from_extensions(extensions).map_err(|err| {
+                    common_telemetry::error!(
+                        "Failed to deserialize GcStat from extensions: {}",
+                        err
+                    );
+                    header.clone()
+                })?;
                 Ok(Self {
                     timestamp_millis: time_util::current_time_millis(),
                     // datanode id
@@ -224,8 +254,10 @@ impl TryFrom<&HeartbeatRequest> for Stat {
                     wcus: region_stats.iter().map(|s| s.wcus).sum(),
                     region_num: region_stats.len() as u64,
                     region_stats,
+                    topic_stats,
                     node_epoch: *node_epoch,
                     datanode_workloads,
+                    gc_stat,
                 })
             }
             (header, _) => Err(header.clone()),
@@ -271,7 +303,7 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             rcus: value.rcus,
             wcus: value.wcus,
             approximate_bytes: value.approximate_bytes as u64,
-            engine: value.engine.to_string(),
+            engine: value.engine.clone(),
             role: RegionRole::from(value.role()),
             num_rows: region_stat.num_rows,
             memtable_size: region_stat.memtable_size,
@@ -280,9 +312,58 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             sst_num: region_stat.sst_num,
             index_size: region_stat.index_size,
             region_manifest: region_stat.manifest.into(),
+            written_bytes: region_stat.written_bytes,
             data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
             metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
         }
+    }
+}
+
+impl From<&api::v1::meta::TopicStat> for TopicStat {
+    fn from(value: &api::v1::meta::TopicStat) -> Self {
+        Self {
+            topic: value.topic_name.clone(),
+            latest_entry_id: value.latest_entry_id,
+            record_size: value.record_size,
+            record_num: value.record_num,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GcStat {
+    /// Number of GC tasks currently running on the datanode.
+    pub running_gc_tasks: u32,
+    /// The maximum number of concurrent GC tasks the datanode can handle.
+    pub gc_concurrency: u32,
+}
+
+impl GcStat {
+    pub const GC_STAT_KEY: &str = "__gc_stat";
+
+    pub fn new(running_gc_tasks: u32, gc_concurrency: u32) -> Self {
+        Self {
+            running_gc_tasks,
+            gc_concurrency,
+        }
+    }
+
+    pub fn into_extensions(&self, extensions: &mut std::collections::HashMap<String, Vec<u8>>) {
+        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        extensions.insert(Self::GC_STAT_KEY.to_string(), bytes);
+    }
+
+    pub fn from_extensions(
+        extensions: &std::collections::HashMap<String, Vec<u8>>,
+    ) -> Result<Option<Self>> {
+        extensions
+            .get(Self::GC_STAT_KEY)
+            .map(|bytes| {
+                serde_json::from_slice(bytes).with_context(|_| DeserializeFromJsonSnafu {
+                    input: String::from_utf8_lossy(bytes).to_string(),
+                })
+            })
+            .transpose()
     }
 }
 

@@ -21,15 +21,15 @@ use std::sync::{Arc, RwLock};
 use common_datasource::compression::CompressionType;
 use common_telemetry::debug;
 use crc32fast::Hasher;
-use futures::future::try_join_all;
 use futures::TryStreamExt;
+use futures::future::try_join_all;
 use lazy_static::lazy_static;
-use object_store::{util, Entry, ErrorKind, Lister, ObjectStore};
+use object_store::{Entry, ErrorKind, Lister, ObjectStore, util};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
-use store_api::storage::RegionId;
+use snafu::{ResultExt, ensure};
 use store_api::ManifestVersion;
+use store_api::storage::RegionId;
 use tokio::sync::Semaphore;
 
 use crate::error::{
@@ -134,6 +134,7 @@ pub struct ManifestObjectStore {
     object_store: ObjectStore,
     compress_type: CompressionType,
     path: String,
+    staging_path: String,
     /// Stores the size of each manifest file.
     manifest_size_map: Arc<RwLock<HashMap<FileKey, u64>>>,
     total_manifest_size: Arc<AtomicU64>,
@@ -146,18 +147,30 @@ impl ManifestObjectStore {
         compress_type: CompressionType,
         total_manifest_size: Arc<AtomicU64>,
     ) -> Self {
+        let path = util::normalize_dir(path);
+        let staging_path = {
+            // Convert "region_dir/manifest/" to "region_dir/staging/manifest/"
+            let parent_dir = path.trim_end_matches("manifest/").trim_end_matches('/');
+            util::normalize_dir(&format!("{}/staging/manifest", parent_dir))
+        };
         Self {
             object_store,
             compress_type,
-            path: util::normalize_dir(path),
+            path,
+            staging_path,
             manifest_size_map: Arc::new(RwLock::new(HashMap::new())),
             total_manifest_size,
         }
     }
 
     /// Returns the delta file path under the **current** compression algorithm
-    fn delta_file_path(&self, version: ManifestVersion) -> String {
-        gen_path(&self.path, &delta_file(version), self.compress_type)
+    fn delta_file_path(&self, version: ManifestVersion, is_staging: bool) -> String {
+        let base_path = if is_staging {
+            &self.staging_path
+        } else {
+            &self.path
+        };
+        gen_path(base_path, &delta_file(version), self.compress_type)
     }
 
     /// Returns the checkpoint file path under the **current** compression algorithm
@@ -176,26 +189,31 @@ impl ManifestObjectStore {
         &self.path
     }
 
-    /// Returns a iterator of manifests.
-    pub(crate) async fn manifest_lister(&self) -> Result<Option<Lister>> {
-        match self.object_store.lister_with(&self.path).await {
+    /// Returns an iterator of manifests from normal or staging directory.
+    pub(crate) async fn manifest_lister(&self, is_staging: bool) -> Result<Option<Lister>> {
+        let path = if is_staging {
+            &self.staging_path
+        } else {
+            &self.path
+        };
+        match self.object_store.lister_with(path).await {
             Ok(streamer) => Ok(Some(streamer)),
             Err(e) if e.kind() == ErrorKind::NotFound => {
-                debug!("Manifest directory does not exists: {}", self.path);
+                debug!("Manifest directory does not exist: {}", path);
                 Ok(None)
             }
             Err(e) => Err(e).context(OpenDalSnafu)?,
         }
     }
 
-    /// Return all `R`s in the root directory that meet the `filter` conditions (that is, the `filter` closure returns `Some(R)`),
+    /// Return all `R`s in the directory that meet the `filter` conditions (that is, the `filter` closure returns `Some(R)`),
     /// and discard `R` that does not meet the conditions (that is, the `filter` closure returns `None`)
     /// Return an empty vector when directory is not found.
-    pub async fn get_paths<F, R>(&self, filter: F) -> Result<Vec<R>>
+    pub async fn get_paths<F, R>(&self, filter: F, is_staging: bool) -> Result<Vec<R>>
     where
         F: Fn(Entry) -> Option<R>,
     {
-        let Some(streamer) = self.manifest_lister().await? else {
+        let Some(streamer) = self.manifest_lister(is_staging).await? else {
             return Ok(vec![]);
         };
 
@@ -220,16 +238,19 @@ impl ManifestObjectStore {
         ensure!(start <= end, InvalidScanIndexSnafu { start, end });
 
         let mut entries: Vec<(ManifestVersion, Entry)> = self
-            .get_paths(|entry| {
-                let file_name = entry.name();
-                if is_delta_file(file_name) {
-                    let version = file_version(file_name);
-                    if start <= version && version < end {
-                        return Some((version, entry));
+            .get_paths(
+                |entry| {
+                    let file_name = entry.name();
+                    if is_delta_file(file_name) {
+                        let version = file_version(file_name);
+                        if start <= version && version < end {
+                            return Some((version, entry));
+                        }
                     }
-                }
-                None
-            })
+                    None
+                },
+                false,
+            )
             .await?;
 
         Self::sort_manifests(&mut entries);
@@ -263,21 +284,19 @@ impl ManifestObjectStore {
         }
     }
 
-    /// Fetch all manifests in concurrent, and return the manifests in range [start_version, end_version)
-    ///
-    /// **Notes**: This function is no guarantee to return manifests from the `start_version` strictly.
-    /// Uses [fetch_manifests_strict_from](ManifestObjectStore::fetch_manifests_strict_from) to get manifests from the `start_version`.
-    pub async fn fetch_manifests(
+    /// Common implementation for fetching manifests from entries in parallel.
+    async fn fetch_manifests_from_entries(
         &self,
-        start_version: ManifestVersion,
-        end_version: ManifestVersion,
+        entries: Vec<(ManifestVersion, Entry)>,
     ) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
-        let manifests = self.scan(start_version, end_version).await?;
+        if entries.is_empty() {
+            return Ok(vec![]);
+        }
 
         // TODO(weny): Make it configurable.
         let semaphore = Semaphore::new(FETCH_MANIFEST_PARALLELISM);
 
-        let tasks = manifests.iter().map(|(v, entry)| async {
+        let tasks = entries.iter().map(|(v, entry)| async {
             // Safety: semaphore must exist.
             let _permit = semaphore.acquire().await.unwrap();
 
@@ -300,6 +319,19 @@ impl ManifestObjectStore {
         try_join_all(tasks).await
     }
 
+    /// Fetch all manifests in concurrent, and return the manifests in range [start_version, end_version)
+    ///
+    /// **Notes**: This function is no guarantee to return manifests from the `start_version` strictly.
+    /// Uses [fetch_manifests_strict_from](ManifestObjectStore::fetch_manifests_strict_from) to get manifests from the `start_version`.
+    pub async fn fetch_manifests(
+        &self,
+        start_version: ManifestVersion,
+        end_version: ManifestVersion,
+    ) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
+        let manifests = self.scan(start_version, end_version).await?;
+        self.fetch_manifests_from_entries(manifests).await
+    }
+
     /// Delete manifest files that version < end.
     /// If keep_last_checkpoint is true, the last checkpoint file will be kept.
     /// ### Return
@@ -311,17 +343,20 @@ impl ManifestObjectStore {
     ) -> Result<usize> {
         // Stores (entry, is_checkpoint, version) in a Vec.
         let entries: Vec<_> = self
-            .get_paths(|entry| {
-                let file_name = entry.name();
-                let is_checkpoint = is_checkpoint_file(file_name);
-                if is_delta_file(file_name) || is_checkpoint_file(file_name) {
-                    let version = file_version(file_name);
-                    if version < end {
-                        return Some((entry, is_checkpoint, version));
+            .get_paths(
+                |entry| {
+                    let file_name = entry.name();
+                    let is_checkpoint = is_checkpoint_file(file_name);
+                    if is_delta_file(file_name) || is_checkpoint_file(file_name) {
+                        let version = file_version(file_name);
+                        if version < end {
+                            return Some((entry, is_checkpoint, version));
+                        }
                     }
-                }
-                None
-            })
+                    None
+                },
+                false,
+            )
             .await?;
         let checkpoint_version = if keep_last_checkpoint {
             // Note that the order of entries is unspecific.
@@ -329,11 +364,7 @@ impl ManifestObjectStore {
                 .iter()
                 .filter_map(
                     |(_e, is_checkpoint, version)| {
-                        if *is_checkpoint {
-                            Some(version)
-                        } else {
-                            None
-                        }
+                        if *is_checkpoint { Some(version) } else { None }
                     },
                 )
                 .max()
@@ -365,11 +396,7 @@ impl ManifestObjectStore {
 
         debug!(
             "Deleting {} logs from manifest storage path {} until {}, checkpoint_version: {:?}, paths: {:?}",
-            ret,
-            self.path,
-            end,
-            checkpoint_version,
-            paths,
+            ret, self.path, end, checkpoint_version, paths,
         );
 
         self.object_store
@@ -390,8 +417,13 @@ impl ManifestObjectStore {
     }
 
     /// Save the delta manifest file.
-    pub async fn save(&mut self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
-        let path = self.delta_file_path(version);
+    pub async fn save(
+        &mut self,
+        version: ManifestVersion,
+        bytes: &[u8],
+        is_staging: bool,
+    ) -> Result<()> {
+        let path = self.delta_file_path(version, is_staging);
         debug!("Save log to manifest storage, version: {}", version);
         let data = self
             .compress_type
@@ -643,10 +675,48 @@ impl ManifestObjectStore {
     fn dec_total_manifest_size(&self, val: u64) {
         self.total_manifest_size.fetch_sub(val, Ordering::Relaxed);
     }
+
+    /// Fetch all staging manifest files and return them as (version, action_list) pairs.
+    pub async fn fetch_staging_manifests(&self) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
+        let manifest_entries = self
+            .get_paths(
+                |entry| {
+                    let file_name = entry.name();
+                    if is_delta_file(file_name) {
+                        let version = file_version(file_name);
+                        Some((version, entry))
+                    } else {
+                        None
+                    }
+                },
+                true,
+            )
+            .await?;
+
+        let mut sorted_entries = manifest_entries;
+        Self::sort_manifests(&mut sorted_entries);
+
+        self.fetch_manifests_from_entries(sorted_entries).await
+    }
+
+    /// Clear all staging manifest files.
+    pub async fn clear_staging_manifests(&mut self) -> Result<()> {
+        self.object_store
+            .remove_all(&self.staging_path)
+            .await
+            .context(OpenDalSnafu)?;
+
+        debug!(
+            "Cleared all staging manifest files from {}",
+            self.staging_path
+        );
+
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct CheckpointMetadata {
+pub(crate) struct CheckpointMetadata {
     pub size: usize,
     /// The latest version this checkpoint contains.
     pub version: ManifestVersion,
@@ -671,8 +741,8 @@ impl CheckpointMetadata {
 #[cfg(test)]
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
-    use object_store::services::Fs;
     use object_store::ObjectStore;
+    use object_store::services::Fs;
 
     use super::*;
 
@@ -724,7 +794,7 @@ mod tests {
     async fn test_manifest_log_store_case(mut log_store: ManifestObjectStore) {
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes())
+                .save(v, format!("hello, {v}").as_bytes(), false)
                 .await
                 .unwrap();
         }
@@ -776,11 +846,13 @@ mod tests {
 
         // delete all logs and checkpoints
         let _ = log_store.delete_until(11, false).await.unwrap();
-        assert!(log_store
-            .load_checkpoint(new_checkpoint_metadata_with_version(3))
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            log_store
+                .load_checkpoint(new_checkpoint_metadata_with_version(3))
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
         let manifests = log_store.fetch_manifests(0, 11).await.unwrap();
         let mut it = manifests.into_iter();
@@ -797,7 +869,7 @@ mod tests {
         log_store.compress_type = CompressionType::Uncompressed;
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes())
+                .save(v, format!("hello, {v}").as_bytes(), false)
                 .await
                 .unwrap();
         }
@@ -817,7 +889,7 @@ mod tests {
         // write compressed data to stimulate compress algorithm take effect
         for v in 5..10 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes())
+                .save(v, format!("hello, {v}").as_bytes(), false)
                 .await
                 .unwrap();
         }
@@ -873,7 +945,7 @@ mod tests {
         log_store.compress_type = CompressionType::Uncompressed;
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes())
+                .save(v, format!("hello, {v}").as_bytes(), false)
                 .await
                 .unwrap();
         }
@@ -912,7 +984,7 @@ mod tests {
         // write 5 manifest files
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes())
+                .save(v, format!("hello, {v}").as_bytes(), false)
                 .await
                 .unwrap();
         }

@@ -23,27 +23,30 @@ use common_query::OutputData;
 use common_recordbatch::util as record_util;
 use common_telemetry::{debug, info};
 use common_time::timestamp::{TimeUnit, Timestamp};
-use datafusion_common::{TableReference, ToDFSchema};
-use datafusion_expr::{col, DmlStatement, LogicalPlan};
+use datafusion::datasource::DefaultTableSource;
+use datafusion::logical_expr::col;
+use datafusion_common::TableReference;
+use datafusion_expr::{DmlStatement, LogicalPlan};
 use datatypes::prelude::ScalarVector;
 use datatypes::timestamp::TimestampNanosecond;
 use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
 use itertools::Itertools;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
-use query::dataframe::DataFrame;
 use query::QueryEngineRef;
+use query::dataframe::DataFrame;
 use session::context::{QueryContextBuilder, QueryContextRef};
-use snafu::{ensure, OptionExt, ResultExt};
-use table::metadata::TableInfo;
+use snafu::{OptionExt, ResultExt, ensure};
 use table::TableRef;
+use table::metadata::TableInfo;
+use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
     BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, DataFrameSnafu, Error,
     ExecuteInternalStatementSnafu, InsertPipelineSnafu, InvalidPipelineVersionSnafu,
     MultiPipelineWithDiffSchemaSnafu, PipelineNotFoundSnafu, RecordBatchLenNotMatchSnafu, Result,
 };
-use crate::etl::{parse, Content, Pipeline};
+use crate::etl::{Content, Pipeline, parse};
 use crate::manager::pipeline_cache::PipelineCache;
 use crate::manager::{PipelineInfo, PipelineVersion};
 use crate::metrics::METRIC_PIPELINE_TABLE_FIND_COUNT;
@@ -187,8 +190,8 @@ impl PipelineTable {
 
     fn query_ctx(table_info: &TableInfo) -> QueryContextRef {
         QueryContextBuilder::default()
-            .current_catalog(table_info.catalog_name.to_string())
-            .current_schema(table_info.schema_name.to_string())
+            .current_catalog(table_info.catalog_name.clone())
+            .current_schema(table_info.schema_name.clone())
             .build()
             .into()
     }
@@ -424,20 +427,13 @@ impl PipelineTable {
             table_info.name.clone(),
         );
 
-        let df_schema = Arc::new(
-            table_info
-                .meta
-                .schema
-                .arrow_schema()
-                .clone()
-                .to_dfschema()
-                .context(BuildDfLogicalPlanSnafu)?,
-        );
+        let table_provider = Arc::new(DfTableProviderAdapter::new(self.table.clone()));
+        let table_source = Arc::new(DefaultTableSource::new(table_provider));
 
         // create dml stmt
         let stmt = DmlStatement::new(
             table_name,
-            df_schema,
+            table_source,
             datafusion_expr::WriteOp::Delete,
             Arc::new(dataframe.into_parts().1),
         );
@@ -491,7 +487,7 @@ impl PipelineTable {
             ])
             .context(BuildDfLogicalPlanSnafu)?
             .sort(vec![
-                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).sort(false, true)
+                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).sort(false, true),
             ])
             .context(BuildDfLogicalPlanSnafu)?;
 

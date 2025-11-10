@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use const_format::concatcp;
+
 pub const SYSTEM_CATALOG_NAME: &str = "system";
 pub const INFORMATION_SCHEMA_NAME: &str = "information_schema";
 pub const PG_CATALOG_NAME: &str = "pg_catalog";
 pub const SYSTEM_CATALOG_TABLE_NAME: &str = "system_catalog";
-pub const DEFAULT_CATALOG_NAME: &str = "greptime";
+pub const DEFAULT_CATALOG_NAME: &str = env!("DEFAULT_CATALOG_NAME");
 pub const DEFAULT_SCHEMA_NAME: &str = "public";
-pub const DEFAULT_PRIVATE_SCHEMA_NAME: &str = "greptime_private";
+pub const DEFAULT_PRIVATE_SCHEMA_NAME: &str = concatcp!(DEFAULT_CATALOG_NAME, "_private");
 
 /// Reserves [0,MIN_USER_FLOW_ID) for internal usage.
 /// User defined table id starts from this value.
@@ -104,15 +106,18 @@ pub const INFORMATION_SCHEMA_PROCEDURE_INFO_TABLE_ID: u32 = 34;
 pub const INFORMATION_SCHEMA_REGION_STATISTICS_TABLE_ID: u32 = 35;
 /// id for information_schema.process_list
 pub const INFORMATION_SCHEMA_PROCESS_LIST_TABLE_ID: u32 = 36;
+/// id for information_schema.ssts_manifest
+pub const INFORMATION_SCHEMA_SSTS_MANIFEST_TABLE_ID: u32 = 37;
+/// id for information_schema.ssts_storage
+pub const INFORMATION_SCHEMA_SSTS_STORAGE_TABLE_ID: u32 = 38;
+/// id for information_schema.ssts_index_meta
+pub const INFORMATION_SCHEMA_SSTS_INDEX_META_TABLE_ID: u32 = 39;
 
 // ----- End of information_schema tables -----
 
 /// ----- Begin of pg_catalog tables -----
-pub const PG_CATALOG_PG_CLASS_TABLE_ID: u32 = 256;
-pub const PG_CATALOG_PG_TYPE_TABLE_ID: u32 = 257;
-pub const PG_CATALOG_PG_NAMESPACE_TABLE_ID: u32 = 258;
-pub const PG_CATALOG_PG_DATABASE_TABLE_ID: u32 = 259;
-
+pub const PG_CATALOG_TABLE_ID_START: u32 = 256;
+// Please leave at 128 table ids for Postgres
 // ----- End of pg_catalog tables -----
 
 pub const MITO_ENGINE: &str = "mito";
@@ -146,5 +151,10 @@ pub const TRACE_TABLE_NAME_SESSION_KEY: &str = "trace_table_name";
 /// Generate the trace services table name from the trace table name by adding `_services` suffix.
 pub fn trace_services_table_name(trace_table_name: &str) -> String {
     format!("{}_services", trace_table_name)
+}
+
+/// Generate the trace operations table name from the trace table name by adding `_operations` suffix.
+pub fn trace_operations_table_name(trace_table_name: &str) -> String {
+    format!("{}_operations", trace_table_name)
 }
 // ---- End of special table and fields ----

@@ -32,11 +32,11 @@ use crate::type_id::LogicalTypeId;
 use crate::types::{
     BinaryType, BooleanType, DateType, Decimal128Type, DictionaryType, DurationMicrosecondType,
     DurationMillisecondType, DurationNanosecondType, DurationSecondType, DurationType, Float32Type,
-    Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, IntervalDayTimeType,
-    IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonType, ListType, NullType,
-    StringType, TimeMillisecondType, TimeType, TimestampMicrosecondType, TimestampMillisecondType,
-    TimestampNanosecondType, TimestampSecondType, TimestampType, UInt16Type, UInt32Type,
-    UInt64Type, UInt8Type, VectorType,
+    Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, IntervalDayTimeType,
+    IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonFormat, JsonType, ListType,
+    NullType, StringType, StructType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
+    UInt8Type, UInt16Type, UInt32Type, UInt64Type, VectorType,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
@@ -80,6 +80,7 @@ pub enum ConcreteDataType {
     // Compound types:
     List(ListType),
     Dictionary(DictionaryType),
+    Struct(StructType),
 
     // JSON type:
     Json(JsonType),
@@ -131,6 +132,7 @@ impl fmt::Display for ConcreteDataType {
             },
             ConcreteDataType::Decimal128(v) => write!(f, "{}", v.name()),
             ConcreteDataType::List(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Struct(v) => write!(f, "{}", v.name()),
             ConcreteDataType::Dictionary(v) => write!(f, "{}", v.name()),
             ConcreteDataType::Json(v) => write!(f, "{}", v.name()),
             ConcreteDataType::Vector(v) => write!(f, "{}", v.name()),
@@ -275,10 +277,21 @@ impl ConcreteDataType {
         matches!(self, ConcreteDataType::Null(NullType))
     }
 
+    pub(crate) fn is_struct(&self) -> bool {
+        matches!(self, ConcreteDataType::Struct(_))
+    }
+
     /// Try to cast the type as a [`ListType`].
     pub fn as_list(&self) -> Option<&ListType> {
         match self {
             ConcreteDataType::List(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    pub fn as_struct(&self) -> Option<&StructType> {
+        match self {
+            ConcreteDataType::Struct(s) => Some(s),
             _ => None,
         }
     }
@@ -339,9 +352,9 @@ impl ConcreteDataType {
         }
     }
 
-    pub fn as_json(&self) -> Option<JsonType> {
+    pub fn as_json(&self) -> Option<&JsonType> {
         match self {
-            ConcreteDataType::Json(j) => Some(*j),
+            ConcreteDataType::Json(j) => Some(j),
             _ => None,
         }
     }
@@ -406,9 +419,12 @@ impl ConcreteDataType {
                 &ConcreteDataType::Duration(_)
                 | &ConcreteDataType::Dictionary(_)
                 | &ConcreteDataType::Vector(_)
-                | &ConcreteDataType::List(_) => "UNKNOWN",
+                | &ConcreteDataType::List(_)
+                | &ConcreteDataType::Struct(_) => "UNKNOWN",
             },
-            &ConcreteDataType::Duration(_) | &ConcreteDataType::Dictionary(_) => "UNKNOWN",
+            &ConcreteDataType::Duration(_)
+            | &ConcreteDataType::Dictionary(_)
+            | &ConcreteDataType::Struct(_) => "UNKNOWN",
         }
     }
 }
@@ -439,11 +455,14 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Date32 => Self::date_datatype(),
             ArrowDataType::Timestamp(u, _) => ConcreteDataType::from_arrow_time_unit(u),
             ArrowDataType::Interval(u) => ConcreteDataType::from_arrow_interval_unit(u),
-            ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
-            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
-            ArrowDataType::List(field) => Self::List(ListType::new(
+            ArrowDataType::Binary | ArrowDataType::LargeBinary | ArrowDataType::BinaryView => {
+                Self::binary_datatype()
+            }
+            ArrowDataType::Utf8 | ArrowDataType::Utf8View => Self::string_datatype(),
+            ArrowDataType::LargeUtf8 => Self::large_string_datatype(),
+            ArrowDataType::List(field) => Self::List(ListType::new(Arc::new(
                 ConcreteDataType::from_arrow_type(field.data_type()),
-            )),
+            ))),
             ArrowDataType::Dictionary(key_type, value_type) => {
                 let key_type = ConcreteDataType::from_arrow_type(key_type);
                 let value_type = ConcreteDataType::from_arrow_type(value_type);
@@ -457,11 +476,24 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Decimal128(precision, scale) => {
                 ConcreteDataType::decimal128_datatype(*precision, *scale)
             }
-            _ => {
+            ArrowDataType::Struct(fields) => ConcreteDataType::Struct(fields.try_into()?),
+            ArrowDataType::Float16
+            | ArrowDataType::Date64
+            | ArrowDataType::FixedSizeBinary(_)
+            | ArrowDataType::ListView(_)
+            | ArrowDataType::FixedSizeList(_, _)
+            | ArrowDataType::LargeList(_)
+            | ArrowDataType::LargeListView(_)
+            | ArrowDataType::Union(_, _)
+            | ArrowDataType::Decimal256(_, _)
+            | ArrowDataType::Map(_, _)
+            | ArrowDataType::RunEndEncoded(_, _)
+            | ArrowDataType::Decimal32(_, _)
+            | ArrowDataType::Decimal64(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: dt.clone(),
                 }
-                .fail()
+                .fail();
             }
         };
 
@@ -489,6 +521,10 @@ impl_new_concrete_type_functions!(
 );
 
 impl ConcreteDataType {
+    pub fn large_string_datatype() -> Self {
+        ConcreteDataType::String(StringType::large_utf8())
+    }
+
     pub fn timestamp_second_datatype() -> Self {
         ConcreteDataType::Timestamp(TimestampType::Second(TimestampSecondType))
     }
@@ -609,8 +645,12 @@ impl ConcreteDataType {
         }
     }
 
-    pub fn list_datatype(item_type: ConcreteDataType) -> ConcreteDataType {
+    pub fn list_datatype(item_type: Arc<ConcreteDataType>) -> ConcreteDataType {
         ConcreteDataType::List(ListType::new(item_type))
+    }
+
+    pub fn struct_datatype(fields: StructType) -> ConcreteDataType {
+        ConcreteDataType::Struct(fields)
     }
 
     pub fn dictionary_datatype(
@@ -634,6 +674,10 @@ impl ConcreteDataType {
 
     pub fn vector_default_datatype() -> ConcreteDataType {
         Self::vector_datatype(0)
+    }
+
+    pub fn json_native_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {
+        ConcreteDataType::Json(JsonType::new(JsonFormat::Native(Box::new(inner_type))))
     }
 }
 
@@ -740,18 +784,58 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8),
             ConcreteDataType::String(_)
         ));
+        // Test LargeUtf8 mapping to large String type
+        let large_string_type = ConcreteDataType::from_arrow_type(&ArrowDataType::LargeUtf8);
+        assert!(matches!(large_string_type, ConcreteDataType::String(_)));
+        if let ConcreteDataType::String(string_type) = &large_string_type {
+            assert!(string_type.is_large());
+        } else {
+            panic!("Expected a String type");
+        }
         assert_eq!(
             ConcreteDataType::from_arrow_type(&ArrowDataType::List(Arc::new(Field::new(
                 "item",
                 ArrowDataType::Int32,
                 true,
             )))),
-            ConcreteDataType::List(ListType::new(ConcreteDataType::int32_datatype()))
+            ConcreteDataType::List(ListType::new(Arc::new(ConcreteDataType::int32_datatype())))
         );
         assert!(matches!(
             ConcreteDataType::from_arrow_type(&ArrowDataType::Date32),
             ConcreteDataType::Date(_)
         ));
+    }
+
+    #[test]
+    fn test_large_utf8_round_trip() {
+        // Test round-trip conversion for LargeUtf8
+        let large_utf8_arrow = ArrowDataType::LargeUtf8;
+        let concrete_type = ConcreteDataType::from_arrow_type(&large_utf8_arrow);
+        let back_to_arrow = concrete_type.as_arrow_type();
+
+        assert!(matches!(concrete_type, ConcreteDataType::String(_)));
+        // Round-trip should preserve the LargeUtf8 type
+        assert_eq!(large_utf8_arrow, back_to_arrow);
+
+        // Test that Utf8 and LargeUtf8 map to different string variants
+        let utf8_concrete = ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8);
+        let large_utf8_concrete = ConcreteDataType::from_arrow_type(&ArrowDataType::LargeUtf8);
+
+        assert!(matches!(utf8_concrete, ConcreteDataType::String(_)));
+        assert!(matches!(large_utf8_concrete, ConcreteDataType::String(_)));
+
+        // They should have different size types
+        if let (ConcreteDataType::String(utf8_type), ConcreteDataType::String(large_type)) =
+            (&utf8_concrete, &large_utf8_concrete)
+        {
+            assert!(!utf8_type.is_large());
+            assert!(large_type.is_large());
+        } else {
+            panic!("Expected both to be String types");
+        }
+
+        // They should be different types
+        assert_ne!(utf8_concrete, large_utf8_concrete);
     }
 
     #[test]
@@ -905,9 +989,10 @@ mod tests {
 
     #[test]
     fn test_as_list() {
-        let list_type = ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype());
+        let list_type =
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype()));
         assert_eq!(
-            ListType::new(ConcreteDataType::int32_datatype()),
+            ListType::new(Arc::new(ConcreteDataType::int32_datatype())),
             *list_type.as_list().unwrap()
         );
         assert!(ConcreteDataType::int32_datatype().as_list().is_none());
@@ -952,21 +1037,24 @@ mod tests {
         );
         // Nested types
         assert_eq!(
-            ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()).to_string(),
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype()))
+                .to_string(),
             "List<Int32>"
         );
         assert_eq!(
-            ConcreteDataType::list_datatype(ConcreteDataType::Dictionary(DictionaryType::new(
-                ConcreteDataType::int32_datatype(),
-                ConcreteDataType::string_datatype()
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::Dictionary(
+                DictionaryType::new(
+                    ConcreteDataType::int32_datatype(),
+                    ConcreteDataType::string_datatype()
+                )
             )))
             .to_string(),
             "List<Dictionary<Int32, String>>"
         );
         assert_eq!(
-            ConcreteDataType::list_datatype(ConcreteDataType::list_datatype(
-                ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype())
-            ))
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::list_datatype(Arc::new(
+                ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype()))
+            ))))
             .to_string(),
             "List<List<List<Int32>>>"
         );

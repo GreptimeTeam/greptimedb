@@ -15,16 +15,17 @@
 use std::collections::HashMap;
 
 use api::v1::column_data_type_extension::TypeExt;
+use api::v1::helper::time_index_column_schema;
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
     RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value,
 };
 use common_grpc::precision::Precision;
+use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp::TimeUnit::Nanosecond;
-use common_time::Timestamp;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{
     IncompatibleSchemaSnafu, Result, RowWriterSnafu, TimePrecisionSnafu, TimestampOverflowSnafu,
@@ -399,12 +400,7 @@ fn write_ts_to(
         one_row[*index].value_data = Some(ts);
     } else {
         let index = schema.len();
-        schema.push(ColumnSchema {
-            column_name: name.clone(),
-            datatype: datatype as i32,
-            semantic_type: SemanticType::Timestamp as i32,
-            ..Default::default()
-        });
+        schema.push(time_index_column_schema(&name, datatype));
         column_indexes.insert(name, index);
         one_row.push(ts.into())
     }

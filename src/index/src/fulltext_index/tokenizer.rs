@@ -12,12 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::fulltext_index::error::Result;
 use crate::Bytes;
+use crate::fulltext_index::error::Result;
 
 lazy_static::lazy_static! {
     static ref JIEBA: jieba_rs::Jieba = jieba_rs::Jieba::new();
 }
+
+/// A-Z, a-z, 0-9, and '_' are true
+const VALID_ASCII_TOKEN: [bool; 256] = [
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, true, true, true, true, true,
+    true, true, true, true, true, false, false, false, false, false, false, false, true, true,
+    true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+    true, true, true, true, true, true, true, true, false, false, false, false, true, false, true,
+    true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+    true, true, true, true, true, true, true, true, true, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false,
+];
 
 /// `Tokenizer` tokenizes a text into a list of tokens.
 pub trait Tokenizer: Send {
@@ -32,9 +55,28 @@ pub struct EnglishTokenizer;
 
 impl Tokenizer for EnglishTokenizer {
     fn tokenize<'a>(&self, text: &'a str) -> Vec<&'a str> {
-        text.split(|c: char| !c.is_alphanumeric())
-            .filter(|s| !s.is_empty())
-            .collect()
+        if text.is_ascii() {
+            let mut tokens = Vec::new();
+            let mut start = 0;
+            for (i, &byte) in text.as_bytes().iter().enumerate() {
+                if !VALID_ASCII_TOKEN[byte as usize] {
+                    if start < i {
+                        tokens.push(&text[start..i]);
+                    }
+                    start = i + 1;
+                }
+            }
+
+            if start < text.len() {
+                tokens.push(&text[start..]);
+            }
+
+            tokens
+        } else {
+            text.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .filter(|s| !s.is_empty())
+                .collect()
+        }
     }
 }
 
@@ -96,9 +138,25 @@ mod tests {
     #[test]
     fn test_english_tokenizer() {
         let tokenizer = EnglishTokenizer;
-        let text = "Hello, world! This is a test0.";
+        let text = "Hello, world!!! This is a----++   test012_345+67890";
         let tokens = tokenizer.tokenize(text);
-        assert_eq!(tokens, vec!["Hello", "world", "This", "is", "a", "test0"]);
+        assert_eq!(
+            tokens,
+            vec!["Hello", "world", "This", "is", "a", "test012_345", "67890"]
+        );
+    }
+
+    #[test]
+    fn test_english_tokenizer_with_utf8() {
+        let tokenizer = EnglishTokenizer;
+        let text = "💸unfold the 纸巾😣and gently 清洁表😭面";
+        let tokens = tokenizer.tokenize(text);
+        assert_eq!(
+            tokens,
+            // Don't care what happens to non-ASCII characters.
+            // It's kind of a misconfiguration to use EnglishTokenizer on non-ASCII text.
+            vec!["unfold", "the", "纸巾", "and", "gently", "清洁表", "面"]
+        );
     }
 
     #[test]
@@ -107,6 +165,29 @@ mod tests {
         let text = "我喜欢苹果";
         let tokens = tokenizer.tokenize(text);
         assert_eq!(tokens, vec!["我", "喜欢", "苹果"]);
+    }
+
+    #[test]
+    fn test_valid_ascii_token_lookup_table() {
+        // Test all ASCII values in a single loop
+        for c in 0u8..=255u8 {
+            let is_valid = VALID_ASCII_TOKEN[c as usize];
+            let should_be_valid = (c as char).is_ascii_alphanumeric() || c == b'_';
+
+            assert_eq!(
+                is_valid,
+                should_be_valid,
+                "Character '{}' (byte {}) validity mismatch: expected {}, got {}",
+                if c.is_ascii() && !c.is_ascii_control() {
+                    c as char
+                } else {
+                    '?'
+                },
+                c,
+                should_be_valid,
+                is_valid
+            );
+        }
     }
 
     #[test]

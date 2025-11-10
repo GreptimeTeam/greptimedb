@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 
 use crate::sst::file::FileHandle;
 
@@ -80,9 +80,10 @@ pub(crate) const TIME_BUCKETS: TimeBuckets = TimeBuckets([
 
 #[cfg(test)]
 mod tests {
+    use store_api::storage::FileId;
+
     use super::*;
     use crate::compaction::test_util::new_file_handle;
-    use crate::sst::file::FileId;
 
     #[test]
     fn test_time_bucket() {

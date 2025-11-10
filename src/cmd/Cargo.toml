@@ -29,15 +29,18 @@ base64.workspace = true
 cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
+either = "1.15"
 clap.workspace = true
 cli.workspace = true
 client.workspace = true
+colored = "2.1.0"
 common-base.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true
 common-error.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true
+common-mem-prof.workspace = true
 common-meta.workspace = true
 common-options.workspace = true
 common-procedure.workspace = true
@@ -53,7 +56,6 @@ common-wal.workspace = true
 datanode.workspace = true
 datatypes.workspace = true
 etcd-client.workspace = true
-file-engine.workspace = true
 flow.workspace = true
 frontend = { workspace = true, default-features = false }
 futures.workspace = true
@@ -67,6 +69,7 @@ mito2.workspace = true
 moka.workspace = true
 nu-ansi-term = "0.46"
 object-store.workspace = true
+parquet = { workspace = true, features = ["object_store"] }
 plugins.workspace = true
 prometheus.workspace = true
 prost.workspace = true
@@ -74,20 +77,25 @@ query.workspace = true
 rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
+standalone.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 servers.workspace = true
 session.workspace = true
 similar-asserts.workspace = true
 snafu.workspace = true
-stat.workspace = true
+common-stat.workspace = true
 store-api.workspace = true
-substrait.workspace = true
 table.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tonic.workspace = true
 tracing-appender.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+pprof = { version = "0.14", features = [
+    "flamegraph",
+] }
 
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemallocator = "0.6"
@@ -99,6 +107,11 @@ common-version.workspace = true
 serde.workspace = true
 temp-env = "0.3"
 tempfile.workspace = true
+file-engine.workspace = true
+mito2.workspace = true
 
 [target.'cfg(not(windows))'.dev-dependencies]
 rexpect = "0.5"
+
+[package.metadata.cargo-udeps.ignore]
+development = ["rexpect"]

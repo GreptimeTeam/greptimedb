@@ -4,11 +4,11 @@ use api::v1::{
     WebhookOptions as PbWebhookOptions,
 };
 use session::context::QueryContextRef;
-use snafu::ensure;
-use sql::ast::ObjectName;
-use sql::statements::create::trigger::{ChannelType, CreateTrigger};
+use snafu::{ResultExt, ensure};
+use sql::ast::{ObjectName, ObjectNamePartExt};
+use sql::statements::create::trigger::{ChannelType, CreateTrigger, DurationExpr, TriggerOn};
 
-use crate::error::Result;
+use crate::error::{Result, TooLargeDurationSnafu};
 
 pub fn to_create_trigger_task_expr(
     create_trigger: CreateTrigger,
@@ -17,8 +17,9 @@ pub fn to_create_trigger_task_expr(
     let CreateTrigger {
         trigger_name,
         if_not_exists,
-        query,
-        interval,
+        trigger_on,
+        r#for,
+        keep_firing_for,
         labels,
         annotations,
         channels,
@@ -43,9 +44,35 @@ pub fn to_create_trigger_task_expr(
         })
         .collect::<Vec<_>>();
 
+    let TriggerOn {
+        query,
+        query_interval,
+    } = trigger_on;
+
+    let DurationExpr {
+        duration,
+        raw_expr: raw_interval_expr,
+    } = query_interval;
+
+    let (r#for, for_raw_expr) = if let Some(f) = r#for {
+        let duration = f.duration.try_into().context(TooLargeDurationSnafu)?;
+        (Some(duration), f.raw_expr)
+    } else {
+        (None, String::new())
+    };
+
+    let (keep_firing_for, keep_firing_for_raw_expr) = if let Some(k) = keep_firing_for {
+        let duration = k.duration.try_into().context(TooLargeDurationSnafu)?;
+        (Some(duration), k.raw_expr)
+    } else {
+        (None, String::new())
+    };
+
     let sql = query.to_string();
     let labels = labels.into_map();
     let annotations = annotations.into_map();
+
+    let interval = duration.try_into().context(TooLargeDurationSnafu)?;
 
     Ok(PbCreateTriggerExpr {
         catalog_name,
@@ -55,7 +82,12 @@ pub fn to_create_trigger_task_expr(
         channels,
         labels,
         annotations,
-        interval,
+        interval: Some(interval),
+        raw_interval_expr,
+        r#for,
+        for_raw_expr,
+        keep_firing_for,
+        keep_firing_for_raw_expr,
     })
 }
 
@@ -67,11 +99,13 @@ fn sanitize_trigger_name(mut trigger_name: ObjectName) -> Result<String> {
         }
     );
     // safety: we've checked trigger_name.0 has exactly one element.
-    Ok(trigger_name.0.swap_remove(0).value)
+    Ok(trigger_name.0.swap_remove(0).to_string_unquoted())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
@@ -81,15 +115,15 @@ mod tests {
 
     #[test]
     fn test_sanitize_trigger_name() {
-        let name = ObjectName(vec![sql::ast::Ident::new("my_trigger")]);
+        let name = vec![sql::ast::Ident::new("my_trigger")].into();
         let sanitized = sanitize_trigger_name(name).unwrap();
         assert_eq!(sanitized, "my_trigger");
 
-        let name = ObjectName(vec![sql::ast::Ident::with_quote('`', "my_trigger")]);
+        let name = vec![sql::ast::Ident::with_quote('`', "my_trigger")].into();
         let sanitized = sanitize_trigger_name(name).unwrap();
         assert_eq!(sanitized, "my_trigger");
 
-        let name = ObjectName(vec![sql::ast::Ident::with_quote('\'', "trigger")]);
+        let name = vec![sql::ast::Ident::with_quote('\'', "trigger")].into();
         let sanitized = sanitize_trigger_name(name).unwrap();
         assert_eq!(sanitized, "trigger");
     }
@@ -123,7 +157,8 @@ NOTIFY
             "(SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2)",
             expr.sql
         );
-        assert_eq!(300, expr.interval);
+        let expected: prost_types::Duration = Duration::from_secs(300).try_into().unwrap();
+        assert_eq!(Some(expected), expr.interval);
         assert_eq!(1, expr.labels.len());
         assert_eq!("label_val", expr.labels.get("label_name").unwrap());
         assert_eq!(1, expr.annotations.len());

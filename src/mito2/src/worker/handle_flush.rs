@@ -14,19 +14,20 @@
 
 //! Handling flush related requests.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
 
-use crate::config::MitoConfig;
+use crate::config::{IndexBuildMode, MitoConfig};
 use crate::error::{RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::region::MitoRegionRef;
-use crate::request::{FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
+use crate::request::{BuildIndexRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
+use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -87,16 +88,13 @@ impl<S> RegionWorkerLoop<S> {
 
         // Flush memtable with max mutable memtable.
         // TODO(yingwen): Maybe flush more tables to reduce write buffer size.
-        if let Some(region) = max_mem_region {
-            if !self.flush_scheduler.is_flush_requested(region.region_id) {
-                let task =
-                    self.new_flush_task(region, FlushReason::EngineFull, None, self.config.clone());
-                self.flush_scheduler.schedule_flush(
-                    region.region_id,
-                    &region.version_control,
-                    task,
-                )?;
-            }
+        if let Some(region) = max_mem_region
+            && !self.flush_scheduler.is_flush_requested(region.region_id)
+        {
+            let task =
+                self.new_flush_task(region, FlushReason::EngineFull, None, self.config.clone());
+            self.flush_scheduler
+                .schedule_flush(region.region_id, &region.version_control, task)?;
         }
 
         Ok(())
@@ -122,6 +120,7 @@ impl<S> RegionWorkerLoop<S> {
             cache_manager: self.cache_manager.clone(),
             manifest_ctx: region.manifest_ctx.clone(),
             index_options: region.version().options.index_options.clone(),
+            flush_semaphore: self.flush_semaphore.clone(),
         }
     }
 }
@@ -209,11 +208,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        region.version_control.apply_edit(
-            request.edit.clone(),
-            &request.memtables_to_remove,
-            region.file_purger.clone(),
-        );
+        // Check if region is currently in staging mode
+        let is_staging = region.manifest_ctx.current_state()
+            == crate::region::RegionRoleState::Leader(crate::region::RegionLeaderState::Staging);
+
+        if is_staging {
+            info!(
+                "Skipping region metadata update for region {} in staging mode",
+                region_id
+            );
+            region.version_control.apply_edit(
+                None,
+                &request.memtables_to_remove,
+                region.file_purger.clone(),
+            );
+        } else {
+            region.version_control.apply_edit(
+                Some(request.edit.clone()),
+                &request.memtables_to_remove,
+                region.file_purger.clone(),
+            );
+        }
 
         region.update_flush_millis();
 
@@ -232,8 +247,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
+        let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
+
         // Notifies waiters and observes the flush timer.
         request.on_success();
+
+        // In async mode, create indexes after flush.
+        if self.config.index.build_mode == IndexBuildMode::Async {
+            self.handle_rebuild_index(
+                BuildIndexRequest {
+                    region_id,
+                    build_type: IndexBuildType::Flush,
+                    file_metas: index_build_file_metas,
+                },
+                OptionOutputTx::new(None),
+            )
+            .await;
+        }
 
         // Handle pending requests for the region.
         if let Some((mut ddl_requests, mut write_requests, mut bulk_writes)) =
@@ -259,20 +289,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// **This is only used for remote WAL pruning.**
     pub(crate) fn update_topic_latest_entry_id(&mut self, region: &MitoRegionRef) {
         if region.provider.is_remote_wal() && region.version().memtables.is_empty() {
-            let high_watermark = self
+            let latest_offset = self
                 .wal
                 .store()
-                .high_watermark(&region.provider)
+                .latest_entry_id(&region.provider)
                 .unwrap_or(0);
             let topic_last_entry_id = region.topic_latest_entry_id.load(Ordering::Relaxed);
 
-            if high_watermark != 0 && high_watermark > topic_last_entry_id {
+            if latest_offset > topic_last_entry_id {
                 region
                     .topic_latest_entry_id
-                    .store(high_watermark, Ordering::Relaxed);
-                info!(
-                    "Region {} high watermark updated to {}",
-                    region.region_id, high_watermark
+                    .store(latest_offset, Ordering::Relaxed);
+                debug!(
+                    "Region {} latest entry id updated to {}",
+                    region.region_id, latest_offset
                 );
             }
         }

@@ -38,8 +38,8 @@ use datatypes::timestamp::TimestampNanosecond;
 use headers::HeaderValue;
 use log_query::LogQuery;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
-use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use pipeline::{GreptimePipelineParams, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
 use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
@@ -198,8 +198,6 @@ pub trait JaegerQueryHandler {
         ctx: QueryContextRef,
         service_name: &str,
         span_kind: Option<&str>,
-        start_time: Option<i64>,
-        end_time: Option<i64>,
     ) -> Result<Output>;
 
     /// Retrieves a trace by its unique identifier.

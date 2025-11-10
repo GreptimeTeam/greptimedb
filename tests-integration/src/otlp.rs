@@ -16,17 +16,22 @@
 mod test {
     use std::sync::Arc;
 
-    use client::{OutputData, DEFAULT_CATALOG_NAME};
+    use client::{DEFAULT_CATALOG_NAME, OutputData};
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
-    use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
-    use opentelemetry_proto::tonic::common::v1::any_value::Value as Val;
-    use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue};
-    use opentelemetry_proto::tonic::metrics::v1::number_data_point::Value;
-    use opentelemetry_proto::tonic::metrics::v1::{metric, NumberDataPoint, *};
-    use opentelemetry_proto::tonic::resource::v1::Resource;
-    use servers::query_handler::sql::SqlQueryHandler;
+    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::any_value::Value as Val;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::{
+        AnyValue, InstrumentationScope, KeyValue,
+    };
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+        Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint, ResourceMetrics,
+        ScopeMetrics, metric,
+    };
+    use otel_arrow_rust::proto::opentelemetry::resource::v1::Resource;
     use servers::query_handler::OpenTelemetryProtocolHandler;
+    use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
 
     use crate::standalone::GreptimeDbStandaloneBuilder;
@@ -54,22 +59,24 @@ mod test {
         let db = "otlp";
         let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
 
-        assert!(SqlQueryHandler::do_query(
-            instance.as_ref(),
-            &format!("CREATE DATABASE IF NOT EXISTS {db}"),
-            ctx.clone(),
-        )
-        .await
-        .first()
-        .unwrap()
-        .is_ok());
+        assert!(
+            SqlQueryHandler::do_query(
+                instance.as_ref(),
+                &format!("CREATE DATABASE IF NOT EXISTS {db}"),
+                ctx.clone(),
+            )
+            .await
+            .first()
+            .unwrap()
+            .is_ok()
+        );
 
         let resp = instance.metrics(req, ctx.clone()).await;
         assert!(resp.is_ok());
 
         let mut output = instance
             .do_query(
-                "SELECT * FROM my_test_metric ORDER BY greptime_timestamp",
+                "SELECT * FROM my_test_metric_my_ignored_unit ORDER BY greptime_timestamp",
                 ctx.clone(),
             )
             .await;
@@ -81,17 +88,17 @@ mod test {
         assert_eq!(
             recordbatches.pretty_print().unwrap(),
             "\
-+------------+-------+--------------------+------------+-------------------------------+----------------+
-| resource   | scope | telemetry_sdk_name | host       | greptime_timestamp            | greptime_value |
-+------------+-------+--------------------+------------+-------------------------------+----------------+
-| greptimedb | otel  | java               | testsevrer | 1970-01-01T00:00:00.000000100 | 100.0          |
-| greptimedb | otel  | java               | testserver | 1970-01-01T00:00:00.000000105 | 105.0          |
-+------------+-------+--------------------+------------+-------------------------------+----------------+",
++----------------+---------------------+----------------+
+| container_name | greptime_timestamp  | greptime_value |
++----------------+---------------------+----------------+
+| testserver     | 1970-01-01T00:00:00 | 105.0          |
+| testsevrer     | 1970-01-01T00:00:00 | 100.0          |
++----------------+---------------------+----------------+",
         );
 
         let mut output = instance
             .do_query(
-                "SELECT le, greptime_value FROM my_test_histo_bucket order by le",
+                "SELECT le, greptime_value FROM my_test_histo_my_ignored_unit_bucket order by le",
                 ctx.clone(),
             )
             .await;
@@ -113,7 +120,10 @@ mod test {
         );
 
         let mut output = instance
-            .do_query("SELECT * FROM my_test_histo_sum", ctx.clone())
+            .do_query(
+                "SELECT * FROM my_test_histo_my_ignored_unit_sum",
+                ctx.clone(),
+            )
             .await;
         let output = output.remove(0).unwrap();
         let OutputData::Stream(stream) = output.data else {
@@ -123,15 +133,18 @@ mod test {
         assert_eq!(
             recordbatches.pretty_print().unwrap(),
             "\
-+------------+-------+--------------------+------------+-------------------------------+----------------+
-| resource   | scope | telemetry_sdk_name | host       | greptime_timestamp            | greptime_value |
-+------------+-------+--------------------+------------+-------------------------------+----------------+
-| greptimedb | otel  | java               | testserver | 1970-01-01T00:00:00.000000100 | 51.0           |
-+------------+-------+--------------------+------------+-------------------------------+----------------+",
++------------+---------------------+----------------+
+| host       | greptime_timestamp  | greptime_value |
++------------+---------------------+----------------+
+| testserver | 1970-01-01T00:00:00 | 51.0           |
++------------+---------------------+----------------+",
         );
 
         let mut output = instance
-            .do_query("SELECT * FROM my_test_histo_count", ctx.clone())
+            .do_query(
+                "SELECT * FROM my_test_histo_my_ignored_unit_count",
+                ctx.clone(),
+            )
             .await;
         let output = output.remove(0).unwrap();
         let OutputData::Stream(stream) = output.data else {
@@ -141,24 +154,24 @@ mod test {
         assert_eq!(
             recordbatches.pretty_print().unwrap(),
             "\
-+------------+-------+--------------------+------------+-------------------------------+----------------+
-| resource   | scope | telemetry_sdk_name | host       | greptime_timestamp            | greptime_value |
-+------------+-------+--------------------+------------+-------------------------------+----------------+
-| greptimedb | otel  | java               | testserver | 1970-01-01T00:00:00.000000100 | 4.0            |
-+------------+-------+--------------------+------------+-------------------------------+----------------+"
++------------+---------------------+----------------+
+| host       | greptime_timestamp  | greptime_value |
++------------+---------------------+----------------+
+| testserver | 1970-01-01T00:00:00 | 4.0            |
++------------+---------------------+----------------+",
         );
     }
 
     fn build_request() -> ExportMetricsServiceRequest {
         let data_points = vec![
             NumberDataPoint {
-                attributes: vec![keyvalue("host", "testsevrer")],
+                attributes: vec![keyvalue("container.name", "testsevrer")],
                 time_unix_nano: 100,
                 value: Some(Value::AsInt(100)),
                 ..Default::default()
             },
             NumberDataPoint {
-                attributes: vec![keyvalue("host", "testserver")],
+                attributes: vec![keyvalue("container.name", "testserver")],
                 time_unix_nano: 105,
                 value: Some(Value::AsInt(105)),
                 ..Default::default()
@@ -212,6 +225,7 @@ mod test {
                 resource: Some(Resource {
                     attributes: vec![keyvalue("resource", "greptimedb")],
                     dropped_attributes_count: 0,
+                    entity_refs: vec![],
                 }),
                 ..Default::default()
             }],

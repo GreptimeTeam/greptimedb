@@ -13,35 +13,132 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use async_stream::try_stream;
+use common_time::Timestamp;
+use either::Either;
+use futures::{Stream, TryStreamExt};
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
-use object_store::{ErrorKind, ObjectStore, ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR};
+use object_store::{ATOMIC_WRITE_DIR, ErrorKind, OLD_ATOMIC_WRITE_DIR, ObjectStore};
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
-use store_api::storage::{RegionId, SequenceNumber};
+use store_api::sst_entry::StorageSstEntry;
+use store_api::storage::{FileId, RegionId, SequenceNumber};
 
+use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
-use crate::cache::CacheManagerRef;
-use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
+use crate::config::{BloomFilterConfig, FulltextIndexConfig, IndexConfig, InvertedIndexConfig};
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
-use crate::read::Source;
+use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
+use crate::read::{FlatSource, Source};
 use crate::region::options::IndexOptions;
-use crate::sst::file::{FileHandle, FileId, FileMeta, RegionFileId};
-use crate::sst::index::intermediate::IntermediateManager;
-use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::file::{FileHandle, RegionFileId};
 use crate::sst::index::IndexerBuilderImpl;
+use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
+use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 pub type AccessLayerRef = Arc<AccessLayer>;
 /// SST write results.
 pub type SstInfoArray = SmallVec<[SstInfo; 2]>;
+
+/// Write operation type.
+#[derive(Eq, PartialEq, Debug)]
+pub enum WriteType {
+    /// Writes from flush
+    Flush,
+    /// Writes from compaction.
+    Compaction,
+}
+
+#[derive(Debug)]
+pub struct Metrics {
+    pub(crate) write_type: WriteType,
+    pub(crate) iter_source: Duration,
+    pub(crate) write_batch: Duration,
+    pub(crate) update_index: Duration,
+    pub(crate) upload_parquet: Duration,
+    pub(crate) upload_puffin: Duration,
+    pub(crate) compact_memtable: Duration,
+}
+
+impl Metrics {
+    pub fn new(write_type: WriteType) -> Self {
+        Self {
+            write_type,
+            iter_source: Default::default(),
+            write_batch: Default::default(),
+            update_index: Default::default(),
+            upload_parquet: Default::default(),
+            upload_puffin: Default::default(),
+            compact_memtable: Default::default(),
+        }
+    }
+
+    pub(crate) fn merge(mut self, other: Self) -> Self {
+        assert_eq!(self.write_type, other.write_type);
+        self.iter_source += other.iter_source;
+        self.write_batch += other.write_batch;
+        self.update_index += other.update_index;
+        self.upload_parquet += other.upload_parquet;
+        self.upload_puffin += other.upload_puffin;
+        self.compact_memtable += other.compact_memtable;
+        self
+    }
+
+    pub(crate) fn observe(self) {
+        match self.write_type {
+            WriteType::Flush => {
+                FLUSH_ELAPSED
+                    .with_label_values(&["iter_source"])
+                    .observe(self.iter_source.as_secs_f64());
+                FLUSH_ELAPSED
+                    .with_label_values(&["write_batch"])
+                    .observe(self.write_batch.as_secs_f64());
+                FLUSH_ELAPSED
+                    .with_label_values(&["update_index"])
+                    .observe(self.update_index.as_secs_f64());
+                FLUSH_ELAPSED
+                    .with_label_values(&["upload_parquet"])
+                    .observe(self.upload_parquet.as_secs_f64());
+                FLUSH_ELAPSED
+                    .with_label_values(&["upload_puffin"])
+                    .observe(self.upload_puffin.as_secs_f64());
+                if !self.compact_memtable.is_zero() {
+                    FLUSH_ELAPSED
+                        .with_label_values(&["compact_memtable"])
+                        .observe(self.upload_puffin.as_secs_f64());
+                }
+            }
+            WriteType::Compaction => {
+                COMPACTION_STAGE_ELAPSED
+                    .with_label_values(&["iter_source"])
+                    .observe(self.iter_source.as_secs_f64());
+                COMPACTION_STAGE_ELAPSED
+                    .with_label_values(&["write_batch"])
+                    .observe(self.write_batch.as_secs_f64());
+                COMPACTION_STAGE_ELAPSED
+                    .with_label_values(&["update_index"])
+                    .observe(self.update_index.as_secs_f64());
+                COMPACTION_STAGE_ELAPSED
+                    .with_label_values(&["upload_parquet"])
+                    .observe(self.upload_parquet.as_secs_f64());
+                COMPACTION_STAGE_ELAPSED
+                    .with_label_values(&["upload_puffin"])
+                    .observe(self.upload_puffin.as_secs_f64());
+            }
+        };
+    }
+}
 
 /// A layer to access SST files under the same directory.
 pub struct AccessLayer {
@@ -102,22 +199,39 @@ impl AccessLayer {
         &self.puffin_manager_factory
     }
 
+    /// Returns the intermediate manager.
+    pub fn intermediate_manager(&self) -> &IntermediateManager {
+        &self.intermediate_manager
+    }
+
+    /// Build the puffin manager.
+    pub(crate) fn build_puffin_manager(&self) -> SstPuffinManager {
+        let store = self.object_store.clone();
+        let path_provider =
+            RegionFilePathFactory::new(self.table_dir().to_string(), self.path_type());
+        self.puffin_manager_factory.build(store, path_provider)
+    }
+
     /// Deletes a SST file (and its index file if it has one) with given file id.
-    pub(crate) async fn delete_sst(&self, file_meta: &FileMeta) -> Result<()> {
-        let path = location::sst_file_path(&self.table_dir, file_meta.file_id(), self.path_type);
+    pub(crate) async fn delete_sst(
+        &self,
+        region_file_id: &RegionFileId,
+        index_file_id: &RegionFileId,
+    ) -> Result<()> {
+        let path = location::sst_file_path(&self.table_dir, *region_file_id, self.path_type);
         self.object_store
             .delete(&path)
             .await
             .context(DeleteSstSnafu {
-                file_id: file_meta.file_id,
+                file_id: region_file_id.file_id(),
             })?;
 
-        let path = location::index_file_path(&self.table_dir, file_meta.file_id(), self.path_type);
+        let path = location::index_file_path(&self.table_dir, *index_file_id, self.path_type);
         self.object_store
             .delete(&path)
             .await
             .context(DeleteIndexSnafu {
-                file_id: file_meta.file_id,
+                file_id: region_file_id.file_id(),
             })?;
 
         Ok(())
@@ -145,6 +259,7 @@ impl AccessLayer {
         &self,
         request: SstWriteRequest,
         write_opts: &WriteOptions,
+        metrics: &mut Metrics,
     ) -> Result<SstInfoArray> {
         let region_id = request.metadata.region_id;
         let cache_manager = request.cache_manager.clone();
@@ -155,13 +270,14 @@ impl AccessLayer {
                 .write_and_upload_sst(
                     request,
                     SstUploadRequest {
-                        dest_path_provider: RegionFilePathFactory {
-                            table_dir: self.table_dir.clone(),
-                            path_type: self.path_type,
-                        },
+                        dest_path_provider: RegionFilePathFactory::new(
+                            self.table_dir.clone(),
+                            self.path_type,
+                        ),
                         remote_store: self.object_store.clone(),
                     },
                     write_opts,
+                    metrics,
                 )
                 .await?
         } else {
@@ -169,7 +285,7 @@ impl AccessLayer {
             let store = self.object_store.clone();
             let path_provider = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
             let indexer_builder = IndexerBuilderImpl {
-                op_type: request.op_type,
+                build_type: request.op_type.into(),
                 metadata: request.metadata.clone(),
                 row_group_size: write_opts.row_group_size,
                 puffin_manager: self
@@ -188,14 +304,23 @@ impl AccessLayer {
             let mut writer = ParquetWriter::new_with_object_store(
                 self.object_store.clone(),
                 request.metadata,
+                request.index_config,
                 indexer_builder,
                 path_provider,
+                metrics,
             )
             .await
             .with_file_cleaner(cleaner);
-            writer
-                .write_all(request.source, request.max_sequence, write_opts)
-                .await?
+            match request.source {
+                Either::Left(source) => {
+                    writer
+                        .write_all(source, request.max_sequence, write_opts)
+                        .await?
+                }
+                Either::Right(flat_source) => {
+                    writer.write_all_flat(flat_source, write_opts).await?
+                }
+            }
         };
 
         // Put parquet metadata to cache manager.
@@ -212,6 +337,94 @@ impl AccessLayer {
 
         Ok(sst_info)
     }
+
+    /// Puts encoded SST bytes to the write cache (if enabled) and uploads it to the object store.
+    pub(crate) async fn put_sst(
+        &self,
+        data: &bytes::Bytes,
+        region_id: RegionId,
+        sst_info: &SstInfo,
+        cache_manager: &CacheManagerRef,
+    ) -> Result<Metrics> {
+        if let Some(write_cache) = cache_manager.write_cache() {
+            // Write to cache and upload to remote store
+            let upload_request = SstUploadRequest {
+                dest_path_provider: RegionFilePathFactory::new(
+                    self.table_dir.clone(),
+                    self.path_type,
+                ),
+                remote_store: self.object_store.clone(),
+            };
+            write_cache
+                .put_and_upload_sst(data, region_id, sst_info, upload_request)
+                .await
+        } else {
+            let start = Instant::now();
+            let cleaner = TempFileCleaner::new(region_id, self.object_store.clone());
+            let path_provider = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
+            let sst_file_path =
+                path_provider.build_sst_file_path(RegionFileId::new(region_id, sst_info.file_id));
+            let mut writer = self
+                .object_store
+                .writer_with(&sst_file_path)
+                .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+                .concurrent(DEFAULT_WRITE_CONCURRENCY)
+                .await
+                .context(OpenDalSnafu)?;
+            if let Err(err) = writer.write(data.clone()).await.context(OpenDalSnafu) {
+                cleaner.clean_by_file_id(sst_info.file_id).await;
+                return Err(err);
+            }
+            if let Err(err) = writer.close().await.context(OpenDalSnafu) {
+                cleaner.clean_by_file_id(sst_info.file_id).await;
+                return Err(err);
+            }
+            let mut metrics = Metrics::new(WriteType::Flush);
+            metrics.write_batch = start.elapsed();
+            Ok(metrics)
+        }
+    }
+
+    /// Lists the SST entries from the storage layer in the table directory.
+    pub fn storage_sst_entries(&self) -> impl Stream<Item = Result<StorageSstEntry>> + use<> {
+        let object_store = self.object_store.clone();
+        let table_dir = self.table_dir.clone();
+
+        try_stream! {
+            let mut lister = object_store
+                .lister_with(table_dir.as_str())
+                .recursive(true)
+                .await
+                .context(OpenDalSnafu)?;
+
+            while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
+                let metadata = entry.metadata();
+                if metadata.is_dir() {
+                    continue;
+                }
+
+                let path = entry.path();
+                if !path.ends_with(".parquet") && !path.ends_with(".puffin") {
+                    continue;
+                }
+
+                let file_size = metadata.content_length();
+                let file_size = if file_size == 0 { None } else { Some(file_size) };
+                let last_modified_ms = metadata
+                    .last_modified()
+                    .map(|ts| Timestamp::new_millisecond(ts.timestamp_millis()));
+
+                let entry = StorageSstEntry {
+                    file_path: path.to_string(),
+                    file_size,
+                    last_modified_ms,
+                    node_id: None,
+                };
+
+                yield entry;
+            }
+        }
+    }
 }
 
 /// `OperationType` represents the origin of the `SstWriteRequest`.
@@ -225,7 +438,7 @@ pub enum OperationType {
 pub struct SstWriteRequest {
     pub op_type: OperationType,
     pub metadata: RegionMetadataRef,
-    pub source: Source,
+    pub source: Either<Source, FlatSource>,
     pub cache_manager: CacheManagerRef,
     #[allow(dead_code)]
     pub storage: Option<String>,
@@ -233,6 +446,7 @@ pub struct SstWriteRequest {
 
     /// Configs for index
     pub index_options: IndexOptions,
+    pub index_config: IndexConfig,
     pub inverted_index_config: InvertedIndexConfig,
     pub fulltext_index_config: FulltextIndexConfig,
     pub bloom_filter_index_config: BloomFilterConfig,

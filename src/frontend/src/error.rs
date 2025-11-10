@@ -36,13 +36,6 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to open raft engine backend"))]
-    OpenRaftEngineBackend {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
     #[snafu(display("Failed to handle heartbeat response"))]
     HandleHeartbeatResponse {
         #[snafu(implicit)]
@@ -337,12 +330,6 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("In-flight write bytes exceeded the maximum limit"))]
-    InFlightWriteBytesExceeded {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to decode logical plan from substrait"))]
     SubstraitDecodeLogicalPlan {
         #[snafu(implicit)]
@@ -366,6 +353,14 @@ pub enum Error {
 
     #[snafu(display("Canceling statement due to statement timeout"))]
     StatementTimeout {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to acquire more permits from limiter"))]
+    AcquireLimiter {
+        #[snafu(source)]
+        error: tokio::sync::AcquireError,
         #[snafu(implicit)]
         location: Location,
     },
@@ -418,8 +413,6 @@ impl ErrorExt for Error {
 
             Error::Table { source, .. } | Error::Insert { source, .. } => source.status_code(),
 
-            Error::OpenRaftEngineBackend { .. } => StatusCode::StorageUnavailable,
-
             Error::RequestQuery { source, .. } => source.status_code(),
 
             Error::CacheRequired { .. } => StatusCode::Internal,
@@ -444,13 +437,13 @@ impl ErrorExt for Error {
 
             Error::TableOperation { source, .. } => source.status_code(),
 
-            Error::InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
-
             Error::DataFusion { error, .. } => datafusion_status_code::<Self>(error, None),
 
             Error::Cancelled { .. } => StatusCode::Cancelled,
 
             Error::StatementTimeout { .. } => StatusCode::Cancelled,
+
+            Error::AcquireLimiter { .. } => StatusCode::Internal,
         }
     }
 

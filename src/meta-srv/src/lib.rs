@@ -12,33 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(result_flattening)]
 #![feature(assert_matches)]
 #![feature(hash_set_entry)]
-#![feature(let_chains)]
+#![feature(duration_constructors)]
+#![feature(string_from_utf8_lossy_owned)]
 
 pub mod bootstrap;
 pub mod cache_invalidator;
 pub mod cluster;
+pub mod discovery;
 pub mod election;
 pub mod error;
+pub mod events;
 mod failure_detector;
-pub mod flow_meta_alloc;
 pub mod handler;
 pub mod key;
-pub mod lease;
 pub mod metasrv;
 pub mod metrics;
 #[cfg(feature = "mock")]
 pub mod mocks;
-pub mod node_excluder;
+pub mod peer;
 pub mod procedure;
 pub mod pubsub;
 pub mod region;
 pub mod selector;
 pub mod service;
 pub mod state;
-pub mod table_meta_alloc;
+pub mod utils;
 
 pub use crate::error::Result;
 

@@ -18,23 +18,23 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use derive_builder::Builder;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
-use rand::seq::SliceRandom;
 use rand::Rng;
-use snafu::{ensure, ResultExt};
+use rand::seq::SliceRandom;
+use snafu::{ResultExt, ensure};
 
 use super::Generator;
 use crate::context::TableContextRef;
 use crate::error::{self, Error, Result};
-use crate::fake::{random_capitalize_map, MappedGenerator, WordGenerator};
+use crate::fake::{MappedGenerator, WordGenerator, random_capitalize_map};
 use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Random};
 use crate::ir::create_expr::{
     ColumnOption, CreateDatabaseExprBuilder, CreateTableExprBuilder, PartitionDef,
 };
 use crate::ir::{
-    column_options_generator, generate_columns, generate_partition_bounds,
-    partible_column_options_generator, primary_key_options_generator, ts_column_options_generator,
     Column, ColumnTypeGenerator, CreateDatabaseExpr, CreateTableExpr, Ident,
     PartibleColumnTypeGenerator, StringColumnTypeGenerator, TsColumnTypeGenerator,
+    column_options_generator, generate_columns, generate_partition_bounds,
+    partible_column_options_generator, primary_key_options_generator, ts_column_options_generator,
 };
 
 #[derive(Builder)]
@@ -160,17 +160,17 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
 
         builder.columns(columns);
         builder.primary_keys(primary_keys);
-        builder.engine(self.engine.to_string());
+        builder.engine(self.engine.clone());
         builder.if_not_exists(self.if_not_exists);
         if self.name.is_empty() {
-            builder.table_name(self.name_generator.gen(rng));
+            builder.table_name(self.name_generator.generate(rng));
         } else {
             builder.table_name(self.name.clone());
         }
         if !self.with_clause.is_empty() {
             let mut options = HashMap::new();
             for (key, value) in &self.with_clause {
-                options.insert(key.to_string(), Value::from(value.to_string()));
+                options.insert(key.clone(), Value::from(value.clone()));
             }
             builder.options(options);
         }
@@ -239,11 +239,11 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreatePhysicalTableExpr
         let mut options = HashMap::with_capacity(self.with_clause.len() + 1);
         options.insert("physical_metric_table".to_string(), Value::from(""));
         for (key, value) in &self.with_clause {
-            options.insert(key.to_string(), Value::from(value.to_string()));
+            options.insert(key.clone(), Value::from(value.clone()));
         }
 
         Ok(CreateTableExpr {
-            table_name: self.name_generator.gen(rng),
+            table_name: self.name_generator.generate(rng),
             columns: vec![
                 Column {
                     name: Ident::new("ts"),
@@ -355,9 +355,9 @@ impl<R: Rng + 'static> Generator<CreateDatabaseExpr, R> for CreateDatabaseExprGe
         let mut builder = CreateDatabaseExprBuilder::default();
         builder.if_not_exists(self.if_not_exists);
         if self.database_name.is_empty() {
-            builder.database_name(self.name_generator.gen(rng));
+            builder.database_name(self.name_generator.generate(rng));
         } else {
-            builder.database_name(self.database_name.to_string());
+            builder.database_name(self.database_name.clone());
         }
         builder.build().context(error::BuildCreateDatabaseExprSnafu)
     }
@@ -451,7 +451,7 @@ mod tests {
         let physical_ts_name = physical_table_expr.columns[physical_ts.unwrap()]
             .name
             .value
-            .to_string();
+            .clone();
 
         let physical_table_ctx = Arc::new(TableContext::from(&physical_table_expr));
 
@@ -472,21 +472,18 @@ mod tests {
         let logical_ts_name = logical_table_expr.columns[logical_ts.unwrap()]
             .name
             .value
-            .to_string();
+            .clone();
 
         assert_eq!(logical_table_expr.engine, "metric");
         assert_eq!(logical_table_expr.columns.len(), 7);
         assert_eq!(logical_ts_name, physical_ts_name);
-        assert!(logical_table_expr
-            .columns
-            .iter()
-            .all(
-                |column| column.column_type != ConcreteDataType::string_datatype()
-                    || column
-                        .options
-                        .iter()
-                        .any(|option| option == &ColumnOption::PrimaryKey)
-            ));
+        assert!(logical_table_expr.columns.iter().all(|column| {
+            column.column_type != ConcreteDataType::string_datatype()
+                || column
+                    .options
+                    .iter()
+                    .any(|option| option == &ColumnOption::PrimaryKey)
+        }));
     }
 
     #[test]
@@ -514,7 +511,7 @@ mod tests {
             .unwrap();
 
         let logical_table_serialized = serde_json::to_string(&logical_table_expr).unwrap();
-        let logical_table_expected = r#"{"table_name":{"value":"impedit","quote_style":null},"columns":[{"name":{"value":"ts","quote_style":null},"column_type":{"Timestamp":{"Millisecond":null}},"options":["TimeIndex"]},{"name":{"value":"val","quote_style":null},"column_type":{"Float64":{}},"options":[]},{"name":{"value":"totam","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"cumque","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"natus","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"molestias","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"qui","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]}],"if_not_exists":false,"partition":null,"engine":"metric","options":{"on_physical_table":{"String":"expedita"}},"primary_keys":[4,2,3,6,5]}"#;
+        let logical_table_expected = r#"{"table_name":{"value":"impedit","quote_style":null},"columns":[{"name":{"value":"ts","quote_style":null},"column_type":{"Timestamp":{"Millisecond":null}},"options":["TimeIndex"]},{"name":{"value":"val","quote_style":null},"column_type":{"Float64":{}},"options":[]},{"name":{"value":"totam","quote_style":null},"column_type":{"String":{"size_type":"Utf8"}},"options":["PrimaryKey"]},{"name":{"value":"cumque","quote_style":null},"column_type":{"String":{"size_type":"Utf8"}},"options":["PrimaryKey"]},{"name":{"value":"natus","quote_style":null},"column_type":{"String":{"size_type":"Utf8"}},"options":["PrimaryKey"]},{"name":{"value":"molestias","quote_style":null},"column_type":{"String":{"size_type":"Utf8"}},"options":["PrimaryKey"]},{"name":{"value":"qui","quote_style":null},"column_type":{"String":{"size_type":"Utf8"}},"options":["PrimaryKey"]}],"if_not_exists":false,"partition":null,"engine":"metric","options":{"on_physical_table":{"String":"expedita"}},"primary_keys":[4,2,3,6,5]}"#;
         assert_eq!(logical_table_expected, logical_table_serialized);
     }
 

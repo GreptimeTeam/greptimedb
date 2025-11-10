@@ -13,8 +13,10 @@
 // limitations under the License.
 
 mod instance_kafka_wal_test;
+mod instance_noop_wal_test;
 mod instance_test;
 mod promql_test;
+mod reconcile_table;
 pub(crate) mod test_util;
 
 use std::collections::HashMap;
@@ -44,6 +46,6 @@ impl MockDistributedInstance {
 
 pub async fn create_distributed_instance(test_name: &str) -> MockDistributedInstance {
     let builder = GreptimeDbClusterBuilder::new(test_name).await;
-    let cluster = builder.build().await;
+    let cluster = builder.build(false).await;
     MockDistributedInstance(cluster)
 }

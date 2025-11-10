@@ -14,15 +14,15 @@
 
 use std::sync::Arc;
 
+use api::v1::meta::ReconcileRequest;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::AffectedRows;
 use common_meta::rpc::procedure::{
-    AddRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
-    RemoveRegionFollowerRequest,
+    ManageRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
 };
-use common_query::error::Result;
 use common_query::Output;
+use common_query::error::Result;
 use session::context::QueryContextRef;
 use store_api::storage::RegionId;
 use table::requests::{CompactTableRequest, DeleteRequest, FlushTableRequest, InsertRequest};
@@ -38,7 +38,7 @@ pub trait TableMutationHandler: Send + Sync {
 
     /// Trigger a flush task for table.
     async fn flush(&self, request: FlushTableRequest, ctx: QueryContextRef)
-        -> Result<AffectedRows>;
+    -> Result<AffectedRows>;
 
     /// Trigger a compaction task for table.
     async fn compact(
@@ -49,7 +49,7 @@ pub trait TableMutationHandler: Send + Sync {
 
     /// Trigger a flush task for a table region.
     async fn flush_region(&self, region_id: RegionId, ctx: QueryContextRef)
-        -> Result<AffectedRows>;
+    -> Result<AffectedRows>;
 
     /// Trigger a compaction task for a table region.
     async fn compact_region(
@@ -65,14 +65,14 @@ pub trait ProcedureServiceHandler: Send + Sync {
     /// Migrate a region from source peer to target peer, returns the procedure id if success.
     async fn migrate_region(&self, request: MigrateRegionRequest) -> Result<Option<String>>;
 
+    /// Reconcile a table, database or catalog, returns the procedure id if success.
+    async fn reconcile(&self, request: ReconcileRequest) -> Result<Option<String>>;
+
     /// Query the procedure' state by its id
     async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse>;
 
-    /// Add a region follower to a region.
-    async fn add_region_follower(&self, request: AddRegionFollowerRequest) -> Result<()>;
-
-    /// Remove a region follower from a region.
-    async fn remove_region_follower(&self, request: RemoveRegionFollowerRequest) -> Result<()>;
+    /// Manage a region follower to a region.
+    async fn manage_region_follower(&self, request: ManageRegionFollowerRequest) -> Result<()>;
 
     /// Get the catalog manager
     fn catalog_manager(&self) -> &CatalogManagerRef;

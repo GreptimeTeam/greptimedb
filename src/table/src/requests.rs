@@ -14,7 +14,7 @@
 
 //! Table and TableEngine requests
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 
@@ -22,19 +22,22 @@ use common_base::readable_size::ReadableSize;
 use common_datasource::object_store::oss::is_supported_in_oss;
 use common_datasource::object_store::s3::is_supported_in_s3;
 use common_query::AddColumnLocation;
-use common_time::range::TimestampRange;
 use common_time::TimeToLive;
+use common_time::range::TimestampRange;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
-use datatypes::schema::{ColumnSchema, FulltextOptions, SkippingIndexOptions};
+use datatypes::schema::{
+    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, SkippingIndexOptions,
+};
 use greptime_proto::v1::region::compact_request;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{
-    is_metric_engine_option_key, LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY,
+    LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY, is_metric_engine_option_key,
 };
 use store_api::mito_engine_options::{
-    is_mito_engine_option_key, APPEND_MODE_KEY, COMPACTION_TYPE, MEMTABLE_TYPE, MERGE_MODE_KEY,
-    TWCS_FALLBACK_TO_LOCAL, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
+    APPEND_MODE_KEY, COMPACTION_TYPE, MEMTABLE_TYPE, MERGE_MODE_KEY, TWCS_FALLBACK_TO_LOCAL,
+    TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, is_mito_engine_option_key,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
@@ -50,11 +53,10 @@ pub const FILE_TABLE_FORMAT_KEY: &str = "format";
 pub const TABLE_DATA_MODEL: &str = "table_data_model";
 pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
 
-use std::collections::HashSet;
+pub const OTLP_METRIC_COMPAT_KEY: &str = "otlp_metric_compat";
+pub const OTLP_METRIC_COMPAT_PROM: &str = "prom";
 
-use once_cell::sync::Lazy;
-
-pub const VALID_TABLE_OPTION_KEYS: [&str; 11] = [
+pub const VALID_TABLE_OPTION_KEYS: [&str; 12] = [
     // common keys:
     WRITE_BUFFER_SIZE_KEY,
     TTL_KEY,
@@ -70,6 +72,7 @@ pub const VALID_TABLE_OPTION_KEYS: [&str; 11] = [
     LOGICAL_TABLE_METADATA_KEY,
     // table model info
     TABLE_DATA_MODEL,
+    OTLP_METRIC_COMPAT_KEY,
 ];
 
 // Valid option keys when creating a db.
@@ -289,6 +292,15 @@ pub enum AlterKind {
     DropDefaults {
         names: Vec<String>,
     },
+    SetDefaults {
+        defaults: Vec<SetDefaultRequest>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetDefaultRequest {
+    pub column_name: String,
+    pub default_constraint: Option<ColumnDefaultConstraint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -389,6 +401,7 @@ pub struct CompactTableRequest {
     pub schema_name: String,
     pub table_name: String,
     pub compact_options: compact_request::Options,
+    pub parallelism: u32,
 }
 
 impl Default for CompactTableRequest {
@@ -398,6 +411,7 @@ impl Default for CompactTableRequest {
             schema_name: Default::default(),
             table_name: Default::default(),
             compact_options: compact_request::Options::Regular(Default::default()),
+            parallelism: 1,
         }
     }
 }
@@ -412,7 +426,7 @@ pub struct TruncateTableRequest {
 }
 
 impl TruncateTableRequest {
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference {
             catalog: &self.catalog_name,
             schema: &self.schema_name,

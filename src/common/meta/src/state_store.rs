@@ -21,20 +21,20 @@ use common_procedure::error::{
 use common_procedure::store::poison_store::PoisonStore;
 use common_procedure::store::state_store::{KeySet, KeyValueStream, StateStore};
 use common_procedure::store::util::multiple_value_stream;
-use futures::future::try_join_all;
 use futures::StreamExt;
+use futures::future::try_join_all;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{ProcedurePoisonConflictSnafu, Result, UnexpectedSnafu};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, MetadataValue};
-use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::range_stream::PaginationStream;
-use crate::rpc::store::{BatchDeleteRequest, PutRequest, RangeRequest};
 use crate::rpc::KeyValue;
+use crate::rpc::store::{BatchDeleteRequest, PutRequest, RangeRequest};
 
 const DELIMITER: &str = "/";
 
@@ -121,7 +121,7 @@ impl StateStore for KvStateStore {
                 self.kv_backend
                     .put(
                         PutRequest::new()
-                            .with_key(key.to_string().into_bytes())
+                            .with_key(key.clone().into_bytes())
                             .with_value(value),
                     )
                     .await
@@ -145,7 +145,7 @@ impl StateStore for KvStateStore {
                         let key = if idx > 0 {
                             KeySet::with_segment_suffix(&key, idx)
                         } else {
-                            key.to_string()
+                            key.clone()
                         };
                         let kv_backend = self.kv_backend.clone();
                         async move {
@@ -240,7 +240,7 @@ impl KvStateStore {
         value: &PoisonValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> PoisonDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> PoisonDecodeResult + use<>,
     )> {
         let key = key.as_bytes().to_vec();
         let value = value.try_as_raw_value()?;
@@ -260,7 +260,7 @@ impl KvStateStore {
         value: PoisonValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> PoisonDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> PoisonDecodeResult + use<>,
     )> {
         let key = key.as_bytes().to_vec();
         let value = value.try_as_raw_value()?;

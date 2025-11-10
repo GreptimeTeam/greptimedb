@@ -20,7 +20,7 @@ use common_error::ext::ErrorExt;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::datanode::RegionStat;
 use crate::error::{
@@ -118,6 +118,21 @@ pub struct NodeInfo {
     pub git_commit: String,
     // The node star timestamp
     pub start_time_ms: u64,
+    // The node build cpus
+    #[serde(default)]
+    pub total_cpu_millicores: i64,
+    // The node build memory bytes
+    #[serde(default)]
+    pub total_memory_bytes: i64,
+    // The node build cpu usage millicores
+    #[serde(default)]
+    pub cpu_usage_millicores: i64,
+    // The node build memory usage bytes
+    #[serde(default)]
+    pub memory_usage_bytes: i64,
+    // The node build hostname
+    #[serde(default)]
+    pub hostname: String,
 }
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -324,6 +339,11 @@ mod tests {
             version: "".to_string(),
             git_commit: "".to_string(),
             start_time_ms: 1,
+            total_cpu_millicores: 0,
+            total_memory_bytes: 0,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
+            hostname: "test_hostname".to_string(),
         };
 
         let node_info_bytes: Vec<u8> = node_info.try_into().unwrap();

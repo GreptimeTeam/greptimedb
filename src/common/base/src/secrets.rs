@@ -31,10 +31,10 @@
 //! types of `SecretBox<T>` to be serializable with `serde`, you will need to impl
 //! the [`SerializableSecret`] marker trait on `T`
 
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use std::{any, fmt};
 
-use serde::{de, ser, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de, ser};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Wrapper type for strings that contains secrets. See also [SecretBox].
@@ -43,6 +43,12 @@ pub type SecretString = SecretBox<String>;
 impl From<String> for SecretString {
     fn from(value: String) -> Self {
         SecretString::new(Box::new(value))
+    }
+}
+
+impl Display for SecretString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SecretString([REDACTED])")
     }
 }
 
@@ -162,6 +168,15 @@ impl<S: Zeroize> ExposeSecret<S> for SecretBox<S> {
 impl<S: Zeroize> ExposeSecretMut<S> for SecretBox<S> {
     fn expose_secret_mut(&mut self) -> &mut S {
         self.inner_secret.as_mut()
+    }
+}
+
+impl<S> PartialEq for SecretBox<S>
+where
+    S: PartialEq + Zeroize,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.inner_secret == other.inner_secret
     }
 }
 

@@ -14,9 +14,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use common_telemetry::{debug, warn};
+use common_base::readable_size::ReadableSize;
+use common_meta::datanode::TopicStatsReporter;
+use common_meta::distributed_time_constants::TOPIC_STATS_REPORT_INTERVAL_SECS;
+use common_telemetry::{debug, info, warn};
+use common_time::util::current_time_millis;
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use dashmap::DashMap;
 use futures::future::try_join_all;
@@ -33,17 +37,33 @@ use store_api::storage::RegionId;
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::consumer::{ConsumerBuilder, RecordsBuffer};
-use crate::kafka::high_watermark_manager::HighWatermarkManager;
 use crate::kafka::index::{
-    build_region_wal_index_iterator, GlobalIndexCollector, MIN_BATCH_WINDOW_SIZE,
+    GlobalIndexCollector, MIN_BATCH_WINDOW_SIZE, build_region_wal_index_iterator,
 };
+use crate::kafka::periodic_offset_fetcher::PeriodicOffsetFetcher;
 use crate::kafka::producer::OrderedBatchProducerRef;
 use crate::kafka::util::record::{
-    convert_to_kafka_records, maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
+    ESTIMATED_META_SIZE, Record, convert_to_kafka_records, maybe_emit_entry, remaining_entries,
 };
 use crate::metrics;
 
-const DEFAULT_HIGH_WATERMARK_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
+const DEFAULT_OFFSET_FETCH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Statistics for a topic.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TopicStat {
+    /// Latest offset for the topic.
+    ///
+    /// The latest offset is updated in two ways:
+    /// - Automatically when the producer successfully commits data to Kafka
+    /// - Periodically by the [PeriodicOffsetFetcher](crate::kafka::periodic_offset_fetcher::PeriodicOffsetFetcher).
+    ///
+    pub latest_offset: u64,
+    /// Total size in bytes of records appended to the topic.
+    pub record_size: u64,
+    /// Total number of records appended to the topic.
+    pub record_num: u64,
+}
 
 /// A log store backed by Kafka.
 #[derive(Debug)]
@@ -56,18 +76,70 @@ pub struct KafkaLogStore {
     consumer_wait_timeout: Duration,
     /// Ignore missing entries during read WAL.
     overwrite_entry_start_id: bool,
-    /// High watermark for all topics.
+    /// The stats of each topic.
     ///
-    /// Represents the offset of the last record in each topic. This is used to track
-    /// the latest available data in Kafka topics.
-    ///
-    /// The high watermark is updated in two ways:
-    /// - Automatically when the producer successfully commits data to Kafka
-    /// - Periodically by the [HighWatermarkManager](crate::kafka::high_watermark_manager::HighWatermarkManager).
-    ///
-    /// This shared map allows multiple components to access the latest high watermark
+    /// This shared map allows multiple components to access the latest stats
     /// information without needing to query Kafka directly.
-    high_watermark: Arc<DashMap<Arc<KafkaProvider>, u64>>,
+    topic_stats: Arc<DashMap<Arc<KafkaProvider>, TopicStat>>,
+}
+
+struct PeriodicTopicStatsReporter {
+    topic_stats: Arc<DashMap<Arc<KafkaProvider>, TopicStat>>,
+    last_reported_timestamp_millis: i64,
+    report_interval_millis: i64,
+}
+
+impl PeriodicTopicStatsReporter {
+    fn align_ts(ts: i64, report_interval_millis: i64) -> i64 {
+        (ts / report_interval_millis) * report_interval_millis
+    }
+
+    /// Creates a new [PeriodicTopicStatsReporter].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `report_interval` is zero.
+    fn new(
+        topic_stats: Arc<DashMap<Arc<KafkaProvider>, TopicStat>>,
+        report_interval: Duration,
+    ) -> Self {
+        assert!(!report_interval.is_zero());
+        let report_interval_millis = report_interval.as_millis() as i64;
+        let last_reported_timestamp_millis =
+            Self::align_ts(current_time_millis(), report_interval_millis);
+
+        Self {
+            topic_stats,
+            last_reported_timestamp_millis,
+            report_interval_millis,
+        }
+    }
+}
+
+impl TopicStatsReporter for PeriodicTopicStatsReporter {
+    fn reportable_topics(&mut self) -> Vec<common_meta::datanode::TopicStat> {
+        let now = Self::align_ts(current_time_millis(), self.report_interval_millis);
+        if now < self.last_reported_timestamp_millis + self.report_interval_millis {
+            debug!("Skip reporting topic stats because the interval is not reached");
+            return vec![];
+        }
+
+        self.last_reported_timestamp_millis = now;
+        let mut reportable_topics = Vec::with_capacity(self.topic_stats.len());
+        for e in self.topic_stats.iter() {
+            let topic_stat = e.value();
+            let topic_stat = common_meta::datanode::TopicStat {
+                topic: e.key().topic.clone(),
+                latest_entry_id: topic_stat.latest_offset,
+                record_size: topic_stat.record_size,
+                record_num: topic_stat.record_num,
+            };
+            debug!("Reportable topic: {:?}", topic_stat);
+            reportable_topics.push(topic_stat);
+        }
+        debug!("Reportable {} topics at {}", reportable_topics.len(), now);
+        reportable_topics
+    }
 }
 
 impl KafkaLogStore {
@@ -76,24 +148,29 @@ impl KafkaLogStore {
         config: &DatanodeKafkaConfig,
         global_index_collector: Option<GlobalIndexCollector>,
     ) -> Result<Self> {
-        let high_watermark = Arc::new(DashMap::new());
+        let topic_stats = Arc::new(DashMap::new());
         let client_manager = Arc::new(
-            ClientManager::try_new(config, global_index_collector, high_watermark.clone()).await?,
+            ClientManager::try_new(config, global_index_collector, topic_stats.clone()).await?,
         );
-        let high_watermark_manager = HighWatermarkManager::new(
-            DEFAULT_HIGH_WATERMARK_UPDATE_INTERVAL,
-            high_watermark.clone(),
-            client_manager.clone(),
-        );
-        high_watermark_manager.run().await;
+        let fetcher =
+            PeriodicOffsetFetcher::new(DEFAULT_OFFSET_FETCH_INTERVAL, client_manager.clone());
+        fetcher.run().await;
 
         Ok(Self {
             client_manager,
             max_batch_bytes: config.max_batch_bytes.as_bytes() as usize,
             consumer_wait_timeout: config.consumer_wait_timeout,
             overwrite_entry_start_id: config.overwrite_entry_start_id,
-            high_watermark,
+            topic_stats,
         })
+    }
+
+    /// Returns the topic stats.
+    pub fn topic_stats_reporter(&self) -> Box<dyn TopicStatsReporter> {
+        Box::new(PeriodicTopicStatsReporter::new(
+            self.topic_stats.clone(),
+            Duration::from_secs(TOPIC_STATS_REPORT_INTERVAL_SECS),
+        ))
     }
 }
 
@@ -225,13 +302,10 @@ impl LogStore for KafkaLogStore {
                 },
             ))
             .await?;
-
-        // Updates the high watermark offset of the last record in the topic.
-        for (region_id, offset) in &region_grouped_max_offset {
-            // Safety: `region_id` is always valid.
-            let provider = region_to_provider.get(region_id).unwrap();
-            self.high_watermark.insert(provider.clone(), *offset);
-        }
+        debug!(
+            "Appended batch to Kafka, region_grouped_max_offset: {:?}",
+            region_grouped_max_offset
+        );
 
         Ok(AppendBatchResponse {
             last_entry_ids: region_grouped_max_offset.into_iter().collect(),
@@ -274,9 +348,9 @@ impl LogStore for KafkaLogStore {
 
             if entry_id as i64 <= start_offset {
                 warn!(
-                "The entry_id: {} is less than start_offset: {}, topic: {}. Overwriting entry_id with start_offset",
-                entry_id, start_offset, &provider.topic
-            );
+                    "The entry_id: {} is less than start_offset: {}, topic: {}. Overwriting entry_id with start_offset",
+                    entry_id, start_offset, &provider.topic
+                );
 
                 entry_id = start_offset as u64;
             }
@@ -292,6 +366,17 @@ impl LogStore for KafkaLogStore {
             .context(GetOffsetSnafu {
                 topic: &provider.topic,
             })?;
+        let latest_offset = (end_offset as u64).saturating_sub(1);
+        self.topic_stats
+            .entry(provider.clone())
+            .and_modify(|stat| {
+                stat.latest_offset = stat.latest_offset.max(latest_offset);
+            })
+            .or_insert_with(|| TopicStat {
+                latest_offset,
+                record_size: 0,
+                record_num: 0,
+            });
 
         let region_indexes = if let (Some(index), Some(collector)) =
             (index, self.client_manager.global_index_collector())
@@ -331,6 +416,7 @@ impl LogStore for KafkaLogStore {
         let mut entry_records: HashMap<RegionId, Vec<Record>> = HashMap::new();
         let provider = provider.clone();
         let stream = async_stream::stream!({
+            let now = Instant::now();
             while let Some(consume_result) = stream_consumer.next().await {
                 // Each next on the stream consumer produces a `RecordAndOffset` and a high watermark offset.
                 // The `RecordAndOffset` contains the record data and its start offset.
@@ -340,9 +426,6 @@ impl LogStore for KafkaLogStore {
                         topic: &provider.topic,
                     })?;
                 let (kafka_record, offset) = (record_and_offset.record, record_and_offset.offset);
-
-                metrics::METRIC_KAFKA_READ_BYTES_TOTAL
-                    .inc_by(kafka_record.approximate_size() as u64);
 
                 debug!(
                     "Read a record at offset {} for topic {}, high watermark: {}",
@@ -377,6 +460,17 @@ impl LogStore for KafkaLogStore {
                     break;
                 }
             }
+
+            metrics::METRIC_KAFKA_READ_BYTES_TOTAL.inc_by(stream_consumer.total_fetched_bytes());
+
+            info!(
+                "Fetched {} bytes from topic: {}, start_entry_id: {}, end_offset: {}, elapsed: {:?}",
+                ReadableSize(stream_consumer.total_fetched_bytes()),
+                stream_consumer.topic(),
+                entry_id,
+                end_offset,
+                now.elapsed()
+            );
         });
         Ok(Box::pin(stream))
     }
@@ -418,7 +512,7 @@ impl LogStore for KafkaLogStore {
     }
 
     /// Returns the highest entry id of the specified topic in remote WAL.
-    fn high_watermark(&self, provider: &Provider) -> Result<EntryId> {
+    fn latest_entry_id(&self, provider: &Provider) -> Result<EntryId> {
         let provider = provider
             .as_kafka_provider()
             .with_context(|| InvalidProviderSnafu {
@@ -426,14 +520,14 @@ impl LogStore for KafkaLogStore {
                 actual: provider.type_name(),
             })?;
 
-        let high_watermark = self
-            .high_watermark
+        let stat = self
+            .topic_stats
             .get(provider)
             .as_deref()
             .copied()
-            .unwrap_or(0);
+            .unwrap_or_default();
 
-        Ok(high_watermark)
+        Ok(stat.latest_offset)
     }
 
     /// Stops components of the logstore.
@@ -458,22 +552,27 @@ mod tests {
 
     use std::assert_matches::assert_matches;
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use common_base::readable_size::ReadableSize;
+    use common_meta::datanode::TopicStatsReporter;
     use common_telemetry::info;
     use common_telemetry::tracing::warn;
-    use common_wal::config::kafka::common::KafkaConnectionConfig;
     use common_wal::config::kafka::DatanodeKafkaConfig;
+    use common_wal::config::kafka::common::KafkaConnectionConfig;
+    use dashmap::DashMap;
     use futures::TryStreamExt;
-    use rand::prelude::SliceRandom;
     use rand::Rng;
+    use rand::prelude::SliceRandom;
+    use rskafka::client::partition::OffsetAt;
+    use store_api::logstore::LogStore;
     use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
     use store_api::logstore::provider::Provider;
-    use store_api::logstore::LogStore;
     use store_api::storage::RegionId;
 
     use super::build_entry;
-    use crate::kafka::log_store::KafkaLogStore;
+    use crate::kafka::log_store::{KafkaLogStore, PeriodicTopicStatsReporter, TopicStat};
 
     #[test]
     fn test_build_naive_entry() {
@@ -630,8 +729,16 @@ mod tests {
                 .for_each(|entry| entry.set_entry_id(0));
             assert_eq!(expected_entries, actual_entries);
         }
-        let high_wathermark = logstore.high_watermark(&provider).unwrap();
-        assert_eq!(high_wathermark, 99);
+        let latest_entry_id = logstore.latest_entry_id(&provider).unwrap();
+        let client = logstore
+            .client_manager
+            .get_or_insert(provider.as_kafka_provider().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(latest_entry_id, 99);
+        // The latest offset is the offset of the last record plus one.
+        let latest = client.client().get_offset(OffsetAt::Latest).await.unwrap();
+        assert_eq!(latest, 100);
     }
 
     #[tokio::test]
@@ -706,7 +813,35 @@ mod tests {
                 .for_each(|entry| entry.set_entry_id(0));
             assert_eq!(expected_entries, actual_entries);
         }
-        let high_wathermark = logstore.high_watermark(&provider).unwrap();
+        let high_wathermark = logstore.latest_entry_id(&provider).unwrap();
         assert_eq!(high_wathermark, (data_size_kb as u64 / 8 + 1) * 20 * 5 - 1);
+    }
+
+    #[tokio::test]
+    async fn test_topic_stats_reporter() {
+        common_telemetry::init_default_ut_logging();
+        let topic_stats = Arc::new(DashMap::new());
+        let provider = Provider::kafka_provider("my_topic".to_string());
+        topic_stats.insert(
+            provider.as_kafka_provider().unwrap().clone(),
+            TopicStat {
+                latest_offset: 0,
+                record_size: 0,
+                record_num: 0,
+            },
+        );
+        let mut reporter = PeriodicTopicStatsReporter::new(topic_stats, Duration::from_secs(1));
+        // The first reportable topics should be empty.
+        let reportable_topics = reporter.reportable_topics();
+        assert_eq!(reportable_topics.len(), 0);
+
+        // After 1 second, the reportable topics should be the topic in the topic_stats.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let reportable_topics = reporter.reportable_topics();
+        assert_eq!(reportable_topics.len(), 1);
+
+        // Call it immediately, should be empty.
+        let reportable_topics = reporter.reportable_topics();
+        assert_eq!(reportable_topics.len(), 0);
     }
 }

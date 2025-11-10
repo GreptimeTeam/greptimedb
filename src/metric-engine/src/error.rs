@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -44,6 +45,13 @@ pub enum Error {
 
     #[snafu(display("Failed to batch open mito region"))]
     BatchOpenMitoRegion {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to batch catchup mito region"))]
+    BatchCatchupMitoRegion {
         source: BoxedError,
         #[snafu(implicit)]
         location: Location,
@@ -143,13 +151,6 @@ pub enum Error {
 
     #[snafu(display("Mito delete operation fails"))]
     MitoDeleteOperation {
-        source: BoxedError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Mito catchup operation fails"))]
-    MitoCatchupOperation {
         source: BoxedError,
         #[snafu(implicit)]
         location: Location,
@@ -304,6 +305,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Get value from cache"))]
+    CacheGet {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -349,11 +357,11 @@ impl ErrorExt for Error {
             | CloseMitoRegion { source, .. }
             | MitoReadOperation { source, .. }
             | MitoWriteOperation { source, .. }
-            | MitoCatchupOperation { source, .. }
             | MitoFlushOperation { source, .. }
             | MitoDeleteOperation { source, .. }
             | MitoSyncOperation { source, .. }
-            | BatchOpenMitoRegion { source, .. } => source.status_code(),
+            | BatchOpenMitoRegion { source, .. }
+            | BatchCatchupMitoRegion { source, .. } => source.status_code(),
 
             EncodePrimaryKey { source, .. } => source.status_code(),
 
@@ -362,6 +370,8 @@ impl ErrorExt for Error {
             StartRepeatedTask { source, .. } => source.status_code(),
 
             MetricManifestInfo { .. } => StatusCode::Internal,
+
+            CacheGet { source, .. } => source.status_code(),
         }
     }
 

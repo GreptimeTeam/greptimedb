@@ -21,7 +21,7 @@ pub(crate) struct GeoFunction;
 
 impl GeoFunction {
     pub fn register(registry: &FunctionRegistry) {
+        registry.register_aggr(encoding::JsonEncodePathAccumulator::uadf_impl());
         registry.register_aggr(geo_path::GeoPathAccumulator::uadf_impl());
-        registry.register_aggr(encoding::JsonPathAccumulator::uadf_impl());
     }
 }

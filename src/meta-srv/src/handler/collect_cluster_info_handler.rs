@@ -21,10 +21,10 @@ use common_meta::rpc::store::PutRequest;
 use snafu::ResultExt;
 use store_api::region_engine::RegionRole;
 
+use crate::Result;
 use crate::error::{InvalidClusterInfoFormatSnafu, SaveClusterInfoSnafu};
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
-use crate::Result;
 
 /// The handler to collect cluster info from the heartbeat request of frontend.
 pub struct CollectFrontendClusterInfoHandler;
@@ -52,6 +52,11 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
             version: info.version,
             git_commit: info.git_commit,
             start_time_ms: info.start_time_ms,
+            total_cpu_millicores: info.total_cpu_millicores,
+            total_memory_bytes: info.total_memory_bytes,
+            cpu_usage_millicores: info.cpu_usage_millicores,
+            memory_usage_bytes: info.memory_usage_bytes,
+            hostname: info.hostname,
         };
 
         put_into_memory_store(ctx, key, value).await?;
@@ -85,6 +90,11 @@ impl HeartbeatHandler for CollectFlownodeClusterInfoHandler {
             version: info.version,
             git_commit: info.git_commit,
             start_time_ms: info.start_time_ms,
+            total_cpu_millicores: info.total_cpu_millicores,
+            total_memory_bytes: info.total_memory_bytes,
+            cpu_usage_millicores: info.cpu_usage_millicores,
+            memory_usage_bytes: info.memory_usage_bytes,
+            hostname: info.hostname,
         };
 
         put_into_memory_store(ctx, key, value).await?;
@@ -136,6 +146,11 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
             version: info.version,
             git_commit: info.git_commit,
             start_time_ms: info.start_time_ms,
+            total_cpu_millicores: info.total_cpu_millicores,
+            total_memory_bytes: info.total_memory_bytes,
+            cpu_usage_millicores: info.cpu_usage_millicores,
+            memory_usage_bytes: info.memory_usage_bytes,
+            hostname: info.hostname,
         };
 
         put_into_memory_store(ctx, key, value).await?;

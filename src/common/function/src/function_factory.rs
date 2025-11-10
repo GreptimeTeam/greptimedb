@@ -22,8 +22,8 @@ use crate::scalars::udf::create_udf;
 /// A factory for creating `ScalarUDF` that require a function context.
 #[derive(Clone)]
 pub struct ScalarFunctionFactory {
-    name: String,
-    factory: Arc<dyn Fn(FunctionContext) -> ScalarUDF + Send + Sync>,
+    pub name: String,
+    pub factory: Arc<dyn Fn(FunctionContext) -> ScalarUDF + Send + Sync>,
 }
 
 impl ScalarFunctionFactory {
@@ -52,9 +52,7 @@ impl From<ScalarUDF> for ScalarFunctionFactory {
 impl From<FunctionRef> for ScalarFunctionFactory {
     fn from(func: FunctionRef) -> Self {
         let name = func.name().to_string();
-        let func = Arc::new(move |ctx: FunctionContext| {
-            create_udf(func.clone(), ctx.query_ctx, ctx.state)
-        });
+        let func = Arc::new(move |_| create_udf(func.clone()));
         Self {
             name,
             factory: func,

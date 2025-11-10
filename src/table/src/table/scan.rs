@@ -26,6 +26,9 @@ use common_telemetry::warn;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::filter_pushdown::{
+    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation,
+};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
@@ -34,13 +37,13 @@ use datafusion::physical_plan::{
 use datafusion_common::stats::Precision;
 use datafusion_common::{ColumnStatistics, DataFusionError, Statistics};
 use datafusion_physical_expr::expressions::Column;
-use datafusion_physical_expr::{
-    EquivalenceProperties, LexOrdering, Partitioning, PhysicalSortExpr,
-};
+use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
-use store_api::region_engine::{PartitionRange, PrepareRequest, RegionScannerRef};
+use store_api::region_engine::{
+    PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
+};
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
@@ -59,6 +62,7 @@ pub struct RegionScanExec {
     is_partition_set: bool,
     // TODO(ruihang): handle TimeWindowed dist via this parameter
     distribution: Option<TimeSeriesDistribution>,
+    explain_verbose: bool,
 }
 
 impl RegionScanExec {
@@ -123,7 +127,7 @@ impl RegionScanExec {
                 }
                 EquivalenceProperties::new_with_orderings(
                     arrow_schema.clone(),
-                    &[LexOrdering::new(pk_sort_columns)],
+                    vec![pk_sort_columns],
                 )
             }
             Some(TimeSeriesDistribution::TimeWindowed) => {
@@ -132,7 +136,7 @@ impl RegionScanExec {
                 }
                 EquivalenceProperties::new_with_orderings(
                     arrow_schema.clone(),
-                    &[LexOrdering::new(pk_sort_columns)],
+                    vec![pk_sort_columns],
                 )
             }
             None => EquivalenceProperties::new(arrow_schema.clone()),
@@ -165,6 +169,7 @@ impl RegionScanExec {
             total_rows,
             is_partition_set: false,
             distribution: request.distribution,
+            explain_verbose: false,
         })
     }
 
@@ -231,6 +236,7 @@ impl RegionScanExec {
             total_rows: self.total_rows,
             is_partition_set: true,
             distribution: self.distribution,
+            explain_verbose: self.explain_verbose,
         })
     }
 
@@ -265,6 +271,10 @@ impl RegionScanExec {
             .primary_key_columns()
             .map(|col| col.column_schema.name.clone())
             .collect()
+    }
+
+    pub fn set_explain_verbose(&mut self, explain_verbose: bool) {
+        self.explain_verbose = explain_verbose;
     }
 }
 
@@ -301,11 +311,14 @@ impl ExecutionPlan for RegionScanExec {
         let span =
             tracing_context.attach(common_telemetry::tracing::info_span!("read_from_region"));
 
+        let ctx = QueryScanContext {
+            explain_verbose: self.explain_verbose,
+        };
         let stream = self
             .scanner
             .lock()
             .unwrap()
-            .scan_partition(&self.metric, partition)
+            .scan_partition(&ctx, &self.metric, partition)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let stream_metrics = StreamMetrics::new(&self.metric, partition);
         Ok(Box::pin(StreamWithMetricWrapper {
@@ -320,31 +333,46 @@ impl ExecutionPlan for RegionScanExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> DfResult<Statistics> {
-        let statistics = if self.append_mode && !self.scanner.lock().unwrap().has_predicate() {
-            let column_statistics = self
-                .arrow_schema
-                .fields
-                .iter()
-                .map(|_| ColumnStatistics {
-                    distinct_count: Precision::Exact(self.total_rows),
-                    null_count: Precision::Exact(0), // all null rows are counted for append-only table
-                    ..Default::default()
-                })
-                .collect();
-            Statistics {
-                num_rows: Precision::Exact(self.total_rows),
-                total_byte_size: Default::default(),
-                column_statistics,
-            }
-        } else {
-            Statistics::new_unknown(&self.arrow_schema)
-        };
+    fn partition_statistics(&self, partition: Option<usize>) -> DfResult<Statistics> {
+        if partition.is_some() {
+            return Ok(Statistics::new_unknown(self.schema().as_ref()));
+        }
+
+        let statistics =
+            if self.append_mode && !self.scanner.lock().unwrap().has_predicate_without_region() {
+                let column_statistics = self
+                    .arrow_schema
+                    .fields
+                    .iter()
+                    .map(|_| ColumnStatistics {
+                        distinct_count: Precision::Exact(self.total_rows),
+                        null_count: Precision::Exact(0), // all null rows are counted for append-only table
+                        ..Default::default()
+                    })
+                    .collect();
+                Statistics {
+                    num_rows: Precision::Exact(self.total_rows),
+                    total_byte_size: Default::default(),
+                    column_statistics,
+                }
+            } else {
+                Statistics::new_unknown(&self.arrow_schema)
+            };
         Ok(statistics)
     }
 
     fn name(&self) -> &str {
         "RegionScanExec"
+    }
+
+    fn handle_child_pushdown_result(
+        &self,
+        _phase: FilterPushdownPhase,
+        child_pushdown_result: ChildPushdownResult,
+        _config: &datafusion::config::ConfigOptions,
+    ) -> DfResult<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
+        // TODO(discord9): use the pushdown result to update the scanner's predicate
+        Ok(FilterPushdownPropagation::if_all(child_pushdown_result))
     }
 }
 

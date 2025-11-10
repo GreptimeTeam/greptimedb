@@ -1,0 +1,36 @@
+name: PR Review Reminder
+
+on:
+  schedule:
+    # Run at 9:00 AM UTC+8 (01:00 AM UTC) on Monday, Wednesday, Friday
+    - cron: '0 1 * * 1,3,5'
+  workflow_dispatch:
+
+jobs:
+  pr-review-reminder:
+    name: Send PR Review Reminders
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: .github/scripts
+        run: npm ci
+
+      - name: Run PR review reminder
+        working-directory: .github/scripts
+        run: node pr-review-reminder.js
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_PR_REVIEW_WEBHOOK_URL: ${{ vars.SLACK_PR_REVIEW_WEBHOOK_URL }}
+          GITHUBID_SLACKID_MAPPING: ${{ vars.GITHUBID_SLACKID_MAPPING }}

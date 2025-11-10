@@ -15,22 +15,28 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
+use arrow::datatypes::IntervalDayTime;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
+use common_function::aggrs::aggr_wrapper::{StateMergeHelper, StateWrapper};
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::init_default_ut_logging;
 use datafusion::datasource::DefaultTableSource;
+use datafusion::execution::SessionState;
 use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::{max, min};
+use datafusion::prelude::SessionContext;
 use datafusion_common::JoinType;
-use datafusion_expr::{col, lit, Expr, LogicalPlanBuilder};
+use datafusion_expr::expr::ScalarFunction;
+use datafusion_expr::{AggregateUDF, Expr, LogicalPlanBuilder, col, lit};
+use datafusion_functions::datetime::date_bin;
 use datafusion_sql::TableReference;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
-use futures::task::{Context, Poll};
 use futures::Stream;
+use futures::task::{Context, Poll};
 use pretty_assertions::assert_eq;
 use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
@@ -86,6 +92,7 @@ impl TestTable {
             next_column_id: 5,
             options: Default::default(),
             created_on: Default::default(),
+            updated_on: Default::default(),
             partition_key_indices: vec![0, 1],
             column_ids: vec![0, 1, 2, 3, 4],
         };
@@ -152,11 +159,30 @@ impl Stream for EmptyStream {
     }
 }
 
+fn try_encode_decode_substrait(plan: &LogicalPlan, state: SessionState) {
+    let sub_plan_bytes = substrait::DFLogicalSubstraitConvertor
+        .encode(plan, crate::query_engine::DefaultSerializer)
+        .unwrap();
+    let inner = sub_plan_bytes.clone();
+    let decoded_plan = futures::executor::block_on(async move {
+        substrait::DFLogicalSubstraitConvertor
+            .decode(inner, state)
+            .await
+    }).inspect_err(|e|{
+use prost::Message;
+        let sub_plan = substrait::substrait_proto_df::proto::Plan::decode(sub_plan_bytes).unwrap();
+        common_telemetry::error!("Failed to decode substrait plan: {e},substrait plan: {sub_plan:#?}\nlogical plan: {plan:#?}");
+    })
+    .unwrap();
+
+    assert_eq!(*plan, decoded_plan);
+}
+
 #[test]
 fn expand_proj_sort_proj() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -200,10 +226,57 @@ fn expand_proj_sort_proj() {
 }
 
 #[test]
+fn expand_proj_sort_partial_proj() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![col("number"), col("pk1"), col("pk2"), col("pk3")])
+        .unwrap()
+        .project(vec![
+            col("number"),
+            col("pk1"),
+            col("pk3"),
+            col("pk1").eq(col("pk2")),
+        ])
+        .unwrap()
+        .sort(vec![col("t.pk1 = t.pk2").sort(true, true)])
+        .unwrap()
+        .project(vec![col("number"), col("t.pk1 = t.pk2").alias("eq_sorted")])
+        .unwrap()
+        .project(vec![col("number")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Projection: t.number",
+        "  MergeSort: eq_sorted ASC NULLS FIRST", // notice how `eq_sorted` is used here
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: t.number, eq_sorted", // notice how `eq_sorted` is added not `t.pk1 = t.pk2`
+        "  Projection: t.number, t.pk1 = t.pk2 AS eq_sorted",
+        "    Sort: t.pk1 = t.pk2 ASC NULLS FIRST",
+        "      Projection: t.number, t.pk1, t.pk3, t.pk1 = t.pk2",
+        "        Projection: t.number, t.pk1, t.pk2, t.pk3", // notice this projection doesn't add `t.pk1 = t.pk2` column requirement
+        "          TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
 fn expand_sort_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -233,11 +306,13 @@ fn expand_sort_limit() {
     assert_eq!(expected, result.to_string());
 }
 
+/// Test merge sort can apply enforce dist requirement columns correctly and use the aliased column correctly, as there is
+/// a aliased sort column, there is no need to add a duplicate sort column using it's original column name
 #[test]
 fn expand_sort_alias_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -258,10 +333,10 @@ fn expand_sort_alias_limit() {
     let expected = [
         "Projection: something",
         "  Limit: skip=0, fetch=10",
-        "    MergeSort: t.pk1 ASC NULLS LAST",
+        "    MergeSort: something ASC NULLS LAST",
         "      MergeScan [is_placeholder=false, remote_input=[",
         "Limit: skip=0, fetch=10",
-        "  Projection: t.pk1 AS something, t.pk1",
+        "  Projection: t.pk1 AS something",
         "    Sort: t.pk1 ASC NULLS LAST",
         "      TableScan: t",
         "]]",
@@ -271,12 +346,12 @@ fn expand_sort_alias_limit() {
 }
 
 /// FIXME(discord9): alias to same name with col req makes it ambiguous
-#[should_panic(expected = "AmbiguousReference")]
+/// for now since it bugged, will use fallback plan rewriter to only push down table scan node
 #[test]
 fn expand_sort_alias_conflict_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -292,17 +367,22 @@ fn expand_sort_alias_conflict_limit() {
         .unwrap();
 
     let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan.clone(), &config);
+    assert!(result.is_err(), "Expected error for ambiguous alias");
+    assert!(format!("{result:?}").contains("AmbiguousReference"));
+
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(DistPlannerOptions {
+        allow_query_fallback: true,
+    });
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
     let expected = [
-        "Projection: something",
-        "  Limit: skip=0, fetch=10",
-        "    MergeSort: t.pk1 ASC NULLS LAST",
-        "      MergeScan [is_placeholder=false, remote_input=[",
         "Limit: skip=0, fetch=10",
-        "  Projection: t.pk2 AS pk1, t.pk1",
+        "  Projection: t.pk2 AS pk1",
         "    Sort: t.pk1 ASC NULLS LAST",
-        "      TableScan: t",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -313,7 +393,7 @@ fn expand_sort_alias_conflict_limit() {
 fn expand_sort_alias_conflict_but_not_really_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -353,7 +433,7 @@ fn expand_sort_alias_conflict_but_not_really_limit() {
 fn expand_limit_sort() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -386,7 +466,7 @@ fn expand_limit_sort() {
 fn expand_sort_limit_sort() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -433,7 +513,7 @@ fn expand_sort_limit_sort() {
 fn expand_proj_step_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -451,10 +531,9 @@ fn expand_proj_step_aggr() {
 
     let expected = [
         "Projection: min(t.number)",
-        "  Projection: min(min(t.number)) AS min(t.number)",
-        "    Aggregate: groupBy=[[]], aggr=[[min(min(t.number))]]",
-        "      MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
+        "  Aggregate: groupBy=[[]], aggr=[[__min_merge(__min_state(t.number)) AS min(t.number)]]",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[__min_state(t.number)]]",
         "  Projection: t.number", // This Projection shouldn't add new column requirements
         "    TableScan: t",
         "]]",
@@ -469,7 +548,7 @@ fn expand_proj_step_aggr() {
 fn expand_proj_alias_fake_part_col_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -497,10 +576,9 @@ fn expand_proj_alias_fake_part_col_aggr() {
 
     let expected = [
         "Projection: pk1, pk2, min(t.number)",
-        "  Projection: pk1, pk2, min(min(t.number)) AS min(t.number)",
-        "    Aggregate: groupBy=[[pk1, pk2]], aggr=[[min(min(t.number))]]",
-        "      MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[pk1, pk2]], aggr=[[min(t.number)]]",
+        "  Aggregate: groupBy=[[pk1, pk2]], aggr=[[__min_merge(__min_state(t.number)) AS min(t.number)]]",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[pk1, pk2]], aggr=[[__min_state(t.number)]]",
         "  Projection: t.number, pk1 AS pk2, pk3 AS pk1",
         "    Projection: t.number, t.pk3 AS pk1, t.pk2 AS pk3",
         "      TableScan: t",
@@ -514,7 +592,7 @@ fn expand_proj_alias_fake_part_col_aggr() {
 fn expand_proj_alias_aliased_part_col_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -560,7 +638,7 @@ fn expand_proj_alias_aliased_part_col_aggr() {
 fn expand_part_col_aggr_step_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -578,10 +656,9 @@ fn expand_part_col_aggr_step_aggr() {
 
     let expected = [
         "Projection: min(max(t.number))",
-        "  Projection: min(min(max(t.number))) AS min(max(t.number))",
-        "    Aggregate: groupBy=[[]], aggr=[[min(min(max(t.number)))]]",
-        "      MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[]], aggr=[[min(max(t.number))]]",
+        "  Aggregate: groupBy=[[]], aggr=[[__min_merge(__min_state(max(t.number))) AS min(max(t.number))]]",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[__min_state(max(t.number))]]",
         "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[max(t.number)]]",
         "    TableScan: t",
         "]]",
@@ -594,7 +671,7 @@ fn expand_part_col_aggr_step_aggr() {
 fn expand_step_aggr_step_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -613,10 +690,9 @@ fn expand_step_aggr_step_aggr() {
     let expected = [
         "Aggregate: groupBy=[[]], aggr=[[min(max(t.number))]]",
         "  Projection: max(t.number)",
-        "    Projection: max(max(t.number)) AS max(t.number)",
-        "      Aggregate: groupBy=[[]], aggr=[[max(max(t.number))]]",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[]], aggr=[[max(t.number)]]",
+        "    Aggregate: groupBy=[[]], aggr=[[__max_merge(__max_state(t.number)) AS max(t.number)]]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[__max_state(t.number)]]",
         "  TableScan: t",
         "]]",
     ]
@@ -628,7 +704,7 @@ fn expand_step_aggr_step_aggr() {
 fn expand_part_col_aggr_part_col_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -645,7 +721,8 @@ fn expand_part_col_aggr_part_col_aggr() {
         .unwrap();
 
     let expected_original = [
-        "Aggregate: groupBy=[[t.pk1, t.pk2, max(t.number)]], aggr=[[min(max(t.number))]]", // notice here `max(t.number)` is added to groupBy due to aggr exprs depend on this column
+        // See DataFusion #14860 for change details.
+        "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(max(t.number))]]",
         "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[max(t.number)]]",
         "    TableScan: t",
     ]
@@ -656,9 +733,9 @@ fn expand_part_col_aggr_part_col_aggr() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
     let expected = [
-        "Projection: t.pk1, t.pk2, max(t.number), min(max(t.number))",
+        "Projection: t.pk1, t.pk2, min(max(t.number))",
         "  MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[t.pk1, t.pk2, max(t.number)]], aggr=[[min(max(t.number))]]",
+        "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(max(t.number))]]",
         "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[max(t.number)]]",
         "    TableScan: t",
         "]]",
@@ -671,7 +748,7 @@ fn expand_part_col_aggr_part_col_aggr() {
 fn expand_step_aggr_proj() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -690,10 +767,9 @@ fn expand_step_aggr_proj() {
     let expected = [
         "Projection: min(t.number)",
         "  Projection: t.pk1, min(t.number)",
-        "    Projection: t.pk1, min(min(t.number)) AS min(t.number)",
-        "      Aggregate: groupBy=[[t.pk1]], aggr=[[min(min(t.number))]]",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[t.pk1]], aggr=[[min(t.number)]]",
+        "    Aggregate: groupBy=[[t.pk1]], aggr=[[__min_merge(__min_state(t.number)) AS min(t.number)]]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[t.pk1]], aggr=[[__min_state(t.number)]]",
         "  TableScan: t",
         "]]",
     ]
@@ -708,7 +784,7 @@ fn expand_step_aggr_proj() {
 fn expand_proj_sort_step_aggr_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -749,7 +825,7 @@ fn expand_proj_sort_step_aggr_limit() {
 fn expand_proj_sort_limit_step_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -791,7 +867,7 @@ fn expand_proj_sort_limit_step_aggr() {
 fn expand_proj_limit_step_aggr_sort() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -832,7 +908,7 @@ fn expand_proj_limit_step_aggr_sort() {
 fn expand_proj_sort_part_col_aggr_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -874,7 +950,7 @@ fn expand_proj_sort_part_col_aggr_limit() {
 fn expand_proj_sort_limit_part_col_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -916,7 +992,7 @@ fn expand_proj_sort_limit_part_col_aggr() {
 fn expand_proj_part_col_aggr_limit_sort() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -958,7 +1034,7 @@ fn expand_proj_part_col_aggr_limit_sort() {
 fn expand_proj_part_col_aggr_sort_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -1001,7 +1077,7 @@ fn expand_proj_part_col_aggr_sort_limit() {
 fn expand_proj_limit_part_col_aggr_sort() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -1043,7 +1119,7 @@ fn expand_proj_limit_part_col_aggr_sort() {
 fn expand_proj_limit_sort_part_col_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -1086,7 +1162,7 @@ fn expand_proj_limit_sort_part_col_aggr() {
 fn expand_step_aggr_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -1104,10 +1180,42 @@ fn expand_step_aggr_limit() {
     let expected = [
         "Limit: skip=0, fetch=10",
         "  Projection: t.pk1, min(t.number)",
-        "    Projection: t.pk1, min(min(t.number)) AS min(t.number)",
-        "      Aggregate: groupBy=[[t.pk1]], aggr=[[min(min(t.number))]]",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[t.pk1]], aggr=[[min(t.number)]]",
+        "    Aggregate: groupBy=[[t.pk1]], aggr=[[__min_merge(__min_state(t.number)) AS min(t.number)]]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[t.pk1]], aggr=[[__min_state(t.number)]]",
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// Test how avg get expanded
+#[test]
+fn expand_step_aggr_avg_limit() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(vec![col("pk1")], vec![avg(col("number"))])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.pk1, avg(t.number)",
+        "    Aggregate: groupBy=[[t.pk1]], aggr=[[__avg_merge(__avg_state(t.number)) AS avg(t.number)]]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[t.pk1]], aggr=[[__avg_state(CAST(t.number AS Float64))]]",
         "  TableScan: t",
         "]]",
     ]
@@ -1120,7 +1228,7 @@ fn expand_step_aggr_limit() {
 fn expand_part_col_aggr_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -1299,10 +1407,253 @@ fn transform_unalighed_join_with_alias() {
         "      MergeScan [is_placeholder=false, remote_input=[",
         "TableScan: t",
         "]]",
-        "    SubqueryAlias: right",
-        "      Projection: t.number",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "TableScan: t",
+        "    Projection: right.number",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "SubqueryAlias: right",
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn transform_subquery_sort_alias() {
+    init_default_ut_logging();
+
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .alias("a")
+        .unwrap()
+        .sort(vec![col("a.number").sort(true, false)])
+        .unwrap()
+        .build()
+        .unwrap();
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Projection: a.pk1, a.pk2, a.pk3, a.ts, a.number",
+        "  MergeSort: a.number ASC NULLS LAST",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Sort: a.number ASC NULLS LAST",
+        "  SubqueryAlias: a",
+        "    TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn transform_sort_subquery_alias() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .sort(vec![col("t.number").sort(true, false)])
+        .unwrap()
+        .alias("a")
+        .unwrap()
+        .build()
+        .unwrap();
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Projection: a.pk1, a.pk2, a.pk3, a.ts, a.number",
+        "  MergeSort: a.number ASC NULLS LAST",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "SubqueryAlias: a",
+        "  Sort: t.number ASC NULLS LAST",
+        "    TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn date_bin_ts_group_by() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let date_bin_call = Expr::ScalarFunction(ScalarFunction::new_udf(
+        date_bin(),
+        vec![
+            lit(datafusion_common::ScalarValue::IntervalDayTime(Some(
+                IntervalDayTime::new(0, 60 * 1000), // 1 minute in millis
+            ))),
+            col("ts"),
+        ],
+    ));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(vec![date_bin_call], vec![min(col("number"))])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        r#"Projection: date_bin(IntervalDayTime("IntervalDayTime { days: 0, milliseconds: 60000 }"),t.ts), min(t.number)"#,
+        r#"  Aggregate: groupBy=[[date_bin(IntervalDayTime("IntervalDayTime { days: 0, milliseconds: 60000 }"),t.ts)]], aggr=[[__min_merge(__min_state(t.number)) AS min(t.number)]]"#,
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        r#"Aggregate: groupBy=[[date_bin(IntervalDayTime("IntervalDayTime { days: 0, milliseconds: 60000 }"), t.ts)]], aggr=[[__min_state(t.number)]]"#,
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn test_last_value_order_by() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_provider = Arc::new(DfTableProviderAdapter::new(test_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider.clone() as _));
+    let ctx = SessionContext::new();
+    ctx.register_table(TableReference::bare("t"), table_provider.clone() as _)
+        .unwrap();
+    ctx.register_udaf(AggregateUDF::new_from_impl(
+        StateWrapper::new(
+            datafusion::functions_aggregate::first_last::last_value_udaf()
+                .as_ref()
+                .clone(),
+        )
+        .unwrap(),
+    ));
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+        .unwrap()
+        .aggregate(
+            Vec::<Expr>::new(),
+            vec![datafusion::functions_aggregate::first_last::last_value(
+                col("ts"),
+                vec![col("ts").sort(true, true)],
+            )],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    try_encode_decode_substrait(&plan, ctx.state());
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan.clone(), &config)
+        .unwrap();
+
+    let expected = [
+        "Projection: last_value(t.ts) ORDER BY [t.ts ASC NULLS FIRST]",
+        "  Aggregate: groupBy=[[]], aggr=[[__last_value_merge(__last_value_state(t.ts) ORDER BY [t.ts ASC NULLS FIRST]) AS last_value(t.ts) ORDER BY [t.ts ASC NULLS FIRST]]]",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[__last_value_state(t.ts) ORDER BY [t.ts ASC NULLS FIRST]]]",
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+
+    let LogicalPlan::Aggregate(aggr_plan) = plan else {
+        panic!("expect Aggregate plan");
+    };
+    let split = StateMergeHelper::split_aggr_node(aggr_plan).unwrap();
+
+    try_encode_decode_substrait(&split.lower_state, ctx.state());
+}
+
+/// try remove the order by to see if it still works
+#[test]
+fn test_last_value_no_order_by() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_provider = Arc::new(DfTableProviderAdapter::new(test_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider.clone() as _));
+    let ctx = SessionContext::new();
+    ctx.register_table(TableReference::bare("t"), table_provider.clone() as _)
+        .unwrap();
+    ctx.register_udaf(AggregateUDF::new_from_impl(
+        StateWrapper::new(
+            datafusion::functions_aggregate::first_last::last_value_udaf()
+                .as_ref()
+                .clone(),
+        )
+        .unwrap(),
+    ));
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(
+            Vec::<Expr>::new(),
+            vec![datafusion::functions_aggregate::first_last::last_value(
+                col("ts"),
+                vec![],
+            )],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let LogicalPlan::Aggregate(aggr_plan) = plan.clone() else {
+        panic!("expect Aggregate plan");
+    };
+    let split = StateMergeHelper::split_aggr_node(aggr_plan).unwrap();
+
+    try_encode_decode_substrait(&split.lower_state, ctx.state());
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan.clone(), &config)
+        .unwrap();
+
+    let expected = [
+        "Projection: last_value(t.ts)",
+        "  Aggregate: groupBy=[[]], aggr=[[__last_value_merge(__last_value_state(t.ts)) AS last_value(t.ts)]]",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[__last_value_state(t.ts)]]",
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn test_table_scan_projection() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_provider = Arc::new(DfTableProviderAdapter::new(test_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider.clone() as _));
+    let ctx = SessionContext::new();
+    ctx.register_table(TableReference::bare("t"), table_provider.clone() as _)
+        .unwrap();
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, Some(vec![3]), vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan.clone(), &config)
+        .unwrap();
+    let expected = [
+        "Projection: t.ts",
+        "  MergeScan [is_placeholder=false, remote_input=[",
+        "TableScan: t projection=[ts]",
         "]]",
     ]
     .join("\n");

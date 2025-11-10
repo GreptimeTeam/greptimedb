@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
 use common_config::config::Configurable;
+use common_event_recorder::EventRecorderOptions;
 use common_options::datanode::DatanodeClientOptions;
+use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
 use meta_client::MetaClientOptions;
 use query::options::QueryOptions;
@@ -31,8 +33,8 @@ use snafu::ResultExt;
 use crate::error;
 use crate::error::Result;
 use crate::heartbeat::HeartbeatTask;
-use crate::instance::prom_store::ExportMetricHandler;
 use crate::instance::Instance;
+use crate::instance::prom_store::ExportMetricHandler;
 use crate::service_config::{
     InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
     PromStoreOptions,
@@ -43,9 +45,13 @@ use crate::service_config::{
 pub struct FrontendOptions {
     pub node_id: Option<String>,
     pub default_timezone: Option<String>,
+    pub default_column_prefix: Option<String>,
     pub heartbeat: HeartbeatOptions,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
+    /// The internal gRPC options for the frontend service.
+    /// it provide the same service as the public gRPC service, just only for internal use.
+    pub internal_grpc: Option<GrpcOptions>,
     pub mysql: MysqlOptions,
     pub postgres: PostgresOptions,
     pub opentsdb: OpentsdbOptions,
@@ -61,7 +67,10 @@ pub struct FrontendOptions {
     pub tracing: TracingOptions,
     pub query: QueryOptions,
     pub max_in_flight_write_bytes: Option<ReadableSize>,
-    pub slow_query: Option<SlowQueryOptions>,
+    pub slow_query: SlowQueryOptions,
+    pub memory: MemoryOptions,
+    /// The event recorder options.
+    pub event_recorder: EventRecorderOptions,
 }
 
 impl Default for FrontendOptions {
@@ -69,9 +78,11 @@ impl Default for FrontendOptions {
         Self {
             node_id: None,
             default_timezone: None,
+            default_column_prefix: None,
             heartbeat: HeartbeatOptions::frontend_default(),
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),
+            internal_grpc: None,
             mysql: MysqlOptions::default(),
             postgres: PostgresOptions::default(),
             opentsdb: OpentsdbOptions::default(),
@@ -87,7 +98,9 @@ impl Default for FrontendOptions {
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
             max_in_flight_write_bytes: None,
-            slow_query: Some(SlowQueryOptions::default()),
+            slow_query: SlowQueryOptions::default(),
+            memory: MemoryOptions::default(),
+            event_recorder: EventRecorderOptions::default(),
         }
     }
 }

@@ -24,7 +24,7 @@ use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::{LexRequirement, PhysicalSortRequirement};
+use datafusion::physical_expr::{LexRequirement, OrderingRequirements, PhysicalSortRequirement};
 use datafusion::physical_plan::expressions::Column as ColumnExpr;
 use datafusion::physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
@@ -35,13 +35,13 @@ use datafusion::physical_plan::{
 };
 use datatypes::arrow::compute;
 use datatypes::compute::SortOptions;
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::METRIC_NUM_SERIES;
+use crate::extension_plan::{METRIC_NUM_SERIES, resolve_column_name, serialize_column_index};
 use crate::metrics::PROMQL_SERIES_COUNT;
 
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
@@ -53,6 +53,13 @@ pub struct SeriesDivide {
     /// here can avoid unnecessary sort in follow on plans.
     time_index_column: String,
     input: LogicalPlan,
+    unfix: Option<UnfixIndices>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
+struct UnfixIndices {
+    pub tag_column_indices: Vec<u64>,
+    pub time_index_column_idx: u64,
 }
 
 impl UserDefinedLogicalNodeCore for SeriesDivide {
@@ -87,11 +94,38 @@ impl UserDefinedLogicalNodeCore for SeriesDivide {
             ));
         }
 
-        Ok(Self {
-            tag_columns: self.tag_columns.clone(),
-            time_index_column: self.time_index_column.clone(),
-            input: inputs[0].clone(),
-        })
+        let input: LogicalPlan = inputs[0].clone();
+        let input_schema = input.schema();
+
+        if let Some(unfix) = &self.unfix {
+            // transform indices to names
+            let tag_columns = unfix
+                .tag_column_indices
+                .iter()
+                .map(|idx| resolve_column_name(*idx, input_schema, "SeriesDivide", "tag"))
+                .collect::<DataFusionResult<Vec<String>>>()?;
+
+            let time_index_column = resolve_column_name(
+                unfix.time_index_column_idx,
+                input_schema,
+                "SeriesDivide",
+                "time index",
+            )?;
+
+            Ok(Self {
+                tag_columns,
+                time_index_column,
+                input,
+                unfix: None,
+            })
+        } else {
+            Ok(Self {
+                tag_columns: self.tag_columns.clone(),
+                time_index_column: self.time_index_column.clone(),
+                input,
+                unfix: None,
+            })
+        }
     }
 }
 
@@ -101,6 +135,7 @@ impl SeriesDivide {
             tag_columns,
             time_index_column,
             input,
+            unfix: None,
         }
     }
 
@@ -122,9 +157,19 @@ impl SeriesDivide {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
+        let tag_column_indices = self
+            .tag_columns
+            .iter()
+            .map(|name| serialize_column_index(self.input.schema(), name))
+            .collect::<Vec<u64>>();
+
+        let time_index_column_idx =
+            serialize_column_index(self.input.schema(), &self.time_index_column);
+
         pb::SeriesDivide {
-            tag_columns: self.tag_columns.clone(),
-            time_index_column: self.time_index_column.clone(),
+            tag_column_indices,
+            time_index_column_idx,
+            ..Default::default()
         }
         .encode_to_vec()
     }
@@ -135,10 +180,17 @@ impl SeriesDivide {
             produce_one_row: false,
             schema: Arc::new(DFSchema::empty()),
         });
+
+        let unfix = UnfixIndices {
+            tag_column_indices: pb_series_divide.tag_column_indices.clone(),
+            time_index_column_idx: pb_series_divide.time_index_column_idx,
+        };
+
         Ok(Self {
-            tag_columns: pb_series_divide.tag_columns,
-            time_index_column: pb_series_divide.time_index_column,
+            tag_columns: Vec::new(),
+            time_index_column: String::new(),
             input: placeholder_plan,
+            unfix: Some(unfix),
         })
     }
 }
@@ -175,7 +227,7 @@ impl ExecutionPlan for SeriesDivideExec {
         )]
     }
 
-    fn required_input_ordering(&self) -> Vec<Option<LexRequirement>> {
+    fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
         let input_schema = self.input.schema();
         let mut exprs: Vec<PhysicalSortRequirement> = self
             .tag_columns
@@ -199,7 +251,11 @@ impl ExecutionPlan for SeriesDivideExec {
                 nulls_first: true,
             }),
         });
-        vec![Some(LexRequirement::new(exprs))]
+
+        // Safety: `exprs` is not empty
+        let requirement = LexRequirement::new(exprs).unwrap();
+
+        vec![Some(OrderingRequirements::Hard(vec![requirement]))]
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
@@ -273,7 +329,9 @@ impl ExecutionPlan for SeriesDivideExec {
 impl DisplayAs for SeriesDivideExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(f, "PromSeriesDivideExec: tags={:?}", self.tag_columns)
             }
         }
@@ -486,12 +544,13 @@ impl SeriesDivideStream {
 #[cfg(test)]
 mod test {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
-    use datafusion::physical_plan::memory::MemoryExec;
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
     use datafusion::prelude::SessionContext;
 
     use super::*;
 
-    fn prepare_test_data() -> MemoryExec {
+    fn prepare_test_data() -> DataSourceExec {
         let schema = Arc::new(Schema::new(vec![
             Field::new("host", DataType::Utf8, true),
             Field::new("path", DataType::Utf8, true),
@@ -547,7 +606,9 @@ mod test {
         )
         .unwrap();
 
-        MemoryExec::try_new(&[vec![data_1, data_2, data_3]], schema, None).unwrap()
+        DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![data_1, data_2, data_3]], schema, None).unwrap(),
+        ))
     }
 
     #[tokio::test]
@@ -792,8 +853,8 @@ mod test {
         .unwrap();
 
         // Create MemoryExec with these batches, keeping same combinations adjacent
-        let memory_exec = Arc::new(
-            MemoryExec::try_new(
+        let memory_exec = DataSourceExec::from_data_source(
+            MemorySourceConfig::try_new(
                 &[vec![batch1, batch2, batch3, batch4, batch5, batch6]],
                 schema.clone(),
                 None,

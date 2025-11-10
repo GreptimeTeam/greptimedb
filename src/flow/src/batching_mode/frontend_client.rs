@@ -23,7 +23,7 @@ use api::v1::query_request::Query;
 use api::v1::{CreateTableExpr, QueryRequest};
 use client::{Client, Database};
 use common_error::ext::{BoxedError, ErrorExt};
-use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager, load_tls_config};
 use common_meta::cluster::{NodeInfo, NodeInfoKey, Role};
 use common_meta::peer::Peer;
 use common_meta::rpc::store::RangeRequest;
@@ -36,10 +36,14 @@ use rand::rng;
 use rand::seq::SliceRandom;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
+use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 
 use crate::batching_mode::BatchingModeOptions;
-use crate::error::{ExternalSnafu, InvalidRequestSnafu, NoAvailableFrontendSnafu, UnexpectedSnafu};
+use crate::error::{
+    CreateSinkTableSnafu, ExternalSnafu, InvalidClientConfigSnafu, InvalidRequestSnafu,
+    NoAvailableFrontendSnafu, UnexpectedSnafu,
+};
 use crate::{Error, FlowAuthHeader};
 
 /// Just like [`GrpcQueryHandler`] but use BoxedError
@@ -59,10 +63,8 @@ pub trait GrpcQueryHandlerWithBoxedError: Send + Sync + 'static {
 
 /// auto impl
 #[async_trait::async_trait]
-impl<
-        E: ErrorExt + Send + Sync + 'static,
-        T: GrpcQueryHandler<Error = E> + Send + Sync + 'static,
-    > GrpcQueryHandlerWithBoxedError for T
+impl<E: ErrorExt + Send + Sync + 'static, T: GrpcQueryHandler<Error = E> + Send + Sync + 'static>
+    GrpcQueryHandlerWithBoxedError for T
 {
     async fn do_query(
         &self,
@@ -113,20 +115,23 @@ impl FrontendClient {
         auth: Option<FlowAuthHeader>,
         query: QueryOptions,
         batch_opts: BatchingModeOptions,
-    ) -> Self {
+    ) -> Result<Self, Error> {
         common_telemetry::info!("Frontend client build with auth={:?}", auth);
-        Self::Distributed {
+        Ok(Self::Distributed {
             meta_client,
             chnl_mgr: {
                 let cfg = ChannelConfig::new()
                     .connect_timeout(batch_opts.grpc_conn_timeout)
                     .timeout(batch_opts.query_timeout);
-                ChannelManager::with_config(cfg)
+
+                let tls_config = load_tls_config(batch_opts.frontend_tls.as_ref())
+                    .context(InvalidClientConfigSnafu)?;
+                ChannelManager::with_config(cfg, tls_config)
             },
             auth,
             query,
             batch_opts,
-        }
+        })
     }
 
     pub fn from_grpc_handler(
@@ -281,13 +286,17 @@ impl FrontendClient {
     ) -> Result<u32, Error> {
         self.handle(
             Request::Ddl(api::v1::DdlRequest {
-                expr: Some(api::v1::ddl_request::Expr::CreateTable(create)),
+                expr: Some(api::v1::ddl_request::Expr::CreateTable(create.clone())),
             }),
             catalog,
             schema,
             &mut None,
         )
         .await
+        .map_err(BoxedError::new)
+        .with_context(|_| CreateSinkTableSnafu {
+            create: create.clone(),
+        })
     }
 
     /// Execute a SQL statement on the frontend.
@@ -363,7 +372,10 @@ impl FrontendClient {
                     .handle_with_retry(
                         req.clone(),
                         batch_opts.experimental_grpc_max_retries,
-                        &[(QUERY_PARALLELISM_HINT, &query.parallelism.to_string())],
+                        &[
+                            (QUERY_PARALLELISM_HINT, &query.parallelism.to_string()),
+                            (READ_PREFERENCE_HINT, batch_opts.read_preference.as_ref()),
+                        ],
                     )
                     .await
                     .with_context(|_| InvalidRequestSnafu {

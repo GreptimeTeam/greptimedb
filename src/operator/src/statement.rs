@@ -29,55 +29,63 @@ mod tql;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::v1::RowInsertRequests;
+use catalog::CatalogManagerRef;
 use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::process_manager::ProcessManagerRef;
-use catalog::CatalogManagerRef;
 use client::RecordBatches;
+use client::error::{ExternalSnafu as ClientExternalSnafu, Result as ClientResult};
+use client::inserter::{InsertOptions, Inserter};
 use common_error::ext::BoxedError;
 use common_meta::cache::TableRouteCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::view_info::{ViewInfoManager, ViewInfoManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::procedure_executor::ProcedureExecutorRef;
 use common_query::Output;
 use common_telemetry::tracing;
-use common_time::range::TimestampRange;
 use common_time::Timestamp;
+use common_time::range::TimestampRange;
 use datafusion_expr::LogicalPlan;
+use datatypes::prelude::ConcreteDataType;
+use humantime::format_duration;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
-use query::parser::QueryStatement;
 use query::QueryEngineRef;
-use session::context::{Channel, QueryContextRef};
+use query::parser::QueryStatement;
+use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use set::{set_query_timeout, set_read_preference};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
+use sql::ast::ObjectNamePartExt;
+use sql::statements::OptionMap;
 use sql::statements::copy::{
     CopyDatabase, CopyDatabaseArgument, CopyQueryToArgument, CopyTable, CopyTableArgument,
 };
 use sql::statements::set_variables::SetVariables;
 use sql::statements::show::ShowCreateTableVariant;
 use sql::statements::statement::Statement;
-use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
 use sqlparser::ast::ObjectName;
+use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
+use table::TableRef;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyQueryToRequest, CopyTableRequest};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
-use table::TableRef;
 
 use self::set::{
     set_bytea_output, set_datestyle, set_search_path, set_timezone, validate_client_encoding,
 };
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    PlanStatementSnafu, Result, SchemaNotFoundSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    UpgradeCatalogManagerRefSnafu,
+    PlanStatementSnafu, Result, SchemaNotFoundSnafu, SqlCommonSnafu, TableMetadataManagerSnafu,
+    TableNotFoundSnafu, UnexpectedSnafu, UpgradeCatalogManagerRefSnafu,
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
+use crate::statement::set::set_allow_query_fallback;
 
 #[derive(Clone)]
 pub struct StatementExecutor {
@@ -91,9 +99,38 @@ pub struct StatementExecutor {
     cache_invalidator: CacheInvalidatorRef,
     inserter: InserterRef,
     process_manager: Option<ProcessManagerRef>,
+    #[cfg(feature = "enterprise")]
+    trigger_querier: Option<TriggerQuerierRef>,
 }
 
 pub type StatementExecutorRef = Arc<StatementExecutor>;
+
+/// Trait for creating [`TriggerQuerier`] instance.
+#[cfg(feature = "enterprise")]
+pub trait TriggerQuerierFactory: Send + Sync {
+    fn create(&self, kv_backend: KvBackendRef) -> TriggerQuerierRef;
+}
+
+#[cfg(feature = "enterprise")]
+pub type TriggerQuerierFactoryRef = Arc<dyn TriggerQuerierFactory>;
+
+/// Trait for querying trigger info, such as `SHOW CREATE TRIGGER` etc.
+#[cfg(feature = "enterprise")]
+#[async_trait::async_trait]
+pub trait TriggerQuerier: Send + Sync {
+    // Query the `SHOW CREATE TRIGGER` statement for the given trigger.
+    async fn show_create_trigger(
+        &self,
+        catalog: &str,
+        trigger: &str,
+        query_ctx: &QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError>;
+
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+#[cfg(feature = "enterprise")]
+pub type TriggerQuerierRef = Arc<dyn TriggerQuerier>;
 
 impl StatementExecutor {
     #[allow(clippy::too_many_arguments)]
@@ -118,7 +155,15 @@ impl StatementExecutor {
             cache_invalidator,
             inserter,
             process_manager,
+            #[cfg(feature = "enterprise")]
+            trigger_querier: None,
         }
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn with_trigger_querier(mut self, querier: TriggerQuerierRef) -> Self {
+        self.trigger_querier = Some(querier);
+        self
     }
 
     #[cfg(feature = "testing")]
@@ -129,7 +174,7 @@ impl StatementExecutor {
     ) -> Result<Output> {
         match stmt {
             QueryStatement::Sql(stmt) => self.execute_sql(stmt, query_ctx).await,
-            QueryStatement::Promql(_) => self.plan_exec(stmt, query_ctx).await,
+            QueryStatement::Promql(_, _) => self.plan_exec(stmt, query_ctx).await,
         }
     }
 
@@ -273,6 +318,11 @@ impl StatementExecutor {
                 self.alter_database(alter_database, query_ctx).await
             }
 
+            #[cfg(feature = "enterprise")]
+            Statement::AlterTrigger(alter_trigger) => {
+                self.alter_trigger(alter_trigger, query_ctx).await
+            }
+
             Statement::DropTable(stmt) => {
                 let mut table_names = Vec::with_capacity(stmt.table_names().len());
                 for table_name_stmt in stmt.table_names() {
@@ -300,7 +350,11 @@ impl StatementExecutor {
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
-                self.truncate_table(table_name, query_ctx).await
+                let time_ranges = self
+                    .convert_truncate_time_ranges(&table_name, stmt.time_ranges(), &query_ctx)
+                    .await?;
+                self.truncate_table(table_name, time_ranges, query_ctx)
+                    .await
             }
             Statement::CreateDatabase(stmt) => {
                 self.create_database(
@@ -362,6 +416,8 @@ impl StatementExecutor {
             }
             Statement::ShowCreateFlow(show) => self.show_create_flow(show, query_ctx).await,
             Statement::ShowCreateView(show) => self.show_create_view(show, query_ctx).await,
+            #[cfg(feature = "enterprise")]
+            Statement::ShowCreateTrigger(show) => self.show_create_trigger(show, query_ctx).await,
             Statement::SetVariables(set_var) => self.set_variables(set_var, query_ctx),
             Statement::ShowVariables(show_variable) => self.show_variable(show_variable, query_ctx),
             Statement::ShowColumns(show_columns) => {
@@ -410,6 +466,9 @@ impl StatementExecutor {
             // The tracked issue is https://github.com/GreptimeTeam/greptimedb/issues/3442.
             "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
 
+            // Allow query to fallback when failed to push down.
+            "ALLOW_QUERY_FALLBACK" => set_allow_query_fallback(set_var.value, query_ctx)?,
+
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
             "@@SESSION.MAX_EXECUTION_TIME" | "MAX_EXECUTION_TIME" => match query_ctx.channel() {
                 Channel::Mysql => set_query_timeout(set_var.value, query_ctx)?,
@@ -420,7 +479,7 @@ impl StatementExecutor {
                     return NotSupportedSnafu {
                         feat: format!("Unsupported set variable {}", var_name),
                     }
-                    .fail()
+                    .fail();
                 }
             },
             "STATEMENT_TIMEOUT" => {
@@ -521,6 +580,89 @@ impl StatementExecutor {
     pub fn cache_invalidator(&self) -> &CacheInvalidatorRef {
         &self.cache_invalidator
     }
+
+    /// Convert truncate time ranges for the given table from sql values to timestamps
+    ///
+    pub async fn convert_truncate_time_ranges(
+        &self,
+        table_name: &TableName,
+        sql_values_time_range: &[(sqlparser::ast::Value, sqlparser::ast::Value)],
+        query_ctx: &QueryContextRef,
+    ) -> Result<Vec<(Timestamp, Timestamp)>> {
+        if sql_values_time_range.is_empty() {
+            return Ok(vec![]);
+        }
+        let table = self.get_table(&table_name.table_ref()).await?;
+        let info = table.table_info();
+        let time_index_dt = info
+            .meta
+            .schema
+            .timestamp_column()
+            .context(UnexpectedSnafu {
+                violated: "Table must have a timestamp column",
+            })?;
+
+        let time_unit = time_index_dt
+            .data_type
+            .as_timestamp()
+            .with_context(|| UnexpectedSnafu {
+                violated: format!(
+                    "Table {}'s time index column must be a timestamp type, found: {:?}",
+                    table_name, time_index_dt
+                ),
+            })?
+            .unit();
+
+        let mut time_ranges = Vec::with_capacity(sql_values_time_range.len());
+        for (start, end) in sql_values_time_range {
+            let start = common_sql::convert::sql_value_to_value(
+                "range_start",
+                &ConcreteDataType::timestamp_datatype(time_unit),
+                start,
+                Some(&query_ctx.timezone()),
+                None,
+                false,
+            )
+            .context(SqlCommonSnafu)
+            .and_then(|v| {
+                if let datatypes::value::Value::Timestamp(t) = v {
+                    Ok(t)
+                } else {
+                    error::InvalidSqlSnafu {
+                        err_msg: format!("Expected a timestamp value, found {v:?}"),
+                    }
+                    .fail()
+                }
+            })?;
+
+            let end = common_sql::convert::sql_value_to_value(
+                "range_end",
+                &ConcreteDataType::timestamp_datatype(time_unit),
+                end,
+                Some(&query_ctx.timezone()),
+                None,
+                false,
+            )
+            .context(SqlCommonSnafu)
+            .and_then(|v| {
+                if let datatypes::value::Value::Timestamp(t) = v {
+                    Ok(t)
+                } else {
+                    error::InvalidSqlSnafu {
+                        err_msg: format!("Expected a timestamp value, found {v:?}"),
+                    }
+                    .fail()
+                }
+            })?;
+            time_ranges.push((start, end));
+        }
+        Ok(time_ranges)
+    }
+
+    /// Returns the inserter for the statement executor.
+    pub(crate) fn inserter(&self) -> &InserterRef {
+        &self.inserter
+    }
 }
 
 fn to_copy_query_request(stmt: CopyQueryToArgument) -> Result<CopyQueryToRequest> {
@@ -535,6 +677,41 @@ fn to_copy_query_request(stmt: CopyQueryToArgument) -> Result<CopyQueryToRequest
         with: with.into_map(),
         connection: connection.into_map(),
     })
+}
+
+// Verifies time related format is valid
+fn verify_time_related_format(with: &OptionMap) -> Result<()> {
+    let time_format = with.get(common_datasource::file_format::TIME_FORMAT);
+    let date_format = with.get(common_datasource::file_format::DATE_FORMAT);
+    let timestamp_format = with.get(common_datasource::file_format::TIMESTAMP_FORMAT);
+    let file_format = with.get(common_datasource::file_format::FORMAT_TYPE);
+
+    if !matches!(file_format, Some(f) if f.eq_ignore_ascii_case("csv")) {
+        ensure!(
+            time_format.is_none() && date_format.is_none() && timestamp_format.is_none(),
+            error::TimestampFormatNotSupportedSnafu {
+                format: "<unknown>".to_string(),
+                file_format: file_format.unwrap_or_default(),
+            }
+        );
+    }
+
+    for (key, format_opt) in [
+        (common_datasource::file_format::TIME_FORMAT, time_format),
+        (common_datasource::file_format::DATE_FORMAT, date_format),
+        (
+            common_datasource::file_format::TIMESTAMP_FORMAT,
+            timestamp_format,
+        ),
+    ] {
+        if let Some(format) = format_opt {
+            chrono::format::strftime::StrftimeItems::new(format)
+                .parse()
+                .map_err(|_| error::InvalidCopyParameterSnafu { key, value: format }.build())?;
+        }
+    }
+
+    Ok(())
 }
 
 fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<CopyTableRequest> {
@@ -561,9 +738,11 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
 
     let timestamp_range = timestamp_range_from_option_map(&with, &query_ctx)?;
 
+    verify_time_related_format(&with)?;
+
     let pattern = with
         .get(common_datasource::file_format::FILE_PATTERN)
-        .cloned();
+        .map(|x| x.to_string());
 
     Ok(CopyTableRequest {
         catalog_name,
@@ -644,15 +823,70 @@ fn idents_to_full_database_name(
     match &obj_name.0[..] {
         [database] => Ok((
             query_ctx.current_catalog().to_owned(),
-            database.value.clone(),
+            database.to_string_unquoted(),
         )),
-        [catalog, database] => Ok((catalog.value.clone(), database.value.clone())),
+        [catalog, database] => Ok((catalog.to_string_unquoted(), database.to_string_unquoted())),
         _ => InvalidSqlSnafu {
             err_msg: format!(
                 "expect database name to be <catalog>.<database>, <database>, found: {obj_name}",
             ),
         }
         .fail(),
+    }
+}
+
+/// The [`Inserter`] implementation for the statement executor.
+pub struct InserterImpl {
+    statement_executor: StatementExecutorRef,
+    options: Option<InsertOptions>,
+}
+
+impl InserterImpl {
+    pub fn new(statement_executor: StatementExecutorRef, options: Option<InsertOptions>) -> Self {
+        Self {
+            statement_executor,
+            options,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Inserter for InserterImpl {
+    async fn insert_rows(
+        &self,
+        context: &client::inserter::Context<'_>,
+        requests: RowInsertRequests,
+    ) -> ClientResult<()> {
+        let mut ctx_builder = QueryContextBuilder::default()
+            .current_catalog(context.catalog.to_string())
+            .current_schema(context.schema.to_string());
+        if let Some(options) = self.options.as_ref() {
+            ctx_builder = ctx_builder
+                .set_extension(
+                    TTL_KEY.to_string(),
+                    format_duration(options.ttl).to_string(),
+                )
+                .set_extension(APPEND_MODE_KEY.to_string(), options.append_mode.to_string());
+        }
+        let query_ctx = ctx_builder.build().into();
+
+        self.statement_executor
+            .inserter()
+            .handle_row_inserts(
+                requests,
+                query_ctx,
+                self.statement_executor.as_ref(),
+                false,
+                false,
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(ClientExternalSnafu)
+            .map(|_| ())
+    }
+
+    fn set_options(&mut self, options: &InsertOptions) {
+        self.options = Some(*options);
     }
 }
 
@@ -670,7 +904,7 @@ mod tests {
     use crate::statement::copy_database::{
         COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY,
     };
-    use crate::statement::timestamp_range_from_option_map;
+    use crate::statement::{timestamp_range_from_option_map, verify_time_related_format};
 
     fn check_timestamp_range((start, end): (&str, &str)) -> error::Result<Option<TimestampRange>> {
         let query_ctx = QueryContextBuilder::default()
@@ -704,6 +938,64 @@ mod tests {
         assert_matches!(
             check_timestamp_range(("2022-04-11 08:00:00", "2022-04-11 07:00:00")).unwrap_err(),
             error::Error::InvalidTimestampRange { .. }
+        );
+    }
+
+    #[test]
+    fn test_verify_timestamp_format() {
+        let map = OptionMap::from(
+            [
+                (
+                    common_datasource::file_format::TIMESTAMP_FORMAT.to_string(),
+                    "%Y-%m-%d %H:%M:%S".to_string(),
+                ),
+                (
+                    common_datasource::file_format::FORMAT_TYPE.to_string(),
+                    "csv".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        );
+        assert!(verify_time_related_format(&map).is_ok());
+
+        let map = OptionMap::from(
+            [
+                (
+                    common_datasource::file_format::TIMESTAMP_FORMAT.to_string(),
+                    "%Y-%m-%d %H:%M:%S".to_string(),
+                ),
+                (
+                    common_datasource::file_format::FORMAT_TYPE.to_string(),
+                    "json".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        );
+
+        assert_matches!(
+            verify_time_related_format(&map).unwrap_err(),
+            error::Error::TimestampFormatNotSupported { .. }
+        );
+        let map = OptionMap::from(
+            [
+                (
+                    common_datasource::file_format::TIMESTAMP_FORMAT.to_string(),
+                    "%111112".to_string(),
+                ),
+                (
+                    common_datasource::file_format::FORMAT_TYPE.to_string(),
+                    "csv".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        );
+
+        assert_matches!(
+            verify_time_related_format(&map).unwrap_err(),
+            error::Error::InvalidCopyParameter { .. }
         );
     }
 }

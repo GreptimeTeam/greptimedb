@@ -59,6 +59,15 @@ impl SortField {
 
     pub fn estimated_size(&self) -> usize {
         match &self.data_type {
+            ConcreteDataType::Dictionary(dict_type) => {
+                Self::estimated_size_by_type(dict_type.value_type())
+            }
+            data_type => Self::estimated_size_by_type(data_type),
+        }
+    }
+
+    fn estimated_size_by_type(data_type: &ConcreteDataType) -> usize {
+        match data_type {
             ConcreteDataType::Boolean(_) => 2,
             ConcreteDataType::Int8(_) | ConcreteDataType::UInt8(_) => 2,
             ConcreteDataType::Int16(_) | ConcreteDataType::UInt16(_) => 3,
@@ -78,6 +87,7 @@ impl SortField {
             ConcreteDataType::Decimal128(_) => 19,
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
+            | ConcreteDataType::Struct(_)
             | ConcreteDataType::Dictionary(_) => 0,
         }
     }
@@ -88,20 +98,33 @@ impl SortField {
         serializer: &mut Serializer<&mut Vec<u8>>,
         value: &ValueRef,
     ) -> Result<()> {
+        match self.data_type() {
+            ConcreteDataType::Dictionary(dict_type) => {
+                Self::serialize_by_type(dict_type.value_type(), serializer, value)
+            }
+            data_type => Self::serialize_by_type(data_type, serializer, value),
+        }
+    }
+
+    fn serialize_by_type(
+        data_type: &ConcreteDataType,
+        serializer: &mut Serializer<&mut Vec<u8>>,
+        value: &ValueRef,
+    ) -> Result<()> {
         macro_rules! cast_value_and_serialize {
             (
-                $self: ident;
+                $data_type: ident;
                 $serializer: ident;
                 $(
                     $ty: ident, $f: ident
                 ),*
             ) => {
-                match &$self.data_type {
+                match $data_type {
                 $(
                     ConcreteDataType::$ty(_) => {
                         paste!{
                             value
-                            .[<as_ $f>]()
+                            .[<try_into_ $f>]()
                             .context(FieldTypeMismatchSnafu)?
                             .serialize($serializer)
                             .context(SerializeFieldSnafu)?;
@@ -109,41 +132,42 @@ impl SortField {
                     }
                 )*
                     ConcreteDataType::Timestamp(_) => {
-                        let timestamp = value.as_timestamp().context(FieldTypeMismatchSnafu)?;
+                        let timestamp = value.try_into_timestamp().context(FieldTypeMismatchSnafu)?;
                         timestamp
                             .map(|t|t.value())
                             .serialize($serializer)
                             .context(SerializeFieldSnafu)?;
                     }
                     ConcreteDataType::Interval(IntervalType::YearMonth(_)) => {
-                        let interval = value.as_interval_year_month().context(FieldTypeMismatchSnafu)?;
+                        let interval = value.try_into_interval_year_month().context(FieldTypeMismatchSnafu)?;
                         interval.map(|i| i.to_i32())
                             .serialize($serializer)
                             .context(SerializeFieldSnafu)?;
                     }
                     ConcreteDataType::Interval(IntervalType::DayTime(_)) => {
-                        let interval = value.as_interval_day_time().context(FieldTypeMismatchSnafu)?;
+                        let interval = value.try_into_interval_day_time().context(FieldTypeMismatchSnafu)?;
                         interval.map(|i| i.to_i64())
                             .serialize($serializer)
                             .context(SerializeFieldSnafu)?;
                     }
                     ConcreteDataType::Interval(IntervalType::MonthDayNano(_)) => {
-                        let interval = value.as_interval_month_day_nano().context(FieldTypeMismatchSnafu)?;
+                        let interval = value.try_into_interval_month_day_nano().context(FieldTypeMismatchSnafu)?;
                         interval.map(|i| i.to_i128())
                             .serialize($serializer)
                             .context(SerializeFieldSnafu)?;
                     }
                     ConcreteDataType::List(_) |
+                    ConcreteDataType::Struct(_) |
                     ConcreteDataType::Dictionary(_) |
                     ConcreteDataType::Null(_) => {
                         return error::NotSupportedFieldSnafu {
-                            data_type: $self.data_type.clone()
+                            data_type: $data_type.clone()
                         }.fail()
                     }
                 }
             };
         }
-        cast_value_and_serialize!(self; serializer;
+        cast_value_and_serialize!(data_type; serializer;
             Boolean, boolean,
             Binary, binary,
             Int8, i8,
@@ -170,16 +194,28 @@ impl SortField {
 
     /// Deserialize a value from the deserializer.
     pub fn deserialize<B: Buf>(&self, deserializer: &mut Deserializer<B>) -> Result<Value> {
+        match &self.data_type {
+            ConcreteDataType::Dictionary(dict_type) => {
+                Self::deserialize_by_type(dict_type.value_type(), deserializer)
+            }
+            data_type => Self::deserialize_by_type(data_type, deserializer),
+        }
+    }
+
+    fn deserialize_by_type<B: Buf>(
+        data_type: &ConcreteDataType,
+        deserializer: &mut Deserializer<B>,
+    ) -> Result<Value> {
         macro_rules! deserialize_and_build_value {
             (
-                $self: ident;
+                $data_type: ident;
                 $serializer: ident;
                 $(
                     $ty: ident, $f: ident
                 ),*
             ) => {
 
-                match &$self.data_type {
+                match $data_type {
                     $(
                         ConcreteDataType::$ty(_) => {
                             Ok(Value::from(Option::<$f>::deserialize(deserializer).context(error::DeserializeFieldSnafu)?))
@@ -218,6 +254,10 @@ impl SortField {
                         data_type: ConcreteDataType::List(l.clone()),
                     }
                     .fail(),
+                    ConcreteDataType::Struct(f) => NotSupportedFieldSnafu {
+                        data_type: ConcreteDataType::Struct(f.clone()),
+                    }
+                    .fail(),
                     ConcreteDataType::Dictionary(d) => NotSupportedFieldSnafu {
                         data_type: ConcreteDataType::Dictionary(d.clone()),
                     }
@@ -229,7 +269,7 @@ impl SortField {
                 }
             };
         }
-        deserialize_and_build_value!(self; deserializer;
+        deserialize_and_build_value!(data_type; deserializer;
             Boolean, bool,
             Int8, i8,
             Int16, i16,
@@ -261,7 +301,20 @@ impl SortField {
             return Ok(1);
         }
 
-        let to_skip = match &self.data_type {
+        match &self.data_type {
+            ConcreteDataType::Dictionary(dict_type) => {
+                Self::skip_deserialize_by_type(dict_type.value_type(), bytes, deserializer)
+            }
+            data_type => Self::skip_deserialize_by_type(data_type, bytes, deserializer),
+        }
+    }
+
+    fn skip_deserialize_by_type(
+        data_type: &ConcreteDataType,
+        bytes: &[u8],
+        deserializer: &mut Deserializer<&[u8]>,
+    ) -> Result<usize> {
+        let to_skip = match data_type {
             ConcreteDataType::Boolean(_) => 2,
             ConcreteDataType::Int8(_) | ConcreteDataType::UInt8(_) => 2,
             ConcreteDataType::Int16(_) | ConcreteDataType::UInt16(_) => 3,
@@ -301,6 +354,7 @@ impl SortField {
             ConcreteDataType::Decimal128(_) => 19,
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
+            | ConcreteDataType::Struct(_)
             | ConcreteDataType::Dictionary(_) => 0,
         };
         deserializer.advance(to_skip);
@@ -462,7 +516,7 @@ impl PrimaryKeyCodec for DensePrimaryKeyCodec {
         values: &[(ColumnId, ValueRef)],
         buffer: &mut Vec<u8>,
     ) -> Result<()> {
-        let iter = values.iter().map(|(_, v)| *v);
+        let iter = values.iter().map(|(_, v)| v.clone());
         self.encode_dense(iter, buffer)
     }
 
@@ -623,6 +677,51 @@ mod tests {
     }
 
     #[test]
+    fn test_memcmp_dictionary() {
+        // Test Dictionary<i32, string>
+        check_encode_and_decode(
+            &[ConcreteDataType::dictionary_datatype(
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::string_datatype(),
+            )],
+            vec![Value::String("hello".into())],
+        );
+
+        // Test Dictionary<i32, i64>
+        check_encode_and_decode(
+            &[ConcreteDataType::dictionary_datatype(
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::int64_datatype(),
+            )],
+            vec![Value::Int64(42)],
+        );
+
+        // Test Dictionary with null value
+        check_encode_and_decode(
+            &[ConcreteDataType::dictionary_datatype(
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::string_datatype(),
+            )],
+            vec![Value::Null],
+        );
+
+        // Test multiple Dictionary columns
+        check_encode_and_decode(
+            &[
+                ConcreteDataType::dictionary_datatype(
+                    ConcreteDataType::int32_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ),
+                ConcreteDataType::dictionary_datatype(
+                    ConcreteDataType::int16_datatype(),
+                    ConcreteDataType::int64_datatype(),
+                ),
+            ],
+            vec![Value::String("world".into()), Value::Int64(123)],
+        );
+    }
+
+    #[test]
     fn test_encode_multiple_rows() {
         check_encode_and_decode(
             &[
@@ -684,6 +783,10 @@ mod tests {
                 ConcreteDataType::interval_month_day_nano_datatype(),
                 ConcreteDataType::decimal128_default_datatype(),
                 ConcreteDataType::vector_datatype(3),
+                ConcreteDataType::dictionary_datatype(
+                    ConcreteDataType::int32_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ),
             ],
             vec![
                 Value::Boolean(true),
@@ -708,6 +811,7 @@ mod tests {
                 Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 1, 15)),
                 Value::Decimal128(Decimal128::from(16)),
                 Value::Binary(Bytes::from(vec![0; 12])),
+                Value::String("dict_value".into()),
             ],
         );
     }

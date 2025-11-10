@@ -24,21 +24,34 @@ use store_api::region_request::{RegionDropRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
-use crate::engine::listener::DropListener;
 use crate::engine::MitoEngine;
+use crate::engine::listener::DropListener;
 use crate::test_util::{
-    build_rows_for_key, flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
+    CreateRequestBuilder, TestEnv, build_rows_for_key, flush_region, put_rows, rows_schema,
 };
 use crate::worker::DROPPING_MARKER_FILE;
 
 #[tokio::test]
 async fn test_engine_drop_region() {
+    test_engine_drop_region_with_format(false).await;
+    test_engine_drop_region_with_format(true).await;
+}
+
+async fn test_engine_drop_region_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::with_prefix("drop").await;
     let listener = Arc::new(DropListener::new(Duration::from_millis(100)));
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .create_engine_with(
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
         .await;
 
     let region_id = RegionId::new(1, 1);
@@ -73,12 +86,13 @@ async fn test_engine_drop_region() {
     let region = engine.get_region(region_id).unwrap();
     let region_dir = region.access_layer.build_region_dir(region_id);
     // no dropping marker file
-    assert!(!env
-        .get_object_store()
-        .unwrap()
-        .exists(&join_path(&region_dir, DROPPING_MARKER_FILE))
-        .await
-        .unwrap());
+    assert!(
+        !env.get_object_store()
+            .unwrap()
+            .exists(&join_path(&region_dir, DROPPING_MARKER_FILE))
+            .await
+            .unwrap()
+    );
 
     let rows = Rows {
         schema: column_schemas.clone(),
@@ -106,6 +120,11 @@ async fn test_engine_drop_region() {
 
 #[tokio::test]
 async fn test_engine_drop_region_for_custom_store() {
+    test_engine_drop_region_for_custom_store_with_format(false).await;
+    test_engine_drop_region_for_custom_store_with_format(true).await;
+}
+
+async fn test_engine_drop_region_for_custom_store_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     async fn setup(
         engine: &MitoEngine,
@@ -147,7 +166,10 @@ async fn test_engine_drop_region_for_custom_store() {
     let listener = Arc::new(DropListener::new(Duration::from_millis(100)));
     let engine = env
         .create_engine_with_multiple_object_stores(
-            MitoConfig::default(),
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
             None,
             Some(listener.clone()),
             &["Gcs"],
@@ -206,18 +228,22 @@ async fn test_engine_drop_region_for_custom_store() {
     common_telemetry::info!("Before drop,default entries: {:?}", entries);
 
     // Both these regions should exist before dropping the custom region.
-    assert!(object_store_manager
-        .find("Gcs")
-        .unwrap()
-        .exists(&custom_region_dir)
-        .await
-        .unwrap());
-    assert!(object_store_manager
-        .find("default")
-        .unwrap()
-        .exists(&global_region_dir)
-        .await
-        .unwrap());
+    assert!(
+        object_store_manager
+            .find("Gcs")
+            .unwrap()
+            .exists(&custom_region_dir)
+            .await
+            .unwrap()
+    );
+    assert!(
+        object_store_manager
+            .find("default")
+            .unwrap()
+            .exists(&global_region_dir)
+            .await
+            .unwrap()
+    );
 
     // Drop the custom region.
     engine
@@ -247,16 +273,20 @@ async fn test_engine_drop_region_for_custom_store() {
         .unwrap();
     common_telemetry::info!("After drop,default entries: {:?}", entries);
 
-    assert!(!object_store_manager
-        .find("Gcs")
-        .unwrap()
-        .exists(&custom_region_dir)
-        .await
-        .unwrap());
-    assert!(object_store_manager
-        .find("default")
-        .unwrap()
-        .exists(&global_region_dir)
-        .await
-        .unwrap());
+    assert!(
+        !object_store_manager
+            .find("Gcs")
+            .unwrap()
+            .exists(&custom_region_dir)
+            .await
+            .unwrap()
+    );
+    assert!(
+        object_store_manager
+            .find("default")
+            .unwrap()
+            .exists(&global_region_dir)
+            .await
+            .unwrap()
+    );
 }

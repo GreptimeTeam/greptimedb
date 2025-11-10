@@ -19,9 +19,9 @@ use common_meta::key::tombstone::TombstoneManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::rpc::store::RangeRequest;
 
-use crate::metadata::common::StoreConfig;
-use crate::metadata::control::del::CLI_TOMBSTONE_PREFIX;
 use crate::Tool;
+use crate::common::StoreConfig;
+use crate::metadata::control::del::CLI_TOMBSTONE_PREFIX;
 
 /// Delete key-value pairs logically from the metadata store.
 #[derive(Debug, Default, Parser)]
@@ -41,7 +41,7 @@ impl DelKeyCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         let kv_backend = self.store.build().await?;
         Ok(Box::new(DelKeyTool {
-            key: self.key.to_string(),
+            key: self.key.clone(),
             prefix: self.prefix,
             key_deleter: KeyDeleter::new(kv_backend),
         }))
@@ -102,8 +102,8 @@ mod tests {
     use common_meta::kv_backend::{KvBackend, KvBackendRef};
     use common_meta::rpc::store::RangeRequest;
 
-    use crate::metadata::control::del::key::KeyDeleter;
     use crate::metadata::control::del::CLI_TOMBSTONE_PREFIX;
+    use crate::metadata::control::del::key::KeyDeleter;
     use crate::metadata::control::test_utils::put_key;
 
     #[tokio::test]

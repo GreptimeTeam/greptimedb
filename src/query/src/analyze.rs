@@ -30,10 +30,10 @@ use datafusion::execution::TaskContext;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    accept, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, accept,
 };
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion_common::{internal_err, DataFusionError};
+use datafusion_common::{DataFusionError, internal_err};
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, Partitioning};
 use futures::StreamExt;
 use serde::Serialize;
@@ -89,7 +89,9 @@ impl DistAnalyzeExec {
 impl DisplayAs for DistAnalyzeExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(f, "DistAnalyzeExec",)
             }
         }

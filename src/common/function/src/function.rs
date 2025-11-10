@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use common_query::error::Result;
-use common_query::prelude::Signature;
-use datatypes::data_type::ConcreteDataType;
-use datatypes::vectors::VectorRef;
+use datafusion::arrow::datatypes::DataType;
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_common::DataFusionError;
+use datafusion_common::arrow::array::ArrayRef;
+use datafusion_common::config::{ConfigEntry, ConfigExtension, ExtensionOptions};
+use datafusion_expr::{ScalarFunctionArgs, Signature};
 use session::context::{QueryContextBuilder, QueryContextRef};
 
 use crate::state::FunctionState;
@@ -41,6 +45,12 @@ impl FunctionContext {
     }
 }
 
+impl std::fmt::Display for FunctionContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FunctionContext {{ query_ctx: {} }}", self.query_ctx)
+    }
+}
+
 impl Default for FunctionContext {
     fn default() -> Self {
         Self {
@@ -50,6 +60,42 @@ impl Default for FunctionContext {
     }
 }
 
+impl ExtensionOptions for FunctionContext {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(self.clone())
+    }
+
+    fn set(&mut self, _: &str, _: &str) -> datafusion_common::Result<()> {
+        Err(DataFusionError::NotImplemented(
+            "set options for `FunctionContext`".to_string(),
+        ))
+    }
+
+    fn entries(&self) -> Vec<ConfigEntry> {
+        vec![]
+    }
+}
+
+impl Debug for FunctionContext {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FunctionContext")
+            .field("query_ctx", &self.query_ctx)
+            .finish()
+    }
+}
+
+impl ConfigExtension for FunctionContext {
+    const PREFIX: &'static str = "FunctionContext";
+}
+
 /// Scalar function trait, modified from databend to adapt datafusion
 /// TODO(dennis): optimize function by it's features such as monotonicity etc.
 pub trait Function: fmt::Display + Sync + Send {
@@ -57,32 +103,42 @@ pub trait Function: fmt::Display + Sync + Send {
     fn name(&self) -> &str;
 
     /// The returned data type of function execution.
-    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType>;
+    fn return_type(&self, input_types: &[DataType]) -> datafusion_common::Result<DataType>;
 
     /// The signature of function.
-    fn signature(&self) -> Signature;
+    fn signature(&self) -> &Signature;
 
-    /// Evaluate the function, e.g. run/execute the function.
-    fn eval(&self, ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef>;
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue>;
+
+    fn aliases(&self) -> &[String] {
+        &[]
+    }
 }
 
 pub type FunctionRef = Arc<dyn Function>;
 
-/// Async Scalar function trait
-#[async_trait::async_trait]
-pub trait AsyncFunction: fmt::Display + Sync + Send {
-    /// Returns the name of the function, should be unique.
-    fn name(&self) -> &str;
-
-    /// The returned data type of function execution.
-    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType>;
-
-    /// The signature of function.
-    fn signature(&self) -> Signature;
-
-    /// Evaluate the function, e.g. run/execute the function.
-    /// TODO(dennis): simplify the signature and refactor all the admin functions.
-    async fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef>;
+/// Find the [FunctionContext] in the [ScalarFunctionArgs]. The [FunctionContext] was set
+/// previously in the DataFusion session context creation, and is passed all the way down to the
+/// args by DataFusion.
+pub(crate) fn find_function_context(
+    args: &ScalarFunctionArgs,
+) -> datafusion_common::Result<&FunctionContext> {
+    let Some(x) = args.config_options.extensions.get::<FunctionContext>() else {
+        return Err(DataFusionError::Execution(
+            "function context is not set".to_string(),
+        ));
+    };
+    Ok(x)
 }
 
-pub type AsyncFunctionRef = Arc<dyn AsyncFunction>;
+/// Extract UDF arguments (as Arrow's [ArrayRef]) from [ScalarFunctionArgs] directly.
+pub(crate) fn extract_args<const N: usize>(
+    name: &str,
+    args: &ScalarFunctionArgs,
+) -> datafusion_common::Result<[ArrayRef; N]> {
+    ColumnarValue::values_to_arrays(&args.args)
+        .and_then(|x| datafusion_common::utils::take_function_args(name, x))
+}

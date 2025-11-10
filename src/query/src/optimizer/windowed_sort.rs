@@ -16,18 +16,18 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::Result as DataFusionResult;
+use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_physical_expr::expressions::Column as PhysicalColumn;
-use datafusion_physical_expr::LexOrdering;
 use store_api::region_engine::PartitionRange;
 use table::table::scan::RegionScanExec;
 
@@ -89,11 +89,11 @@ impl WindowedSortPhysicalRule {
                     };
                     let input_schema = sort_input.schema();
 
-                    if let Some(first_sort_expr) = sort_exec.expr().first()
-                        && let Some(column_expr) = first_sort_expr
-                            .expr
-                            .as_any()
-                            .downcast_ref::<PhysicalColumn>()
+                    let first_sort_expr = sort_exec.expr().first();
+                    if let Some(column_expr) = first_sort_expr
+                        .expr
+                        .as_any()
+                        .downcast_ref::<PhysicalColumn>()
                         && scanner_info
                             .time_index
                             .contains(input_schema.field(column_expr.index()).name())
@@ -101,7 +101,6 @@ impl WindowedSortPhysicalRule {
                     } else {
                         return Ok(Transformed::no(plan));
                     }
-                    let first_sort_expr = sort_exec.expr().first().unwrap().clone();
 
                     // PartSortExec is unnecessary if:
                     // - there is no tag column, and
@@ -120,7 +119,7 @@ impl WindowedSortPhysicalRule {
                     };
 
                     let windowed_sort_exec = WindowedSortExec::try_new(
-                        first_sort_expr,
+                        first_sort_expr.clone(),
                         sort_exec.fetch(),
                         scanner_info.partition_ranges,
                         new_input,
@@ -128,7 +127,7 @@ impl WindowedSortPhysicalRule {
 
                     if !preserve_partitioning {
                         let order_preserving_merge = SortPreservingMergeExec::new(
-                            LexOrdering::new(sort_exec.expr().to_vec()),
+                            sort_exec.expr().clone(),
                             Arc::new(windowed_sort_exec),
                         );
                         return Ok(Transformed {
@@ -168,6 +167,10 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
     let mut is_batch_coalesced = false;
 
     input.transform_up(|plan| {
+        if plan.as_any().is::<CooperativeExec>() {
+            return Ok(Transformed::no(plan));
+        }
+
         // Unappliable case, reset the state.
         if plan.as_any().is::<RepartitionExec>()
             || plan.as_any().is::<CoalescePartitionsExec>()
@@ -193,9 +196,9 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
         // TODO(discord9): do this in logical plan instead as it's lessy bugy there
         // Collects alias of the time index column.
         if let Some(projection) = plan.as_any().downcast_ref::<ProjectionExec>() {
-            for (expr, output_name) in projection.expr() {
-                if let Some(column_expr) = expr.as_any().downcast_ref::<PhysicalColumn>() {
-                    alias_map.push((column_expr.name().to_string(), output_name.clone()));
+            for expr in projection.expr() {
+                if let Some(column_expr) = expr.expr.as_any().downcast_ref::<PhysicalColumn>() {
+                    alias_map.push((column_expr.name().to_string(), expr.alias.clone()));
                 }
             }
             // resolve alias properly

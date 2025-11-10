@@ -13,34 +13,47 @@
 // limitations under the License.
 
 use snafu::ResultExt;
-use sqlparser::ast::DescribeAlias;
+use sqlparser::keywords::Keyword;
 
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
-use crate::statements::explain::Explain;
+use crate::statements::explain::ExplainStatement;
 use crate::statements::statement::Statement;
 
 /// EXPLAIN statement parser implementation
 impl ParserContext<'_> {
+    /// explain that support use our own parser to parse the inner statement
     pub(crate) fn parse_explain(&mut self) -> Result<Statement> {
-        let explain_statement = self
-            .parser
-            .parse_explain(DescribeAlias::Explain)
-            .with_context(|_| error::UnexpectedSnafu {
-                expected: "a query statement",
-                actual: self.peek_token_as_string(),
-            })?;
+        let analyze = self.parser.parse_keyword(Keyword::ANALYZE);
+        let verbose = self.parser.parse_keyword(Keyword::VERBOSE);
+        let format =
+            if self.parser.parse_keyword(Keyword::FORMAT) {
+                Some(self.parser.parse_analyze_format().with_context(|_| {
+                    error::UnexpectedSnafu {
+                        expected: "analyze format",
+                        actual: self.peek_token_as_string(),
+                    }
+                })?)
+            } else {
+                None
+            };
 
-        Ok(Statement::Explain(Explain::try_from(explain_statement)?))
+        let statement = self.parse_statement()?;
+
+        let explain = ExplainStatement {
+            analyze,
+            verbose,
+            format,
+            statement: Box::new(statement),
+        };
+        Ok(Statement::Explain(Box::new(explain)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use sqlparser::ast::helpers::attached_token::AttachedToken;
-    use sqlparser::ast::{
-        GroupByExpr, Query as SpQuery, Statement as SpStatement, WildcardAdditionalOptions,
-    };
+    use sqlparser::ast::{GroupByExpr, Query as SpQuery, SelectFlavor, WildcardAdditionalOptions};
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
@@ -60,10 +73,11 @@ mod tests {
             projection: vec![sqlparser::ast::SelectItem::Wildcard(
                 WildcardAdditionalOptions::default(),
             )],
+            exclude: None,
             into: None,
             from: vec![sqlparser::ast::TableWithJoins {
                 relation: sqlparser::ast::TableFactor::Table {
-                    name: sqlparser::ast::ObjectName(vec![sqlparser::ast::Ident::new("foo")]),
+                    name: sqlparser::ast::ObjectName::from(vec![sqlparser::ast::Ident::new("foo")]),
                     alias: None,
                     args: None,
                     with_hints: vec![],
@@ -72,6 +86,7 @@ mod tests {
                     with_ordinality: false,
                     json_path: None,
                     sample: None,
+                    index_hints: vec![],
                 },
                 joins: vec![],
             }],
@@ -90,34 +105,33 @@ mod tests {
             window_before_qualify: false,
             connect_by: None,
             select_token: AttachedToken::empty(),
+            flavor: SelectFlavor::Standard,
         };
 
-        let sp_statement = SpStatement::Query(Box::new(SpQuery {
-            with: None,
-            body: Box::new(sqlparser::ast::SetExpr::Select(Box::new(select))),
-            order_by: None,
-            limit: None,
-            limit_by: vec![],
-            offset: None,
-            fetch: None,
-            locks: vec![],
-            for_clause: None,
-            settings: None,
-            format_clause: None,
-        }));
+        let sp_query = Box::new(
+            SpQuery {
+                with: None,
+                body: Box::new(sqlparser::ast::SetExpr::Select(Box::new(select))),
+                order_by: None,
+                limit_clause: None,
+                pipe_operators: vec![],
+                fetch: None,
+                locks: vec![],
+                for_clause: None,
+                settings: None,
+                format_clause: None,
+            }
+            .try_into()
+            .unwrap(),
+        );
 
-        let explain = Explain::try_from(SpStatement::Explain {
-            describe_alias: DescribeAlias::Explain,
+        let explain = ExplainStatement {
             analyze: false,
             verbose: false,
-            statement: Box::new(sp_statement),
             format: None,
-            query_plan: false,
-            options: None,
-            estimate: false,
-        })
-        .unwrap();
+            statement: Box::new(Statement::Query(sp_query)),
+        };
 
-        assert_eq!(stmts[0], Statement::Explain(explain))
+        assert_eq!(stmts[0], Statement::Explain(Box::new(explain)))
     }
 }

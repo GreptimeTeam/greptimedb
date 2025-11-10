@@ -13,17 +13,19 @@
 // limitations under the License.
 
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use common_telemetry::{error, info};
 use store_api::storage::RegionId;
-use store_api::{ManifestVersion, MIN_VERSION};
+use store_api::{MIN_VERSION, ManifestVersion};
 
+use crate::error::Result;
 use crate::manifest::action::{RegionCheckpoint, RegionManifest};
 use crate::manifest::manager::RegionManifestOptions;
 use crate::manifest::storage::ManifestObjectStore;
 use crate::metrics::MANIFEST_OP_ELAPSED;
+use crate::region::{RegionLeaderState, RegionRoleState};
 
 /// [`Checkpointer`] is responsible for doing checkpoint for a region, in an asynchronous way.
 #[derive(Debug)]
@@ -117,10 +119,36 @@ impl Checkpointer {
         self.inner.last_checkpoint_version.load(Ordering::Relaxed)
     }
 
+    /// Update the `removed_files` field in the manifest by the options in `manifest_options`.
+    /// This should be called before maybe do checkpoint to update the manifest.
+    pub(crate) fn update_manifest_removed_files(
+        &self,
+        mut manifest: RegionManifest,
+    ) -> Result<RegionManifest> {
+        let opt = &self.manifest_options.remove_file_options;
+
+        manifest.removed_files.evict_old_removed_files(opt)?;
+
+        Ok(manifest)
+    }
+
     /// Check if it's needed to do checkpoint for the region by the checkpoint distance.
     /// If needed, and there's no currently running checkpoint task, it will start a new checkpoint
     /// task running in the background.
-    pub(crate) fn maybe_do_checkpoint(&self, manifest: &RegionManifest) {
+    pub(crate) fn maybe_do_checkpoint(
+        &self,
+        manifest: &RegionManifest,
+        region_state: RegionRoleState,
+    ) {
+        // Skip checkpoint if region is in staging state
+        if region_state == RegionRoleState::Leader(RegionLeaderState::Staging) {
+            info!(
+                "Skipping checkpoint for region {} in staging mode, manifest version: {}",
+                manifest.metadata.region_id, manifest.manifest_version
+            );
+            return;
+        }
+
         if self.manifest_options.checkpoint_distance == 0 {
             return;
         }

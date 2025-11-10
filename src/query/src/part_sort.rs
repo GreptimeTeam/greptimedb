@@ -30,14 +30,21 @@ use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use datafusion::common::arrow::compute::sort_to_indices;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::execution::{RecordBatchStream, TaskContext};
+use datafusion::physical_plan::execution_plan::CardinalityEffect;
+use datafusion::physical_plan::filter_pushdown::{
+    ChildFilterDescription, FilterDescription, FilterPushdownPhase,
+};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties, TopK,
+    TopKDynamicFilters,
 };
-use datafusion_common::{internal_err, DataFusionError};
-use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
+use datafusion_common::{DataFusionError, internal_err};
+use datafusion_physical_expr::expressions::{DynamicFilterPhysicalExpr, lit};
+use datafusion_physical_expr::{PhysicalExpr, PhysicalSortExpr};
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
+use parking_lot::RwLock;
 use snafu::location;
 use store_api::region_engine::PartitionRange;
 
@@ -58,6 +65,10 @@ pub struct PartSortExec {
     metrics: ExecutionPlanMetricsSet,
     partition_ranges: Vec<Vec<PartitionRange>>,
     properties: PlanProperties,
+    /// Filter matching the state of the sort for dynamic filter pushdown.
+    /// If `limit` is `Some`, this will also be set and a TopK operator may be used.
+    /// If `limit` is `None`, this will be `None`.
+    filter: Option<Arc<RwLock<TopKDynamicFilters>>>,
 }
 
 impl PartSortExec {
@@ -76,6 +87,10 @@ impl PartSortExec {
             properties.boundedness,
         );
 
+        let filter = limit
+            .is_some()
+            .then(|| Self::create_filter(expression.expr.clone()));
+
         Self {
             expression,
             limit,
@@ -83,7 +98,15 @@ impl PartSortExec {
             metrics,
             partition_ranges,
             properties,
+            filter,
         }
+    }
+
+    /// Add or reset `self.filter` to a new `TopKDynamicFilters`.
+    fn create_filter(expr: Arc<dyn PhysicalExpr>) -> Arc<RwLock<TopKDynamicFilters>> {
+        Arc::new(RwLock::new(TopKDynamicFilters::new(Arc::new(
+            DynamicFilterPhysicalExpr::new(vec![expr], lit(true)),
+        ))))
     }
 
     pub fn to_stream(
@@ -110,6 +133,7 @@ impl PartSortExec {
             input_stream,
             self.partition_ranges[partition].clone(),
             partition,
+            self.filter.clone(),
         )?) as _;
 
         Ok(df_stream)
@@ -189,6 +213,51 @@ impl ExecutionPlan for PartSortExec {
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {
         vec![false]
     }
+
+    fn cardinality_effect(&self) -> CardinalityEffect {
+        if self.limit.is_none() {
+            CardinalityEffect::Equal
+        } else {
+            CardinalityEffect::LowerEqual
+        }
+    }
+
+    fn gather_filters_for_pushdown(
+        &self,
+        phase: FilterPushdownPhase,
+        parent_filters: Vec<Arc<dyn PhysicalExpr>>,
+        _config: &datafusion::config::ConfigOptions,
+    ) -> datafusion_common::Result<FilterDescription> {
+        if !matches!(phase, FilterPushdownPhase::Post) {
+            return FilterDescription::from_children(parent_filters, &self.children());
+        }
+
+        let mut child = ChildFilterDescription::from_child(&parent_filters, &self.input)?;
+
+        if let Some(filter) = &self.filter {
+            child = child.with_self_filter(filter.read().expr());
+        }
+
+        Ok(FilterDescription::new().with_child(child))
+    }
+
+    fn reset_state(self: Arc<Self>) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
+        // shared dynamic filter needs to be reset
+        let new_filter = self
+            .limit
+            .is_some()
+            .then(|| Self::create_filter(self.expression.expr.clone()));
+
+        Ok(Arc::new(Self {
+            expression: self.expression.clone(),
+            limit: self.limit,
+            input: self.input.clone(),
+            metrics: self.metrics.clone(),
+            partition_ranges: self.partition_ranges.clone(),
+            properties: self.properties.clone(),
+            filter: new_filter,
+        }))
+    }
 }
 
 enum PartSortBuffer {
@@ -237,17 +306,27 @@ impl PartSortStream {
         input: DfSendableRecordBatchStream,
         partition_ranges: Vec<PartitionRange>,
         partition: usize,
+        filter: Option<Arc<RwLock<TopKDynamicFilters>>>,
     ) -> datafusion_common::Result<Self> {
         let buffer = if let Some(limit) = limit {
+            let Some(filter) = filter else {
+                return internal_err!(
+                    "TopKDynamicFilters must be provided when limit is set at {}",
+                    snafu::location!()
+                );
+            };
+
             PartSortBuffer::Top(
                 TopK::try_new(
                     partition,
                     sort.schema().clone(),
-                    LexOrdering::new(vec![sort.expression.clone()]),
+                    vec![],
+                    [sort.expression.clone()].into(),
                     limit,
                     context.session_config().batch_size(),
                     context.runtime_env(),
                     &sort.metrics,
+                    filter,
                 )?,
                 0,
             )
@@ -375,10 +454,10 @@ impl PartSortStream {
 
         for (idx, val) in sort_column_iter {
             // ignore vacant time index data
-            if let Some(val) = val {
-                if val >= cur_range.end.value() || val < cur_range.start.value() {
-                    return Ok(Some(idx));
-                }
+            if let Some(val) = val
+                && (val >= cur_range.end.value() || val < cur_range.start.value())
+            {
+                return Ok(Some(idx));
             }
         }
 
@@ -429,14 +508,14 @@ impl PartSortStream {
         let sort_column =
             concat(&sort_columns.iter().map(|a| a.as_ref()).collect_vec()).map_err(|e| {
                 DataFusionError::ArrowError(
-                    e,
+                    Box::new(e),
                     Some(format!("Fail to concat sort columns at {}", location!())),
                 )
             })?;
 
         let indices = sort_to_indices(&sort_column, opt, self.limit).map_err(|e| {
             DataFusionError::ArrowError(
-                e,
+                Box::new(e),
                 Some(format!("Fail to sort to indices at {}", location!())),
             )
         })?;
@@ -468,7 +547,7 @@ impl PartSortStream {
 
         let full_input = concat_batches(&self.schema, &buffer).map_err(|e| {
             DataFusionError::ArrowError(
-                e,
+                Box::new(e),
                 Some(format!(
                     "Fail to concat input batches when sorting at {}",
                     location!()
@@ -478,7 +557,7 @@ impl PartSortStream {
 
         let sorted = take_record_batch(&full_input, &indices).map_err(|e| {
             DataFusionError::ArrowError(
-                e,
+                Box::new(e),
                 Some(format!(
                     "Fail to take result record batch when sorting at {}",
                     location!()
@@ -495,14 +574,19 @@ impl PartSortStream {
 
     /// Internal method for sorting `Top` buffer (with limit).
     fn sort_top_buffer(&mut self) -> datafusion_common::Result<DfRecordBatch> {
+        let filter = Arc::new(RwLock::new(TopKDynamicFilters::new(Arc::new(
+            DynamicFilterPhysicalExpr::new(vec![], lit(true)),
+        ))));
         let new_top_buffer = TopK::try_new(
             self.partition,
             self.schema().clone(),
-            LexOrdering::new(vec![self.expression.clone()]),
+            vec![],
+            [self.expression.clone()].into(),
             self.limit.unwrap(),
             self.context.session_config().batch_size(),
             self.context.runtime_env(),
             &self.root_metrics,
+            filter,
         )?;
         let PartSortBuffer::Top(top_k, _) =
             std::mem::replace(&mut self.buffer, PartSortBuffer::Top(new_top_buffer, 0))
@@ -532,7 +616,7 @@ impl PartSortStream {
 
         let concat_batch = concat_batches(&self.schema, &results).map_err(|e| {
             DataFusionError::ArrowError(
-                e,
+                Box::new(e),
                 Some(format!(
                     "Fail to concat top k result record batch when sorting at {}",
                     location!()
@@ -676,7 +760,7 @@ mod test {
     use store_api::region_engine::PartitionRange;
 
     use super::*;
-    use crate::test_util::{new_ts_array, MockInputExec};
+    use crate::test_util::{MockInputExec, new_ts_array};
 
     #[tokio::test]
     async fn fuzzy_test() {
@@ -1093,11 +1177,13 @@ mod test {
             }
             panic!(
                 "case_{} failed, opt: {:?},\n real output has {} batches, {} rows, expected has {} batches with {} rows\nfull msg: {}",
-                case_id, opt,
+                case_id,
+                opt,
                 real_output.len(),
-                real_output.iter().map(|x|x.num_rows()).sum::<usize>(),
+                real_output.iter().map(|x| x.num_rows()).sum::<usize>(),
                 expected_output.len(),
-                expected_output.iter().map(|x|x.num_rows()).sum::<usize>(), full_msg
+                expected_output.iter().map(|x| x.num_rows()).sum::<usize>(),
+                full_msg
             );
         }
     }

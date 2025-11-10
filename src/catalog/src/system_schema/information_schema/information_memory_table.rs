@@ -15,8 +15,7 @@
 use std::sync::Arc;
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE};
-use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{Schema, SchemaRef};
 use datatypes::vectors::{Int64Vector, StringVector, VectorRef};
 
 use crate::system_schema::information_schema::table_names::*;
@@ -89,9 +88,9 @@ pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>
                 vec![
                     Arc::new(StringVector::from(vec![build_info.branch.to_string()])),
                     Arc::new(StringVector::from(vec![build_info.commit.to_string()])),
-                    Arc::new(StringVector::from(vec![build_info
-                        .commit_short
-                        .to_string()])),
+                    Arc::new(StringVector::from(vec![
+                        build_info.commit_short.to_string(),
+                    ])),
                     Arc::new(StringVector::from(vec![build_info.clean.to_string()])),
                     Arc::new(StringVector::from(vec![build_info.version.to_string()])),
                 ],
@@ -362,24 +361,6 @@ pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>
                 string_column("TABLE_NAME"),
                 string_column("PRIVILEGE_TYPE"),
                 string_column("IS_GRANTABLE"),
-            ],
-            vec![],
-        ),
-
-        TRIGGERS => (
-            vec![
-                string_column("TRIGGER_NAME"),
-                ColumnSchema::new(
-                    "trigger_id",
-                    ConcreteDataType::uint64_datatype(),
-                    false,
-                ),
-                string_column("TRIGGER_DEFINITION"),
-                ColumnSchema::new(
-                    "flownode_id",
-                    ConcreteDataType::uint64_datatype(),
-                    true,
-                ),
             ],
             vec![],
         ),

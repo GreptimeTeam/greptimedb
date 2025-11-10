@@ -28,8 +28,8 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use futures_util::stream::BoxStream;
 use session::context::QueryContext;
 use snafu::OptionExt;
-use table::metadata::TableId;
 use table::TableRef;
+use table::metadata::{TableId, TableInfoRef};
 
 use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
 use crate::information_schema::InformationSchemaProvider;
@@ -38,7 +38,7 @@ use crate::{CatalogManager, DeregisterTableRequest, RegisterSchemaRequest, Regis
 
 type SchemaEntries = HashMap<String, HashMap<String, TableRef>>;
 
-/// Simple in-memory list of catalogs
+/// Simple in-memory list of catalogs used for tests.
 #[derive(Clone)]
 pub struct MemoryCatalogManager {
     /// Collection of catalogs containing schemas and ultimately Tables
@@ -142,6 +142,18 @@ impl CatalogManager for MemoryCatalogManager {
                 .cloned()?
         };
         Ok(result)
+    }
+
+    async fn table_info_by_id(&self, table_id: TableId) -> Result<Option<TableInfoRef>> {
+        Ok(self
+            .catalogs
+            .read()
+            .unwrap()
+            .iter()
+            .flat_map(|(_, schema_entries)| schema_entries.values())
+            .flat_map(|tables| tables.values())
+            .find(|t| t.table_info().ident.table_id == table_id)
+            .map(|t| t.table_info()))
     }
 
     async fn tables_by_ids(
@@ -380,15 +392,15 @@ impl MemoryCatalogManager {
         if !manager.schema_exist_sync(catalog, schema).unwrap() {
             manager
                 .register_schema_sync(RegisterSchemaRequest {
-                    catalog: catalog.to_string(),
-                    schema: schema.to_string(),
+                    catalog: catalog.clone(),
+                    schema: schema.clone(),
                 })
                 .unwrap();
         }
 
         let request = RegisterTableRequest {
-            catalog: catalog.to_string(),
-            schema: schema.to_string(),
+            catalog: catalog.clone(),
+            schema: schema.clone(),
             table_name: table.table_info().name.clone(),
             table_id: table.table_info().ident.table_id,
             table,
@@ -407,7 +419,7 @@ pub fn new_memory_catalog_manager() -> Result<Arc<MemoryCatalogManager>> {
 mod tests {
     use common_catalog::consts::*;
     use futures_util::TryStreamExt;
-    use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
+    use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
 
     use super::*;
 
@@ -442,16 +454,18 @@ mod tests {
             tables[0].table_info().table_id()
         );
 
-        assert!(catalog_list
-            .table(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-                "not_exists",
-                None
-            )
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            catalog_list
+                .table(
+                    DEFAULT_CATALOG_NAME,
+                    DEFAULT_SCHEMA_NAME,
+                    "not_exists",
+                    None
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -474,11 +488,13 @@ mod tests {
             table: NumbersTable::table(2333),
         };
         catalog.register_table_sync(register_table_req).unwrap();
-        assert!(catalog
-            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name, None)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            catalog
+                .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name, None)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         let deregister_table_req = DeregisterTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -486,10 +502,12 @@ mod tests {
             table_name: table_name.to_string(),
         };
         catalog.deregister_table_sync(deregister_table_req).unwrap();
-        assert!(catalog
-            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name, None)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            catalog
+                .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

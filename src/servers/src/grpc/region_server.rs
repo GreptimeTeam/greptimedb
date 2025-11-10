@@ -15,11 +15,11 @@
 use std::sync::Arc;
 
 use api::v1::region::region_server::Region as RegionServer;
-use api::v1::region::{region_request, RegionRequest, RegionResponse};
+use api::v1::region::{RegionRequest, RegionResponse, region_request};
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
-use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
+use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::tracing::info_span;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, warn};
@@ -27,7 +27,7 @@ use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response, Status};
 
 use crate::error::{InvalidQuerySnafu, JoinTaskSnafu, Result};
-use crate::grpc::{cancellation, TonicResult};
+use crate::grpc::{TonicResult, cancellation};
 
 #[async_trait]
 pub trait RegionServerHandler: Send + Sync {

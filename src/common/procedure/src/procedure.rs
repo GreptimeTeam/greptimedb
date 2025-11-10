@@ -19,9 +19,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_event_recorder::{Event, Eventable};
 use serde::{Deserialize, Serialize};
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use snafu::{ResultExt, Snafu};
+use tokio::sync::watch::Receiver;
 use uuid::Uuid;
 
 use crate::error::{self, Error, Result};
@@ -58,6 +60,14 @@ pub enum Status {
 }
 
 impl Status {
+    /// Returns a [Status::Suspended] with given `subprocedures` and `persist` flag.
+    pub fn suspended(subprocedures: Vec<ProcedureWithId>, persist: bool) -> Status {
+        Status::Suspended {
+            subprocedures,
+            persist,
+        }
+    }
+
     /// Returns a [Status::Poisoned] with given `keys` and `error`.
     pub fn poisoned(keys: impl IntoIterator<Item = PoisonKey>, error: Error) -> Status {
         Status::Poisoned {
@@ -140,6 +150,11 @@ pub trait ContextProvider: Send + Sync {
     /// Query the procedure state.
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>>;
 
+    async fn procedure_state_receiver(
+        &self,
+        procedure_id: ProcedureId,
+    ) -> Result<Option<Receiver<ProcedureState>>>;
+
     /// Try to put a poison key for a procedure.
     ///
     /// This method is used to mark a resource as being operated on by a procedure.
@@ -199,6 +214,29 @@ pub trait Procedure: Send {
     /// Returns the [PoisonKeys] that may cause this procedure to become poisoned during execution.
     fn poison_keys(&self) -> PoisonKeys {
         PoisonKeys::default()
+    }
+
+    /// Returns the user metadata of the procedure. If the metadata contains the eventable object, you can use [UserMetadata::to_event] to get the event and emit it to the event recorder.
+    fn user_metadata(&self) -> Option<UserMetadata> {
+        None
+    }
+}
+
+/// The user metadata injected by the procedure caller. It can be used to emit events to the event recorder.
+#[derive(Clone, Debug)]
+pub struct UserMetadata {
+    event_object: Arc<dyn Eventable>,
+}
+
+impl UserMetadata {
+    /// Creates a new [UserMetadata] with the given event object.
+    pub fn new(event_object: Arc<dyn Eventable>) -> Self {
+        Self { event_object }
+    }
+
+    /// Returns the event of the procedure. It can be None if the procedure does not emit any event.
+    pub fn to_event(&self) -> Option<Box<dyn Event>> {
+        self.event_object.to_event()
     }
 }
 

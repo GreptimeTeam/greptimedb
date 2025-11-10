@@ -14,23 +14,25 @@
 
 use std::str::FromStr;
 
-use common_time::timezone::Timezone;
 use common_time::Timestamp;
+use common_time::timezone::Timezone;
+use datatypes::json::JsonStructureSettings;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::types::{parse_string_to_json_type_value, parse_string_to_vector_type_value};
+use datatypes::schema::ColumnDefaultConstraint;
+use datatypes::types::{JsonFormat, parse_string_to_jsonb, parse_string_to_vector_type_value};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 pub use sqlparser::ast::{
-    visit_expressions_mut, visit_statements_mut, BinaryOperator, ColumnDef, ColumnOption,
-    ColumnOptionDef, DataType, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-    Ident, ObjectName, SqlOption, TableConstraint, TimezoneInfo, UnaryOperator, Value as SqlValue,
-    Visit, VisitMut, Visitor, VisitorMut,
+    BinaryOperator, ColumnDef, ColumnOption, ColumnOptionDef, DataType, Expr, Function,
+    FunctionArg, FunctionArgExpr, FunctionArguments, Ident, ObjectName, SqlOption, TableConstraint,
+    TimezoneInfo, UnaryOperator, Value as SqlValue, Visit, VisitMut, Visitor, VisitorMut,
+    visit_expressions_mut, visit_statements_mut,
 };
 
 use crate::error::{
     ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertStrSnafu, DatatypeSnafu,
-    InvalidCastSnafu, InvalidSqlValueSnafu, InvalidUnaryOpSnafu, ParseSqlValueSnafu, Result,
-    TimestampOverflowSnafu, UnsupportedUnaryOpSnafu,
+    DeserializeSnafu, InvalidCastSnafu, InvalidSqlValueSnafu, InvalidUnaryOpSnafu,
+    ParseSqlValueSnafu, Result, TimestampOverflowSnafu, UnsupportedUnaryOpSnafu,
 };
 
 fn parse_sql_number<R: FromStr + std::fmt::Debug>(n: &str) -> Result<R>
@@ -172,7 +174,7 @@ pub fn sql_value_to_value(
                 value: sql_val.clone(),
                 datatype: data_type.clone(),
             }
-            .fail()
+            .fail();
         }
     };
 
@@ -209,7 +211,8 @@ pub fn sql_value_to_value(
             | Value::Duration(_)
             | Value::IntervalYearMonth(_)
             | Value::IntervalDayTime(_)
-            | Value::IntervalMonthDayNano(_) => match unary_op {
+            | Value::IntervalMonthDayNano(_)
+            | Value::Json(_) => match unary_op {
                 UnaryOperator::Plus => {}
                 UnaryOperator::Minus => {
                     value = value
@@ -219,8 +222,8 @@ pub fn sql_value_to_value(
                 _ => return InvalidUnaryOpSnafu { unary_op, value }.fail(),
             },
 
-            Value::String(_) | Value::Binary(_) | Value::List(_) => {
-                return InvalidUnaryOpSnafu { unary_op, value }.fail()
+            Value::String(_) | Value::Binary(_) | Value::List(_) | Value::Struct(_) => {
+                return InvalidUnaryOpSnafu { unary_op, value }.fail();
             }
         }
     }
@@ -242,10 +245,8 @@ pub(crate) fn parse_string_to_value(
     timezone: Option<&Timezone>,
     auto_string_to_numeric: bool,
 ) -> Result<Value> {
-    if auto_string_to_numeric {
-        if let Some(value) = auto_cast_to_numeric(&s, data_type)? {
-            return Ok(value);
-        }
+    if auto_string_to_numeric && let Some(value) = auto_cast_to_numeric(&s, data_type)? {
+        return Ok(value);
     }
 
     ensure!(
@@ -298,8 +299,21 @@ pub(crate) fn parse_string_to_value(
         }
         ConcreteDataType::Binary(_) => Ok(Value::Binary(s.as_bytes().into())),
         ConcreteDataType::Json(j) => {
-            let v = parse_string_to_json_type_value(&s, &j.format).context(DatatypeSnafu)?;
-            Ok(Value::Binary(v.into()))
+            match &j.format {
+                JsonFormat::Jsonb => {
+                    let v = parse_string_to_jsonb(&s).context(DatatypeSnafu)?;
+                    Ok(Value::Binary(v.into()))
+                }
+                JsonFormat::Native(_inner) => {
+                    // Always use the structured version at this level.
+                    let serde_json_value =
+                        serde_json::from_str(&s).context(DeserializeSnafu { json: s })?;
+                    let json_structure_settings = JsonStructureSettings::Structured(None);
+                    json_structure_settings
+                        .encode(serde_json_value)
+                        .context(DatatypeSnafu)
+                }
+            }
         }
         ConcreteDataType::Vector(d) => {
             let v = parse_string_to_vector_type_value(&s, Some(d.dim)).context(DatatypeSnafu)?;
@@ -366,6 +380,27 @@ pub(crate) fn parse_hex_string(s: &str) -> Result<Value> {
         }
         .fail(),
     }
+}
+
+/// Deserialize default constraint from json bytes
+pub fn deserialize_default_constraint(
+    bytes: &[u8],
+    column_name: &str,
+    data_type: &ConcreteDataType,
+) -> Result<Option<ColumnDefaultConstraint>> {
+    let json = String::from_utf8_lossy(bytes);
+    let default_constraint = serde_json::from_str(&json).context(DeserializeSnafu { json })?;
+    let column_def = sqlparser::ast::ColumnOptionDef {
+        name: None,
+        option: sqlparser::ast::ColumnOption::Default(default_constraint),
+    };
+
+    crate::default_constraint::parse_column_default_constraint(
+        column_name,
+        data_type,
+        &[column_def],
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -792,14 +827,16 @@ mod test {
             }
         }
 
-        assert!(parse_string_to_value(
-            "json_col",
-            r#"Nicola Kovac is the best rifler in the world"#.to_string(),
-            &ConcreteDataType::json_datatype(),
-            None,
-            false,
+        assert!(
+            parse_string_to_value(
+                "json_col",
+                r#"Nicola Kovac is the best rifler in the world"#.to_string(),
+                &ConcreteDataType::json_datatype(),
+                None,
+                false,
+            )
+            .is_err()
         )
-        .is_err())
     }
 
     #[test]
@@ -944,14 +981,16 @@ mod test {
             }
         }
 
-        assert!(parse_string_to_value(
-            "timestamp_col",
-            "2022-02-22T00:01:01+08".to_string(),
-            &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
-            None,
-            false,
-        )
-        .is_err());
+        assert!(
+            parse_string_to_value(
+                "timestamp_col",
+                "2022-02-22T00:01:01+08".to_string(),
+                &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
+                None,
+                false,
+            )
+            .is_err()
+        );
 
         // with timezone
         match parse_string_to_value(
@@ -976,42 +1015,50 @@ mod test {
 
     #[test]
     fn test_parse_placeholder_value() {
-        assert!(sql_value_to_value(
-            "test",
-            &ConcreteDataType::string_datatype(),
-            &SqlValue::Placeholder("default".into()),
-            None,
-            None,
-            false
-        )
-        .is_err());
-        assert!(sql_value_to_value(
-            "test",
-            &ConcreteDataType::string_datatype(),
-            &SqlValue::Placeholder("default".into()),
-            None,
-            Some(UnaryOperator::Minus),
-            false
-        )
-        .is_err());
-        assert!(sql_value_to_value(
-            "test",
-            &ConcreteDataType::uint16_datatype(),
-            &SqlValue::Number("3".into(), false),
-            None,
-            Some(UnaryOperator::Minus),
-            false
-        )
-        .is_err());
-        assert!(sql_value_to_value(
-            "test",
-            &ConcreteDataType::uint16_datatype(),
-            &SqlValue::Number("3".into(), false),
-            None,
-            None,
-            false
-        )
-        .is_ok());
+        assert!(
+            sql_value_to_value(
+                "test",
+                &ConcreteDataType::string_datatype(),
+                &SqlValue::Placeholder("default".into()),
+                None,
+                None,
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            sql_value_to_value(
+                "test",
+                &ConcreteDataType::string_datatype(),
+                &SqlValue::Placeholder("default".into()),
+                None,
+                Some(UnaryOperator::Minus),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            sql_value_to_value(
+                "test",
+                &ConcreteDataType::uint16_datatype(),
+                &SqlValue::Number("3".into(), false),
+                None,
+                Some(UnaryOperator::Minus),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            sql_value_to_value(
+                "test",
+                &ConcreteDataType::uint16_datatype(),
+                &SqlValue::Number("3".into(), false),
+                None,
+                None,
+                false
+            )
+            .is_ok()
+        );
     }
 
     #[test]

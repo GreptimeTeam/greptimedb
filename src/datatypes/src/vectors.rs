@@ -35,11 +35,13 @@ mod duration;
 mod eq;
 mod helper;
 mod interval;
+pub(crate) mod json;
 mod list;
 mod null;
 pub(crate) mod operations;
 mod primitive;
 mod string;
+mod struct_vector;
 mod time;
 mod timestamp;
 mod validity;
@@ -63,13 +65,14 @@ pub use interval::{
 pub use list::{ListIter, ListVector, ListVectorBuilder};
 pub use null::{NullVector, NullVectorBuilder};
 pub use primitive::{
-    Float32Vector, Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int16Vector,
-    Int16VectorBuilder, Int32Vector, Int32VectorBuilder, Int64Vector, Int64VectorBuilder,
-    Int8Vector, Int8VectorBuilder, PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder,
-    UInt16Vector, UInt16VectorBuilder, UInt32Vector, UInt32VectorBuilder, UInt64Vector,
-    UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
+    Float32Vector, Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int8Vector,
+    Int8VectorBuilder, Int16Vector, Int16VectorBuilder, Int32Vector, Int32VectorBuilder,
+    Int64Vector, Int64VectorBuilder, PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder,
+    UInt8Vector, UInt8VectorBuilder, UInt16Vector, UInt16VectorBuilder, UInt32Vector,
+    UInt32VectorBuilder, UInt64Vector, UInt64VectorBuilder,
 };
 pub use string::{StringVector, StringVectorBuilder};
+pub use struct_vector::{StructVector, StructVectorBuilder};
 pub use time::{
     TimeMicrosecondVector, TimeMicrosecondVectorBuilder, TimeMillisecondVector,
     TimeMillisecondVectorBuilder, TimeNanosecondVector, TimeNanosecondVectorBuilder,
@@ -164,7 +167,7 @@ pub trait Vector: Send + Sync + Serializable + Debug + VectorOp {
     ///
     /// # Panics
     /// Panic if `index` is out of bound.
-    fn get_ref(&self, index: usize) -> ValueRef;
+    fn get_ref(&self, index: usize) -> ValueRef<'_>;
 }
 
 pub type VectorRef = Arc<dyn Vector>;
@@ -195,13 +198,13 @@ pub trait MutableVector: Send + Sync {
     fn to_vector_cloned(&self) -> VectorRef;
 
     /// Try to push value ref to this mutable vector.
-    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()>;
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()>;
 
     /// Push value ref to this mutable vector.
     ///
     /// # Panics
     /// Panics if error if data types mismatch.
-    fn push_value_ref(&mut self, value: ValueRef) {
+    fn push_value_ref(&mut self, value: &ValueRef) {
         self.try_push_value_ref(value).unwrap_or_else(|_| {
             panic!(
                 "expecting pushing value of datatype {:?}, actual {:?}",
@@ -422,12 +425,12 @@ pub mod tests {
     #[test]
     #[should_panic(expected = "Must use ListVectorBuilder::with_type_capacity()")]
     fn test_mutable_vector_list_data_type() {
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
         // List type
-        let builder =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 1024);
+        let builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 1024);
         assert_eq!(
             builder.data_type(),
-            ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype())
+            ConcreteDataType::list_datatype(item_type)
         );
 
         // Panic with_capacity
@@ -438,9 +441,9 @@ pub mod tests {
     fn test_mutable_vector_to_vector_cloned() {
         // create a string vector builder
         let mut builder = ConcreteDataType::string_datatype().create_mutable_vector(1024);
-        builder.push_value_ref(ValueRef::String("hello"));
-        builder.push_value_ref(ValueRef::String("world"));
-        builder.push_value_ref(ValueRef::String("!"));
+        builder.push_value_ref(&ValueRef::String("hello"));
+        builder.push_value_ref(&ValueRef::String("world"));
+        builder.push_value_ref(&ValueRef::String("!"));
 
         // use MutableVector trait to_vector_cloned won't reset builder
         let vector = builder.to_vector_cloned();

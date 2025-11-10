@@ -17,8 +17,8 @@ use arrow_array::{
     TimestampNanosecondArray, TimestampSecondArray,
 };
 use arrow_schema::DataType;
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use paste::paste;
 use serde::{Deserialize, Serialize};
 
@@ -143,6 +143,7 @@ define_timestamp_with_unit!(Millisecond);
 define_timestamp_with_unit!(Microsecond);
 define_timestamp_with_unit!(Nanosecond);
 
+/// Converts a timestamp array to a primitive array and the time unit.
 pub fn timestamp_array_to_primitive(
     ts_array: &ArrayRef,
 ) -> Option<(

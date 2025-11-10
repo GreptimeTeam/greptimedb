@@ -16,21 +16,21 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use common_error::ext::BoxedError;
-use common_function::function::{FunctionContext, FunctionRef};
+use common_function::function::FunctionRef;
+use datafusion::arrow::datatypes::{DataType, TimeUnit};
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_expr::{ScalarFunctionArgs, Signature, Volatility};
 use datafusion_substrait::extensions::Extensions;
-use datatypes::data_type::ConcreteDataType as CDT;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
 /// note here we are using the `substrait_proto_df` crate from the `substrait` module and
 /// rename it to `substrait_proto`
 use substrait::substrait_proto_df as substrait_proto;
-use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
 use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
+use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
 
 use crate::adapter::FlownodeContext;
-use crate::error::{Error, NotImplementedSnafu, UnexpectedSnafu};
+use crate::error::{Error, NotImplementedSnafu};
 use crate::expr::{TUMBLE_END, TUMBLE_START};
 /// a simple macro to generate a not implemented error
 macro_rules! not_impl_err {
@@ -120,12 +120,14 @@ pub fn register_function_to_query_engine(engine: &Arc<dyn QueryEngine>) {
 #[derive(Debug)]
 pub struct TumbleFunction {
     name: String,
+    signature: Signature,
 }
 
 impl TumbleFunction {
     fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
+            signature: Signature::variadic_any(Volatility::Immutable),
         }
     }
 }
@@ -141,25 +143,16 @@ impl common_function::function::Function for TumbleFunction {
         &self.name
     }
 
-    fn return_type(&self, _input_types: &[CDT]) -> common_query::error::Result<CDT> {
-        Ok(CDT::timestamp_millisecond_datatype())
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Timestamp(TimeUnit::Millisecond, None))
     }
 
-    fn signature(&self) -> common_query::prelude::Signature {
-        common_query::prelude::Signature::variadic_any(common_query::prelude::Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(
-        &self,
-        _func_ctx: &FunctionContext,
-        _columns: &[datatypes::prelude::VectorRef],
-    ) -> common_query::error::Result<datatypes::prelude::VectorRef> {
-        UnexpectedSnafu {
-            reason: "Tumbler function is not implemented for datafusion executor",
-        }
-        .fail()
-        .map_err(BoxedError::new)
-        .context(common_query::error::ExecuteSnafu)
+    fn invoke_with_args(&self, _: ScalarFunctionArgs) -> datafusion_common::Result<ColumnarValue> {
+        datafusion_common::not_impl_err!("{}", self.name())
     }
 }
 
@@ -169,20 +162,21 @@ mod test {
 
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
+    use datatypes::data_type::ConcreteDataType as CDT;
     use datatypes::prelude::*;
     use datatypes::schema::Schema;
     use datatypes::timestamp::TimestampMillisecond;
     use datatypes::vectors::{TimestampMillisecondVectorBuilder, VectorRef};
     use itertools::Itertools;
     use prost::Message;
+    use query::QueryEngine;
     use query::options::QueryOptions;
     use query::parser::QueryLanguageParser;
     use query::query_engine::DefaultSerializer;
-    use query::QueryEngine;
     use session::context::QueryContext;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
     use substrait_proto::proto;
-    use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
+    use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
     use table::test_util::MemTable;
 
     use super::*;
@@ -293,7 +287,9 @@ mod test {
             .plan(&stmt, QueryContext::arc())
             .await
             .unwrap();
-        let plan = apply_df_optimizer(plan).await.unwrap();
+        let plan = apply_df_optimizer(plan, &QueryContext::arc())
+            .await
+            .unwrap();
 
         // encode then decode so to rely on the impl of conversion from logical plan to substrait plan
         let bytes = DFLogicalSubstraitConvertor {}
@@ -315,7 +311,7 @@ mod test {
             .plan(&stmt, QueryContext::arc())
             .await
             .unwrap();
-        let plan = apply_df_optimizer(plan).await;
+        let plan = apply_df_optimizer(plan, &QueryContext::arc()).await;
 
         assert!(plan.is_err());
     }

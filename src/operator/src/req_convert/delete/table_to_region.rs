@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::DeleteRequests as RegionDeleteRequests;
 use api::v1::Rows;
+use api::v1::region::DeleteRequests as RegionDeleteRequests;
 use partition::manager::PartitionRuleManager;
 use table::metadata::TableInfo;
 use table::requests::DeleteRequest as TableDeleteRequest;
@@ -53,9 +53,10 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use api::v1::helper::tag_column_schema;
     use api::v1::region::DeleteRequest as RegionDeleteRequest;
     use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType, Value};
+    use api::v1::{ColumnDataType, Row, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::vectors::{Int32Vector, VectorRef};
     use store_api::storage::RegionId;
@@ -132,12 +133,7 @@ mod tests {
         RegionDeleteRequest {
             region_id,
             rows: Some(Rows {
-                schema: vec![ColumnSchema {
-                    column_name: "a".to_string(),
-                    datatype: ColumnDataType::Int32 as i32,
-                    semantic_type: SemanticType::Tag as i32,
-                    ..Default::default()
-                }],
+                schema: vec![tag_column_schema("a", ColumnDataType::Int32)],
                 rows: rows
                     .into_iter()
                     .map(|v| Row {

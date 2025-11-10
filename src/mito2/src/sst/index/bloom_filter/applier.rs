@@ -22,6 +22,7 @@ use common_base::range_read::RangeReader;
 use common_telemetry::warn;
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
 use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
+use index::target::IndexTarget;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
@@ -41,10 +42,10 @@ use crate::error::{
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::RegionFileId;
-pub use crate::sst::index::bloom_filter::applier::builder::BloomFilterIndexApplierBuilder;
-use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
-use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
+use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
+pub use crate::sst::index::bloom_filter::applier::builder::BloomFilterIndexApplierBuilder;
+use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 
 pub(crate) type BloomFilterIndexApplierRef = Arc<BloomFilterIndexApplier>;
 
@@ -263,12 +264,14 @@ impl BloomFilterIndexApplier {
             file_cache.local_store(),
             WriteCachePathProvider::new(file_cache.clone()),
         );
+        let blob_name = Self::column_blob_name(column_id);
+
         let reader = puffin_manager
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
             .with_file_size_hint(file_size_hint)
-            .blob(&Self::column_blob_name(column_id))
+            .blob(&blob_name)
             .await
             .context(PuffinReadBlobSnafu)?
             .reader()
@@ -279,7 +282,7 @@ impl BloomFilterIndexApplier {
 
     // TODO(ruihang): use the same util with the code in creator
     fn column_blob_name(column_id: ColumnId) -> String {
-        format!("{INDEX_BLOB_TYPE}-{column_id}")
+        format!("{INDEX_BLOB_TYPE}-{}", IndexTarget::ColumnId(column_id))
     }
 
     /// Creates a blob reader from the remote index file
@@ -297,12 +300,14 @@ impl BloomFilterIndexApplier {
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
+        let blob_name = Self::column_blob_name(column_id);
+
         puffin_manager
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
             .with_file_size_hint(file_size_hint)
-            .blob(&Self::column_blob_name(column_id))
+            .blob(&blob_name)
             .await
             .context(PuffinReadBlobSnafu)?
             .reader()
@@ -349,17 +354,17 @@ fn is_blob_not_found(err: &Error) -> bool {
 #[cfg(test)]
 mod tests {
 
-    use datafusion_expr::{col, lit, Expr};
+    use datafusion_expr::{Expr, col, lit};
     use futures::future::BoxFuture;
     use puffin::puffin_manager::PuffinWriter;
     use store_api::metadata::RegionMetadata;
+    use store_api::storage::FileId;
 
     use super::*;
-    use crate::sst::file::FileId;
+    use crate::sst::index::bloom_filter::creator::BloomFilterIndexer;
     use crate::sst::index::bloom_filter::creator::tests::{
         mock_object_store, mock_region_metadata, new_batch, new_intm_mgr,
     };
-    use crate::sst::index::bloom_filter::creator::BloomFilterIndexer;
 
     #[allow(clippy::type_complexity)]
     fn tester(
@@ -369,7 +374,7 @@ mod tests {
         puffin_manager_factory: PuffinManagerFactory,
         file_id: RegionFileId,
     ) -> impl Fn(&[Expr], Vec<(usize, bool)>) -> BoxFuture<'static, Vec<(usize, Vec<Range<usize>>)>>
-           + use<'_> {
+    + use<'_> {
         move |exprs, row_groups| {
             let table_dir = table_dir.clone();
             let object_store: ObjectStore = object_store.clone();

@@ -22,7 +22,7 @@ use std::sync::{Arc, RwLock};
 use common_telemetry::{error, info};
 use notify::{EventKind, RecursiveMode, Watcher};
 use rustls::ServerConfig;
-use rustls_pemfile::{certs, read_one, Item};
+use rustls_pemfile::{Item, certs, read_one};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -61,6 +61,8 @@ pub struct TlsOption {
     pub cert_path: String,
     #[serde(default)]
     pub key_path: String,
+    #[serde(default)]
+    pub ca_cert_path: String,
     #[serde(default)]
     pub watch: bool,
 }
@@ -253,6 +255,7 @@ mod tests {
                 mode: Disable,
                 cert_path: "/path/to/cert_path".to_string(),
                 key_path: "/path/to/key_path".to_string(),
+                ca_cert_path: String::new(),
                 watch: false
             },
             TlsOption::new(
@@ -413,6 +416,7 @@ mod tests {
                 .into_os_string()
                 .into_string()
                 .expect("failed to convert path to string"),
+            ca_cert_path: String::new(),
             watch: true,
         };
 

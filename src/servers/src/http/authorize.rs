@@ -13,28 +13,29 @@
 // limitations under the License.
 
 use ::auth::UserProviderRef;
+use api::v1::Basic;
 use axum::extract::{Request, State};
 use axum::http::{self, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use common_base::secrets::SecretString;
+use base64::prelude::BASE64_STANDARD;
+use common_base::secrets::{ExposeSecret, SecretString};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_telemetry::warn;
-use common_time::timezone::parse_timezone;
 use common_time::Timezone;
+use common_time::timezone::parse_timezone;
 use headers::Header;
 use session::context::QueryContextBuilder;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{
     self, InvalidAuthHeaderInvisibleASCIISnafu, InvalidAuthHeaderSnafu, InvalidParameterSnafu,
     NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
 };
-use crate::http::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
+use crate::http::header::{GREPTIME_TIMEZONE_HEADER_NAME, GreptimeDbName};
 use crate::http::result::error_result::ErrorResponse;
 use crate::http::{AUTHORIZATION_HEADER, HTTP_API_PREFIX, PUBLIC_APIS};
 use crate::influxdb::{is_influxdb_request, is_influxdb_v2_request};
@@ -236,6 +237,19 @@ impl TryFrom<&str> for AuthScheme {
             "basic" => decode_basic(encoded_credentials)
                 .map(|(username, password)| AuthScheme::Basic(username, password)),
             other => UnsupportedAuthSchemeSnafu { name: other }.fail(),
+        }
+    }
+}
+
+impl From<AuthScheme> for api::v1::auth_header::AuthScheme {
+    fn from(value: AuthScheme) -> Self {
+        match value {
+            AuthScheme::Basic(username, password) => {
+                api::v1::auth_header::AuthScheme::Basic(Basic {
+                    username,
+                    password: password.expose_secret().clone(),
+                })
+            }
         }
     }
 }

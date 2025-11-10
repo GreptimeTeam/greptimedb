@@ -26,54 +26,38 @@ use common_meta::distributed_time_constants::META_LEASE_SECS;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
-#[cfg(feature = "mysql_kvbackend")]
-use common_meta::kv_backend::rds::MySqlStore;
-#[cfg(feature = "pg_kvbackend")]
-use common_meta::kv_backend::rds::PgStore;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
-#[cfg(feature = "pg_kvbackend")]
-use deadpool_postgres::{Config, Runtime};
 use either::Either;
-use etcd_client::Client;
 use servers::configurator::ConfiguratorRef;
 use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
-#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-use snafu::OptionExt;
 use snafu::ResultExt;
-#[cfg(feature = "mysql_kvbackend")]
-use sqlx::mysql::MySqlConnectOptions;
-#[cfg(feature = "mysql_kvbackend")]
-use sqlx::mysql::MySqlPool;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::{oneshot, Mutex};
-#[cfg(feature = "pg_kvbackend")]
-use tokio_postgres::NoTls;
+use tokio::sync::{Mutex, oneshot};
 use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
-use crate::election::etcd::EtcdElection;
-#[cfg(feature = "mysql_kvbackend")]
-use crate::election::rds::mysql::MySqlElection;
-#[cfg(feature = "pg_kvbackend")]
-use crate::election::rds::postgres::PgElection;
+use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
+use crate::election::etcd::EtcdElection;
 use crate::metasrv::builder::MetasrvBuilder;
-use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectTarget, SelectorRef};
-use crate::node_excluder::NodeExcluderRef;
+use crate::metasrv::{
+    BackendImpl, ElectionRef, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
+};
+use crate::selector::SelectorType;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
 use crate::selector::weight_compute::RegionNumsBasedWeightCompute;
-use crate::selector::SelectorType;
 use crate::service::admin;
 use crate::service::admin::admin_axum_router;
-use crate::{error, Result};
+use crate::utils::etcd::create_etcd_client_with_tls;
+use crate::{Result, error};
 
 pub struct MetasrvInstance {
     metasrv: Arc<Metasrv>,
@@ -173,10 +157,10 @@ impl MetasrvInstance {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        if let Some(mut rx) = self.serve_state.lock().await.take() {
-            if let Ok(Err(err)) = rx.try_recv() {
-                common_telemetry::error!(err; "Metasrv start failed")
-            }
+        if let Some(mut rx) = self.serve_state.lock().await.take()
+            && let Ok(Err(err)) = rx.try_recv()
+        {
+            common_telemetry::error!(err; "Metasrv start failed")
         }
         if let Some(signal) = &self.signal_sender {
             signal
@@ -233,8 +217,7 @@ pub async fn bootstrap_metasrv_with_router(
 
     info!("gRPC server is bound to: {}", real_bind_addr);
 
-    let incoming =
-        TcpIncoming::from_listener(listener, true, None).context(error::TcpIncomingSnafu)?;
+    let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
 
     let _handle = common_runtime::spawn_global(async move {
         let result = router
@@ -281,7 +264,8 @@ pub async fn metasrv_builder(
         (Some(kv_backend), _) => (kv_backend, None),
         (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
         (None, BackendImpl::EtcdStore) => {
-            let etcd_client = create_etcd_client(&opts.store_addrs).await?;
+            let etcd_client =
+                create_etcd_client_with_tls(&opts.store_addrs, opts.backend_tls.as_ref()).await?;
             let kv_backend = EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
             let election = EtcdElection::with_etcd_client(
                 &opts.grpc.server_addr,
@@ -297,8 +281,11 @@ pub async fn metasrv_builder(
             use std::time::Duration;
 
             use common_meta::distributed_time_constants::POSTGRES_KEEP_ALIVE_SECS;
+            use common_meta::kv_backend::rds::PgStore;
+            use deadpool_postgres::Config;
 
-            use crate::election::rds::postgres::ElectionPgClient;
+            use crate::election::rds::postgres::{ElectionPgClient, PgElection};
+            use crate::utils::postgres::create_postgres_pool;
 
             let candidate_lease_ttl = Duration::from_secs(CANDIDATE_LEASE_SECS);
             let execution_timeout = Duration::from_secs(META_LEASE_SECS);
@@ -310,7 +297,8 @@ pub async fn metasrv_builder(
             cfg.keepalives = Some(true);
             cfg.keepalives_idle = Some(Duration::from_secs(POSTGRES_KEEP_ALIVE_SECS));
             // We use a separate pool for election since we need a different session keep-alive idle time.
-            let pool = create_postgres_pool_with(&opts.store_addrs, cfg).await?;
+            let pool = create_postgres_pool(&opts.store_addrs, Some(cfg), opts.backend_tls.clone())
+                .await?;
 
             let election_client = ElectionPgClient::new(
                 pool,
@@ -324,15 +312,22 @@ pub async fn metasrv_builder(
                 opts.store_key_prefix.clone(),
                 candidate_lease_ttl,
                 meta_lease_ttl,
+                opts.meta_schema_name.as_deref(),
                 &opts.meta_table_name,
                 opts.meta_election_lock_id,
             )
             .await?;
 
-            let pool = create_postgres_pool(&opts.store_addrs).await?;
-            let kv_backend = PgStore::with_pg_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
-                .await
-                .context(error::KvBackendSnafu)?;
+            let pool =
+                create_postgres_pool(&opts.store_addrs, None, opts.backend_tls.clone()).await?;
+            let kv_backend = PgStore::with_pg_pool(
+                pool,
+                opts.meta_schema_name.as_deref(),
+                &opts.meta_table_name,
+                opts.max_txn_ops,
+            )
+            .await
+            .context(error::KvBackendSnafu)?;
 
             (kv_backend, Some(election))
         }
@@ -340,9 +335,12 @@ pub async fn metasrv_builder(
         (None, BackendImpl::MysqlStore) => {
             use std::time::Duration;
 
-            use crate::election::rds::mysql::ElectionMysqlClient;
+            use common_meta::kv_backend::rds::MySqlStore;
 
-            let pool = create_mysql_pool(&opts.store_addrs).await?;
+            use crate::election::rds::mysql::{ElectionMysqlClient, MySqlElection};
+            use crate::utils::mysql::create_mysql_pool;
+
+            let pool = create_mysql_pool(&opts.store_addrs, opts.backend_tls.as_ref()).await?;
             let kv_backend =
                 MySqlStore::with_mysql_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
                     .await
@@ -350,7 +348,7 @@ pub async fn metasrv_builder(
             // Since election will acquire a lock of the table, we need a separate table for election.
             let election_table_name = opts.meta_table_name.clone() + "_election";
             // We use a separate pool for election since we need a different session keep-alive idle time.
-            let pool = create_mysql_pool(&opts.store_addrs).await?;
+            let pool = create_mysql_pool(&opts.store_addrs, opts.backend_tls.as_ref()).await?;
             let execution_timeout = Duration::from_secs(META_LEASE_SECS);
             let statement_timeout = Duration::from_secs(META_LEASE_SECS);
             let idle_session_timeout = Duration::from_secs(META_LEASE_SECS);
@@ -391,10 +389,8 @@ pub async fn metasrv_builder(
     }
 
     let in_memory = Arc::new(MemoryKvBackend::new()) as ResettableKvBackendRef;
+    let meta_peer_client = build_default_meta_peer_client(&election, &in_memory);
 
-    let node_excluder = plugins
-        .get::<NodeExcluderRef>()
-        .unwrap_or_else(|| Arc::new(Vec::new()) as NodeExcluderRef);
     let selector = if let Some(selector) = plugins.get::<SelectorRef>() {
         info!("Using selector from plugins");
         selector
@@ -402,15 +398,12 @@ pub async fn metasrv_builder(
         let selector = match opts.selector {
             SelectorType::LoadBased => Arc::new(LoadBasedSelector::new(
                 RegionNumsBasedWeightCompute,
-                node_excluder,
+                meta_peer_client.clone(),
             )) as SelectorRef,
-            SelectorType::LeaseBased => {
-                Arc::new(LeaseBasedSelector::new(node_excluder)) as SelectorRef
+            SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
+            SelectorType::RoundRobin => {
+                Arc::new(RoundRobinSelector::new(SelectTarget::Datanode)) as SelectorRef
             }
-            SelectorType::RoundRobin => Arc::new(RoundRobinSelector::new(
-                SelectTarget::Datanode,
-                node_excluder,
-            )) as SelectorRef,
         };
         info!(
             "Using selector from options, selector type: {}",
@@ -425,69 +418,19 @@ pub async fn metasrv_builder(
         .in_memory(in_memory)
         .selector(selector)
         .election(election)
+        .meta_peer_client(meta_peer_client)
         .plugins(plugins))
 }
 
-pub async fn create_etcd_client(store_addrs: &[String]) -> Result<Client> {
-    let etcd_endpoints = store_addrs
-        .iter()
-        .map(|x| x.trim())
-        .filter(|x| !x.is_empty())
-        .collect::<Vec<_>>();
-    Client::connect(&etcd_endpoints, None)
-        .await
-        .context(error::ConnectEtcdSnafu)
-}
-
-#[cfg(feature = "pg_kvbackend")]
-/// Creates a pool for the Postgres backend.
-///
-/// It only use first store addr to create a pool.
-pub async fn create_postgres_pool(store_addrs: &[String]) -> Result<deadpool_postgres::Pool> {
-    create_postgres_pool_with(store_addrs, Config::new()).await
-}
-
-#[cfg(feature = "pg_kvbackend")]
-/// Creates a pool for the Postgres backend.
-///
-/// It only use first store addr to create a pool, and use the given config to create a pool.
-pub async fn create_postgres_pool_with(
-    store_addrs: &[String],
-    mut cfg: Config,
-) -> Result<deadpool_postgres::Pool> {
-    let postgres_url = store_addrs.first().context(error::InvalidArgumentsSnafu {
-        err_msg: "empty store addrs",
-    })?;
-    cfg.url = Some(postgres_url.to_string());
-    let pool = cfg
-        .create_pool(Some(Runtime::Tokio1), NoTls)
-        .context(error::CreatePostgresPoolSnafu)?;
-    Ok(pool)
-}
-
-#[cfg(feature = "mysql_kvbackend")]
-async fn setup_mysql_options(store_addrs: &[String]) -> Result<MySqlConnectOptions> {
-    let mysql_url = store_addrs.first().context(error::InvalidArgumentsSnafu {
-        err_msg: "empty store addrs",
-    })?;
-    // Avoid `SET` commands in sqlx
-    let opts: MySqlConnectOptions = mysql_url
-        .parse()
-        .context(error::ParseMySqlUrlSnafu { mysql_url })?;
-    let opts = opts
-        .no_engine_substitution(false)
-        .pipes_as_concat(false)
-        .timezone(None)
-        .set_names(false);
-    Ok(opts)
-}
-
-#[cfg(feature = "mysql_kvbackend")]
-pub async fn create_mysql_pool(store_addrs: &[String]) -> Result<MySqlPool> {
-    let opts = setup_mysql_options(store_addrs).await?;
-    let pool = MySqlPool::connect_with(opts)
-        .await
-        .context(error::CreateMySqlPoolSnafu)?;
-
-    Ok(pool)
+pub(crate) fn build_default_meta_peer_client(
+    election: &Option<ElectionRef>,
+    in_memory: &ResettableKvBackendRef,
+) -> MetaPeerClientRef {
+    MetaPeerClientBuilder::default()
+        .election(election.clone())
+        .in_memory(in_memory.clone())
+        .build()
+        .map(Arc::new)
+        // Safety: all required fields set at initialization
+        .unwrap()
 }

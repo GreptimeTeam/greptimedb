@@ -101,4 +101,52 @@ TQL EVAL (0, 15, '5s') scalar(scalar(host{host="host2"}) + 1);
 
 TQL EVAL (0, 15, '5s') scalar(scalar(host{host="host1"}) + scalar(host{host="host2"}));
 
+-- Test clamp functions with vector input and scalar bounds
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') clamp(host, 0, 12);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') clamp(host, 6 - 6, 6 + 6);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') clamp(host, 12, 0);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') clamp(host{host="host1"}, -1, 6);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') clamp_min(host{host="host1"}, 10);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') clamp_min(host{host="host1"}, 1);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') clamp_max(host{host="host1"}, 1);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') clamp_max(host{host="host1"}, 10);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') clamp_min(host, 1);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') clamp_max(host, 10);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') scalar(clamp(host{host="host1"}, 0, 6));
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') scalar(clamp_min(host{host="host1"}, 1));
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') scalar(clamp_max(host{host="host1"}, 10));
+
+-- Test nested clamp functions
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') clamp(clamp_min(host{host="host1"}, 1), 0, 12);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') clamp_max(clamp(host{host="host1"}, 0, 15), 6);
+
 Drop table host;

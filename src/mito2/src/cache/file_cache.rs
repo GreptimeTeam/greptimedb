@@ -30,12 +30,11 @@ use object_store::util::join_path;
 use object_store::{ErrorKind, ObjectStore, Reader};
 use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 
 use crate::cache::FILE_TYPE;
 use crate::error::{OpenDalSnafu, Result};
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
-use crate::sst::file::FileId;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::metadata::MetadataLoader;
 
@@ -578,10 +577,12 @@ mod tests {
             None,
         ));
         // No entry before recovery.
-        assert!(cache
-            .reader(IndexKey::new(region_id, file_ids[0], file_type))
-            .await
-            .is_none());
+        assert!(
+            cache
+                .reader(IndexKey::new(region_id, file_ids[0], file_type))
+                .await
+                .is_none()
+        );
         cache.recover(true).await;
 
         // Check size.
@@ -662,9 +663,9 @@ mod tests {
         assert!(
             parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parque").is_none()
         );
-        assert!(parse_index_key(
-            "5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parquet.puffin"
-        )
-        .is_none());
+        assert!(
+            parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parquet.puffin")
+                .is_none()
+        );
     }
 }

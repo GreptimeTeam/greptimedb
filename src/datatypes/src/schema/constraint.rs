@@ -14,9 +14,9 @@
 
 use std::fmt::{Display, Formatter};
 
-use common_time::{util, Timestamp};
+use common_time::{Timestamp, util};
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
@@ -53,6 +53,15 @@ impl TryFrom<ColumnDefaultConstraint> for Vec<u8> {
 
     fn try_from(value: ColumnDefaultConstraint) -> std::result::Result<Self, Self::Error> {
         let s = serde_json::to_string(&value).context(error::SerializeSnafu)?;
+        Ok(s.into_bytes())
+    }
+}
+
+impl TryFrom<&ColumnDefaultConstraint> for Vec<u8> {
+    type Error = error::Error;
+
+    fn try_from(value: &ColumnDefaultConstraint) -> std::result::Result<Self, Self::Error> {
+        let s = serde_json::to_string(value).context(error::SerializeSnafu)?;
         Ok(s.into_bytes())
     }
 }
@@ -148,7 +157,7 @@ impl ColumnDefaultConstraint {
                 //  attempt to downcast the vector fail if they don't check whether the vector is const
                 //  first.
                 let mut mutable_vector = data_type.create_mutable_vector(1);
-                mutable_vector.try_push_value_ref(v.as_value_ref())?;
+                mutable_vector.try_push_value_ref(&v.as_value_ref())?;
                 let base_vector = mutable_vector.to_vector();
                 Ok(base_vector.replicate(&[num_rows]))
             }
@@ -322,9 +331,11 @@ mod tests {
         constraint.validate(&data_type, false).unwrap();
         constraint.validate(&data_type, true).unwrap();
 
-        assert!(constraint
-            .validate(&ConcreteDataType::uint32_datatype(), true)
-            .is_err());
+        assert!(
+            constraint
+                .validate(&ConcreteDataType::uint32_datatype(), true)
+                .is_err()
+        );
     }
 
     #[test]
@@ -333,23 +344,29 @@ mod tests {
         constraint
             .validate(&ConcreteDataType::timestamp_millisecond_datatype(), false)
             .unwrap();
-        assert!(constraint
-            .validate(&ConcreteDataType::boolean_datatype(), false)
-            .is_err());
+        assert!(
+            constraint
+                .validate(&ConcreteDataType::boolean_datatype(), false)
+                .is_err()
+        );
 
         let constraint = ColumnDefaultConstraint::Function("hello()".to_string());
-        assert!(constraint
-            .validate(&ConcreteDataType::timestamp_millisecond_datatype(), false)
-            .is_err());
+        assert!(
+            constraint
+                .validate(&ConcreteDataType::timestamp_millisecond_datatype(), false)
+                .is_err()
+        );
     }
 
     #[test]
     fn test_create_default_vector_by_null() {
         let constraint = ColumnDefaultConstraint::null_value();
         let data_type = ConcreteDataType::int32_datatype();
-        assert!(constraint
-            .create_default_vector(&data_type, false, 10)
-            .is_err());
+        assert!(
+            constraint
+                .create_default_vector(&data_type, false, 10)
+                .is_err()
+        );
 
         let constraint = ColumnDefaultConstraint::null_value();
         let v = constraint
@@ -437,9 +454,11 @@ mod tests {
 
         let constraint = ColumnDefaultConstraint::Function("no".to_string());
         let data_type = ConcreteDataType::timestamp_millisecond_datatype();
-        assert!(constraint
-            .create_default_vector(&data_type, false, 4)
-            .is_err());
+        assert!(
+            constraint
+                .create_default_vector(&data_type, false, 4)
+                .is_err()
+        );
         assert!(constraint.create_default(&data_type, false).is_err());
     }
 

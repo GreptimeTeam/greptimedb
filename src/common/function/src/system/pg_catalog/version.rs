@@ -13,42 +13,49 @@
 // limitations under the License.
 
 use std::fmt;
-use std::sync::Arc;
 
-use common_query::error::Result;
-use common_query::prelude::{Signature, Volatility};
-use datatypes::data_type::ConcreteDataType;
-use datatypes::vectors::{StringVector, VectorRef};
+use datafusion::arrow::datatypes::DataType;
+use datafusion_common::ScalarValue;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 
-use crate::function::{Function, FunctionContext};
+use crate::function::Function;
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct PGVersionFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct PGVersionFunction {
+    signature: Signature,
+}
+
+impl Default for PGVersionFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::exact(vec![], Volatility::Immutable),
+        }
+    }
+}
 
 impl fmt::Display for PGVersionFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, crate::pg_catalog_func_fullname!("VERSION"))
+        write!(f, "pg_catalog.VERSION")
     }
 }
 
 impl Function for PGVersionFunction {
     fn name(&self) -> &str {
-        crate::pg_catalog_func_fullname!("version")
+        "pg_catalog.version"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::exact(vec![], Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
-        let result = StringVector::from(vec![format!(
+    fn invoke_with_args(&self, _: ScalarFunctionArgs) -> datafusion_common::Result<ColumnarValue> {
+        Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(Some(format!(
             "PostgreSQL 16.3 GreptimeDB {}",
             common_version::version()
-        )]);
-        Ok(Arc::new(result))
+        )))))
     }
 }

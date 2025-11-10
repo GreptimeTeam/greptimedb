@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 common-base.workspace = true
-common-datasource.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
@@ -15,6 +14,7 @@ datafusion-sql.workspace = true
 datatypes.workspace = true
 hex = "0.4"
 jsonb.workspace = true
+serde_json.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true
 

@@ -19,8 +19,8 @@ use std::sync::Arc;
 use arrow_array::builder::{ArrayBuilder, Decimal128Builder};
 use arrow_array::iterator::ArrayIter;
 use arrow_array::{Array, ArrayRef, Decimal128Array};
-use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECISION};
 use common_decimal::Decimal128;
+use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECISION};
 use snafu::{OptionExt, ResultExt};
 
 use crate::arrow::datatypes::DataType as ArrowDataType;
@@ -207,7 +207,7 @@ impl Vector for Decimal128Vector {
         }
     }
 
-    fn get_ref(&self, index: usize) -> ValueRef {
+    fn get_ref(&self, index: usize) -> ValueRef<'_> {
         if let Some(decimal) = self.get_decimal128_value_from_array(index) {
             ValueRef::Decimal128(decimal)
         } else {
@@ -314,8 +314,8 @@ impl MutableVector for Decimal128VectorBuilder {
         Arc::new(self.finish_cloned())
     }
 
-    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
-        let decimal_val = value.as_decimal128()?.map(|v| v.val());
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
+        let decimal_val = value.try_into_decimal128()?.map(|v| v.val());
         self.mutable_array.append_option(decimal_val);
         Ok(())
     }
@@ -430,8 +430,8 @@ pub mod tests {
     use common_decimal::Decimal128;
 
     use super::*;
-    use crate::vectors::operations::VectorOp;
     use crate::vectors::Int8Vector;
+    use crate::vectors::operations::VectorOp;
 
     #[test]
     fn test_from_arrow_decimal128_array() {

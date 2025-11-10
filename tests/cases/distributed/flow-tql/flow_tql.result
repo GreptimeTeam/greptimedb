@@ -1,0 +1,386 @@
+CREATE TABLE http_requests (
+  ts timestamp(3) time index,
+  host STRING,
+  idc STRING,
+  val DOUBLE,
+  PRIMARY KEY(host, idc),
+);
+
+Affected Rows: 0
+
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", http_requests);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE cnt_reqs;
+
++----------+-------------------------------------------+
+| Table    | Create Table                              |
++----------+-------------------------------------------+
+| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" (   |
+|          |   "count(http_requests.val)" DOUBLE NULL, |
+|          |   "ts" TIMESTAMP(3) NOT NULL,             |
+|          |   "status_code" STRING NULL,              |
+|          |   TIME INDEX ("ts"),                      |
+|          |   PRIMARY KEY ("status_code")             |
+|          | )                                         |
+|          |                                           |
+|          | ENGINE=mito                               |
+|          |                                           |
++----------+-------------------------------------------+
+
+-- test if sink table is tql queryable
+TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", cnt_reqs);
+
+++
+++
+
+INSERT INTO TABLE http_requests VALUES
+    (now() - '17s'::interval, 'host1', 'idc1', 200),
+    (now() - '17s'::interval, 'host2', 'idc1', 200),
+    (now() - '17s'::interval, 'host3', 'idc2', 200),
+    (now() - '17s'::interval, 'host4', 'idc2', 401),
+    (now() - '13s'::interval, 'host1', 'idc1', 404),
+    (now() - '13s'::interval, 'host2', 'idc1', 401),
+    (now() - '13s'::interval, 'host3', 'idc2', 404),
+    (now() - '13s'::interval, 'host4', 'idc2', 500),
+    (now() - '7s'::interval, 'host1', 'idc1', 200),
+    (now() - '7s'::interval, 'host2', 'idc1', 200),
+    (now() - '7s'::interval, 'host3', 'idc2', 201),
+    (now() - '7s'::interval, 'host4', 'idc2', 201),
+    (now() - '3s'::interval, 'host1', 'idc1', 500),
+    (now() - '3s'::interval, 'host2', 'idc1', 500),
+    (now() - '3s'::interval, 'host3', 'idc2', 500),
+    (now() - '3s'::interval, 'host4', 'idc2', 500);
+
+Affected Rows: 16
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_reqs');
+
++-------------------------------+
+| ADMIN FLUSH_FLOW('calc_reqs') |
++-------------------------------+
+|  FLOW_FLUSHED  |
++-------------------------------+
+
+-- too much indeterminsticity in the test, so just check that the flow is running
+SELECT count(*) > 0 FROM cnt_reqs;
+
++---------------------+
+| count(*) > Int64(0) |
++---------------------+
+| true                |
++---------------------+
+
+DROP FLOW calc_reqs;
+
+Affected Rows: 0
+
+DROP TABLE http_requests;
+
+Affected Rows: 0
+
+DROP TABLE cnt_reqs;
+
+Affected Rows: 0
+
+CREATE TABLE http_requests_two_vals (
+  ts timestamp(3) time index,
+  host STRING,
+  idc STRING,
+  val DOUBLE,
+  valb DOUBLE,
+  PRIMARY KEY(host, idc),
+);
+
+Affected Rows: 0
+
+-- should failed with two value columns error
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", http_requests_two_vals);
+
+Error: 3001(EngineExecuteQuery), Unsupported expr type: count_values on multi-value input
+
+-- should failed with two value columns error
+-- SQLNESS REPLACE id=[0-9]+ id=[REDACTED]
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '5s') rate(http_requests_two_vals[5m]);
+
+Error: 3001(EngineExecuteQuery), Invalid query: TQL query only supports one f64 value column, table `greptime.public.http_requests_two_vals`(id=[REDACTED]) has 2 f64 value columns, columns are: [val Float64 null, valb Float64 null]
+
+SHOW TABLES;
+
++------------------------+
+| Tables                 |
++------------------------+
+| http_requests_two_vals |
+| numbers                |
++------------------------+
+
+DROP TABLE http_requests_two_vals;
+
+Affected Rows: 0
+
+CREATE TABLE http_requests (
+  ts timestamp(3) time index,
+  host STRING,
+  idc STRING,
+  val DOUBLE,
+  PRIMARY KEY(host, idc),
+);
+
+Affected Rows: 0
+
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (0, 15, '5s') count_values("status_code", http_requests);
+
+Error: 2000(InvalidSyntax), Invalid TQL syntax: sql parser error: Expected expression containing `now()`, but have Number("0", false)
+
+-- standalone&distributed have slightly different error message(distributed will print source error as well ("cannot convert float seconds to Duration: value is negative"))
+-- so duplicate test into two
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - now(), now()-(now()+'15s'::interval), '5s') count_values("status_code", http_requests);
+
+Error: 3001(EngineExecuteQuery), Failed to convert float seconds to duration, raw: -15
+
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - now(), now()-now()+'15s'::interval, '5s') count_values("status_code", http_requests);
+
+Error: 2000(InvalidSyntax), Invalid TQL syntax: Failed to evaluate TQL expression: Failed to extract a timestamp value IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 15000000000 }")
+
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - now(), now()-(now()-'15s'::interval), '5s') count_values("status_code", http_requests);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE cnt_reqs;
+
++----------+-------------------------------------------+
+| Table    | Create Table                              |
++----------+-------------------------------------------+
+| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" (   |
+|          |   "count(http_requests.val)" DOUBLE NULL, |
+|          |   "ts" TIMESTAMP(3) NOT NULL,             |
+|          |   "status_code" STRING NULL,              |
+|          |   TIME INDEX ("ts"),                      |
+|          |   PRIMARY KEY ("status_code")             |
+|          | )                                         |
+|          |                                           |
+|          | ENGINE=mito                               |
+|          |                                           |
++----------+-------------------------------------------+
+
+-- test if sink table is tql queryable
+TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", cnt_reqs);
+
+++
+++
+
+INSERT INTO TABLE http_requests VALUES
+    (0::Timestamp, 'host1', 'idc1', 200),
+    (0::Timestamp, 'host2', 'idc1', 200),
+    (0::Timestamp, 'host3', 'idc2', 200),
+    (0::Timestamp, 'host4', 'idc2', 401),
+    (5000::Timestamp, 'host1', 'idc1', 404),
+    (5000::Timestamp, 'host2', 'idc1', 401),
+    (5000::Timestamp, 'host3', 'idc2', 404),
+    (5000::Timestamp, 'host4', 'idc2', 500),
+    (10000::Timestamp, 'host1', 'idc1', 200),
+    (10000::Timestamp, 'host2', 'idc1', 200),
+    (10000::Timestamp, 'host3', 'idc2', 201),
+    (10000::Timestamp, 'host4', 'idc2', 201),
+    (15000::Timestamp, 'host1', 'idc1', 500),
+    (15000::Timestamp, 'host2', 'idc1', 500),
+    (15000::Timestamp, 'host3', 'idc2', 500),
+    (15000::Timestamp, 'host4', 'idc2', 500);
+
+Affected Rows: 16
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_reqs');
+
++-------------------------------+
+| ADMIN FLUSH_FLOW('calc_reqs') |
++-------------------------------+
+|  FLOW_FLUSHED  |
++-------------------------------+
+
+SELECT * FROM cnt_reqs ORDER BY ts, status_code;
+
++--------------------------+---------------------+-------------+
+| count(http_requests.val) | ts                  | status_code |
++--------------------------+---------------------+-------------+
+| 3.0                      | 1970-01-01T00:00:00 | 200.0       |
+| 1.0                      | 1970-01-01T00:00:00 | 401.0       |
+| 1.0                      | 1970-01-01T00:00:05 | 401.0       |
+| 2.0                      | 1970-01-01T00:00:05 | 404.0       |
+| 1.0                      | 1970-01-01T00:00:05 | 500.0       |
+| 2.0                      | 1970-01-01T00:00:10 | 200.0       |
+| 2.0                      | 1970-01-01T00:00:10 | 201.0       |
+| 4.0                      | 1970-01-01T00:00:15 | 500.0       |
++--------------------------+---------------------+-------------+
+
+DROP FLOW calc_reqs;
+
+Affected Rows: 0
+
+DROP TABLE http_requests;
+
+Affected Rows: 0
+
+DROP TABLE cnt_reqs;
+
+Affected Rows: 0
+
+CREATE TABLE http_requests (
+  ts timestamp(3) time index,
+  val DOUBLE,
+);
+
+Affected Rows: 0
+
+CREATE FLOW calc_rate SINK TO rate_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '30s') rate(http_requests[5m]);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE rate_reqs;
+
++-----------+-----------------------------------------------------------+
+| Table     | Create Table                                              |
++-----------+-----------------------------------------------------------+
+| rate_reqs | CREATE TABLE IF NOT EXISTS "rate_reqs" (                  |
+|           |   "ts" TIMESTAMP(3) NOT NULL,                             |
+|           |   "prom_rate(ts_range,val,ts,Int64(300000))" DOUBLE NULL, |
+|           |   TIME INDEX ("ts")                                       |
+|           | )                                                         |
+|           |                                                           |
+|           | ENGINE=mito                                               |
+|           |                                                           |
++-----------+-----------------------------------------------------------+
+
+-- test if sink table is tql queryable
+TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", rate_reqs);
+
+++
+++
+
+INSERT INTO TABLE http_requests VALUES
+    (now() - '1m'::interval, 0),
+    (now() - '30s'::interval, 1),
+    (now(), 2);
+
+Affected Rows: 3
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_rate');
+
++-------------------------------+
+| ADMIN FLUSH_FLOW('calc_rate') |
++-------------------------------+
+|  FLOW_FLUSHED  |
++-------------------------------+
+
+SELECT count(*) > 0 FROM rate_reqs;
+
++---------------------+
+| count(*) > Int64(0) |
++---------------------+
+| true                |
++---------------------+
+
+DROP FLOW calc_rate;
+
+Affected Rows: 0
+
+DROP TABLE http_requests;
+
+Affected Rows: 0
+
+DROP TABLE rate_reqs;
+
+Affected Rows: 0
+
+CREATE TABLE http_requests_total (
+    host STRING,
+    job STRING,
+    instance STRING,
+    byte DOUBLE,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY (host, job, instance)
+);
+
+Affected Rows: 0
+
+CREATE FLOW calc_rate 
+SINK TO rate_reqs 
+EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '30s') rate(http_requests_total{job="my_service"}[1m]);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE rate_reqs;
+
++-----------+-----------------------------------------------------------+
+| Table     | Create Table                                              |
++-----------+-----------------------------------------------------------+
+| rate_reqs | CREATE TABLE IF NOT EXISTS "rate_reqs" (                  |
+|           |   "ts" TIMESTAMP(3) NOT NULL,                             |
+|           |   "prom_rate(ts_range,byte,ts,Int64(60000))" DOUBLE NULL, |
+|           |   "host" STRING NULL,                                     |
+|           |   "job" STRING NULL,                                      |
+|           |   "instance" STRING NULL,                                 |
+|           |   TIME INDEX ("ts"),                                      |
+|           |   PRIMARY KEY ("host", "job", "instance")                 |
+|           | )                                                         |
+|           |                                                           |
+|           | ENGINE=mito                                               |
+|           |                                                           |
++-----------+-----------------------------------------------------------+
+
+-- test if sink table is tql queryable
+TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", rate_reqs);
+
+++
+++
+
+INSERT INTO TABLE http_requests_total VALUES
+    ('localhost', 'my_service', 'instance1', 100, now() - '1min'::interval),
+    ('localhost', 'my_service', 'instance1', 200, now() - '45s'::interval),
+    ('remotehost', 'my_service', 'instance1', 300, now() - '30s'::interval),
+    ('remotehost', 'their_service', 'instance1', 300, now() - '15s'::interval),
+    ('localhost', 'my_service', 'instance1', 400, now());
+
+Affected Rows: 5
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_rate');
+
++-------------------------------+
+| ADMIN FLUSH_FLOW('calc_rate') |
++-------------------------------+
+|  FLOW_FLUSHED  |
++-------------------------------+
+
+SELECT count(*)>0 FROM rate_reqs;
+
++---------------------+
+| count(*) > Int64(0) |
++---------------------+
+| true                |
++---------------------+
+
+DROP FLOW calc_rate;
+
+Affected Rows: 0
+
+DROP TABLE http_requests_total;
+
+Affected Rows: 0
+
+DROP TABLE rate_reqs;
+
+Affected Rows: 0
+

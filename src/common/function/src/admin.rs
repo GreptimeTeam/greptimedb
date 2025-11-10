@@ -12,36 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod add_region_follower;
 mod flush_compact_region;
 mod flush_compact_table;
 mod migrate_region;
-mod remove_region_follower;
+mod reconcile_catalog;
+mod reconcile_database;
+mod reconcile_table;
 
-use std::sync::Arc;
-
-use add_region_follower::AddRegionFollowerFunction;
 use flush_compact_region::{CompactRegionFunction, FlushRegionFunction};
 use flush_compact_table::{CompactTableFunction, FlushTableFunction};
 use migrate_region::MigrateRegionFunction;
-use remove_region_follower::RemoveRegionFollowerFunction;
+use reconcile_catalog::ReconcileCatalogFunction;
+use reconcile_database::ReconcileDatabaseFunction;
+use reconcile_table::ReconcileTableFunction;
 
 use crate::flush_flow::FlushFlowFunction;
 use crate::function_registry::FunctionRegistry;
 
-/// Table functions
+/// Administration functions
 pub(crate) struct AdminFunction;
 
 impl AdminFunction {
-    /// Register all table functions to [`FunctionRegistry`].
+    /// Register all admin functions to [`FunctionRegistry`].
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_async(Arc::new(MigrateRegionFunction));
-        registry.register_async(Arc::new(AddRegionFollowerFunction));
-        registry.register_async(Arc::new(RemoveRegionFollowerFunction));
-        registry.register_async(Arc::new(FlushRegionFunction));
-        registry.register_async(Arc::new(CompactRegionFunction));
-        registry.register_async(Arc::new(FlushTableFunction));
-        registry.register_async(Arc::new(CompactTableFunction));
-        registry.register_async(Arc::new(FlushFlowFunction));
+        registry.register(MigrateRegionFunction::factory());
+        registry.register(FlushRegionFunction::factory());
+        registry.register(CompactRegionFunction::factory());
+        registry.register(FlushTableFunction::factory());
+        registry.register(CompactTableFunction::factory());
+        registry.register(FlushFlowFunction::factory());
+        registry.register(ReconcileCatalogFunction::factory());
+        registry.register(ReconcileDatabaseFunction::factory());
+        registry.register(ReconcileTableFunction::factory());
     }
 }

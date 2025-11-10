@@ -30,10 +30,10 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::VectorRef;
 use futures::Stream;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::ScanRequest;
 
-use self::file_stream::{CreateScanPlanContext, ScanPlanConfig};
+use self::file_stream::ScanPlanConfig;
 use crate::error::{
     BuildBackendSnafu, CreateDefaultSnafu, ExtractColumnFromFilterSnafu,
     MissingColumnNoDefaultSnafu, ProjectSchemaSnafu, ProjectionOutOfBoundsSnafu, Result,
@@ -50,7 +50,6 @@ impl FileRegion {
 
         let file_stream = file_stream::create_stream(
             &self.format,
-            &CreateScanPlanContext::default(),
             &ScanPlanConfig {
                 file_schema,
                 files: &self.file_options.files,

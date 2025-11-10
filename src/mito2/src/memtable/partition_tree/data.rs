@@ -30,12 +30,12 @@ use datatypes::schema::ColumnSchema;
 use datatypes::types::TimestampType;
 use datatypes::vectors::{
     TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-    TimestampSecondVector, UInt16Vector, UInt16VectorBuilder, UInt64Vector, UInt64VectorBuilder,
-    UInt8Vector, UInt8VectorBuilder,
+    TimestampSecondVector, UInt8Vector, UInt8VectorBuilder, UInt16Vector, UInt16VectorBuilder,
+    UInt64Vector, UInt64VectorBuilder,
 };
 use mito_codec::key_values::KeyValue;
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::schema::types::ColumnPath;
@@ -45,8 +45,8 @@ use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 
 use crate::error;
 use crate::error::Result;
-use crate::memtable::partition_tree::merger::{DataBatchKey, DataNode, DataSource, Merger};
 use crate::memtable::partition_tree::PkIndex;
+use crate::memtable::partition_tree::merger::{DataBatchKey, DataNode, DataSource, Merger};
 use crate::metrics::{
     PARTITION_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED, PARTITION_TREE_READ_STAGE_ELAPSED,
 };
@@ -219,7 +219,7 @@ impl DataBuffer {
 
     /// Writes a row to data buffer.
     pub fn write_row(&mut self, pk_index: PkIndex, kv: &KeyValue) {
-        self.ts_builder.push_value_ref(kv.timestamp());
+        self.ts_builder.push_value_ref(&kv.timestamp());
         self.pk_index_builder.push(Some(pk_index));
         self.sequence_builder.push(Some(kv.sequence()));
         self.op_type_builder.push(Some(kv.op_type() as u8));
@@ -229,7 +229,7 @@ impl DataBuffer {
         for (idx, field) in kv.fields().enumerate() {
             self.field_builders[idx]
                 .get_or_create_builder(self.ts_builder.len())
-                .push_value_ref(field);
+                .push_value_ref(&field);
         }
     }
 
@@ -550,7 +550,7 @@ impl DataBufferReader {
     /// Returns current data batch.
     /// # Panics
     /// If Current reader is exhausted.
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    pub(crate) fn current_data_batch(&self) -> DataBatch<'_> {
         let range = self.current_range.unwrap();
         DataBatch {
             rb: &self.batch,
@@ -774,7 +774,9 @@ impl<'a> DataPartEncoder<'a> {
             .set_column_encoding(sequence_col.clone(), Encoding::DELTA_BINARY_PACKED)
             .set_column_dictionary_enabled(sequence_col, false)
             .set_column_encoding(op_type_col.clone(), Encoding::DELTA_BINARY_PACKED)
-            .set_column_dictionary_enabled(op_type_col, true);
+            .set_column_dictionary_enabled(op_type_col, true)
+            .set_column_index_truncate_length(None)
+            .set_statistics_truncate_length(None);
         builder.build()
     }
 
@@ -879,7 +881,7 @@ impl DataPartReader {
     /// Returns current data batch of reader.
     /// # Panics
     /// If reader is exhausted.
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    pub(crate) fn current_data_batch(&self) -> DataBatch<'_> {
         let range = self.current_range.unwrap();
         DataBatch {
             rb: self.current_batch.as_ref().unwrap(),
@@ -1039,7 +1041,7 @@ impl Drop for DataPartsReader {
 }
 
 impl DataPartsReader {
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    pub(crate) fn current_data_batch(&self) -> DataBatch<'_> {
         let batch = self.merger.current_node().current_data_batch();
         batch.slice(0, self.merger.current_rows())
     }

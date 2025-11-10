@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+pub mod trigger;
+
 use std::fmt::{Debug, Display};
 
 use api::v1;
@@ -19,7 +22,7 @@ use common_query::AddColumnLocation;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use itertools::Itertools;
 use serde::Serialize;
-use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
+use sqlparser::ast::{ColumnDef, DataType, Expr, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
@@ -95,11 +98,57 @@ pub enum AlterTableOperation {
     DropDefaults {
         columns: Vec<DropDefaultsOperation>,
     },
+    /// `ALTER <column_name> SET DEFAULT <default_value>`
+    SetDefaults {
+        defaults: Vec<SetDefaultsOperation>,
+    },
+    /// `REPARTITION (...) INTO (...)`
+    Repartition {
+        operation: RepartitionOperation,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 /// `ALTER <column_name> DROP DEFAULT`
 pub struct DropDefaultsOperation(pub Ident);
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct SetDefaultsOperation {
+    pub column_name: Ident,
+    pub default_constraint: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct RepartitionOperation {
+    pub from_exprs: Vec<Expr>,
+    pub into_exprs: Vec<Expr>,
+}
+
+impl RepartitionOperation {
+    pub fn new(from_exprs: Vec<Expr>, into_exprs: Vec<Expr>) -> Self {
+        Self {
+            from_exprs,
+            into_exprs,
+        }
+    }
+}
+
+impl Display for RepartitionOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let from = self
+            .from_exprs
+            .iter()
+            .map(|expr| expr.to_string())
+            .join(", ");
+        let into = self
+            .into_exprs
+            .iter()
+            .map(|expr| expr.to_string())
+            .join(", ");
+
+        write!(f, "({from}) INTO ({into})")
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum SetIndexOperation {
@@ -183,12 +232,19 @@ impl Display for AlterTableOperation {
                 let keys = keys.iter().map(|k| format!("'{k}'")).join(",");
                 write!(f, "UNSET {keys}")
             }
+            AlterTableOperation::Repartition { operation } => {
+                write!(f, "REPARTITION {operation}")
+            }
             AlterTableOperation::SetIndex { options } => match options {
                 SetIndexOperation::Fulltext {
                     column_name,
                     options,
                 } => {
-                    write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT INDEX WITH(analyzer={0}, case_sensitive={1}, backend={2})", options.analyzer, options.case_sensitive, options.backend)
+                    write!(
+                        f,
+                        "MODIFY COLUMN {column_name} SET FULLTEXT INDEX WITH(analyzer={0}, case_sensitive={1}, backend={2})",
+                        options.analyzer, options.case_sensitive, options.backend
+                    )
                 }
                 SetIndexOperation::Inverted { column_name } => {
                     write!(f, "MODIFY COLUMN {column_name} SET INVERTED INDEX")
@@ -197,7 +253,11 @@ impl Display for AlterTableOperation {
                     column_name,
                     options,
                 } => {
-                    write!(f, "MODIFY COLUMN {column_name} SET SKIPPING INDEX WITH(granularity={0}, index_type={1})", options.granularity, options.index_type)
+                    write!(
+                        f,
+                        "MODIFY COLUMN {column_name} SET SKIPPING INDEX WITH(granularity={0}, index_type={1})",
+                        options.granularity, options.index_type
+                    )
                 }
             },
             AlterTableOperation::UnsetIndex { options } => match options {
@@ -214,9 +274,21 @@ impl Display for AlterTableOperation {
             AlterTableOperation::DropDefaults { columns } => {
                 let columns = columns
                     .iter()
-                    .map(|column| format!("ALTER {} DROP DEFAULT", column.0))
+                    .map(|column| format!("MODIFY COLUMN {} DROP DEFAULT", column.0))
                     .join(", ");
                 write!(f, "{columns}")
+            }
+            AlterTableOperation::SetDefaults { defaults } => {
+                let defaults = defaults
+                    .iter()
+                    .map(|column| {
+                        format!(
+                            "MODIFY COLUMN {} SET DEFAULT {}",
+                            column.column_name, column.default_constraint
+                        )
+                    })
+                    .join(", ");
+                write!(f, "{defaults}")
             }
         }
     }
@@ -502,7 +574,7 @@ ALTER TABLE monitor MODIFY COLUMN a SET INVERTED INDEX"#,
             }
         }
 
-        let sql = "ALTER TABLE monitor ALTER a DROP DEFAULT";
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a DROP DEFAULT";
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -514,7 +586,28 @@ ALTER TABLE monitor MODIFY COLUMN a SET INVERTED INDEX"#,
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
-ALTER TABLE monitor ALTER a DROP DEFAULT"#,
+ALTER TABLE monitor MODIFY COLUMN a DROP DEFAULT"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a SET DEFAULT 'default_for_a'";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
+
+        match &stmts[0] {
+            Statement::AlterTable(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER TABLE monitor MODIFY COLUMN a SET DEFAULT 'default_for_a'"#,
                     &new_sql
                 );
             }

@@ -119,6 +119,14 @@ lazy_static! {
 
     // Compaction metrics
     /// Timer of different stages in compaction.
+    /// - pick
+    /// - merge (in parallel)
+    ///   - iter_source
+    ///   - write_batch
+    ///   - update_index
+    ///   - upload_parquet
+    ///   - upload puffin
+    /// - write_manifest
     pub static ref COMPACTION_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_mito_compaction_stage_elapsed",
         "mito compaction stage elapsed",
@@ -429,6 +437,11 @@ lazy_static! {
             "mito stalled write request in each worker",
             &[WORKER_LABEL]
         ).unwrap();
+    /// Number of ref files
+    pub static ref GC_REF_FILE_CNT: IntGauge = register_int_gauge!(
+            "greptime_gc_ref_file_count",
+            "gc ref file count",
+        ).unwrap();
     /// Total number of stalled write requests.
     pub static ref WRITE_STALL_TOTAL: IntCounter = register_int_counter!(
         "greptime_mito_write_stall_total",
@@ -443,6 +456,13 @@ lazy_static! {
             exponential_buckets(0.001, 10.0, 8).unwrap(),
         )
         .unwrap();
+
+    /// Counter for the number of files deleted by the GC worker.
+    pub static ref GC_DEL_FILE_CNT: IntGauge =
+        register_int_gauge!(
+            "greptime_mito_gc_delete_file_count",
+            "mito gc deleted file count",
+        ).unwrap();
 }
 
 /// Stager notifier to collect metrics.

@@ -24,7 +24,9 @@ mod util;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use api::v1::meta::{ProcedureDetailResponse, Role};
+use api::v1::meta::{
+    MetasrvNodeInfo, ProcedureDetailResponse, ReconcileRequest, ReconcileResponse, Role,
+};
 pub use ask_leader::{AskLeader, LeaderProvider, LeaderProviderRef};
 use cluster::Client as ClusterClient;
 pub use cluster::ClusterKvBackend;
@@ -34,24 +36,25 @@ use common_meta::cluster::{
     ClusterInfo, MetasrvStatus, NodeInfo, NodeInfoKey, NodeStatus, Role as ClusterRole,
 };
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat};
-use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
 use common_meta::error::{
     self as meta_error, ExternalSnafu, Result as MetaResult, UnsupportedSnafu,
 };
 use common_meta::key::flow::flow_state::{FlowStat, FlowStateManager};
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
 use common_meta::range_stream::PaginationStream;
+use common_meta::rpc::KeyValue;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::procedure::{
-    AddRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
-    RemoveRegionFollowerRequest,
+    AddRegionFollowerRequest, AddTableFollowerRequest, ManageRegionFollowerRequest,
+    MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+    RemoveRegionFollowerRequest, RemoveTableFollowerRequest,
 };
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
-use common_meta::rpc::KeyValue;
 use common_telemetry::info;
 use futures::TryStreamExt;
 use heartbeat::Client as HeartbeatClient;
@@ -246,6 +249,10 @@ pub trait RegionFollowerClient: Sync + Send + Debug {
 
     async fn remove_region_follower(&self, request: RemoveRegionFollowerRequest) -> Result<()>;
 
+    async fn add_table_follower(&self, request: AddTableFollowerRequest) -> Result<()>;
+
+    async fn remove_table_follower(&self, request: RemoveTableFollowerRequest) -> Result<()>;
+
     async fn start(&self, urls: &[&str]) -> Result<()>;
 
     async fn start_with(&self, leader_provider: LeaderProviderRef) -> Result<()>;
@@ -275,39 +282,52 @@ impl ProcedureExecutor for MetaClient {
             .context(meta_error::ExternalSnafu)
     }
 
-    async fn add_region_follower(
+    async fn reconcile(
         &self,
         _ctx: &ExecutorContext,
-        request: AddRegionFollowerRequest,
-    ) -> MetaResult<()> {
-        if let Some(region_follower) = &self.region_follower {
-            region_follower
-                .add_region_follower(request)
-                .await
-                .map_err(BoxedError::new)
-                .context(meta_error::ExternalSnafu)
-        } else {
-            UnsupportedSnafu {
-                operation: "add_region_follower",
-            }
-            .fail()
-        }
+        request: ReconcileRequest,
+    ) -> MetaResult<ReconcileResponse> {
+        self.reconcile(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
     }
 
-    async fn remove_region_follower(
+    async fn manage_region_follower(
         &self,
         _ctx: &ExecutorContext,
-        request: RemoveRegionFollowerRequest,
+        request: ManageRegionFollowerRequest,
     ) -> MetaResult<()> {
         if let Some(region_follower) = &self.region_follower {
-            region_follower
-                .remove_region_follower(request)
-                .await
-                .map_err(BoxedError::new)
-                .context(meta_error::ExternalSnafu)
+            match request {
+                ManageRegionFollowerRequest::AddRegionFollower(add_region_follower_request) => {
+                    region_follower
+                        .add_region_follower(add_region_follower_request)
+                        .await
+                }
+                ManageRegionFollowerRequest::RemoveRegionFollower(
+                    remove_region_follower_request,
+                ) => {
+                    region_follower
+                        .remove_region_follower(remove_region_follower_request)
+                        .await
+                }
+                ManageRegionFollowerRequest::AddTableFollower(add_table_follower_request) => {
+                    region_follower
+                        .add_table_follower(add_table_follower_request)
+                        .await
+                }
+                ManageRegionFollowerRequest::RemoveTableFollower(remove_table_follower_request) => {
+                    region_follower
+                        .remove_table_follower(remove_table_follower_request)
+                        .await
+                }
+            }
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
         } else {
             UnsupportedSnafu {
-                operation: "remove_region_follower",
+                operation: "manage_region_follower",
             }
             .fail()
         }
@@ -335,6 +355,8 @@ impl ProcedureExecutor for MetaClient {
     }
 }
 
+// TODO(zyy17): Allow deprecated fields for backward compatibility. Remove this when the deprecated fields are removed from the proto.
+#[allow(deprecated)]
 #[async_trait::async_trait]
 impl ClusterInfo for MetaClient {
     type Error = Error;
@@ -351,24 +373,73 @@ impl ClusterInfo for MetaClient {
         let mut nodes = if get_metasrv_nodes {
             let last_activity_ts = -1; // Metasrv does not provide this information.
 
-            let (leader, followers) = cluster_client.get_metasrv_peers().await?;
+            let (leader, followers): (Option<MetasrvNodeInfo>, Vec<MetasrvNodeInfo>) =
+                cluster_client.get_metasrv_peers().await?;
             followers
                 .into_iter()
-                .map(|node| NodeInfo {
-                    peer: node.peer.unwrap_or_default(),
-                    last_activity_ts,
-                    status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
-                    version: node.version,
-                    git_commit: node.git_commit,
-                    start_time_ms: node.start_time_ms,
+                .map(|node| {
+                    if let Some(node_info) = node.info {
+                        NodeInfo {
+                            peer: node.peer.unwrap_or_default(),
+                            last_activity_ts,
+                            status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
+                            version: node_info.version,
+                            git_commit: node_info.git_commit,
+                            start_time_ms: node_info.start_time_ms,
+                            total_cpu_millicores: node_info.total_cpu_millicores,
+                            total_memory_bytes: node_info.total_memory_bytes,
+                            cpu_usage_millicores: node_info.cpu_usage_millicores,
+                            memory_usage_bytes: node_info.memory_usage_bytes,
+                            hostname: node_info.hostname,
+                        }
+                    } else {
+                        // TODO(zyy17): It's for backward compatibility. Remove this when the deprecated fields are removed from the proto.
+                        NodeInfo {
+                            peer: node.peer.unwrap_or_default(),
+                            last_activity_ts,
+                            status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
+                            version: node.version,
+                            git_commit: node.git_commit,
+                            start_time_ms: node.start_time_ms,
+                            total_cpu_millicores: node.cpus as i64,
+                            total_memory_bytes: node.memory_bytes as i64,
+                            cpu_usage_millicores: 0,
+                            memory_usage_bytes: 0,
+                            hostname: "".to_string(),
+                        }
+                    }
                 })
-                .chain(leader.into_iter().map(|node| NodeInfo {
-                    peer: node.peer.unwrap_or_default(),
-                    last_activity_ts,
-                    status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
-                    version: node.version,
-                    git_commit: node.git_commit,
-                    start_time_ms: node.start_time_ms,
+                .chain(leader.into_iter().map(|node| {
+                    if let Some(node_info) = node.info {
+                        NodeInfo {
+                            peer: node.peer.unwrap_or_default(),
+                            last_activity_ts,
+                            status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
+                            version: node_info.version,
+                            git_commit: node_info.git_commit,
+                            start_time_ms: node_info.start_time_ms,
+                            total_cpu_millicores: node_info.total_cpu_millicores,
+                            total_memory_bytes: node_info.total_memory_bytes,
+                            cpu_usage_millicores: node_info.cpu_usage_millicores,
+                            memory_usage_bytes: node_info.memory_usage_bytes,
+                            hostname: node_info.hostname,
+                        }
+                    } else {
+                        // TODO(zyy17): It's for backward compatibility. Remove this when the deprecated fields are removed from the proto.
+                        NodeInfo {
+                            peer: node.peer.unwrap_or_default(),
+                            last_activity_ts,
+                            status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
+                            version: node.version,
+                            git_commit: node.git_commit,
+                            start_time_ms: node.start_time_ms,
+                            total_cpu_millicores: node.cpus as i64,
+                            total_memory_bytes: node.memory_bytes as i64,
+                            cpu_usage_millicores: 0,
+                            memory_usage_bytes: 0,
+                            hostname: "".to_string(),
+                        }
+                    }
                 }))
                 .collect::<Vec<_>>()
         } else {
@@ -514,7 +585,7 @@ impl MetaClient {
         self.heartbeat_client()?.ask_leader().await
     }
 
-    /// Returns a heartbeat bidirectional streaming: (sender, recever), the
+    /// Returns a heartbeat bidirectional streaming: (sender, receiver), the
     /// other end is the leader of `metasrv`.
     ///
     /// The `datanode` needs to use the sender to continuously send heartbeat
@@ -609,6 +680,11 @@ impl MetaClient {
                 request.timeout,
             )
             .await
+    }
+
+    /// Reconcile the procedure state.
+    pub async fn reconcile(&self, request: ReconcileRequest) -> Result<ReconcileResponse> {
+        self.procedure_client()?.reconcile(request).await
     }
 
     /// Submit a DDL task

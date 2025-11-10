@@ -91,10 +91,12 @@ fn init_factory(table_flow_manager: TableFlowManagerRef) -> Initializer<TableId,
                 .map(Arc::new)
                 .map(Some)
                 .inspect(|set| {
-                    info!(
-                        "Initialized table_flownode cache for table_id: {}, set: {:?}",
-                        table_id, set
-                    );
+                    if set.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+                        info!(
+                            "Initialized table_flownode cache for table_id: {}, set: {:?}",
+                            table_id, set
+                        );
+                    };
                 })
         })
     })
@@ -203,11 +205,11 @@ mod tests {
     use moka::future::CacheBuilder;
     use table::table_name::TableName;
 
-    use crate::cache::flow::table_flownode::{new_table_flownode_set_cache, FlowIdent};
+    use crate::cache::flow::table_flownode::{FlowIdent, new_table_flownode_set_cache};
     use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
+    use crate::key::flow::FlowMetadataManager;
     use crate::key::flow::flow_info::FlowInfoValue;
     use crate::key::flow::flow_route::FlowRouteValue;
-    use crate::key::flow::FlowMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
 
@@ -240,6 +242,7 @@ mod tests {
                     flow_name: "my_flow".to_string(),
                     raw_sql: "sql".to_string(),
                     expire_after: Some(300),
+                    eval_interval_secs: None,
                     comment: "comment".to_string(),
                     options: Default::default(),
                     created_time: chrono::Utc::now(),

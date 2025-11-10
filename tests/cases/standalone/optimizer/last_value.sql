@@ -16,6 +16,25 @@ insert into t values
     (7, 'c', '🌔', 8.0),
     (8, 'd', '🌕', 9.0);
 
+select
+    last_value(host order by ts) as ordered_host,
+    last_value(not_pk order by ts),
+    last_value(val order by ts)
+from t
+group by host
+order by ordered_host;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+explain select
+        last_value(host order by ts),
+        last_value(not_pk order by ts),
+        last_value(val order by ts)
+    from t
+    group by host;
+
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (elapsed_compute.*) REDACTED
@@ -31,5 +50,24 @@ explain analyze
         last_value(val order by ts)
     from t
     group by host;
+
+select last_value(ts order by ts) from t;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+explain select last_value(ts order by ts) from t;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+explain analyze
+    select last_value(ts order by ts) from t;
 
 drop table t;

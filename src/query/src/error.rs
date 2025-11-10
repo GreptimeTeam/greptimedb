@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::time::Duration;
+use std::time::{Duration, TryFromFloatSecsError};
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -323,6 +323,43 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Column schema mismatch in CTE {}, original: {:?}, expected: {:?}",
+        cte_name,
+        original,
+        expected,
+    ))]
+    CteColumnSchemaMismatch {
+        cte_name: String,
+        original: Vec<String>,
+        expected: Vec<String>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert value for region pruning"))]
+    ConvertValue {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert float seconds to duration, raw: {}", raw))]
+    TryIntoDuration {
+        raw: String,
+        #[snafu(source)]
+        error: TryFromFloatSecsError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(transparent)]
+    Datatypes {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -345,7 +382,10 @@ impl ErrorExt for Error {
             | AddSystemTimeOverflow { .. }
             | ColumnSchemaIncompatible { .. }
             | UnsupportedVariable { .. }
-            | ColumnSchemaNoDefault { .. } => StatusCode::InvalidArguments,
+            | ColumnSchemaNoDefault { .. }
+            | CteColumnSchemaMismatch { .. }
+            | ConvertValue { .. }
+            | TryIntoDuration { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
 
@@ -373,9 +413,10 @@ impl ErrorExt for Error {
             MissingTableMutationHandler { .. } => StatusCode::Unexpected,
             GetRegionMetadata { .. } => StatusCode::RegionNotReady,
             TableReadOnly { .. } => StatusCode::Unsupported,
-            GetFulltextOptions { source, .. } | GetSkippingIndexOptions { source, .. } => {
-                source.status_code()
-            }
+
+            GetFulltextOptions { source, .. }
+            | GetSkippingIndexOptions { source, .. }
+            | Datatypes { source, .. } => source.status_code(),
         }
     }
 

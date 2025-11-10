@@ -66,6 +66,9 @@ pub struct BenchTableMetadataCommand {
     #[cfg(feature = "pg_kvbackend")]
     #[clap(long)]
     postgres_addr: Option<String>,
+    #[cfg(feature = "pg_kvbackend")]
+    #[clap(long)]
+    postgres_schema: Option<String>,
     #[cfg(feature = "mysql_kvbackend")]
     #[clap(long)]
     mysql_addr: Option<String>,
@@ -154,6 +157,7 @@ fn create_table_info(table_id: TableId, table_name: TableName) -> RawTableInfo {
         schema: RawSchema::new(column_schemas),
         engine: "mito".to_string(),
         created_on: chrono::DateTime::default(),
+        updated_on: chrono::DateTime::default(),
         primary_key_indices: vec![],
         next_column_id: columns as u32 + 1,
         value_indices: vec![],

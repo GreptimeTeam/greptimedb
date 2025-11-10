@@ -52,5 +52,57 @@ GT_KAFKA_ENDPOINTS = localhost:9092
 ```
 cd tests-integration/fixtures
 
-docker compose -f docker-compose-standalone.yml up kafka
+docker compose -f docker-compose.yml up kafka
 ```
+
+## Setup tests with etcd TLS
+
+This guide explains how to set up and test TLS-enabled etcd connections in GreptimeDB integration tests.
+
+### Quick Start
+
+TLS certificates are already at `tests-integration/fixtures/etcd-tls-certs/`.
+
+1. **Start TLS-enabled etcd**:
+   ```bash
+   cd tests-integration/fixtures
+   docker compose up etcd-tls -d
+   ```
+
+2. **Start all services (including etcd-tls)**:
+   ```bash
+   cd tests-integration/fixtures
+   docker compose up -d --wait
+   ```
+
+### Certificate Details
+
+The checked-in certificates include:
+- `ca.crt` - Certificate Authority certificate
+- `server.crt` / `server-key.pem` - Server certificate for etcd-tls service
+- `client.crt` / `client-key.pem` - Client certificate for connecting to etcd-tls
+
+The server certificate includes SANs for `localhost`, `etcd-tls`, `127.0.0.1`, and `::1`.
+
+### Regenerating Certificates (Optional)
+
+If you need to regenerate the etcd certificates:
+```bash
+# Regenerate certificates (overwrites existing ones)
+./scripts/generate-etcd-tls-certs.sh
+
+# Or generate in custom location
+./scripts/generate-etcd-tls-certs.sh /path/to/cert/directory
+```
+
+If you need to regenerate the mysql and postgres certificates:
+
+```bash
+# Regenerate certificates (overwrites existing ones)
+./scripts/generate_certs.sh
+
+# Or generate in custom location
+./scripts/generate_certs.sh /path/to/cert/directory
+```
+
+**Note**: The checked-in certificates are for testing purposes only and should never be used in production.

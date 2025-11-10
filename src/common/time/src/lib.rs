@@ -31,4 +31,4 @@ pub use range::RangeMillis;
 pub use timestamp::Timestamp;
 pub use timestamp_millis::TimestampMillis;
 pub use timezone::Timezone;
-pub use ttl::{DatabaseTimeToLive, TimeToLive, FOREVER, INSTANT};
+pub use ttl::{DatabaseTimeToLive, FOREVER, INSTANT, TimeToLive};

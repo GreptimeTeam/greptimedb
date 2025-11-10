@@ -15,16 +15,16 @@
 use std::collections::HashMap;
 use std::fmt::{self, Display};
 
-use api::helper::ColumnDataTypeWrapper;
+use api::helper::{ColumnDataTypeWrapper, from_pb_time_ranges};
 use api::v1::add_column_location::LocationType;
 use api::v1::column_def::{
     as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    alter_request, compact_request, region_request, AlterRequest, AlterRequests, BulkInsertRequest,
-    CloseRequest, CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest,
-    DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
+    AlterRequest, AlterRequests, BulkInsertRequest, CloseRequest, CompactRequest, CreateRequest,
+    CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
+    OpenRequest, TruncateRequest, alter_request, compact_request, region_request, truncate_request,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -33,18 +33,20 @@ use api::v1::{
 pub use common_base::AffectedRows;
 use common_grpc::flight::FlightDecoder;
 use common_recordbatch::DfRecordBatch;
-use common_time::TimeToLive;
+use common_time::{TimeToLive, Timestamp};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
+use num_enum::TryFromPrimitive;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeProtoSnafu, FlightCodecSnafu, InvalidIndexOptionSnafu,
-    InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
-    InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result, UnexpectedSnafu,
+    ColumnMetadata, ConvertTimeRangesSnafu, DecodeProtoSnafu, FlightCodecSnafu,
+    InvalidIndexOptionSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
+    InvalidSetRegionOptionRequestSnafu, InvalidUnsetRegionOptionRequestSnafu, MetadataError,
+    RegionMetadata, Result, UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
@@ -55,7 +57,8 @@ use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
 /// The type of path to generate.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, TryFromPrimitive)]
+#[repr(u8)]
 pub enum PathType {
     /// A bare path - the original path of an engine.
     ///
@@ -143,6 +146,7 @@ pub enum RegionRequest {
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
+    BuildIndex(RegionBuildIndexRequest),
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
     BulkInserts(RegionBulkInsertsRequest),
@@ -226,6 +230,7 @@ fn parse_region_create(create: CreateRequest) -> Result<(RegionId, RegionCreateR
         .collect::<Result<Vec<_>>>()?;
     let region_id = RegionId::from(create.region_id);
     let table_dir = table_dir(&create.path, region_id.table_id());
+    let partition_expr_json = create.partition.as_ref().map(|p| p.expression.clone());
     Ok((
         region_id,
         RegionCreateRequest {
@@ -235,6 +240,7 @@ fn parse_region_create(create: CreateRequest) -> Result<(RegionId, RegionCreateR
             options: create.options,
             table_dir,
             path_type: PathType::Bare,
+            partition_expr_json,
         },
     ))
 }
@@ -286,6 +292,7 @@ fn make_region_open(open: OpenRequest) -> Result<Vec<(RegionId, RegionRequest)>>
             path_type: PathType::Bare,
             options: open.options,
             skip_wal_replay: false,
+            checkpoint: None,
         }),
     )])
 }
@@ -332,18 +339,41 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
     let options = compact
         .options
         .unwrap_or(compact_request::Options::Regular(Default::default()));
+    // Convert parallelism: a value of 0 indicates no specific parallelism requested (None)
+    let parallelism = if compact.parallelism == 0 {
+        None
+    } else {
+        Some(compact.parallelism)
+    };
     Ok(vec![(
         region_id,
-        RegionRequest::Compact(RegionCompactRequest { options }),
+        RegionRequest::Compact(RegionCompactRequest {
+            options,
+            parallelism,
+        }),
     )])
 }
 
 fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = truncate.region_id.into();
-    Ok(vec![(
-        region_id,
-        RegionRequest::Truncate(RegionTruncateRequest {}),
-    )])
+    match truncate.kind {
+        None => InvalidRawRegionRequestSnafu {
+            err: "missing kind in TruncateRequest".to_string(),
+        }
+        .fail(),
+        Some(truncate_request::Kind::All(_)) => Ok(vec![(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )]),
+        Some(truncate_request::Kind::TimeRanges(time_ranges)) => {
+            let time_ranges = from_pb_time_ranges(time_ranges).context(ConvertTimeRangesSnafu)?;
+
+            Ok(vec![(
+                region_id,
+                RegionRequest::Truncate(RegionTruncateRequest::ByTimeRanges { time_ranges }),
+            )])
+        }
+    }
 }
 
 /// Convert [BulkInsertRequest] to [RegionRequest] and group by [RegionId].
@@ -409,6 +439,9 @@ pub struct RegionCreateRequest {
     pub table_dir: String,
     /// Path type for generating paths
     pub path_type: PathType,
+    /// Partition expression JSON from table metadata. Set to empty string for a region without partition.
+    /// `Option` to keep compatibility with old clients.
+    pub partition_expr_json: Option<String>,
 }
 
 impl RegionCreateRequest {
@@ -481,6 +514,14 @@ pub struct RegionOpenRequest {
     pub options: HashMap<String, String>,
     /// To skip replaying the WAL.
     pub skip_wal_replay: bool,
+    /// Replay checkpoint.
+    pub checkpoint: Option<ReplayCheckpoint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayCheckpoint {
+    pub entry_id: u64,
+    pub metadata_entry_id: Option<u64>,
 }
 
 impl RegionOpenRequest {
@@ -562,6 +603,20 @@ pub enum AlterKind {
         /// Name of columns to drop.
         names: Vec<String>,
     },
+    /// Set column default value.
+    SetDefaults {
+        /// Columns to change.
+        columns: Vec<SetDefault>,
+    },
+    /// Sync column metadatas.
+    SyncColumns {
+        column_metadatas: Vec<ColumnMetadata>,
+    },
+}
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct SetDefault {
+    pub name: String,
+    pub default_constraint: Vec<u8>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -738,7 +793,74 @@ impl AlterKind {
             AlterKind::DropDefaults { names } => {
                 names
                     .iter()
-                    .try_for_each(|name| Self::validate_column_to_drop(name, metadata))?;
+                    .try_for_each(|name| Self::validate_column_existence(name, metadata))?;
+            }
+            AlterKind::SetDefaults { columns } => {
+                columns
+                    .iter()
+                    .try_for_each(|col| Self::validate_column_existence(&col.name, metadata))?;
+            }
+            AlterKind::SyncColumns { column_metadatas } => {
+                let new_primary_keys = column_metadatas
+                    .iter()
+                    .filter(|c| c.semantic_type == SemanticType::Tag)
+                    .map(|c| (c.column_schema.name.as_str(), c.column_id))
+                    .collect::<HashMap<_, _>>();
+
+                let old_primary_keys = metadata
+                    .column_metadatas
+                    .iter()
+                    .filter(|c| c.semantic_type == SemanticType::Tag)
+                    .map(|c| (c.column_schema.name.as_str(), c.column_id));
+
+                for (name, id) in old_primary_keys {
+                    let primary_key =
+                        new_primary_keys
+                            .get(name)
+                            .with_context(|| InvalidRegionRequestSnafu {
+                                region_id: metadata.region_id,
+                                err: format!("column {} is not a primary key", name),
+                            })?;
+
+                    ensure!(
+                        *primary_key == id,
+                        InvalidRegionRequestSnafu {
+                            region_id: metadata.region_id,
+                            err: format!(
+                                "column with same name {} has different id, existing: {}, got: {}",
+                                name, id, primary_key
+                            ),
+                        }
+                    );
+                }
+
+                let new_ts_column = column_metadatas
+                    .iter()
+                    .find(|c| c.semantic_type == SemanticType::Timestamp)
+                    .map(|c| (c.column_schema.name.as_str(), c.column_id))
+                    .context(InvalidRegionRequestSnafu {
+                        region_id: metadata.region_id,
+                        err: "timestamp column not found",
+                    })?;
+
+                // Safety: timestamp column must exist.
+                let old_ts_column = metadata
+                    .column_metadatas
+                    .iter()
+                    .find(|c| c.semantic_type == SemanticType::Timestamp)
+                    .map(|c| (c.column_schema.name.as_str(), c.column_id))
+                    .unwrap();
+
+                ensure!(
+                    new_ts_column == old_ts_column,
+                    InvalidRegionRequestSnafu {
+                        region_id: metadata.region_id,
+                        err: format!(
+                            "timestamp column {} has different id, existing: {}, got: {}",
+                            old_ts_column.0, old_ts_column.1, new_ts_column.1
+                        ),
+                    }
+                );
             }
         }
         Ok(())
@@ -772,6 +894,13 @@ impl AlterKind {
             AlterKind::DropDefaults { names } => names
                 .iter()
                 .any(|name| metadata.column_by_name(name).is_some()),
+
+            AlterKind::SetDefaults { columns } => columns
+                .iter()
+                .any(|x| metadata.column_by_name(&x.name).is_some()),
+            AlterKind::SyncColumns { column_metadatas } => {
+                metadata.column_metadatas != *column_metadatas
+            }
         }
     }
 
@@ -815,6 +944,18 @@ impl AlterKind {
                 }
             );
         }
+
+        Ok(())
+    }
+
+    /// Returns an error if the column isn't exist.
+    fn validate_column_existence(column_name: &String, metadata: &RegionMetadata) -> Result<()> {
+        metadata
+            .column_by_name(column_name)
+            .context(InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!("column {} not found", column_name),
+            })?;
 
         Ok(())
     }
@@ -882,6 +1023,25 @@ impl TryFrom<alter_request::Kind> for AlterKind {
             alter_request::Kind::DropDefaults(x) => AlterKind::DropDefaults {
                 names: x.drop_defaults.into_iter().map(|x| x.column_name).collect(),
             },
+            alter_request::Kind::SetDefaults(x) => AlterKind::SetDefaults {
+                columns: x
+                    .set_defaults
+                    .into_iter()
+                    .map(|x| {
+                        Ok(SetDefault {
+                            name: x.column_name,
+                            default_constraint: x.default_constraint.clone(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            },
+            alter_request::Kind::SyncColumns(x) => AlterKind::SyncColumns {
+                column_metadatas: x
+                    .column_defs
+                    .into_iter()
+                    .map(ColumnMetadata::try_from_column_def)
+                    .collect::<Result<Vec<_>>>()?,
+            },
         };
 
         Ok(alter_kind)
@@ -930,7 +1090,9 @@ impl AddColumn {
                     region_id: metadata.region_id,
                     err: format!(
                         "column {} already exists with different metadata, existing: {:?}, got: {:?}",
-                        self.column_metadata.column_schema.name, existing_column, self.column_metadata,
+                        self.column_metadata.column_schema.name,
+                        existing_column,
+                        self.column_metadata,
                     ),
                 }
             );
@@ -1109,7 +1271,7 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 Ok(Self::Ttl(Some(ttl)))
             }
             TWCS_TRIGGER_FILE_NUM | TWCS_MAX_OUTPUT_FILE_SIZE | TWCS_TIME_WINDOW => {
-                Ok(Self::Twsc(key.to_string(), value.to_string()))
+                Ok(Self::Twsc(key.clone(), value.clone()))
             }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
@@ -1180,6 +1342,7 @@ pub struct RegionFlushRequest {
 #[derive(Debug)]
 pub struct RegionCompactRequest {
     pub options: compact_request::Options,
+    pub parallelism: Option<u32>,
 }
 
 impl Default for RegionCompactRequest {
@@ -1187,19 +1350,32 @@ impl Default for RegionCompactRequest {
         Self {
             // Default to regular compaction.
             options: compact_request::Options::Regular(Default::default()),
+            parallelism: None,
         }
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RegionBuildIndexRequest {}
+
 /// Truncate region request.
 #[derive(Debug)]
-pub struct RegionTruncateRequest {}
+pub enum RegionTruncateRequest {
+    /// Truncate all data in the region.
+    All,
+    ByTimeRanges {
+        /// Time ranges to truncate. Both bound are inclusive.
+        /// only files that are fully contained in the time range will be truncated.
+        /// so no guarantee that all data in the time range will be truncated.
+        time_ranges: Vec<(Timestamp, Timestamp)>,
+    },
+}
 
 /// Catchup region request.
 ///
 /// Makes a readonly region to catch up to leader region changes.
 /// There is no effect if it operating on a leader region.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct RegionCatchupRequest {
     /// Sets it to writable if it's available after it has caught up with all changes.
     pub set_writable: bool,
@@ -1212,12 +1388,8 @@ pub struct RegionCatchupRequest {
     pub metadata_entry_id: Option<entry::Id>,
     /// The hint for replaying memtable.
     pub location_id: Option<u64>,
-}
-
-/// Get sequences of regions by region ids.
-#[derive(Debug, Clone)]
-pub struct RegionSequencesRequest {
-    pub region_ids: Vec<RegionId>,
+    /// Replay checkpoint.
+    pub checkpoint: Option<ReplayCheckpoint>,
 }
 
 #[derive(Debug, Clone)]
@@ -1245,6 +1417,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Alter(_) => write!(f, "Alter"),
             RegionRequest::Flush(_) => write!(f, "Flush"),
             RegionRequest::Compact(_) => write!(f, "Compact"),
+            RegionRequest::BuildIndex(_) => write!(f, "BuildIndex"),
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
             RegionRequest::BulkInserts(_) => write!(f, "BulkInserts"),
@@ -1254,6 +1427,7 @@ impl fmt::Display for RegionRequest {
 
 #[cfg(test)]
 mod tests {
+
     use api::v1::region::RegionColumnDef;
     use api::v1::{ColumnDataType, ColumnDef};
     use datatypes::prelude::ConcreteDataType;
@@ -1707,6 +1881,7 @@ mod tests {
             options: HashMap::new(),
             table_dir: "path".to_string(),
             path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
         };
 
         assert!(create.validate().is_err());
@@ -1741,5 +1916,98 @@ mod tests {
         let mut metadata = new_metadata();
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();
+    }
+
+    #[test]
+    fn test_validate_sync_columns() {
+        let metadata = new_metadata();
+        let kind = AlterKind::SyncColumns {
+            column_metadatas: vec![
+                ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "tag_1",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 5,
+                },
+                ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "field_2",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Field,
+                    column_id: 6,
+                },
+            ],
+        };
+        let err = kind.validate(&metadata).unwrap_err();
+        assert!(err.to_string().contains("not a primary key"));
+
+        // Change the timestamp column name.
+        let mut column_metadatas_with_different_ts_column = metadata.column_metadatas.clone();
+        let ts_column = column_metadatas_with_different_ts_column
+            .iter_mut()
+            .find(|c| c.semantic_type == SemanticType::Timestamp)
+            .unwrap();
+        ts_column.column_schema.name = "ts1".to_string();
+
+        let kind = AlterKind::SyncColumns {
+            column_metadatas: column_metadatas_with_different_ts_column,
+        };
+        let err = kind.validate(&metadata).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("timestamp column ts has different id")
+        );
+
+        // Change the primary key column name.
+        let mut column_metadatas_with_different_pk_column = metadata.column_metadatas.clone();
+        let pk_column = column_metadatas_with_different_pk_column
+            .iter_mut()
+            .find(|c| c.column_schema.name == "tag_0")
+            .unwrap();
+        pk_column.column_id = 100;
+        let kind = AlterKind::SyncColumns {
+            column_metadatas: column_metadatas_with_different_pk_column,
+        };
+        let err = kind.validate(&metadata).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("column with same name tag_0 has different id")
+        );
+
+        // Add a new field column.
+        let mut column_metadatas_with_new_field_column = metadata.column_metadatas.clone();
+        column_metadatas_with_new_field_column.push(ColumnMetadata {
+            column_schema: ColumnSchema::new("field_2", ConcreteDataType::string_datatype(), true),
+            semantic_type: SemanticType::Field,
+            column_id: 4,
+        });
+        let kind = AlterKind::SyncColumns {
+            column_metadatas: column_metadatas_with_new_field_column,
+        };
+        kind.validate(&metadata).unwrap();
+    }
+
+    #[test]
+    fn test_cast_path_type_to_primitive() {
+        assert_eq!(PathType::Bare as u8, 0);
+        assert_eq!(PathType::Data as u8, 1);
+        assert_eq!(PathType::Metadata as u8, 2);
+        assert_eq!(
+            PathType::try_from(PathType::Bare as u8).unwrap(),
+            PathType::Bare
+        );
+        assert_eq!(
+            PathType::try_from(PathType::Data as u8).unwrap(),
+            PathType::Data
+        );
+        assert_eq!(
+            PathType::try_from(PathType::Metadata as u8).unwrap(),
+            PathType::Metadata
+        );
     }
 }

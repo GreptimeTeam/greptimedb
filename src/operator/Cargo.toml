@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 testing = []
-enterprise = ["common-meta/enterprise", "sql/enterprise", "query/enterprise"]
+enterprise = ["common-meta/enterprise", "sql/enterprise", "query/enterprise", "prost-types"]
 
 [lints]
 workspace = true
@@ -45,6 +45,7 @@ datatypes.workspace = true
 file-engine.workspace = true
 futures.workspace = true
 futures-util.workspace = true
+humantime.workspace = true
 jsonb.workspace = true
 lazy_static.workspace = true
 meta-client.workspace = true
@@ -56,6 +57,7 @@ object_store_opendal.workspace = true
 partition.workspace = true
 prometheus.workspace = true
 prost.workspace = true
+prost-types = { workspace = true, optional = true }
 query.workspace = true
 regex.workspace = true
 serde_json.workspace = true

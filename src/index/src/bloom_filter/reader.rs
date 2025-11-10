@@ -12,26 +12,68 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::ops::Range;
+use std::ops::{Range, Rem};
 
 use async_trait::async_trait;
+use bytemuck::try_cast_slice;
 use bytes::Bytes;
 use common_base::range_read::RangeReader;
 use fastbloom::BloomFilter;
 use greptime_proto::v1::index::{BloomFilterLoc, BloomFilterMeta};
 use prost::Message;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
+use crate::bloom_filter::SEED;
 use crate::bloom_filter::error::{
     DecodeProtoSnafu, FileSizeTooSmallSnafu, IoSnafu, Result, UnexpectedMetaSizeSnafu,
 };
-use crate::bloom_filter::SEED;
 
 /// Minimum size of the bloom filter, which is the size of the length of the bloom filter.
 const BLOOM_META_LEN_SIZE: u64 = 4;
 
 /// Default prefetch size of bloom filter meta.
 pub const DEFAULT_PREFETCH_SIZE: u64 = 8192; // 8KiB
+
+/// Safely converts bytes to Vec<u64> using bytemuck for optimal performance.
+/// Faster than chunking and converting each piece individually.
+///
+/// The input bytes are a sequence of little-endian u64s.
+pub fn bytes_to_u64_vec(bytes: &Bytes) -> Vec<u64> {
+    // drop tailing things, this keeps the same behavior with `chunks_exact`.
+    let aligned_length = bytes.len() - bytes.len().rem(std::mem::size_of::<u64>());
+    let byte_slice = &bytes[..aligned_length];
+
+    // Try fast path first: direct cast if aligned
+    let u64_vec = if let Ok(u64_slice) = try_cast_slice::<u8, u64>(byte_slice) {
+        u64_slice.to_vec()
+    } else {
+        // Slow path: create aligned Vec<u64> and copy data
+        let u64_count = byte_slice.len() / std::mem::size_of::<u64>();
+        let mut u64_vec = Vec::<u64>::with_capacity(u64_count);
+
+        // SAFETY: We're creating a properly sized slice from uninitialized but allocated memory
+        // to copy bytes into. The slice has exactly the right size for the byte data.
+        let dest_slice = unsafe {
+            std::slice::from_raw_parts_mut(u64_vec.as_mut_ptr() as *mut u8, byte_slice.len())
+        };
+        dest_slice.copy_from_slice(byte_slice);
+
+        // SAFETY: We've just initialized exactly u64_count elements worth of bytes
+        unsafe { u64_vec.set_len(u64_count) };
+        u64_vec
+    };
+
+    // Convert from platform endianness to little endian if needed
+    // Just in case.
+    #[cfg(target_endian = "little")]
+    {
+        u64_vec
+    }
+    #[cfg(target_endian = "big")]
+    {
+        u64_vec.into_iter().map(|x| x.swap_bytes()).collect()
+    }
+}
 
 /// `BloomFilterReader` reads the bloom filter from the file.
 #[async_trait]
@@ -56,10 +98,7 @@ pub trait BloomFilterReader: Sync {
     /// Reads a bloom filter with the given location.
     async fn bloom_filter(&self, loc: &BloomFilterLoc) -> Result<BloomFilter> {
         let bytes = self.range_read(loc.offset, loc.size as _).await?;
-        let vec = bytes
-            .chunks_exact(std::mem::size_of::<u64>())
-            .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
-            .collect();
+        let vec = bytes_to_u64_vec(&bytes);
         let bm = BloomFilter::from_vec(vec)
             .seed(&SEED)
             .expected_items(loc.element_count as _);
@@ -75,10 +114,7 @@ pub trait BloomFilterReader: Sync {
 
         let mut result = Vec::with_capacity(bss.len());
         for (bs, loc) in bss.into_iter().zip(locs.iter()) {
-            let vec = bs
-                .chunks_exact(std::mem::size_of::<u64>())
-                .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
-                .collect();
+            let vec = bytes_to_u64_vec(&bs);
             let bm = BloomFilter::from_vec(vec)
                 .seed(&SEED)
                 .expected_items(loc.element_count as _);
@@ -209,8 +245,8 @@ impl<R: RangeReader> BloomFilterMetaReader<R> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     use futures::io::Cursor;
 

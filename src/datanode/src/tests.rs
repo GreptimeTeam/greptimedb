@@ -21,8 +21,9 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_query::Output;
-use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use common_runtime::Runtime;
+use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
+use datafusion::catalog::TableFunction;
 use datafusion_expr::{AggregateUDF, LogicalPlan};
 use query::dataframe::DataFrame;
 use query::planner::LogicalPlanner;
@@ -79,6 +80,8 @@ impl QueryEngine for MockQueryEngine {
     fn register_aggregate_function(&self, _func: AggregateUDF) {}
 
     fn register_scalar_function(&self, _func: ScalarFunctionFactory) {}
+
+    fn register_table_function(&self, _func: Arc<TableFunction>) {}
 
     fn read_table(&self, _table: TableRef) -> query::error::Result<DataFrame> {
         unimplemented!()
@@ -249,7 +252,7 @@ impl RegionEngine for MockRegionEngine {
         unimplemented!()
     }
 
-    async fn get_last_seq_num(&self, _: RegionId) -> Result<Option<SequenceNumber>, BoxedError> {
+    async fn get_committed_sequence(&self, _: RegionId) -> Result<SequenceNumber, BoxedError> {
         unimplemented!()
     }
 

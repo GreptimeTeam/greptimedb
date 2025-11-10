@@ -14,17 +14,22 @@
 
 use core::str;
 
+use ahash::HashSet;
 use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use http::HeaderMap;
-use pipeline::{GreptimePipelineParams, SelectInfo};
+use pipeline::{GreptimePipelineParams, SelectInfo, truthy};
 
 use crate::http::header::constants::{
     GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME, GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
     GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME, GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
-    GREPTIME_PIPELINE_NAME_HEADER_NAME, GREPTIME_PIPELINE_PARAMS_HEADER,
-    GREPTIME_PIPELINE_VERSION_HEADER_NAME, GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
+    GREPTIME_OTLP_METRIC_IGNORE_RESOURCE_ATTRS_HEADER_NAME,
+    GREPTIME_OTLP_METRIC_PROMOTE_ALL_RESOURCE_ATTRS_HEADER_NAME,
+    GREPTIME_OTLP_METRIC_PROMOTE_RESOURCE_ATTRS_HEADER_NAME,
+    GREPTIME_OTLP_METRIC_PROMOTE_SCOPE_ATTRS_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
+    GREPTIME_PIPELINE_PARAMS_HEADER, GREPTIME_PIPELINE_VERSION_HEADER_NAME,
+    GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
 };
 
 /// Axum extractor for optional target log table name from HTTP header
@@ -125,6 +130,61 @@ where
             pipeline_name,
             pipeline_version,
             pipeline_params: GreptimePipelineParams::from_params(pipeline_parameters.as_deref()),
+        })
+    }
+}
+
+/// Axum extractor for OTLP metric options from HTTP headers.
+pub struct OtlpMetricOptions {
+    /// Persist all resource attributes to the table
+    /// If false, persist selected attributes. See [`promote_resource_attrs`].
+    pub promote_all_resource_attrs: bool,
+
+    /// If `promote_all_resource_attrs` is true, then the list is an exclude list from `ignore_resource_attrs`.
+    /// If `promote_all_resource_attrs` is false, then this list is a include list from `promote_resource_attrs`.
+    pub resource_attrs: HashSet<String>,
+
+    /// Persist scope attributes to the table
+    /// If false, persist none
+    pub promote_scope_attrs: bool,
+}
+
+impl<S> FromRequestParts<S> for OtlpMetricOptions
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let headers = &parts.headers;
+        let promote_all_resource_attrs = string_value_from_header(
+            headers,
+            &[GREPTIME_OTLP_METRIC_PROMOTE_ALL_RESOURCE_ATTRS_HEADER_NAME],
+        )?
+        .map(truthy)
+        .unwrap_or(false);
+
+        let attr_header = if promote_all_resource_attrs {
+            [GREPTIME_OTLP_METRIC_IGNORE_RESOURCE_ATTRS_HEADER_NAME]
+        } else {
+            [GREPTIME_OTLP_METRIC_PROMOTE_RESOURCE_ATTRS_HEADER_NAME]
+        };
+
+        let resource_attrs = string_value_from_header(headers, &attr_header)?
+            .map(|s| s.split(';').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_default();
+
+        let promote_scope_attrs = string_value_from_header(
+            headers,
+            &[GREPTIME_OTLP_METRIC_PROMOTE_SCOPE_ATTRS_HEADER_NAME],
+        )?
+        .map(truthy)
+        .unwrap_or(false);
+
+        Ok(OtlpMetricOptions {
+            promote_all_resource_attrs,
+            resource_attrs,
+            promote_scope_attrs,
         })
     }
 }

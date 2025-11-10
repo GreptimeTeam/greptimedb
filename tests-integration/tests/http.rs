@@ -15,15 +15,25 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::str::FromStr;
+use std::time::Duration;
 
-use api::prom_store::remote::WriteRequest;
+use api::prom_store::remote::label_matcher::Type as MatcherType;
+use api::prom_store::remote::{
+    Label, LabelMatcher, Query, ReadRequest, ReadResponse, Sample, TimeSeries, WriteRequest,
+};
 use auth::user_provider_from_option;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use chrono::Utc;
-use common_catalog::consts::{trace_services_table_name, TRACE_TABLE_NAME};
+use common_catalog::consts::{
+    DEFAULT_PRIVATE_SCHEMA_NAME, TRACE_TABLE_NAME, trace_operations_table_name,
+    trace_services_table_name,
+};
 use common_error::status_code::StatusCode as ErrorCode;
-use flate2::write::GzEncoder;
+use common_frontend::slow_query_event::{
+    SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
+};
 use flate2::Compression;
+use flate2::write::GzEncoder;
 use log_query::{Context, Limit, LogQuery, TimeFilter};
 use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
@@ -32,26 +42,25 @@ use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequ
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME;
 use prost::Message;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use servers::http::GreptimeQueryOutput;
 use servers::http::handler::HealthResponse;
 use servers::http::header::constants::{
     GREPTIME_LOG_TABLE_NAME_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
 };
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
-use servers::http::jaeger::JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER;
-use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
+use servers::http::prometheus::{Column, PrometheusJsonResponse, PrometheusResponse};
 use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::test_helpers::{TestClient, TestResponse};
-use servers::http::GreptimeQueryOutput;
 use servers::prom_store::{self, mock_timeseries_new_label};
 use table::table_name::TableName;
 use tests_integration::test_util::{
-    setup_test_http_app, setup_test_http_app_with_frontend,
+    StorageType, setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
-    StorageType,
 };
+use urlencoding::encode;
 use yaml_rust::YamlLoader;
 
 #[macro_export]
@@ -85,6 +94,7 @@ macro_rules! http_tests {
 
                 test_http_auth,
                 test_sql_api,
+                test_http_sql_slow_query,
                 test_prometheus_promql_api,
                 test_prom_http_api,
                 test_metrics_api,
@@ -94,6 +104,7 @@ macro_rules! http_tests {
                 test_dashboard_path,
                 test_prometheus_remote_write,
                 test_prometheus_remote_special_labels,
+                test_prometheus_remote_schema_labels,
                 test_prometheus_remote_write_with_pipeline,
                 test_vm_proto_remote_write,
 
@@ -113,8 +124,9 @@ macro_rules! http_tests {
                 test_pipeline_2,
                 test_pipeline_skip_error,
                 test_pipeline_filter,
+                test_pipeline_create_table,
 
-                test_otlp_metrics,
+                test_otlp_metrics_new,
                 test_otlp_traces_v0,
                 test_otlp_traces_v1,
                 test_otlp_logs,
@@ -138,7 +150,7 @@ pub async fn test_http_auth(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
 
     let user_provider = user_provider_from_option(
-        &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
+        "static_user_provider:cmd:greptime_user=greptime_pwd,readonly_user:ro=readonly_pwd,writeonly_user:wo=writeonly_pwd",
     )
     .unwrap();
 
@@ -175,6 +187,65 @@ pub async fn test_http_auth(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+
+    // 4. readonly user cannot write
+    let res = client
+        .get("/v1/sql?db=public&sql=show tables;")
+        .header(
+            "Authorization",
+            "basic cmVhZG9ubHlfdXNlcjpyZWFkb25seV9wd2Q=",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?db=public&sql=create table auth_test(ts timestamp time index);")
+        .header(
+            "Authorization",
+            "basic cmVhZG9ubHlfdXNlcjpyZWFkb25seV9wd2Q=",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // 5. writeonly user cannot read
+    let res = client
+        .get("/v1/sql?db=public&sql=show tables;")
+        .header(
+            "Authorization",
+            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let res = client
+        .get("/v1/sql?db=public&sql=create table auth_test(ts timestamp time index);")
+        .header(
+            "Authorization",
+            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?db=public&sql=insert into auth_test values(1);")
+        .header(
+            "Authorization",
+            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?db=public&sql=select * from auth_test;")
+        .header(
+            "Authorization",
+            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
     guard.remove_all().await;
 }
 
@@ -495,7 +566,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(
         res.text().await,
-        r#"[{"DescribeTable":{"name":[{"value":"t","quote_style":null,"span":{"start":{"line":0,"column":0},"end":{"line":0,"column":0}}}]}}]"#,
+        r#"[{"DescribeTable":{"name":[{"Identifier":{"value":"t","quote_style":null,"span":{"start":{"line":0,"column":0},"end":{"line":0,"column":0}}}}]}}]"#,
     );
 
     // test timezone header
@@ -538,6 +609,78 @@ pub async fn test_sql_api(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+#[tokio::test]
+async fn test_sql_format_api() {
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(StorageType::File, "sql_format_api").await;
+    let client = TestClient::new(app).await;
+
+    // missing sql
+    let res = client.get("/v1/sql/format").send().await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
+    assert_eq!(body.code(), 1004);
+    assert_eq!(body.error(), "sql parameter is required.");
+
+    // with sql
+    let res = client
+        .get("/v1/sql/format?sql=select%201%20as%20x")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let json: serde_json::Value = serde_json::from_str(&res.text().await).unwrap();
+    let formatted = json
+        .get("formatted")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert_eq!(formatted, "SELECT 1 AS x;");
+
+    // complex query
+    let complex_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(CAST(random() AS STRING)) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
+    let encoded_complex_query = encode(complex_query);
+
+    let query_params = format!("/v1/sql/format?sql={encoded_complex_query}");
+    let res = client.get(&query_params).send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let json: serde_json::Value = serde_json::from_str(&res.text().await).unwrap();
+    let formatted = json
+        .get("formatted")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert_eq!(
+        formatted,
+        "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(CAST(random() AS STRING)) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte;"
+    );
+
+    guard.remove_all().await;
+}
+
+pub async fn test_http_sql_slow_query(store_type: StorageType) {
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
+    let client = TestClient::new(app).await;
+
+    let slow_query = "SELECT count(*) FROM generate_series(1, 1000000000)";
+    let encoded_slow_query = encode(slow_query);
+
+    let query_params = format!("/v1/sql?sql={encoded_slow_query}");
+    let res = client.get(&query_params).send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Wait for the slow query to be recorded.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    let table = format!("{}.{}", DEFAULT_PRIVATE_SCHEMA_NAME, SLOW_QUERY_TABLE_NAME);
+    let query = format!("SELECT {} FROM {table}", SLOW_QUERY_TABLE_QUERY_COLUMN_NAME);
+
+    let expected = format!(r#"[["{}"]]"#, slow_query);
+    validate_data("test_http_sql_slow_query", &client, &query, &expected).await;
+
+    guard.remove_all().await;
+}
+
 pub async fn test_prometheus_promql_api(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "promql_api").await;
     let client = TestClient::new(app).await;
@@ -558,7 +701,10 @@ pub async fn test_prometheus_promql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     let csv_body = &res.text().await;
-    assert_eq!("0,1.0\r\n5000,1.0\r\n10000,1.0\r\n15000,1.0\r\n20000,1.0\r\n25000,1.0\r\n30000,1.0\r\n35000,1.0\r\n40000,1.0\r\n45000,1.0\r\n50000,1.0\r\n55000,1.0\r\n60000,1.0\r\n65000,1.0\r\n70000,1.0\r\n75000,1.0\r\n80000,1.0\r\n85000,1.0\r\n90000,1.0\r\n95000,1.0\r\n100000,1.0\r\n", csv_body);
+    assert_eq!(
+        "0,1.0\r\n5000,1.0\r\n10000,1.0\r\n15000,1.0\r\n20000,1.0\r\n25000,1.0\r\n30000,1.0\r\n35000,1.0\r\n40000,1.0\r\n45000,1.0\r\n50000,1.0\r\n55000,1.0\r\n60000,1.0\r\n65000,1.0\r\n70000,1.0\r\n75000,1.0\r\n80000,1.0\r\n85000,1.0\r\n90000,1.0\r\n95000,1.0\r\n100000,1.0\r\n",
+        csv_body
+    );
 
     guard.remove_all().await;
 }
@@ -703,10 +849,10 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     let actual = series
         .remove(0)
         .into_iter()
-        .collect::<BTreeMap<String, String>>();
+        .collect::<BTreeMap<Column, String>>();
     let expected = BTreeMap::from([
-        ("__name__".to_string(), "demo".to_string()),
-        ("host".to_string(), "host1".to_string()),
+        ("__name__".into(), "demo".to_string()),
+        ("host".into(), "host1".to_string()),
     ]);
     assert_eq!(actual, expected);
 
@@ -729,12 +875,16 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let prom_resp = res.json::<PrometheusJsonResponse>().await;
     assert_eq!(prom_resp.status, "error");
-    assert!(prom_resp
-        .error
-        .is_some_and(|err| err.eq_ignore_ascii_case("match[] parameter is required")));
-    assert!(prom_resp
-        .error_type
-        .is_some_and(|err| err.eq_ignore_ascii_case("InvalidArguments")));
+    assert!(
+        prom_resp
+            .error
+            .is_some_and(|err| err.eq_ignore_ascii_case("match[] parameter is required"))
+    );
+    assert!(
+        prom_resp
+            .error_type
+            .is_some_and(|err| err.eq_ignore_ascii_case("InvalidArguments"))
+    );
 
     // single match[]
     let res = client
@@ -801,6 +951,89 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         serde_json::from_value::<PrometheusResponse>(json!(["host1", "host2"])).unwrap()
     );
 
+    // special labels
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__schema__/values?start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "greptime_private",
+            "information_schema",
+            "public"
+        ]))
+        .unwrap()
+    );
+
+    // special labels
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__schema__/values?match[]=demo&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["public"])).unwrap()
+    );
+
+    // special labels
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__database__/values?match[]=demo&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["public"])).unwrap()
+    );
+
+    // special labels
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__database__/values?match[]=multi_labels{idc=\"idc1\", env=\"dev\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["public"])).unwrap()
+    );
+
+    // match special labels.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/host/values?match[]=multi_labels{__schema__=\"public\", idc=\"idc1\", env=\"dev\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["host1", "host2"])).unwrap()
+    );
+
+    // match special labels.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/host/values?match[]=multi_labels{__schema__=\"information_schema\", idc=\"idc1\", env=\"dev\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!([])).unwrap()
+    );
+
     // search field name
     let res = client
         .get("/v1/prometheus/api/v1/label/__field__/values?match[]=demo")
@@ -812,6 +1045,62 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(
         body.data,
         serde_json::from_value::<PrometheusResponse>(json!(["val"])).unwrap()
+    );
+
+    // limit
+    let res = client
+        .get("/v1/prometheus/api/v1/label/host/values?match[]=demo&start=0&end=600&limit=1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["host1"])).unwrap()
+    );
+
+    // limit 0
+    let res = client
+        .get("/v1/prometheus/api/v1/label/host/values?match[]=demo&start=0&end=600&limit=0")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["host1", "host2"])).unwrap()
+    );
+
+    // limit 10
+    let res = client
+        .get("/v1/prometheus/api/v1/label/host/values?match[]=demo&start=0&end=600&limit=10")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["host1", "host2"])).unwrap()
+    );
+
+    // special labels limit
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__schema__/values?start=0&end=600&limit=2")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "greptime_private",
+            "information_schema",
+        ]))
+        .unwrap()
     );
 
     // query an empty database should return nothing
@@ -863,12 +1152,12 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     // query `__name__` without match[]
     // create a physical table and a logical table
     let res = client
-        .get("/v1/sql?sql=create table physical_table (`ts` timestamp time index, message string) with ('physical_metric_table' = 'true');")
+        .get("/v1/sql?sql=create table physical_table (`ts` timestamp time index, `message` string) with ('physical_metric_table' = 'true');")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
     let res = client
-        .get("/v1/sql?sql=create table logic_table (`ts` timestamp time index, message string) with ('on_physical_table' = 'physical_table');")
+        .get("/v1/sql?sql=create table logic_table (`ts` timestamp time index, `message` string) with ('on_physical_table' = 'physical_table');")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
@@ -884,15 +1173,49 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert!(prom_resp.error_type.is_none());
     assert_eq!(
         prom_resp.data,
-        PrometheusResponse::Labels(vec![
-            "demo".to_string(),
-            "demo_metrics".to_string(),
-            "demo_metrics_with_nanos".to_string(),
-            "logic_table".to_string(),
-            "mito".to_string(),
-            "multi_labels".to_string(),
-            "numbers".to_string()
-        ])
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "demo",
+            "demo_metrics",
+            "demo_metrics_with_nanos",
+            "logic_table",
+            "multi_labels",
+        ]))
+        .unwrap()
+    );
+
+    // query `__name__`
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={__name__=\"demo\"}")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert!(prom_resp.error_type.is_none());
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["demo",])).unwrap()
+    );
+
+    // query `__name__`
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={__name__=~\".*demo.*\"}")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert!(prom_resp.error_type.is_none());
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "demo",
+            "demo_metrics",
+            "demo_metrics_with_nanos",
+        ]))
+        .unwrap()
     );
 
     // buildinfo
@@ -1077,6 +1400,7 @@ runtime_size = 8
 mode = "disable"
 cert_path = ""
 key_path = ""
+ca_cert_path = ""
 watch = false
 
 [mysql]
@@ -1084,11 +1408,13 @@ enable = true
 addr = "127.0.0.1:4002"
 runtime_size = 2
 keep_alive = "0s"
+prepared_stmt_cache_size = 10000
 
 [mysql.tls]
 mode = "disable"
 cert_path = ""
 key_path = ""
+ca_cert_path = ""
 watch = false
 
 [postgres]
@@ -1101,6 +1427,7 @@ keep_alive = "0s"
 mode = "disable"
 cert_path = ""
 key_path = ""
+ca_cert_path = ""
 watch = false
 
 [opentsdb]
@@ -1150,6 +1477,7 @@ experimental_frontend_scan_timeout = "30s"
 experimental_frontend_activity_timeout = "1m"
 experimental_max_filter_num_per_query = 20
 experimental_time_window_merge_threshold = 3
+read_preference = "Leader"
 
 [logging]
 max_log_files = 720
@@ -1162,6 +1490,8 @@ enable_otlp_tracing = false
 worker_channel_size = 128
 worker_request_batch_size = 64
 manifest_checkpoint_distance = 10
+experimental_manifest_keep_removed_file_count = 256
+experimental_manifest_keep_removed_file_ttl = "1h"
 compress_manifest = false
 auto_flush_interval = "30m"
 enable_write_cache = false
@@ -1169,13 +1499,16 @@ write_cache_path = ""
 write_cache_size = "5GiB"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
+max_concurrent_scan_files = 384
 allow_stale_entries = false
 min_compaction_interval = "0s"
+default_experimental_flat_format = false
 
 [region_engine.mito.index]
 aux_path = ""
 staging_size = "2GiB"
 staging_ttl = "7days"
+build_mode = "sync"
 write_buffer_size = "8MiB"
 content_cache_page_size = "64KiB"
 
@@ -1201,6 +1534,13 @@ mem_threshold_on_create = "auto"
 [region_engine.mito.memtable]
 type = "time_series"
 
+[region_engine.mito.gc]
+enable = false
+lingering_time = "5m"
+unknown_file_lingering_time = "6h"
+max_concurrent_lister_per_gc_job = 32
+max_concurrent_gc_job = 4
+
 [[region_engine]]
 
 [region_engine.file]
@@ -1214,12 +1554,16 @@ write_interval = "30s"
 [slow_query]
 enable = true
 record_type = "system_table"
-threshold = "30s"
+threshold = "1s"
 sample_ratio = 1.0
-ttl = "30d"
+ttl = "2months 29days 2h 52m 48s"
 
 [query]
 parallelism = 0
+allow_query_fallback = false
+
+[memory]
+enable_heap_profiling = true
 "#,
     )
     .trim()
@@ -1255,9 +1599,13 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "result_cache_size =",
         "name =",
         "recovery_parallelism =",
+        "max_background_index_builds =",
         "max_background_flushes =",
         "max_background_compactions =",
         "max_background_purges =",
+        "enable_read_cache =",
+        "max_total_body_memory =",
+        "max_total_message_memory =",
     ];
 
     input
@@ -1492,6 +1840,188 @@ pub async fn test_prometheus_remote_write_with_pipeline(store_type: StorageType)
         table_val,
     )
     .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_prometheus_remote_schema_labels(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "test_prometheus_remote_schema_labels").await;
+    let client = TestClient::new(app).await;
+
+    // Create test schemas
+    let res = client
+        .post("/v1/sql?sql=create database test_schema_1")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = client
+        .post("/v1/sql?sql=create database test_schema_2")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Write data with __schema__ label
+    let schema_series = TimeSeries {
+        labels: vec![
+            Label {
+                name: "__name__".to_string(),
+                value: "metric_with_schema".to_string(),
+            },
+            Label {
+                name: "__schema__".to_string(),
+                value: "test_schema_1".to_string(),
+            },
+            Label {
+                name: "instance".to_string(),
+                value: "host1".to_string(),
+            },
+        ],
+        samples: vec![Sample {
+            value: 100.0,
+            timestamp: 1000,
+        }],
+        ..Default::default()
+    };
+
+    let write_request = WriteRequest {
+        timeseries: vec![schema_series],
+        ..Default::default()
+    };
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Read data from test_schema_1 using __schema__ matcher
+    let read_request = ReadRequest {
+        queries: vec![Query {
+            start_timestamp_ms: 500,
+            end_timestamp_ms: 1500,
+            matchers: vec![
+                LabelMatcher {
+                    name: "__name__".to_string(),
+                    value: "metric_with_schema".to_string(),
+                    r#type: MatcherType::Eq as i32,
+                },
+                LabelMatcher {
+                    name: "__schema__".to_string(),
+                    value: "test_schema_1".to_string(),
+                    r#type: MatcherType::Eq as i32,
+                },
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let serialized_read_request = read_request.encode_to_vec();
+    let compressed_read_request =
+        prom_store::snappy_compress(&serialized_read_request).expect("failed to encode snappy");
+
+    let mut result = client
+        .post("/v1/prometheus/read")
+        .body(compressed_read_request)
+        .send()
+        .await;
+    assert_eq!(result.status(), StatusCode::OK);
+
+    let response_body = result.chunk().await.unwrap();
+    let decompressed_response = prom_store::snappy_decompress(&response_body).unwrap();
+    let read_response = ReadResponse::decode(&decompressed_response[..]).unwrap();
+
+    assert_eq!(read_response.results.len(), 1);
+    assert_eq!(read_response.results[0].timeseries.len(), 1);
+
+    let timeseries = &read_response.results[0].timeseries[0];
+    assert_eq!(timeseries.samples.len(), 1);
+    assert_eq!(timeseries.samples[0].value, 100.0);
+    assert_eq!(timeseries.samples[0].timestamp, 1000);
+
+    // write data to unknown schema
+    let unknown_schema_series = TimeSeries {
+        labels: vec![
+            Label {
+                name: "__name__".to_string(),
+                value: "metric_unknown_schema".to_string(),
+            },
+            Label {
+                name: "__schema__".to_string(),
+                value: "unknown_schema".to_string(),
+            },
+            Label {
+                name: "instance".to_string(),
+                value: "host2".to_string(),
+            },
+        ],
+        samples: vec![Sample {
+            value: 200.0,
+            timestamp: 2000,
+        }],
+        ..Default::default()
+    };
+
+    let unknown_write_request = WriteRequest {
+        timeseries: vec![unknown_schema_series],
+        ..Default::default()
+    };
+    let serialized_unknown_request = unknown_write_request.encode_to_vec();
+    let compressed_unknown_request =
+        prom_store::snappy_compress(&serialized_unknown_request).expect("failed to encode snappy");
+
+    // Write data to unknown schema
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed_unknown_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Read data from unknown schema
+    let unknown_read_request = ReadRequest {
+        queries: vec![Query {
+            start_timestamp_ms: 1500,
+            end_timestamp_ms: 2500,
+            matchers: vec![
+                LabelMatcher {
+                    name: "__name__".to_string(),
+                    value: "metric_unknown_schema".to_string(),
+                    r#type: MatcherType::Eq as i32,
+                },
+                LabelMatcher {
+                    name: "__schema__".to_string(),
+                    value: "unknown_schema".to_string(),
+                    r#type: MatcherType::Eq as i32,
+                },
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let serialized_unknown_read_request = unknown_read_request.encode_to_vec();
+    let compressed_unknown_read_request =
+        prom_store::snappy_compress(&serialized_unknown_read_request)
+            .expect("failed to encode snappy");
+
+    let unknown_result = client
+        .post("/v1/prometheus/read")
+        .body(compressed_unknown_read_request)
+        .send()
+        .await;
+    assert_eq!(unknown_result.status(), StatusCode::BAD_REQUEST);
 
     guard.remove_all().await;
 }
@@ -1815,8 +2345,8 @@ pub async fn test_identity_pipeline(store_type: StorageType) {
 
     assert_eq!(res.status(), StatusCode::OK);
 
-    let line1_expected = r#"[null,"10.170.***.***",1453809242,"","10.200.**.***",[1,2,3],{"a":1,"b":2},"200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java",null,null]"#;
-    let line2_expected = r#"[null,"10.170.***.***",1453809242,"","10.200.**.***",[1,2,3],{"a":1,"b":2},"200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java","guaguagua","hasagei"]"#;
+    let line1_expected = r#"[null,"10.170.***.***",1453809242,"","10.200.**.***","[1,2,3]",1,2,"200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java",null,null]"#;
+    let line2_expected = r#"[null,"10.170.***.***",1453809242,"","10.200.**.***","[1,2,3]",1,2,"200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java","guaguagua","hasagei"]"#;
     let res = client.get("/v1/sql?sql=select * from logs").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let resp: serde_json::Value = res.json().await;
@@ -1839,7 +2369,7 @@ pub async fn test_identity_pipeline(store_type: StorageType) {
         serde_json::from_str::<Vec<Value>>(line2_expected).unwrap()
     );
 
-    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["json_array","Json","","YES","","FIELD"],["json_object","Json","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"]]"#;
+    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["json_array","String","","YES","","FIELD"],["json_object.a","Int64","","YES","","FIELD"],["json_object.b","Int64","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"]]"#;
     validate_data("identity_schema", &client, "desc logs", expected).await;
 
     guard.remove_all().await;
@@ -2049,6 +2579,98 @@ transform:
     guard.remove_all().await;
 }
 
+pub async fn test_pipeline_create_table(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_pipeline_create_table").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let pipeline_body = r#"
+processors:
+- dissect:
+    fields:
+      - message
+    patterns:
+      - '%{ip_address} - %{username} [%{timestamp}] "%{http_method} %{request_line} %{protocol}" %{status_code} %{response_size}'
+    ignore_missing: true
+- date:
+    fields:
+      - timestamp
+    formats:
+      - "%d/%b/%Y:%H:%M:%S %z"
+
+transform:
+  - fields:
+      - timestamp
+    type: time
+    index: timestamp
+  - fields:
+      - ip_address
+    type: string
+    index: skipping
+  - fields:
+      - username
+    type: string
+    tag: true
+  - fields:
+      - http_method
+    type: string
+    index: inverted
+  - fields:
+      - request_line
+    type: string
+    index: fulltext
+  - fields:
+      - protocol
+    type: string
+  - fields:
+      - status_code
+    type: int32
+    index: inverted
+    tag: true
+  - fields:
+      - response_size
+    type: int64
+    on_failure: default
+    default: 0
+  - fields:
+      - message
+    type: string
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = client
+        .get("/v1/pipelines/test/ddl?table=logs1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp: serde_json::Value = res.json().await;
+    let sql = resp
+        .get("sql")
+        .unwrap()
+        .get("sql")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert_eq!(
+        "CREATE TABLE IF NOT EXISTS `logs1` (\n  `timestamp` TIMESTAMP(9) NOT NULL,\n  `ip_address` STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  `username` STRING NULL,\n  `http_method` STRING NULL INVERTED INDEX,\n  `request_line` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false', false_positive_rate = '0.01', granularity = '10240'),\n  `protocol` STRING NULL,\n  `status_code` INT NULL INVERTED INDEX,\n  `response_size` BIGINT NULL,\n  `message` STRING NULL,\n  TIME INDEX (`timestamp`),\n  PRIMARY KEY (`username`, `status_code`)\n)\nENGINE=mito\nWITH(\n  append_mode = 'true'\n)",
+        sql
+    );
+
+    guard.remove_all().await;
+}
+
 pub async fn test_pipeline_dispatcher(storage_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -2069,12 +2691,12 @@ dispatcher:
   field: type
   rules:
     - value: http
-      table_suffix: http
+      table_suffix: _http
       pipeline: http
     - value: db
-      table_suffix: db
+      table_suffix: _db
     - value: not_found
-      table_suffix: not_found
+      table_suffix: _not_found
       pipeline: not_found
 
 transform:
@@ -2742,7 +3364,7 @@ pub async fn test_identity_pipeline_with_flatten(store_type: StorageType) {
 
     assert_eq!(StatusCode::OK, res.status());
 
-    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["custom_map.value_a","Json","","YES","","FIELD"],["custom_map.value_b","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"]]"#;
+    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["custom_map.value_a","String","","YES","","FIELD"],["custom_map.value_b","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"]]"#;
     validate_data(
         "test_identity_pipeline_with_flatten_desc_logs",
         &client,
@@ -2751,7 +3373,7 @@ pub async fn test_identity_pipeline_with_flatten(store_type: StorageType) {
     )
     .await;
 
-    let expected = "[[[\"a\",\"b\",\"c\"]]]";
+    let expected = "[[\"[\\\"a\\\",\\\"b\\\",\\\"c\\\"]\"]]";
     validate_data(
         "test_identity_pipeline_with_flatten_select_json",
         &client,
@@ -2906,37 +3528,37 @@ transform:
 
     let dryrun_schema = json!([
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "INT32",
             "fulltext": false,
             "name": "id1"
         },
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "INT32",
             "fulltext": false,
             "name": "id2"
         },
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "STRING",
             "fulltext": false,
             "name": "type"
         },
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "STRING",
             "fulltext": false,
             "name": "log"
         },
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "STRING",
             "fulltext": false,
             "name": "logger"
         },
         {
-            "colume_type": "TIMESTAMP",
+            "column_type": "TIMESTAMP",
             "data_type": "TIMESTAMP_NANOSECOND",
             "fulltext": false,
             "name": "time"
@@ -2978,7 +3600,7 @@ transform:
                 "data_type": "TIMESTAMP_NANOSECOND",
                 "key": "time",
                 "semantic_type": "TIMESTAMP",
-                "value": "2024-05-25 20:16:37.217+0000"
+                "value": 1716668197217000000i64
             }
         ],
         [
@@ -3016,7 +3638,7 @@ transform:
                 "data_type": "TIMESTAMP_NANOSECOND",
                 "key": "time",
                 "semantic_type": "TIMESTAMP",
-                "value": "2024-05-25 20:16:38.217+0000"
+                "value": 1716668198217000000i64
             }
         ]
     ]);
@@ -3190,7 +3812,12 @@ transform:
             .await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         let body: Value = res.json().await;
-        assert_eq!(body["error"], json!("Invalid request parameter: invalid content type: application/yaml, expected: one of application/json, application/x-ndjson, text/plain"));
+        assert_eq!(
+            body["error"],
+            json!(
+                "Invalid request parameter: invalid content type: application/yaml, expected: one of application/json, application/x-ndjson, text/plain"
+            )
+        );
 
         body_for_text["data_type"] = json!("application/json");
         let res = client
@@ -3203,7 +3830,9 @@ transform:
         let body: Value = res.json().await;
         assert_eq!(
             body["error"],
-            json!("Invalid request parameter: json format error, please check the date is valid JSON.")
+            json!(
+                "Invalid request parameter: json format error, please check the date is valid JSON."
+            )
         );
 
         body_for_text["data_type"] = json!("text/plain");
@@ -3587,13 +4216,14 @@ pub async fn test_pipeline_auto_transform_with_select(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-pub async fn test_otlp_metrics(store_type: StorageType) {
+pub async fn test_otlp_metrics_new(store_type: StorageType) {
     // init
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_metrics").await;
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_otlp_metrics_new").await;
 
     let content = r#"
-{"resourceMetrics":[{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","metadata":[],"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":"0","timeUnixNano":"1736489291872539000","exemplars":[],"flags":0,"asInt":0}]}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"},{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","metadata":[],"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":"0","timeUnixNano":"1736489291919917000","exemplars":[],"flags":0,"asInt":1}]}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"}]}
+{"resourceMetrics":[{"resource":{"attributes":[{"key":"host.arch","value":{"stringValue":"arm64"}},{"key":"os.type","value":{"stringValue":"darwin"}},{"key":"os.version","value":{"stringValue":"25.0.0"}},{"key":"service.name","value":{"stringValue":"claude-code"}},{"key":"service.version","value":{"stringValue":"1.0.62"}}],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"com.anthropic.claude_code","version":"1.0.62","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"claude_code.cost.usage","description":"Cost of the Claude Code session","unit":"USD","metadata":[],"sum":{"dataPoints":[{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"model","value":{"stringValue":"claude-3-5-haiku-20241022"}}],"startTimeUnixNano":"1753780502453000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":0.0052544},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"model","value":{"stringValue":"claude-sonnet-4-20250514"}}],"startTimeUnixNano":"1753780513420000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":2.244618}],"aggregationTemporality":1,"isMonotonic":true}},{"name":"claude_code.token.usage","description":"Number of tokens used","unit":"tokens","metadata":[],"sum":{"dataPoints":[{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"input"}},{"key":"model","value":{"stringValue":"claude-3-5-haiku-20241022"}}],"startTimeUnixNano":"1753780502453000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":6208.0},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"output"}},{"key":"model","value":{"stringValue":"claude-3-5-haiku-20241022"}}],"startTimeUnixNano":"1753780502453000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":72.0},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"cacheRead"}},{"key":"model","value":{"stringValue":"claude-3-5-haiku-20241022"}}],"startTimeUnixNano":"1753780502453000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":0.0},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"cacheCreation"}},{"key":"model","value":{"stringValue":"claude-3-5-haiku-20241022"}}],"startTimeUnixNano":"1753780502453000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":0.0},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"input"}},{"key":"model","value":{"stringValue":"claude-sonnet-4-20250514"}}],"startTimeUnixNano":"1753780513420000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":743056.0},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"output"}},{"key":"model","value":{"stringValue":"claude-sonnet-4-20250514"}}],"startTimeUnixNano":"1753780513420000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":1030.0},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"cacheRead"}},{"key":"model","value":{"stringValue":"claude-sonnet-4-20250514"}}],"startTimeUnixNano":"1753780513420000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":0.0},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"cacheCreation"}},{"key":"model","value":{"stringValue":"claude-sonnet-4-20250514"}}],"startTimeUnixNano":"1753780513420000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":0.0}],"aggregationTemporality":1,"isMonotonic":true}}],"schemaUrl":""}],"schemaUrl":""}]}
     "#;
 
     let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
@@ -3601,6 +4231,164 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
 
     // handshake
     let client = TestClient::new(app).await;
+
+    // write metrics data
+    // with scope attrs and all resource attrs
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-otlp-metric-promote-scope-attrs"),
+                HeaderValue::from_static("true"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-otlp-metric-promote-all-resource-attrs"),
+                HeaderValue::from_static("true"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-otlp-metric-ignore-resource-attrs"),
+                HeaderValue::from_static("os.type"),
+            ),
+        ],
+        "/v1/otlp/v1/metrics",
+        body.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = "[[\"claude_code_cost_usage_USD_total\"],[\"claude_code_token_usage_tokens_total\"],[\"demo\"],[\"greptime_physical_table\"],[\"numbers\"]]";
+    validate_data("otlp_metrics_all_tables", &client, "show tables;", expected).await;
+
+    // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage_USD_total" (
+    //   "greptime_timestamp" TIMESTAMP(3) NOT NULL,
+    //   "greptime_value" DOUBLE NULL,
+    //   "host_arch" STRING NULL,
+    //   "job" STRING NULL,
+    //   "model" STRING NULL,
+    //   "os_version" STRING NULL,
+    //   "otel_scope_name" STRING NULL,
+    //   "otel_scope_schema_url" STRING NULL,
+    //   "otel_scope_version" STRING NULL,
+    //   "service_name" STRING NULL,
+    //   "service_version" STRING NULL,
+    //   "session_id" STRING NULL,
+    //   "terminal_type" STRING NULL,
+    //   "user_id" STRING NULL,
+    //   TIME INDEX ("greptime_timestamp"),
+    //   PRIMARY KEY ("host_arch", "job", "model", "os_version", "otel_scope_name", "otel_scope_schema_url", "otel_scope_version", "service_name", "service_version", "session_id", "terminal_type", "user_id")
+    //   )
+    // ENGINE=metric
+    // WITH(
+    //   on_physical_table = 'greptime_physical_table',
+    //   otlp_metric_compat = 'prom'
+    // )
+    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"host_arch\\\" STRING NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"otel_scope_name\\\" STRING NULL,\\n  \\\"otel_scope_schema_url\\\" STRING NULL,\\n  \\\"otel_scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"host_arch\\\", \\\"job\\\", \\\"model\\\", \\\"os_version\\\", \\\"otel_scope_name\\\", \\\"otel_scope_schema_url\\\", \\\"otel_scope_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    validate_data(
+        "otlp_metrics_all_show_create_table",
+        &client,
+        "show create table `claude_code_cost_usage_USD_total`;",
+        expected,
+    )
+    .await;
+
+    // select metrics data
+    let expected = "[[1753780559836,0.0052544,\"arm64\",\"claude-code\",\"claude-3-5-haiku-20241022\",\"25.0.0\",\"com.anthropic.claude_code\",\"\",\"1.0.62\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"],[1753780559836,2.244618,\"arm64\",\"claude-code\",\"claude-sonnet-4-20250514\",\"25.0.0\",\"com.anthropic.claude_code\",\"\",\"1.0.62\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"]]";
+    validate_data(
+        "otlp_metrics_all_select",
+        &client,
+        "select * from `claude_code_cost_usage_USD_total`;",
+        expected,
+    )
+    .await;
+
+    // drop table
+    let res = client
+        .get("/v1/sql?sql=drop table `claude_code_cost_usage_USD_total`;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?sql=drop table claude_code_token_usage_tokens_total;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // write metrics data
+    // with scope attrs
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-otlp-metric-promote-resource-attrs"),
+                HeaderValue::from_static("os.type;os.version"),
+            ),
+        ],
+        "/v1/otlp/v1/metrics",
+        body.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage_USD_total" (
+    //     "greptime_timestamp" TIMESTAMP(3) NOT NULL,
+    //     "greptime_value" DOUBLE NULL,
+    //     "job" STRING NULL,
+    //     "model" STRING NULL,
+    //     "os_type" STRING NULL,
+    //     "os_version" STRING NULL,
+    //     "service_name" STRING NULL,
+    //     "service_version" STRING NULL,
+    //     "session_id" STRING NULL,
+    //     "terminal_type" STRING NULL,
+    //     "user_id" STRING NULL,
+    //     TIME INDEX ("greptime_timestamp"),
+    //     PRIMARY KEY ("job", "model", "os_type", "os_version", "service_name", "service_version", "session_id", "terminal_type", "user_id")
+    //     )
+    //   ENGINE=metric
+    //   WITH(
+    //     on_physical_table = 'greptime_physical_table',
+    //     otlp_metric_compat = 'prom'
+    //   )
+    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_type\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"job\\\", \\\"model\\\", \\\"os_type\\\", \\\"os_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    validate_data(
+        "otlp_metrics_show_create_table",
+        &client,
+        "show create table `claude_code_cost_usage_USD_total`;",
+        expected,
+    )
+    .await;
+
+    // select metrics data
+    let expected = "[[1753780559836,2.244618,\"claude-code\",\"claude-sonnet-4-20250514\",\"darwin\",\"25.0.0\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"],[1753780559836,0.0052544,\"claude-code\",\"claude-3-5-haiku-20241022\",\"darwin\",\"25.0.0\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"]]";
+    validate_data(
+        "otlp_metrics_select",
+        &client,
+        "select * from `claude_code_cost_usage_USD_total`;",
+        expected,
+    )
+    .await;
+
+    // drop table
+    let res = client
+        .get("/v1/sql?sql=drop table `claude_code_cost_usage_USD_total`;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?sql=drop table claude_code_token_usage_tokens_total;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
 
     // write metrics data
     let res = send_req(
@@ -3616,36 +4404,54 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
-    // select metrics data
-    let expected = "[[1736489291872539000,0.0],[1736489291919917000,1.0]]";
-    validate_data("otlp_metrics", &client, "select * from gen;", expected).await;
-
-    // drop table
-    let res = client.get("/v1/sql?sql=drop table gen;").send().await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // write metrics data with gzip
-    let res = send_req(
-        &client,
-        vec![(
-            HeaderName::from_static("content-type"),
-            HeaderValue::from_static("application/x-protobuf"),
-        )],
-        "/v1/otlp/v1/metrics",
-        body.clone(),
-        true,
-    )
-    .await;
-    assert_eq!(StatusCode::OK, res.status());
-
-    // select metrics data again
+    // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage_USD_total" (
+    //     "greptime_timestamp" TIMESTAMP(3) NOT NULL,
+    //     "greptime_value" DOUBLE NULL,
+    //     "job" STRING NULL,
+    //     "model" STRING NULL,
+    //     "service_name" STRING NULL,
+    //     "service_version" STRING NULL,
+    //     "session_id" STRING NULL,
+    //     "terminal_type" STRING NULL,
+    //     "user_id" STRING NULL,
+    //     TIME INDEX ("greptime_timestamp"),
+    //     PRIMARY KEY ("job", "model", "service_name", "service_version", "session_id", "terminal_type", "user_id")
+    //     )
+    //   ENGINE=metric
+    //   WITH(
+    //     on_physical_table = 'greptime_physical_table',
+    //     otlp_metric_compat = 'prom'
+    //   )
+    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"job\\\", \\\"model\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
     validate_data(
-        "otlp_metrics_with_gzip",
+        "otlp_metrics_show_create_table_none",
         &client,
-        "select * from gen;",
+        "show create table `claude_code_cost_usage_USD_total`;",
         expected,
     )
     .await;
+
+    // select metrics data
+    let expected = "[[1753780559836,0.0052544,\"claude-code\",\"claude-3-5-haiku-20241022\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"],[1753780559836,2.244618,\"claude-code\",\"claude-sonnet-4-20250514\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"]]";
+    validate_data(
+        "otlp_metrics_select_none",
+        &client,
+        "select * from `claude_code_cost_usage_USD_total`;",
+        expected,
+    )
+    .await;
+
+    // drop table
+    let res = client
+        .get("/v1/sql?sql=drop table `claude_code_cost_usage_USD_total`;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?sql=drop table claude_code_token_usage_tokens_total;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
 
     guard.remove_all().await;
 }
@@ -3692,6 +4498,19 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
         &format!(
             "select service_name from {};",
             trace_services_table_name(TRACE_TABLE_NAME)
+        ),
+        expected,
+    )
+    .await;
+
+    // Validate operations table
+    let expected = r#"[["telemetrygen","SPAN_KIND_CLIENT","lets-go"],["telemetrygen","SPAN_KIND_SERVER","okey-dokey-0"]]"#;
+    validate_data(
+        "otlp_traces_operations",
+        &client,
+        &format!(
+            "select service_name, span_kind, span_name from {} order by span_kind, span_name;",
+            trace_operations_table_name(TRACE_TABLE_NAME)
         ),
         expected,
     )
@@ -3807,6 +4626,19 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
         &format!(
             "select service_name from {};",
             trace_services_table_name(trace_table_name)
+        ),
+        expected,
+    )
+    .await;
+
+    // Validate operations table
+    let expected = r#"[["telemetrygen","SPAN_KIND_CLIENT","lets-go"],["telemetrygen","SPAN_KIND_SERVER","okey-dokey-0"]]"#;
+    validate_data(
+        "otlp_traces_operations_v1",
+        &client,
+        &format!(
+            "select service_name, span_kind, span_name from {} order by span_kind, span_name;",
+            trace_operations_table_name(trace_table_name)
         ),
         expected,
     )
@@ -4212,7 +5044,7 @@ processors:
     .await;
 
     // test content
-    let expected =      "[[1730976830000,\"test\",\"integration\",\"do anything\",\"this is a log message\",\"value1\",\"value2\",null],[1730976831000,\"test\",\"integration\",\"do anything\",\"this is a log message 2\",null,null,\"value3\"],[1730976832000,\"test\",\"integration\",\"do anything\",\"this is a log message 2\",null,null,null]]";
+    let expected = "[[1730976830000,\"test\",\"integration\",\"do anything\",\"this is a log message\",\"value1\",\"value2\",null],[1730976831000,\"test\",\"integration\",\"do anything\",\"this is a log message 2\",null,null,\"value3\"],[1730976832000,\"test\",\"integration\",\"do anything\",\"this is a log message 2\",null,null,null]]";
     validate_data(
         "loki_pb_content",
         &client,
@@ -4272,7 +5104,7 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // test schema
-    let expected =  "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"structured_metadata\\\" JSON NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"sender\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"structured_metadata\\\" JSON NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"sender\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "loki_json_schema",
         &client,
@@ -4498,7 +5330,7 @@ pub async fn test_log_query(store_type: StorageType) {
 
     // prepare data with SQL API
     let res = client
-        .get("/v1/sql?sql=create table logs (`ts` timestamp time index, message string);")
+        .get("/v1/sql?sql=create table logs (`ts` timestamp time index, `message` string);")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
@@ -4526,7 +5358,7 @@ pub async fn test_log_query(store_type: StorageType) {
             fetch: Some(1),
         },
         columns: vec!["ts".to_string(), "message".to_string()],
-        filters: vec![],
+        filters: Default::default(),
         context: Context::None,
         exprs: vec![],
     };
@@ -4802,6 +5634,11 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
               "value": "1.0.0"
             },
             {
+              "key": "otel.status_description",
+              "type": "string",
+              "value": "success"
+            },
+            {
               "key": "peer.service",
               "type": "string",
               "value": "test-jaeger-query-api"
@@ -4842,6 +5679,11 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
               "key": "otel.scope.version",
               "type": "string",
               "value": "1.0.0"
+            },
+            {
+              "key": "otel.status_description",
+              "type": "string",
+              "value": "success"
             },
             {
               "key": "peer.service",
@@ -4886,60 +5728,22 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
     let expected = r#"
 {
-    "data": [
+    "data":
+    [
         {
             "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-            "spans": [
-                {
-                    "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-                    "spanID": "008421dbbd33a3e9",
-                    "operationName": "access-mysql",
-                    "references": [],
-                    "startTime": 1738726754492421,
-                    "duration": 100000,
-                    "tags": [
-                        {
-                            "key": "net.peer.ip",
-                            "type": "string",
-                            "value": "1.2.3.4"
-                        },
-                        {
-                            "key": "operation.type",
-                            "type": "string",
-                            "value": "access-mysql"
-                        },
-                        {
-                            "key": "otel.scope.name",
-                            "type": "string",
-                            "value": "test-jaeger-query-api"
-                        },
-                        {
-                            "key": "otel.scope.version",
-                            "type": "string",
-                            "value": "1.0.0"
-                        },
-                        {
-                            "key": "peer.service",
-                            "type": "string",
-                            "value": "test-jaeger-query-api"
-                        },
-                        {
-                            "key": "span.kind",
-                            "type": "string",
-                            "value": "server"
-                        }
-                    ],
-                    "logs": [],
-                    "processID": "p1"
-                },
+            "spans":
+            [
                 {
                     "traceID": "5611dce1bc9ebed65352d99a027b08ea",
                     "spanID": "ffa03416a7b9ea48",
                     "operationName": "access-redis",
-                    "references": [],
+                    "references":
+                    [],
                     "startTime": 1738726754492422,
                     "duration": 100000,
-                    "tags": [
+                    "tags":
+                    [
                         {
                             "key": "net.peer.ip",
                             "type": "string",
@@ -4961,6 +5765,11 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
                             "value": "1.0.0"
                         },
                         {
+                            "key": "otel.status_description",
+                            "type": "string",
+                            "value": "success"
+                        },
+                        {
                             "key": "peer.service",
                             "type": "string",
                             "value": "test-jaeger-query-api"
@@ -4971,14 +5780,68 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
                             "value": "server"
                         }
                     ],
-                    "logs": [],
+                    "logs":
+                    [],
+                    "processID": "p1"
+                },
+                {
+                    "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+                    "spanID": "008421dbbd33a3e9",
+                    "operationName": "access-mysql",
+                    "references":
+                    [],
+                    "startTime": 1738726754492421,
+                    "duration": 100000,
+                    "tags":
+                    [
+                        {
+                            "key": "net.peer.ip",
+                            "type": "string",
+                            "value": "1.2.3.4"
+                        },
+                        {
+                            "key": "operation.type",
+                            "type": "string",
+                            "value": "access-mysql"
+                        },
+                        {
+                            "key": "otel.scope.name",
+                            "type": "string",
+                            "value": "test-jaeger-query-api"
+                        },
+                        {
+                            "key": "otel.scope.version",
+                            "type": "string",
+                            "value": "1.0.0"
+                        },
+                        {
+                            "key": "otel.status_description",
+                            "type": "string",
+                            "value": "success"
+                        },
+                        {
+                            "key": "peer.service",
+                            "type": "string",
+                            "value": "test-jaeger-query-api"
+                        },
+                        {
+                            "key": "span.kind",
+                            "type": "string",
+                            "value": "server"
+                        }
+                    ],
+                    "logs":
+                    [],
                     "processID": "p1"
                 }
             ],
-            "processes": {
-                "p1": {
+            "processes":
+            {
+                "p1":
+                {
                     "serviceName": "test-jaeger-query-api",
-                    "tags": []
+                    "tags":
+                    []
                 }
             }
         }
@@ -4986,7 +5849,8 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
     "total": 0,
     "limit": 0,
     "offset": 0,
-    "errors": []
+    "errors":
+    []
 }
     "#;
 
@@ -5143,6 +6007,34 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
                                 }
                             }
                         ]
+                    },
+                    {
+                        "scope": {
+                        "name": "test-jaeger-find-traces",
+                        "version": "1.0.0"
+                        },
+                        "spans": [
+                            {
+                                "traceId": "5611dce1bc9ebed65352d99a027b08fa",
+                                "spanId": "ffa03416a7b9ea49",
+                                "name": "access-pg",
+                                "kind": 2,
+                                "startTimeUnixNano": "1738726754492423000",
+                                "endTimeUnixNano": "1738726754592423000",
+                                "attributes": [
+                                    {
+                                        "key": "operation.type",
+                                        "value": {
+                                        "stringValue": "access-pg"
+                                        }
+                                    }
+                                ],
+                                "status": {
+                                    "message": "success",
+                                    "code": 0
+                                }
+                            }
+                        ]
                     }
                 ],
                 "schemaUrl": "https://opentelemetry.io/schemas/1.4.0"
@@ -5181,6 +6073,10 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
                 HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME),
             ),
             (
+                HeaderName::from_static("x-greptime-hints"),
+                HeaderValue::from_static("ttl=7d"),
+            ),
+            (
                 HeaderName::from_static("x-greptime-trace-table-name"),
                 HeaderValue::from_static(trace_table_name),
             ),
@@ -5191,6 +6087,24 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     )
     .await;
     assert_eq!(StatusCode::OK, res.status());
+
+    let trace_table_sql = "[[\"mytable\",\"CREATE TABLE IF NOT EXISTS \\\"mytable\\\" (\\n  \\\"timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"timestamp_end\\\" TIMESTAMP(9) NULL,\\n  \\\"duration_nano\\\" BIGINT UNSIGNED NULL,\\n  \\\"parent_span_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"trace_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_id\\\" STRING NULL,\\n  \\\"span_kind\\\" STRING NULL,\\n  \\\"span_name\\\" STRING NULL,\\n  \\\"span_status_code\\\" STRING NULL,\\n  \\\"span_status_message\\\" STRING NULL,\\n  \\\"trace_state\\\" STRING NULL,\\n  \\\"scope_name\\\" STRING NULL,\\n  \\\"scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_attributes.operation.type\\\" STRING NULL,\\n  \\\"span_attributes.net.peer.ip\\\" STRING NULL,\\n  \\\"span_attributes.peer.service\\\" STRING NULL,\\n  \\\"span_events\\\" JSON NULL,\\n  \\\"span_links\\\" JSON NULL,\\n  TIME INDEX (\\\"timestamp\\\"),\\n  PRIMARY KEY (\\\"service_name\\\")\\n)\\nPARTITION ON COLUMNS (\\\"trace_id\\\") (\\n  trace_id < '1',\\n  trace_id >= '1' AND trace_id < '2',\\n  trace_id >= '2' AND trace_id < '3',\\n  trace_id >= '3' AND trace_id < '4',\\n  trace_id >= '4' AND trace_id < '5',\\n  trace_id >= '5' AND trace_id < '6',\\n  trace_id >= '6' AND trace_id < '7',\\n  trace_id >= '7' AND trace_id < '8',\\n  trace_id >= '8' AND trace_id < '9',\\n  trace_id >= '9' AND trace_id < 'a',\\n  trace_id >= 'a' AND trace_id < 'b',\\n  trace_id >= 'b' AND trace_id < 'c',\\n  trace_id >= 'c' AND trace_id < 'd',\\n  trace_id >= 'd' AND trace_id < 'e',\\n  trace_id >= 'e' AND trace_id < 'f',\\n  trace_id >= 'f'\\n)\\nENGINE=mito\\nWITH(\\n  append_mode = 'true',\\n  table_data_model = 'greptime_trace_v1',\\n  ttl = '7days'\\n)\"]]";
+    validate_data(
+        "trace_v1_create_table",
+        &client,
+        "show create table mytable;",
+        trace_table_sql,
+    )
+    .await;
+
+    let trace_meta_table_sql = "[[\"mytable_services\",\"CREATE TABLE IF NOT EXISTS \\\"mytable_services\\\" (\\n  \\\"timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  TIME INDEX (\\\"timestamp\\\"),\\n  PRIMARY KEY (\\\"service_name\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'false'\\n)\"]]";
+    validate_data(
+        "trace_v1_create_meta_table",
+        &client,
+        "show create table mytable_services;",
+        trace_meta_table_sql,
+    )
+    .await;
 
     // Test `/api/services` API.
     let res = client
@@ -5218,7 +6132,6 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     let res = client
         .get("/v1/jaeger/api/operations?service=test-jaeger-query-api")
         .header("x-greptime-trace-table-name", trace_table_name)
-        .header(JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER, "3 days")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
@@ -5226,11 +6139,19 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     {
         "data": [
             {
+                "name": "access-mysql",
+                "spanKind": "server"
+            },
+            {
                 "name": "access-pg",
+                "spanKind": "server"
+            },
+            {
+                "name": "access-redis",
                 "spanKind": "server"
             }
         ],
-        "total": 1,
+        "total": 3,
         "limit": 0,
         "offset": 0,
         "errors": []
@@ -5251,9 +6172,10 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     {
         "data": [
             "access-mysql",
+            "access-pg",
             "access-redis"
         ],
-        "total": 2,
+        "total": 3,
         "limit": 0,
         "offset": 0,
         "errors": []
@@ -5304,6 +6226,11 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
               "value": "1.0.0"
             },
             {
+              "key": "otel.status_description",
+              "type": "string",
+              "value": "success"
+            },
+            {
               "key": "peer.service",
               "type": "string",
               "value": "test-jaeger-query-api"
@@ -5344,6 +6271,11 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
               "key": "otel.scope.version",
               "type": "string",
               "value": "1.0.0"
+            },
+            {
+              "key": "otel.status_description",
+              "type": "string",
+              "value": "success"
             },
             {
               "key": "peer.service",
@@ -5420,6 +6352,11 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
               "value": "1.0.0"
             },
             {
+              "key": "otel.status_description",
+              "type": "string",
+              "value": "success"
+            },
+            {
               "key": "peer.service",
               "type": "string",
               "value": "test-jaeger-query-api"
@@ -5460,6 +6397,11 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
               "key": "otel.scope.version",
               "type": "string",
               "value": "1.0.0"
+            },
+            {
+              "key": "otel.status_description",
+              "type": "string",
+              "value": "success"
             },
             {
               "key": "peer.service",
@@ -5510,6 +6452,53 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
             "spans": [
                 {
                     "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+                    "spanID": "ffa03416a7b9ea48",
+                    "operationName": "access-redis",
+                    "references": [],
+                    "startTime": 1738726754492422,
+                    "duration": 100000,
+                    "tags": [
+                        {
+                            "key": "net.peer.ip",
+                            "type": "string",
+                            "value": "1.2.3.4"
+                        },
+                        {
+                            "key": "operation.type",
+                            "type": "string",
+                            "value": "access-redis"
+                        },
+                        {
+                            "key": "otel.scope.name",
+                            "type": "string",
+                            "value": "test-jaeger-query-api"
+                        },
+                        {
+                            "key": "otel.scope.version",
+                            "type": "string",
+                            "value": "1.0.0"
+                        },
+                        {
+                            "key": "otel.status_description",
+                            "type": "string",
+                            "value": "success"
+                        },
+                        {
+                            "key": "peer.service",
+                            "type": "string",
+                            "value": "test-jaeger-query-api"
+                        },
+                        {
+                            "key": "span.kind",
+                            "type": "string",
+                            "value": "server"
+                        }
+                    ],
+                    "logs": [],
+                    "processID": "p1"
+                },
+                {
+                    "traceID": "5611dce1bc9ebed65352d99a027b08ea",
                     "spanID": "008421dbbd33a3e9",
                     "operationName": "access-mysql",
                     "references": [],
@@ -5537,46 +6526,9 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
                             "value": "1.0.0"
                         },
                         {
-                            "key": "peer.service",
+                            "key": "otel.status_description",
                             "type": "string",
-                            "value": "test-jaeger-query-api"
-                        },
-                        {
-                            "key": "span.kind",
-                            "type": "string",
-                            "value": "server"
-                        }
-                    ],
-                    "logs": [],
-                    "processID": "p1"
-                },
-                {
-                    "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-                    "spanID": "ffa03416a7b9ea48",
-                    "operationName": "access-redis",
-                    "references": [],
-                    "startTime": 1738726754492422,
-                    "duration": 100000,
-                    "tags": [
-                        {
-                            "key": "net.peer.ip",
-                            "type": "string",
-                            "value": "1.2.3.4"
-                        },
-                        {
-                            "key": "operation.type",
-                            "type": "string",
-                            "value": "access-redis"
-                        },
-                        {
-                            "key": "otel.scope.name",
-                            "type": "string",
-                            "value": "test-jaeger-query-api"
-                        },
-                        {
-                            "key": "otel.scope.version",
-                            "type": "string",
-                            "value": "1.0.0"
+                            "value": "success"
                         },
                         {
                             "key": "peer.service",
@@ -5607,6 +6559,39 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     "errors": []
 }
     "#;
+
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    // Test `/api/traces` API with tags.
+    // 1. first query without tags, get 2 results
+    let res = client
+            .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754492422&end=1738726754592422")
+            .header("x-greptime-trace-table-name", trace_table_name)
+            .send()
+            .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = r#"
+{"data":[{"processes":{"p1":{"serviceName":"test-jaeger-query-api","tags":[]}},"spans":[{"duration":100000,"logs":[],"operationName":"access-redis","processID":"p1","references":[],"spanID":"ffa03416a7b9ea48","startTime":1738726754492422,"tags":[{"key":"net.peer.ip","type":"string","value":"1.2.3.4"},{"key":"operation.type","type":"string","value":"access-redis"},{"key":"otel.scope.name","type":"string","value":"test-jaeger-query-api"},{"key":"otel.scope.version","type":"string","value":"1.0.0"},{"key":"otel.status_description","type":"string","value":"success"},{"key":"peer.service","type":"string","value":"test-jaeger-query-api"},{"key":"span.kind","type":"string","value":"server"}],"traceID":"5611dce1bc9ebed65352d99a027b08ea"}],"traceID":"5611dce1bc9ebed65352d99a027b08ea"},{"processes":{"p1":{"serviceName":"test-jaeger-query-api","tags":[]}},"spans":[{"duration":100000,"logs":[],"operationName":"access-pg","processID":"p1","references":[],"spanID":"ffa03416a7b9ea49","startTime":1738726754492423,"tags":[{"key":"operation.type","type":"string","value":"access-pg"},{"key":"otel.scope.name","type":"string","value":"test-jaeger-find-traces"},{"key":"otel.scope.version","type":"string","value":"1.0.0"},{"key":"otel.status_description","type":"string","value":"success"},{"key":"span.kind","type":"string","value":"server"}],"traceID":"5611dce1bc9ebed65352d99a027b08fa"}],"traceID":"5611dce1bc9ebed65352d99a027b08fa"}],"errors":[],"limit":0,"offset":0,"total":0}
+    "#;
+
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    // 2. second query with tags, get 1 result
+    let res = client
+.get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754492422&end=1738726754592422&tags=%7B%22operation.type%22%3A%22access-pg%22%7D")
+.header("x-greptime-trace-table-name", trace_table_name)
+.send()
+.await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = r#"
+{"data":[{"processes":{"p1":{"serviceName":"test-jaeger-query-api","tags":[]}},"spans":[{"duration":100000,"logs":[],"operationName":"access-pg","processID":"p1","references":[],"spanID":"ffa03416a7b9ea49","startTime":1738726754492423,"tags":[{"key":"operation.type","type":"string","value":"access-pg"},{"key":"otel.scope.name","type":"string","value":"test-jaeger-find-traces"},{"key":"otel.scope.version","type":"string","value":"1.0.0"},{"key":"otel.status_description","type":"string","value":"success"},{"key":"span.kind","type":"string","value":"server"}],"traceID":"5611dce1bc9ebed65352d99a027b08fa"}],"traceID":"5611dce1bc9ebed65352d99a027b08fa"}],"errors":[],"limit":0,"offset":0,"total":0}
+"#;
 
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
     let expected: Value = serde_json::from_str(expected).unwrap();
@@ -5653,7 +6638,7 @@ pub async fn test_influxdb_write(store_type: StorageType) {
     validate_data(
         "test_influxdb_write",
         &client,
-        "select * from test_alter order by ts;",
+        "select * from test_alter order by greptime_timestamp;",
         expected,
     )
     .await;

@@ -14,16 +14,17 @@
 
 //! functions registry
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
+use datafusion::catalog::TableFunction;
 use datafusion_expr::AggregateUDF;
-use once_cell::sync::Lazy;
 
 use crate::admin::AdminFunction;
+use crate::aggrs::aggr_wrapper::StateMergeHelper;
 use crate::aggrs::approximate::ApproximateFunction;
 use crate::aggrs::count_hash::CountHash;
 use crate::aggrs::vector::VectorFunction as VectorAggrFunction;
-use crate::function::{AsyncFunctionRef, Function, FunctionRef};
+use crate::function::{Function, FunctionRef};
 use crate::function_factory::ScalarFunctionFactory;
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
@@ -33,6 +34,7 @@ use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
 use crate::scalars::matches_term::MatchesTermFunction;
 use crate::scalars::math::MathFunction;
+use crate::scalars::string::register_string_functions;
 use crate::scalars::timestamp::TimestampFunction;
 use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
 use crate::scalars::vector::VectorFunction as VectorScalarFunction;
@@ -41,11 +43,19 @@ use crate::system::SystemFunction;
 #[derive(Default)]
 pub struct FunctionRegistry {
     functions: RwLock<HashMap<String, ScalarFunctionFactory>>,
-    async_functions: RwLock<HashMap<String, AsyncFunctionRef>>,
     aggregate_functions: RwLock<HashMap<String, AggregateUDF>>,
+    table_functions: RwLock<HashMap<String, Arc<TableFunction>>>,
 }
 
 impl FunctionRegistry {
+    /// Register a function in the registry by converting it into a `ScalarFunctionFactory`.
+    ///
+    /// # Arguments
+    ///
+    /// * `func` - An object that can be converted into a `ScalarFunctionFactory`.
+    ///
+    /// The function is inserted into the internal function map, keyed by its name.
+    /// If a function with the same name already exists, it will be replaced.
     pub fn register(&self, func: impl Into<ScalarFunctionFactory>) {
         let func = func.into();
         let _ = self
@@ -55,18 +65,23 @@ impl FunctionRegistry {
             .insert(func.name().to_string(), func);
     }
 
+    /// Register a scalar function in the registry.
     pub fn register_scalar(&self, func: impl Function + 'static) {
-        self.register(Arc::new(func) as FunctionRef);
+        let func = Arc::new(func) as FunctionRef;
+
+        for alias in func.aliases() {
+            let func: ScalarFunctionFactory = func.clone().into();
+            let alias = ScalarFunctionFactory {
+                name: alias.clone(),
+                ..func
+            };
+            self.register(alias);
+        }
+
+        self.register(func)
     }
 
-    pub fn register_async(&self, func: AsyncFunctionRef) {
-        let _ = self
-            .async_functions
-            .write()
-            .unwrap()
-            .insert(func.name().to_string(), func);
-    }
-
+    /// Register an aggregate function in the registry.
     pub fn register_aggr(&self, func: AggregateUDF) {
         let _ = self
             .aggregate_functions
@@ -75,28 +90,25 @@ impl FunctionRegistry {
             .insert(func.name().to_string(), func);
     }
 
-    pub fn get_async_function(&self, name: &str) -> Option<AsyncFunctionRef> {
-        self.async_functions.read().unwrap().get(name).cloned()
-    }
-
-    pub fn async_functions(&self) -> Vec<AsyncFunctionRef> {
-        self.async_functions
-            .read()
+    /// Register a table function
+    pub fn register_table_function(&self, func: TableFunction) {
+        let _ = self
+            .table_functions
+            .write()
             .unwrap()
-            .values()
-            .cloned()
-            .collect()
+            .insert(func.name().to_string(), Arc::new(func));
     }
 
-    #[cfg(test)]
     pub fn get_function(&self, name: &str) -> Option<ScalarFunctionFactory> {
         self.functions.read().unwrap().get(name).cloned()
     }
 
+    /// Returns a list of all scalar functions registered in the registry.
     pub fn scalar_functions(&self) -> Vec<ScalarFunctionFactory> {
         self.functions.read().unwrap().values().cloned().collect()
     }
 
+    /// Returns a list of all aggregate functions registered in the registry.
     pub fn aggregate_functions(&self) -> Vec<AggregateUDF> {
         self.aggregate_functions
             .read()
@@ -105,9 +117,23 @@ impl FunctionRegistry {
             .cloned()
             .collect()
     }
+
+    pub fn table_functions(&self) -> Vec<Arc<TableFunction>> {
+        self.table_functions
+            .read()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Returns true if an aggregate function with the given name exists in the registry.
+    pub fn is_aggr_func_exist(&self, name: &str) -> bool {
+        self.aggregate_functions.read().unwrap().contains_key(name)
+    }
 }
 
-pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
+pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(|| {
     let function_registry = FunctionRegistry::default();
 
     // Utility functions
@@ -129,6 +155,9 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     // Json related functions
     JsonFunction::register(&function_registry);
 
+    // String related functions
+    register_string_functions(&function_registry);
+
     // Vector related functions
     VectorScalarFunction::register(&function_registry);
     VectorAggrFunction::register(&function_registry);
@@ -148,6 +177,9 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     // CountHash function
     CountHash::register(&function_registry);
 
+    // state function of supported aggregate functions
+    StateMergeHelper::register(&function_registry);
+
     Arc::new(function_registry)
 });
 
@@ -162,7 +194,7 @@ mod tests {
 
         assert!(registry.get_function("test_and").is_none());
         assert!(registry.scalar_functions().is_empty());
-        registry.register_scalar(TestAndFunction);
+        registry.register_scalar(TestAndFunction::default());
         let _ = registry.get_function("test_and").unwrap();
         assert_eq!(1, registry.scalar_functions().len());
     }

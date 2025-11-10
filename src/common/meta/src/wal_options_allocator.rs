@@ -22,12 +22,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_wal::config::MetasrvWalConfig;
-use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
-use snafu::{ensure, ResultExt};
+use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
+use snafu::{ResultExt, ensure};
 use store_api::storage::{RegionId, RegionNumber};
 
 use crate::error::{EncodeWalOptionsSnafu, InvalidTopicNamePrefixSnafu, Result};
-use crate::key::NAME_PATTERN_REGEX;
+use crate::key::TOPIC_NAME_PATTERN_REGEX;
 use crate::kv_backend::KvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
 pub use crate::wal_options_allocator::topic_creator::{
@@ -109,7 +109,7 @@ pub async fn build_wal_options_allocator(
         MetasrvWalConfig::Kafka(kafka_config) => {
             let prefix = &kafka_config.kafka_topic.topic_name_prefix;
             ensure!(
-                NAME_PATTERN_REGEX.is_match(prefix),
+                TOPIC_NAME_PATTERN_REGEX.is_match(prefix),
                 InvalidTopicNamePrefixSnafu { prefix }
             );
             let topic_creator =
@@ -149,12 +149,32 @@ pub fn prepare_wal_options(
     }
 }
 
+/// Extracts the topic from the wal options.
+pub fn extract_topic_from_wal_options(
+    region_id: RegionId,
+    region_options: &HashMap<RegionNumber, String>,
+) -> Option<String> {
+    region_options
+        .get(&region_id.region_number())
+        .and_then(|wal_options| {
+            serde_json::from_str::<WalOptions>(wal_options)
+                .ok()
+                .and_then(|wal_options| {
+                    if let WalOptions::Kafka(kafka_wal_option) = wal_options {
+                        Some(kafka_wal_option.topic)
+                    } else {
+                        None
+                    }
+                })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use common_wal::config::kafka::common::KafkaTopicConfig;
     use common_wal::config::kafka::MetasrvKafkaConfig;
+    use common_wal::config::kafka::common::KafkaTopicConfig;
     use common_wal::maybe_skip_kafka_integration_test;
     use common_wal::test_util::get_kafka_endpoints;
 

@@ -32,7 +32,7 @@ use crate::request::OptionOutputTx;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::handle_drop::remove_region_dir_once;
-use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
+use crate::worker::{DROPPING_MARKER_FILE, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     async fn check_and_cleanup_region(
@@ -43,8 +43,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let object_store = if let Some(storage_name) = request.options.get(STORAGE_KEY) {
             self.object_store_manager
                 .find(storage_name)
-                .context(ObjectStoreNotFoundSnafu {
-                    object_store: storage_name.to_string(),
+                .with_context(|| ObjectStoreNotFoundSnafu {
+                    object_store: storage_name.clone(),
                 })?
         } else {
             self.object_store_manager.default_object_store()
@@ -103,10 +103,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.puffin_manager_factory.clone(),
             self.intermediate_manager.clone(),
             self.time_provider.clone(),
+            self.file_ref_manager.clone(),
+            self.partition_expr_fetcher.clone(),
         )
         .skip_wal_replay(request.skip_wal_replay)
         .cache(Some(self.cache_manager.clone()))
         .wal_entry_reader(wal_entry_receiver.map(|receiver| Box::new(receiver) as _))
+        .replay_checkpoint(request.checkpoint.map(|checkpoint| checkpoint.entry_id))
         .parse_options(request.options)
         {
             Ok(opener) => opener,

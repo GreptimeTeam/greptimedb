@@ -25,13 +25,16 @@ use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
+use common_error::ext::BoxedError;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
-use common_meta::heartbeat::handler::HandlerGroupExecutor;
+use common_query::prelude::set_default_prefix;
+use common_stat::ResourceStatImpl;
 use common_telemetry::info;
-use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
+use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
 use frontend::frontend::Frontend;
@@ -41,13 +44,14 @@ use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
 use servers::addrs;
 use servers::export_metrics::ExportMetricsTask;
+use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, Result};
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{create_resource_limit_metrics, log_versions, App};
+use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
 type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions>;
 
@@ -144,6 +148,14 @@ pub struct StartCommand {
     /// on the host, with the same port number as the one specified in `rpc_bind_addr`.
     #[clap(long, alias = "rpc-hostname")]
     rpc_server_addr: Option<String>,
+    /// The address to bind the internal gRPC server.
+    #[clap(long, alias = "internal-rpc-addr")]
+    internal_rpc_bind_addr: Option<String>,
+    /// The address advertised to the metasrv, and used for connections from outside the host.
+    /// If left empty or unset, the server will automatically use the IP address of the first network interface
+    /// on the host, with the same port number as the one specified in `internal_rpc_bind_addr`.
+    #[clap(long, alias = "internal-rpc-hostname")]
+    internal_rpc_server_addr: Option<String>,
     #[clap(long)]
     http_addr: Option<String>,
     #[clap(long)]
@@ -241,6 +253,31 @@ impl StartCommand {
             opts.grpc.server_addr.clone_from(addr);
         }
 
+        if let Some(addr) = &self.internal_rpc_bind_addr {
+            if let Some(internal_grpc) = &mut opts.internal_grpc {
+                internal_grpc.bind_addr = addr.clone();
+            } else {
+                let grpc_options = GrpcOptions {
+                    bind_addr: addr.clone(),
+                    ..Default::default()
+                };
+
+                opts.internal_grpc = Some(grpc_options);
+            }
+        }
+
+        if let Some(addr) = &self.internal_rpc_server_addr {
+            if let Some(internal_grpc) = &mut opts.internal_grpc {
+                internal_grpc.server_addr = addr.clone();
+            } else {
+                let grpc_options = GrpcOptions {
+                    server_addr: addr.clone(),
+                    ..Default::default()
+                };
+                opts.internal_grpc = Some(grpc_options);
+            }
+        }
+
         if let Some(addr) = &self.mysql_addr {
             opts.mysql.enable = true;
             opts.mysql.addr.clone_from(addr);
@@ -279,10 +316,11 @@ impl StartCommand {
             &opts.component.logging,
             &opts.component.tracing,
             opts.component.node_id.clone(),
-            opts.component.slow_query.as_ref(),
+            Some(&opts.component.slow_query),
         );
 
         log_versions(verbose_version(), short_version(), APP_NAME);
+        maybe_activate_heap_profile(&opts.component.memory);
         create_resource_limit_metrics(APP_NAME);
 
         info!("Frontend start command: {:#?}", self);
@@ -297,6 +335,9 @@ impl StartCommand {
             .context(error::StartFrontendSnafu)?;
 
         set_default_timezone(opts.default_timezone.as_deref()).context(error::InitTimezoneSnafu)?;
+        set_default_prefix(opts.default_column_prefix.as_deref())
+            .map_err(BoxedError::new)
+            .context(error::BuildCliSnafu)?;
 
         let meta_client_options = opts
             .meta_client
@@ -343,8 +384,24 @@ impl StartCommand {
             .build(),
         );
 
-        let information_extension =
-            Arc::new(DistributedInformationExtension::new(meta_client.clone()));
+        // frontend to datanode need not timeout.
+        // Some queries are expected to take long time.
+        let mut channel_config = ChannelConfig {
+            timeout: None,
+            tcp_nodelay: opts.datanode.client.tcp_nodelay,
+            connect_timeout: Some(opts.datanode.client.connect_timeout),
+            ..Default::default()
+        };
+        if opts.grpc.flight_compression.transport_compression() {
+            channel_config.accept_compression = true;
+            channel_config.send_compression = true;
+        }
+        let client = Arc::new(NodeClients::new(channel_config));
+
+        let information_extension = Arc::new(DistributedInformationExtension::new(
+            meta_client.clone(),
+            client.clone(),
+        ));
 
         let process_manager = Arc::new(ProcessManager::new(
             addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
@@ -370,34 +427,24 @@ impl StartCommand {
             Arc::new(InvalidateCacheHandler::new(layered_cache_registry.clone())),
         ]);
 
+        let mut resource_stat = ResourceStatImpl::default();
+        resource_stat.start_collect_cpu_usage();
+
         let heartbeat_task = HeartbeatTask::new(
             &opts,
             meta_client.clone(),
             opts.heartbeat.clone(),
             Arc::new(executor),
+            Arc::new(resource_stat),
         );
         let heartbeat_task = Some(heartbeat_task);
-
-        // frontend to datanode need not timeout.
-        // Some queries are expected to take long time.
-        let mut channel_config = ChannelConfig {
-            timeout: None,
-            tcp_nodelay: opts.datanode.client.tcp_nodelay,
-            connect_timeout: Some(opts.datanode.client.connect_timeout),
-            ..Default::default()
-        };
-        if opts.grpc.flight_compression.transport_compression() {
-            channel_config.accept_compression = true;
-            channel_config.send_compression = true;
-        }
-        let client = NodeClients::new(channel_config);
 
         let instance = FrontendBuilder::new(
             opts.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             catalog_manager,
-            Arc::new(client),
+            client,
             meta_client,
             process_manager,
         )
@@ -447,6 +494,8 @@ mod tests {
             http_addr: Some("127.0.0.1:1234".to_string()),
             mysql_addr: Some("127.0.0.1:5678".to_string()),
             postgres_addr: Some("127.0.0.1:5432".to_string()),
+            internal_rpc_bind_addr: Some("127.0.0.1:4010".to_string()),
+            internal_rpc_server_addr: Some("10.0.0.24:4010".to_string()),
             influxdb_enable: Some(false),
             disable_dashboard: Some(false),
             ..Default::default()
@@ -458,6 +507,10 @@ mod tests {
         assert_eq!(ReadableSize::mb(64), opts.http.body_limit);
         assert_eq!(opts.mysql.addr, "127.0.0.1:5678");
         assert_eq!(opts.postgres.addr, "127.0.0.1:5432");
+
+        let internal_grpc = opts.internal_grpc.as_ref().unwrap();
+        assert_eq!(internal_grpc.bind_addr, "127.0.0.1:4010");
+        assert_eq!(internal_grpc.server_addr, "10.0.0.24:4010");
 
         let default_opts = FrontendOptions::default().component;
 

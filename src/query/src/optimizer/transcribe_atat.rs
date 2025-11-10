@@ -16,14 +16,12 @@ use std::sync::Arc;
 
 use common_function::scalars::matches_term::MatchesTermFunction;
 use common_function::scalars::udf::create_udf;
-use common_function::state::FunctionState;
 use datafusion::config::ConfigOptions;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::Result;
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::analyzer::AnalyzerRule;
-use session::context::QueryContext;
 
 use crate::plan::ExtractExpr;
 
@@ -88,11 +86,7 @@ impl TreeNodeRewriter for TranscribeAtatRewriter {
             && matches!(binary_expr.op, datafusion_expr::Operator::AtAt)
         {
             self.transcribed = true;
-            let scalar_udf = create_udf(
-                Arc::new(MatchesTermFunction),
-                QueryContext::arc(),
-                Arc::new(FunctionState::default()),
-            );
+            let scalar_udf = create_udf(Arc::new(MatchesTermFunction::default()));
             let exprs = vec![
                 binary_expr.left.as_ref().clone(),
                 binary_expr.right.as_ref().clone(),
@@ -109,8 +103,8 @@ impl TreeNodeRewriter for TranscribeAtatRewriter {
 mod tests {
 
     use arrow_schema::SchemaRef;
-    use datafusion::datasource::{provider_as_source, MemTable};
-    use datafusion::logical_expr::{col, lit, LogicalPlan, LogicalPlanBuilder};
+    use datafusion::datasource::{MemTable, provider_as_source};
+    use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder, col, lit};
     use datafusion_expr::{BinaryExpr, Operator};
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
 
@@ -125,7 +119,7 @@ mod tests {
             Field::new("a", DataType::Utf8, false),
             Field::new("b", DataType::Utf8, false),
         ]);
-        let table = MemTable::try_new(SchemaRef::from(schema), vec![]).unwrap();
+        let table = MemTable::try_new(SchemaRef::from(schema), vec![vec![]]).unwrap();
         LogicalPlanBuilder::scan("t", provider_as_source(Arc::new(table)), None).unwrap()
     }
 

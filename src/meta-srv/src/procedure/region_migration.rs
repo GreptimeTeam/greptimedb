@@ -27,24 +27,29 @@ pub(crate) mod upgrade_candidate_region;
 
 use std::any::Any;
 use std::fmt::{Debug, Display};
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_error::ext::BoxedError;
+use common_event_recorder::{Event, Eventable};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::RegionFailureDetectorControllerRef;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
+use common_meta::key::topic_region::{ReplayCheckpoint, TopicRegionKey};
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
-use common_meta::kv_backend::ResettableKvBackendRef;
+use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
-use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status, StringKey};
+use common_procedure::{
+    Context as ProcedureContext, LockKey, Procedure, Status, StringKey, UserMetadata,
+};
 use common_telemetry::{error, info};
 use manager::RegionMigrationProcedureGuard;
 pub use manager::{
@@ -58,6 +63,7 @@ use tokio::time::Instant;
 
 use self::migration_start::RegionMigrationStart;
 use crate::error::{self, Result};
+use crate::events::region_migration_event::RegionMigrationEvent;
 use crate::metrics::{
     METRIC_META_REGION_MIGRATION_ERROR, METRIC_META_REGION_MIGRATION_EXECUTE,
     METRIC_META_REGION_MIGRATION_STAGE_ELAPSED,
@@ -75,21 +81,21 @@ pub const DEFAULT_REGION_MIGRATION_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistentContext {
     /// The table catalog.
-    catalog: String,
+    pub(crate) catalog: String,
     /// The table schema.
-    schema: String,
+    pub(crate) schema: String,
     /// The [Peer] of migration source.
-    from_peer: Peer,
+    pub(crate) from_peer: Peer,
     /// The [Peer] of migration destination.
-    to_peer: Peer,
+    pub(crate) to_peer: Peer,
     /// The [RegionId] of migration region.
-    region_id: RegionId,
+    pub(crate) region_id: RegionId,
     /// The timeout for downgrading leader region and upgrading candidate region operations.
     #[serde(with = "humantime_serde", default = "default_timeout")]
-    timeout: Duration,
+    pub(crate) timeout: Duration,
     /// The trigger reason of region migration.
     #[serde(default)]
-    trigger_reason: RegionMigrationTriggerReason,
+    pub(crate) trigger_reason: RegionMigrationTriggerReason,
 }
 
 fn default_timeout() -> Duration {
@@ -106,6 +112,12 @@ impl PersistentContext {
         ];
 
         lock_key
+    }
+}
+
+impl Eventable for PersistentContext {
+    fn to_event(&self) -> Option<Box<dyn Event>> {
+        Some(Box::new(RegionMigrationEvent::from_persistent_ctx(self)))
     }
 }
 
@@ -307,7 +319,7 @@ impl DefaultContextFactory {
 impl ContextFactory for DefaultContextFactory {
     fn new_context(self, persistent_ctx: PersistentContext) -> Context {
         Context {
-            persistent_ctx,
+            persistent_ctx: Arc::new(persistent_ctx),
             volatile_ctx: self.volatile_ctx,
             in_memory: self.in_memory_key,
             table_metadata_manager: self.table_metadata_manager,
@@ -322,9 +334,9 @@ impl ContextFactory for DefaultContextFactory {
 
 /// The context of procedure execution.
 pub struct Context {
-    persistent_ctx: PersistentContext,
+    persistent_ctx: Arc<PersistentContext>,
     volatile_ctx: VolatileContext,
-    in_memory: ResettableKvBackendRef,
+    in_memory: KvBackendRef,
     table_metadata_manager: TableMetadataManagerRef,
     opening_region_keeper: MemoryRegionKeeperRef,
     region_failure_detector_controller: RegionFailureDetectorControllerRef,
@@ -523,6 +535,20 @@ impl Context {
         Ok(datanode_value.as_ref().unwrap())
     }
 
+    /// Fetches the replay checkpoint for the given topic.
+    pub async fn fetch_replay_checkpoint(&self, topic: &str) -> Result<Option<ReplayCheckpoint>> {
+        let region_id = self.region_id();
+        let topic_region_key = TopicRegionKey::new(region_id, topic);
+        let value = self
+            .table_metadata_manager
+            .topic_region_manager()
+            .get(topic_region_key)
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
+
+        Ok(value.and_then(|value| value.checkpoint))
+    }
+
     /// Returns the [RegionId].
     pub fn region_id(&self) -> RegionId {
         self.persistent_ctx.region_id
@@ -538,6 +564,11 @@ impl Context {
             .invalidate(&ctx, &[CacheIdent::TableId(table_id)])
             .await;
         Ok(())
+    }
+
+    /// Returns the [PersistentContext] of the procedure.
+    pub fn persistent_ctx(&self) -> Arc<PersistentContext> {
+        self.persistent_ctx.clone()
     }
 }
 
@@ -743,6 +774,10 @@ impl Procedure for RegionMigrationProcedure {
     fn lock_key(&self) -> LockKey {
         LockKey::new(self.context.persistent_ctx.lock_key())
     }
+
+    fn user_metadata(&self) -> Option<UserMetadata> {
+        Some(UserMetadata::new(self.context.persistent_ctx()))
+    }
 }
 
 #[cfg(test)]
@@ -761,7 +796,7 @@ mod tests {
     use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
     use crate::procedure::region_migration::test_util::*;
     use crate::procedure::test_util::{
-        new_downgrade_region_reply, new_flush_region_reply, new_open_region_reply,
+        new_downgrade_region_reply, new_flush_region_reply_for_region, new_open_region_reply,
         new_upgrade_region_reply,
     };
     use crate::service::mailbox::Channel;
@@ -1281,7 +1316,9 @@ mod tests {
                 "Should be the flush leader region",
                 Some(mock_datanode_reply(
                     from_peer_id,
-                    Arc::new(|id| Ok(new_flush_region_reply(id, true, None))),
+                    Arc::new(move |id| {
+                        Ok(new_flush_region_reply_for_region(id, region_id, true, None))
+                    }),
                 )),
                 Assertion::simple(assert_update_metadata_downgrade, assert_no_persist),
             ),

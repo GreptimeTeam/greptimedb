@@ -24,18 +24,19 @@ use common_error::ext::BoxedError;
 use common_telemetry::{debug, error, info};
 use object_store::layers::LoggingLayer;
 use object_store::services::Oss;
-use object_store::{services, ObjectStore};
+use object_store::{ObjectStore, services};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
-use crate::database::{parse_proxy_opts, DatabaseClient};
+use crate::data::{COPY_PATH_PLACEHOLDER, default_database};
+use crate::database::{DatabaseClient, parse_proxy_opts};
 use crate::error::{
     EmptyResultSnafu, Error, OpenDalSnafu, OutputDirNotSetSnafu, Result, S3ConfigNotSetSnafu,
     SchemaNotFoundSnafu,
 };
-use crate::{database, Tool};
+use crate::{Tool, database};
 
 type TableReference = (String, String, String);
 
@@ -63,7 +64,7 @@ pub struct ExportCommand {
     output_dir: Option<String>,
 
     /// The name of the catalog to export.
-    #[clap(long, default_value = "greptime-*")]
+    #[clap(long, default_value_t = default_database())]
     database: String,
 
     /// Parallelism of the export.
@@ -667,10 +668,26 @@ impl Export {
                 );
 
                 // Create copy_from.sql file
-                let copy_database_from_sql = format!(
-                    r#"COPY DATABASE "{}"."{}" FROM '{}' WITH ({}){};"#,
-                    export_self.catalog, schema, path, with_options_clone, connection_part
-                );
+                let copy_database_from_sql = {
+                    let command_without_connection = format!(
+                        r#"COPY DATABASE "{}"."{}" FROM '{}' WITH ({});"#,
+                        export_self.catalog, schema, COPY_PATH_PLACEHOLDER, with_options_clone
+                    );
+
+                    if connection_part.is_empty() {
+                        command_without_connection
+                    } else {
+                        let command_with_connection = format!(
+                            r#"COPY DATABASE "{}"."{}" FROM '{}' WITH ({}){};"#,
+                            export_self.catalog, schema, path, with_options_clone, connection_part
+                        );
+
+                        format!(
+                            "-- {}\n{}",
+                            command_with_connection, command_without_connection
+                        )
+                    }
+                };
 
                 let copy_from_path = export_self.get_file_path(&schema, "copy_from.sql");
                 export_self

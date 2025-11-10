@@ -20,27 +20,33 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use clap::ValueEnum;
-use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
+use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
+use common_event_recorder::EventRecorderOptions;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::ddl::ProcedureExecutorRef;
+use common_meta::ddl_manager::DdlManagerRef;
 use common_meta::distributed_time_constants;
-use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::leadership_notifier::{
     LeadershipChangeNotifier, LeadershipChangeNotifierCustomizerRef,
 };
 use common_meta::node_expiry_listener::NodeExpiryListener;
-use common_meta::peer::Peer;
+use common_meta::peer::{Peer, PeerDiscoveryRef};
+use common_meta::reconciliation::manager::ReconciliationManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
+use common_meta::sequence::SequenceRef;
+use common_meta::stats::topic::TopicStatsRegistryRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
 use common_options::datanode::DatanodeClientOptions;
-use common_procedure::options::ProcedureConfig;
+use common_options::memory::MemoryOptions;
 use common_procedure::ProcedureManagerRef;
+use common_procedure::options::ProcedureConfig;
+use common_stat::ResourceStatRef;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{error, info, warn};
 use common_wal::config::MetasrvWalConfig;
@@ -48,12 +54,13 @@ use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
+use servers::tls::TlsOption;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
-use table::metadata::TableId;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
+use crate::discovery;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{
     self, InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu,
@@ -61,16 +68,16 @@ use crate::error::{
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
-use crate::lease::lookup_datanode_peer;
+use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::wal_prune::manager::WalPruneTickerRef;
-use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
+use crate::region::flush_trigger::RegionFlushTickerRef;
 use crate::region::supervisor::RegionSupervisorTickerRef;
 use crate::selector::{RegionStatAwareSelector, Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
-use crate::state::{become_follower, become_leader, StateRef};
+use crate::state::{StateRef, become_follower, become_leader};
 
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const FLOW_ID_SEQ: &str = "flow_id";
@@ -93,6 +100,26 @@ pub enum BackendImpl {
     MysqlStore,
 }
 
+/// Configuration options for the stats persistence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StatsPersistenceOptions {
+    /// TTL for the stats table that will be used to store the stats.
+    #[serde(with = "humantime_serde")]
+    pub ttl: Duration,
+    /// The interval to persist the stats.
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
+}
+
+impl Default for StatsPersistenceOptions {
+    fn default() -> Self {
+        Self {
+            ttl: Duration::ZERO,
+            interval: Duration::from_mins(10),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetasrvOptions {
@@ -104,6 +131,10 @@ pub struct MetasrvOptions {
     pub server_addr: String,
     /// The address of the store, e.g., etcd.
     pub store_addrs: Vec<String>,
+    /// TLS configuration for kv store backend (PostgreSQL/MySQL)
+    /// Only applicable when using PostgreSQL or MySQL as the metadata store
+    #[serde(default)]
+    pub backend_tls: Option<TlsOption>,
     /// The type of selector.
     pub selector: SelectorType,
     /// Whether to use the memory store.
@@ -159,6 +190,8 @@ pub struct MetasrvOptions {
     pub flush_stats_factor: usize,
     /// The tracing options.
     pub tracing: TracingOptions,
+    /// The memory options.
+    pub memory: MemoryOptions,
     /// The datastore for kv metadata.
     pub backend: BackendImpl,
     #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
@@ -167,8 +200,15 @@ pub struct MetasrvOptions {
     #[cfg(feature = "pg_kvbackend")]
     /// Lock id for meta kv election. Only effect when using pg_kvbackend.
     pub meta_election_lock_id: u64,
+    #[cfg(feature = "pg_kvbackend")]
+    /// Optional PostgreSQL schema for metadata table (defaults to current search_path if empty).
+    pub meta_schema_name: Option<String>,
     #[serde(with = "humantime_serde")]
     pub node_max_idle_time: Duration,
+    /// The event recorder options.
+    pub event_recorder: EventRecorderOptions,
+    /// The stats persistence options.
+    pub stats_persistence: StatsPersistenceOptions,
 }
 
 impl fmt::Debug for MetasrvOptions {
@@ -176,6 +216,7 @@ impl fmt::Debug for MetasrvOptions {
         let mut debug_struct = f.debug_struct("MetasrvOptions");
         debug_struct
             .field("store_addrs", &self.sanitize_store_addrs())
+            .field("backend_tls", &self.backend_tls)
             .field("selector", &self.selector)
             .field("use_memory_store", &self.use_memory_store)
             .field("enable_region_failover", &self.enable_region_failover)
@@ -197,13 +238,17 @@ impl fmt::Debug for MetasrvOptions {
             .field("max_txn_ops", &self.max_txn_ops)
             .field("flush_stats_factor", &self.flush_stats_factor)
             .field("tracing", &self.tracing)
-            .field("backend", &self.backend);
+            .field("backend", &self.backend)
+            .field("event_recorder", &self.event_recorder)
+            .field("stats_persistence", &self.stats_persistence);
 
         #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
         debug_struct.field("meta_table_name", &self.meta_table_name);
 
         #[cfg(feature = "pg_kvbackend")]
         debug_struct.field("meta_election_lock_id", &self.meta_election_lock_id);
+        #[cfg(feature = "pg_kvbackend")]
+        debug_struct.field("meta_schema_name", &self.meta_schema_name);
 
         debug_struct
             .field("node_max_idle_time", &self.node_max_idle_time)
@@ -221,6 +266,7 @@ impl Default for MetasrvOptions {
             #[allow(deprecated)]
             server_addr: String::new(),
             store_addrs: vec!["127.0.0.1:2379".to_string()],
+            backend_tls: None,
             selector: SelectorType::default(),
             use_memory_store: false,
             enable_region_failover: false,
@@ -250,12 +296,17 @@ impl Default for MetasrvOptions {
             max_txn_ops: 128,
             flush_stats_factor: 3,
             tracing: TracingOptions::default(),
+            memory: MemoryOptions::default(),
             backend: BackendImpl::EtcdStore,
             #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
             meta_table_name: common_meta::kv_backend::DEFAULT_META_TABLE_NAME.to_string(),
             #[cfg(feature = "pg_kvbackend")]
             meta_election_lock_id: common_meta::kv_backend::DEFAULT_META_ELECTION_LOCK_ID,
+            #[cfg(feature = "pg_kvbackend")]
+            meta_schema_name: None,
             node_max_idle_time: Duration::from_secs(24 * 60 * 60),
+            event_recorder: EventRecorderOptions::default(),
+            stats_persistence: StatsPersistenceOptions::default(),
         }
     }
 }
@@ -291,6 +342,7 @@ pub struct Context {
     pub table_metadata_manager: TableMetadataManagerRef,
     pub cache_invalidator: CacheInvalidatorRef,
     pub leader_region_registry: LeaderRegionRegistryRef,
+    pub topic_stats_registry: TopicStatsRegistryRef,
 }
 
 impl Context {
@@ -320,8 +372,25 @@ pub struct MetasrvNodeInfo {
     pub git_commit: String,
     // The node start timestamp in milliseconds
     pub start_time_ms: u64,
+    // The node total cpu millicores
+    #[serde(default)]
+    pub total_cpu_millicores: i64,
+    // The node total memory bytes
+    #[serde(default)]
+    pub total_memory_bytes: i64,
+    /// The node build cpu usage millicores
+    #[serde(default)]
+    pub cpu_usage_millicores: i64,
+    /// The node build memory usage bytes
+    #[serde(default)]
+    pub memory_usage_bytes: i64,
+    // The node hostname
+    #[serde(default)]
+    pub hostname: String,
 }
 
+// TODO(zyy17): Allow deprecated fields for backward compatibility. Remove this when the deprecated top-level fields are removed from the proto.
+#[allow(deprecated)]
 impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
     fn from(node_info: MetasrvNodeInfo) -> Self {
         Self {
@@ -329,9 +398,26 @@ impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
                 addr: node_info.addr,
                 ..Default::default()
             }),
-            version: node_info.version,
-            git_commit: node_info.git_commit,
+            // TODO(zyy17): The following top-level fields are deprecated. They are kept for backward compatibility and will be removed in a future version.
+            // New code should use the fields in `info.NodeInfo` instead.
+            version: node_info.version.clone(),
+            git_commit: node_info.git_commit.clone(),
             start_time_ms: node_info.start_time_ms,
+            cpus: node_info.total_cpu_millicores as u32,
+            memory_bytes: node_info.total_memory_bytes as u64,
+            // The canonical location for node information.
+            info: Some(api::v1::meta::NodeInfo {
+                version: node_info.version,
+                git_commit: node_info.git_commit,
+                start_time_ms: node_info.start_time_ms,
+                total_cpu_millicores: node_info.total_cpu_millicores,
+                total_memory_bytes: node_info.total_memory_bytes,
+                cpu_usage_millicores: node_info.cpu_usage_millicores,
+                memory_usage_bytes: node_info.memory_usage_bytes,
+                cpus: node_info.total_cpu_millicores as u32,
+                memory_bytes: node_info.total_memory_bytes as u64,
+                hostname: node_info.hostname,
+            }),
         }
     }
 }
@@ -353,12 +439,7 @@ impl Display for SelectTarget {
 
 #[derive(Clone)]
 pub struct SelectorContext {
-    pub server_addr: String,
-    pub datanode_lease_secs: u64,
-    pub flownode_lease_secs: u64,
-    pub kv_backend: KvBackendRef,
-    pub meta_peer_client: MetaPeerClientRef,
-    pub table_id: Option<TableId>,
+    pub peer_discovery: PeerDiscoveryRef,
 }
 
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
@@ -431,7 +512,7 @@ pub struct Metasrv {
     election: Option<ElectionRef>,
     procedure_manager: ProcedureManagerRef,
     mailbox: MailboxRef,
-    procedure_executor: ProcedureExecutorRef,
+    ddl_manager: DdlManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
     table_metadata_manager: TableMetadataManagerRef,
     runtime_switch_manager: RuntimeSwitchManagerRef,
@@ -441,7 +522,12 @@ pub struct Metasrv {
     region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
     cache_invalidator: CacheInvalidatorRef,
     leader_region_registry: LeaderRegionRegistryRef,
+    topic_stats_registry: TopicStatsRegistryRef,
     wal_prune_ticker: Option<WalPruneTickerRef>,
+    region_flush_ticker: Option<RegionFlushTickerRef>,
+    table_id_sequence: SequenceRef,
+    reconciliation_manager: ReconciliationManagerRef,
+    resource_stat: ResourceStatRef,
 
     plugins: Plugins,
 }
@@ -498,6 +584,9 @@ impl Metasrv {
             }
             if let Some(wal_prune_ticker) = &self.wal_prune_ticker {
                 leadership_change_notifier.add_listener(wal_prune_ticker.clone() as _);
+            }
+            if let Some(region_flush_trigger) = &self.region_flush_ticker {
+                leadership_change_notifier.add_listener(region_flush_trigger.clone() as _);
             }
             if let Some(customizer) = self.plugins.get::<LeadershipChangeNotifierCustomizerRef>() {
                 customizer.customize(&mut leadership_change_notifier);
@@ -620,6 +709,10 @@ impl Metasrv {
         self.start_time_ms
     }
 
+    pub fn resource_stat(&self) -> &ResourceStatRef {
+        &self.resource_stat
+    }
+
     pub fn node_info(&self) -> MetasrvNodeInfo {
         let build_info = common_version::build_info();
         MetasrvNodeInfo {
@@ -627,16 +720,24 @@ impl Metasrv {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms: self.start_time_ms(),
+            total_cpu_millicores: self.resource_stat.get_total_cpu_millicores(),
+            total_memory_bytes: self.resource_stat.get_total_memory_bytes(),
+            cpu_usage_millicores: self.resource_stat.get_cpu_usage_millicores(),
+            memory_usage_bytes: self.resource_stat.get_memory_usage_bytes(),
+            hostname: hostname::get()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
         }
     }
 
     /// Looks up a datanode peer by peer_id, returning it only when it's alive.
     /// A datanode is considered alive when it's still within the lease period.
     pub(crate) async fn lookup_datanode_peer(&self, peer_id: u64) -> Result<Option<Peer>> {
-        lookup_datanode_peer(
+        discovery::utils::alive_datanode(
+            self.meta_peer_client.as_ref(),
             peer_id,
-            &self.meta_peer_client,
-            distributed_time_constants::DATANODE_LEASE_SECS,
+            Duration::from_secs(distributed_time_constants::DATANODE_LEASE_SECS),
         )
         .await
     }
@@ -681,8 +782,8 @@ impl Metasrv {
         &self.mailbox
     }
 
-    pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
-        &self.procedure_executor
+    pub fn ddl_manager(&self) -> &DdlManagerRef {
+        &self.ddl_manager
     }
 
     pub fn procedure_manager(&self) -> &ProcedureManagerRef {
@@ -713,8 +814,20 @@ impl Metasrv {
         self.plugins.get::<SubscriptionManagerRef>()
     }
 
+    pub fn table_id_sequence(&self) -> &SequenceRef {
+        &self.table_id_sequence
+    }
+
+    pub fn reconciliation_manager(&self) -> &ReconciliationManagerRef {
+        &self.reconciliation_manager
+    }
+
     pub fn plugins(&self) -> &Plugins {
         &self.plugins
+    }
+
+    pub fn started(&self) -> Arc<AtomicBool> {
+        self.started.clone()
     }
 
     #[inline]
@@ -729,6 +842,7 @@ impl Metasrv {
         let table_metadata_manager = self.table_metadata_manager.clone();
         let cache_invalidator = self.cache_invalidator.clone();
         let leader_region_registry = self.leader_region_registry.clone();
+        let topic_stats_registry = self.topic_stats_registry.clone();
 
         Context {
             server_addr,
@@ -742,6 +856,22 @@ impl Metasrv {
             table_metadata_manager,
             cache_invalidator,
             leader_region_registry,
+            topic_stats_registry,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::metasrv::MetasrvNodeInfo;
+
+    #[test]
+    fn test_deserialize_metasrv_node_info() {
+        let str = r#"{"addr":"127.0.0.1:4002","version":"0.1.0","git_commit":"1234567890","start_time_ms":1715145600}"#;
+        let node_info: MetasrvNodeInfo = serde_json::from_str(str).unwrap();
+        assert_eq!(node_info.addr, "127.0.0.1:4002");
+        assert_eq!(node_info.version, "0.1.0");
+        assert_eq!(node_info.git_commit, "1234567890");
+        assert_eq!(node_info.start_time_ms, 1715145600);
     }
 }

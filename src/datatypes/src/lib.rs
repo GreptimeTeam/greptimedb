@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(let_chains)]
 #![feature(assert_matches)]
+#![feature(box_patterns)]
 
 pub mod arrow_array;
 pub mod data_type;
 pub mod duration;
 pub mod error;
+pub mod extension;
 pub mod interval;
+pub mod json;
 pub mod macros;
 pub mod prelude;
 pub mod scalars;

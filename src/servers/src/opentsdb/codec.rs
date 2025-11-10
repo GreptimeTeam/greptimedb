@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest, SemanticType};
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use api::v1::{Column, ColumnDataType, InsertRequest as GrpcInsertRequest, SemanticType, column};
+use common_query::prelude::{greptime_timestamp, greptime_value};
 
 use crate::error::{self, Result};
 
@@ -63,7 +63,7 @@ impl DataPoint {
                 return error::InvalidQuerySnafu {
                     reason: format!("put: invalid timestamp: {}", tokens[2]),
                 }
-                .fail()
+                .fail();
             }
         };
 
@@ -73,7 +73,7 @@ impl DataPoint {
                 return error::InvalidQuerySnafu {
                     reason: format!("put: invalid value: {}", tokens[3]),
                 }
-                .fail()
+                .fail();
             }
         };
 
@@ -129,7 +129,7 @@ impl DataPoint {
         let mut columns = Vec::with_capacity(2 + self.tags.len());
 
         let ts_column = Column {
-            column_name: GREPTIME_TIMESTAMP.to_string(),
+            column_name: greptime_timestamp().to_string(),
             values: Some(column::Values {
                 timestamp_millisecond_values: vec![self.ts_millis],
                 ..Default::default()
@@ -141,7 +141,7 @@ impl DataPoint {
         columns.push(ts_column);
 
         let field_column = Column {
-            column_name: GREPTIME_VALUE.to_string(),
+            column_name: greptime_value().to_string(),
             values: Some(column::Values {
                 f64_values: vec![self.value],
                 ..Default::default()
@@ -154,9 +154,9 @@ impl DataPoint {
 
         for (tagk, tagv) in self.tags.iter() {
             columns.push(Column {
-                column_name: tagk.to_string(),
+                column_name: tagk.clone(),
                 values: Some(column::Values {
-                    string_values: vec![tagv.to_string()],
+                    string_values: vec![tagv.clone()],
                     ..Default::default()
                 }),
                 semantic_type: SemanticType::Tag as i32,
@@ -267,7 +267,7 @@ mod test {
         assert_eq!(row_count, 1);
         assert_eq!(columns.len(), 4);
 
-        assert_eq!(columns[0].column_name, GREPTIME_TIMESTAMP);
+        assert_eq!(columns[0].column_name, greptime_timestamp());
         assert_eq!(
             columns[0]
                 .values
@@ -277,7 +277,7 @@ mod test {
             vec![1000]
         );
 
-        assert_eq!(columns[1].column_name, GREPTIME_VALUE);
+        assert_eq!(columns[1].column_name, greptime_value());
         assert_eq!(columns[1].values.as_ref().unwrap().f64_values, vec![1.0]);
 
         assert_eq!(columns[2].column_name, "tagk1");

@@ -17,14 +17,16 @@
 //! It updates the manifest and applies the changes to the region in background.
 
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use common_telemetry::{info, warn};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
-use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
+use crate::cache::file_cache::{FileType, IndexKey};
+use crate::config::IndexBuildMode;
 use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
@@ -33,9 +35,10 @@ use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
 use crate::region::version::VersionBuilder;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
-    BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditRequest, RegionEditResult,
-    RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BuildIndexRequest, OptionOutputTx, RegionChangeResult, RegionEditRequest,
+    RegionEditResult, RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
+use crate::sst::index::IndexBuildType;
 use crate::sst::location;
 use crate::worker::{RegionWorkerLoop, WorkerListener};
 
@@ -116,6 +119,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Sends the result.
         change_result.sender.send(change_result.result.map(|_| 0));
 
+        // In async mode, rebuild index after index metadata changed.
+        if self.config.index.build_mode == IndexBuildMode::Async && change_result.need_index {
+            self.handle_rebuild_index(
+                BuildIndexRequest {
+                    region_id: region.region_id,
+                    build_type: IndexBuildType::SchemaChange,
+                    file_metas: Vec::new(),
+                },
+                OptionOutputTx::new(None),
+            )
+            .await;
+        }
         // Handles the stalled requests.
         self.handle_region_stalled_requests(&change_result.region_id)
             .await;
@@ -203,9 +218,16 @@ impl<S> RegionWorkerLoop<S> {
 
         let RegionEditRequest {
             region_id: _,
-            edit,
+            mut edit,
             tx: sender,
         } = request;
+        let file_sequence = region.version_control.committed_sequence() + 1;
+        edit.committed_sequence = Some(file_sequence);
+
+        // For every file added through region edit, we should fill the file sequence
+        for file in &mut edit.files_to_add {
+            file.sequence = NonZeroU64::new(file_sequence);
+        }
 
         // Marks the region as editing.
         if let Err(e) = region.set_editing() {
@@ -229,6 +251,7 @@ impl<S> RegionWorkerLoop<S> {
                     result,
                 }),
             };
+
             // We don't set state back as the worker loop is already exited.
             if let Err(res) = request_sender
                 .send(WorkerRequestWithTime::new(notify))
@@ -262,9 +285,11 @@ impl<S> RegionWorkerLoop<S> {
 
         if edit_result.result.is_ok() {
             // Applies the edit to the region.
-            region
-                .version_control
-                .apply_edit(edit_result.edit, &[], region.file_purger.clone());
+            region.version_control.apply_edit(
+                Some(edit_result.edit),
+                &[],
+                region.file_purger.clone(),
+            );
         }
 
         // Sets the region as writable.
@@ -272,10 +297,10 @@ impl<S> RegionWorkerLoop<S> {
 
         let _ = edit_result.sender.send(edit_result.result);
 
-        if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id) {
-            if let Some(request) = edit_queue.dequeue() {
-                self.handle_region_edit(request).await;
-            }
+        if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id)
+            && let Some(request) = edit_queue.dequeue()
+        {
+            self.handle_region_edit(request).await;
         }
 
         if need_compaction {
@@ -317,8 +342,7 @@ impl<S> RegionWorkerLoop<S> {
                 region_id: truncate.region_id,
                 sender,
                 result,
-                truncated_entry_id: truncate.truncated_entry_id,
-                truncated_sequence: truncate.truncated_sequence,
+                kind: truncate.kind,
             };
             let _ = request_sender
                 .send(WorkerRequestWithTime::new(WorkerRequest::Background {
@@ -335,6 +359,7 @@ impl<S> RegionWorkerLoop<S> {
         &self,
         region: MitoRegionRef,
         change: RegionChange,
+        need_index: bool,
         sender: OptionOutputTx,
     ) {
         // Marks the region as altering.
@@ -361,6 +386,7 @@ impl<S> RegionWorkerLoop<S> {
                     sender,
                     result,
                     new_meta,
+                    need_index,
                 }),
             };
             listener

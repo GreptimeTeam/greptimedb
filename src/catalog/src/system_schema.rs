@@ -14,6 +14,7 @@
 
 pub mod information_schema;
 mod memory_table;
+pub mod numbers_table_provider;
 pub mod pg_catalog;
 pub mod predicate;
 mod utils;
@@ -137,21 +138,24 @@ impl DataSource for SystemTableDataSource {
         &self,
         request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        let projection = request.projection.clone();
-        let projected_schema = match &projection {
+        let projected_schema = match &request.projection {
             Some(projection) => self.try_project(projection)?,
             None => self.table.schema(),
         };
 
+        let projection = request.projection.clone();
         let stream = self
             .table
             .to_stream(request)
             .map_err(BoxedError::new)
             .context(TablesRecordBatchSnafu)
             .map_err(BoxedError::new)?
-            .map(move |batch| match &projection {
-                Some(p) => batch.and_then(|b| b.try_project(p)),
-                None => batch,
+            .map(move |batch| match (&projection, batch) {
+                // Some tables (e.g., inspect tables) already honor projection in their inner stream;
+                // others ignore it and return full rows. We will only apply projection here if the
+                // inner batch width doesn't match the projection size.
+                (Some(p), Ok(b)) if b.num_columns() != p.len() => b.try_project(p),
+                (_, res) => res,
             });
 
         let stream = RecordBatchStreamWrapper {

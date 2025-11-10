@@ -46,8 +46,10 @@ tql explain (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr
 |               |           RepartitionExec: partitioning=REDACTED
 |               |             AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, c@4 as c, greptime_timestamp@0 as greptime_timestamp], aggr=[max(prom_max_over_time(greptime_timestamp_range,greptime_value))], ordering_mode=PartiallySorted([0, 1, 2])                          |
 |               |               ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range,greptime_value)@1 as prom_max_over_time(greptime_timestamp_range,greptime_value), a@2 as a, b@3 as b, c@4 as c]                         |
-|               |                 SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true]                                                                                                                                         |
-|               |                   MergeScanExec: REDACTED
+|               |                 CooperativeExec                                                                                                                                                                                                                                     |
+|               |                   SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true]                                                                                                                                       |
+|               |                     CooperativeExec                                                                                                                                                                                                                                 |
+|               |                       MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                                                                                     |
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -71,7 +73,9 @@ tql analyze (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, c@4 as c, greptime_timestamp@0 as greptime_timestamp], aggr=[max(prom_max_over_time(greptime_timestamp_range,greptime_value))], ordering_mode=PartiallySorted([0, 1, 2]) REDACTED
 |_|_|_ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range,greptime_value)@1 as prom_max_over_time(greptime_timestamp_range,greptime_value), a@2 as a, b@3 as b, c@4 as c] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
@@ -80,6 +84,7 @@ tql analyze (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 | 1_| 1_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
@@ -88,6 +93,7 @@ tql analyze (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
@@ -124,8 +130,10 @@ tql explain (1752591864, 1752592164, '30s') sum by (a, b) (max_over_time(aggr_op
 |               |           RepartitionExec: partitioning=REDACTED
 |               |             AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, greptime_timestamp@0 as greptime_timestamp], aggr=[sum(prom_max_over_time(greptime_timestamp_range,greptime_value))], ordering_mode=PartiallySorted([0, 1])                                       |
 |               |               ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range,greptime_value)@1 as prom_max_over_time(greptime_timestamp_range,greptime_value), a@2 as a, b@3 as b]                                   |
-|               |                 SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true]                                                                                                                                         |
-|               |                   MergeScanExec: REDACTED
+|               |                 CooperativeExec                                                                                                                                                                                                                                     |
+|               |                   SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true]                                                                                                                                       |
+|               |                     CooperativeExec                                                                                                                                                                                                                                 |
+|               |                       MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                                                                                     |
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -149,7 +157,9 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b) (max_over_time(aggr_op
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, greptime_timestamp@0 as greptime_timestamp], aggr=[sum(prom_max_over_time(greptime_timestamp_range,greptime_value))], ordering_mode=PartiallySorted([0, 1]) REDACTED
 |_|_|_ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range,greptime_value)@1 as prom_max_over_time(greptime_timestamp_range,greptime_value), a@2 as a, b@3 as b] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
@@ -158,6 +168,7 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b) (max_over_time(aggr_op
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 | 1_| 1_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
@@ -166,6 +177,7 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b) (max_over_time(aggr_op
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
@@ -202,8 +214,10 @@ tql explain (1752591864, 1752592164, '30s') avg by (a) (max_over_time(aggr_optim
 |               |           RepartitionExec: partitioning=REDACTED
 |               |             AggregateExec: mode=Partial, gby=[a@2 as a, greptime_timestamp@0 as greptime_timestamp], aggr=[avg(prom_max_over_time(greptime_timestamp_range,greptime_value))], ordering_mode=PartiallySorted([0])                                                    |
 |               |               ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range,greptime_value)@1 as prom_max_over_time(greptime_timestamp_range,greptime_value), a@2 as a]                                             |
-|               |                 SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true]                                                                                                                                         |
-|               |                   MergeScanExec: REDACTED
+|               |                 CooperativeExec                                                                                                                                                                                                                                     |
+|               |                   SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true]                                                                                                                                       |
+|               |                     CooperativeExec                                                                                                                                                                                                                                 |
+|               |                       MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                                                                                     |
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -227,7 +241,9 @@ tql analyze (1752591864, 1752592164, '30s') avg by (a) (max_over_time(aggr_optim
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@2 as a, greptime_timestamp@0 as greptime_timestamp], aggr=[avg(prom_max_over_time(greptime_timestamp_range,greptime_value))], ordering_mode=PartiallySorted([0]) REDACTED
 |_|_|_ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range,greptime_value)@1 as prom_max_over_time(greptime_timestamp_range,greptime_value), a@2 as a] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
@@ -236,6 +252,7 @@ tql analyze (1752591864, 1752592164, '30s') avg by (a) (max_over_time(aggr_optim
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 | 1_| 1_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
@@ -244,6 +261,7 @@ tql analyze (1752591864, 1752592164, '30s') avg by (a) (max_over_time(aggr_optim
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
@@ -277,8 +295,10 @@ tql explain (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time
 |               |       CoalesceBatchesExec: target_batch_size=8192                                                                                                                                                                                                                   |
 |               |         RepartitionExec: partitioning=REDACTED
 |               |           AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, c@4 as c, d@5 as d, greptime_timestamp@0 as greptime_timestamp], aggr=[count(prom_max_over_time(greptime_timestamp_range,greptime_value))], ordering_mode=Sorted                                    |
-|               |             SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true]                                                                                                                                             |
-|               |               MergeScanExec: REDACTED
+|               |             CooperativeExec                                                                                                                                                                                                                                         |
+|               |               SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true]                                                                                                                                           |
+|               |                 CooperativeExec                                                                                                                                                                                                                                     |
+|               |                   MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                                                                                     |
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -300,7 +320,9 @@ tql analyze (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, c@4 as c, d@5 as d, greptime_timestamp@0 as greptime_timestamp], aggr=[count(prom_max_over_time(greptime_timestamp_range,greptime_value))], ordering_mode=Sorted REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
@@ -309,6 +331,7 @@ tql analyze (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 | 1_| 1_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
@@ -317,6 +340,7 @@ tql analyze (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
@@ -352,7 +376,9 @@ tql explain (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr
 |               |         RepartitionExec: partitioning=REDACTED
 |               |           AggregateExec: mode=Partial, gby=[b@2 as b, c@3 as c, d@4 as d, greptime_timestamp@0 as greptime_timestamp], aggr=[min(prom_max_over_time(greptime_timestamp_range,greptime_value))]                                                                      |
 |               |             ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range,greptime_value)@1 as prom_max_over_time(greptime_timestamp_range,greptime_value), b@3 as b, c@4 as c, d@5 as d]                           |
-|               |               MergeScanExec: REDACTED
+|               |               CooperativeExec                                                                                                                                                                                                                                       |
+|               |                 CooperativeExec                                                                                                                                                                                                                                     |
+|               |                   MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                                                                                     |
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -375,6 +401,8 @@ tql analyze (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[b@2 as b, c@3 as c, d@4 as d, greptime_timestamp@0 as greptime_timestamp], aggr=[min(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range,greptime_value)@1 as prom_max_over_time(greptime_timestamp_range,greptime_value), b@3 as b, c@4 as c, d@5 as d] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
@@ -383,6 +411,7 @@ tql analyze (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 | 1_| 1_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
@@ -391,6 +420,7 @@ tql analyze (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
@@ -423,7 +453,9 @@ tql explain sum(aggr_optimize_not);
 |               |         RepartitionExec: partitioning=REDACTED
 |               |           AggregateExec: mode=Partial, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[sum(aggr_optimize_not.greptime_value)]                                                                                     |
 |               |             ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, greptime_value@5 as greptime_value]                                                                                                         |
-|               |               MergeScanExec: REDACTED
+|               |               CooperativeExec                                                                                                                                                                                             |
+|               |                 CooperativeExec                                                                                                                                                                                           |
+|               |                   MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                                           |
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -446,14 +478,18 @@ tql analyze sum(aggr_optimize_not);
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[sum(aggr_optimize_not.greptime_value)] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, greptime_value@5 as greptime_value] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 | 1_| 1_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
@@ -523,8 +559,10 @@ tql explain (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 |               |             RepartitionExec: partitioning=REDACTED
 |               |               AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, c@4 as c, greptime_timestamp@0 as greptime_timestamp], aggr=[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))], ordering_mode=PartiallySorted([0, 1, 2])                                                                                                                                                                                                                                                                                                                                    |
 |               |                 ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))@1 as prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)), a@2 as a, b@3 as b, c@4 as c]                                                                                                                                                                                                                                                                                                           |
-|               |                   SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-|               |                     MergeScanExec: REDACTED
+|               |                   CooperativeExec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+|               |                     SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+|               |                       CooperativeExec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+|               |                         MergeScanExec: REDACTED
 |               |       CoalesceBatchesExec: target_batch_size=8192                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 |               |         RepartitionExec: partitioning=REDACTED
 |               |           CoalescePartitionsExec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -534,8 +572,10 @@ tql explain (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 |               |                   RepartitionExec: partitioning=REDACTED
 |               |                     AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, c@4 as c, greptime_timestamp@0 as greptime_timestamp], aggr=[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))], ordering_mode=PartiallySorted([0, 1, 2])                                                                                                                                                                                                                                                                                                                              |
 |               |                       ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))@1 as prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)), a@2 as a, b@3 as b, c@4 as c]                                                                                                                                                                                                                                                                                                     |
-|               |                         SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-|               |                           MergeScanExec: REDACTED
+|               |                         CooperativeExec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+|               |                           SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+|               |                             CooperativeExec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+|               |                               MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -560,7 +600,9 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, c@4 as c, greptime_timestamp@0 as greptime_timestamp], aggr=[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))], ordering_mode=PartiallySorted([0, 1, 2]) REDACTED
 |_|_|_ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))@1 as prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)), a@2 as a, b@3 as b, c@4 as c] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
@@ -571,7 +613,9 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, c@4 as c, greptime_timestamp@0 as greptime_timestamp], aggr=[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))], ordering_mode=PartiallySorted([0, 1, 2]) REDACTED
 |_|_|_ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))@1 as prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)), a@2 as a, b@3 as b, c@4 as c] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_rate(greptime_timestamp_range,greptime_value,aggr_optimize_not.greptime_timestamp,Int64(120000))@1 as prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)), a@2 as a, b@3 as b, c@4 as c, d@5 as d] REDACTED
@@ -581,6 +625,7 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 | 1_| 1_|_ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_rate(greptime_timestamp_range,greptime_value,aggr_optimize_not.greptime_timestamp,Int64(120000))@1 as prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)), a@2 as a, b@3 as b, c@4 as c, d@5 as d] REDACTED
@@ -590,6 +635,7 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_rate(greptime_timestamp_range,greptime_value,aggr_optimize_not_count.greptime_timestamp,Int64(120000))@1 as prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)), a@2 as a, b@3 as b, c@4 as c, d@5 as d] REDACTED
@@ -599,6 +645,7 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 | 1_| 1_|_ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_rate(greptime_timestamp_range,greptime_value,aggr_optimize_not_count.greptime_timestamp,Int64(120000))@1 as prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)), a@2 as a, b@3 as b, c@4 as c, d@5 as d] REDACTED
@@ -608,6 +655,7 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
@@ -635,7 +683,8 @@ GROUP BY
 |               |   Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.c]], aggr=[[min(aggr_optimize_not.greptime_value)]] |
 |               |     TableScan: aggr_optimize_not                                                                                                       |
 |               | ]]                                                                                                                                     |
-| physical_plan | MergeScanExec: REDACTED
+| physical_plan | CooperativeExec                                                                                                                        |
+|               |   MergeScanExec: REDACTED
 |               |                                                                                                                                        |
 +---------------+----------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -659,13 +708,15 @@ GROUP BY
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_MergeScanExec: REDACTED
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@3 as min(aggr_optimize_not.greptime_value)] REDACTED
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 | 1_| 1_|_ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@3 as min(aggr_optimize_not.greptime_value)] REDACTED
@@ -673,6 +724,7 @@ GROUP BY
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
@@ -701,7 +753,8 @@ GROUP BY
 |               |   Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.c, aggr_optimize_not.d]], aggr=[[min(aggr_optimize_not.greptime_value)]] |
 |               |     TableScan: aggr_optimize_not                                                                                                                            |
 |               | ]]                                                                                                                                                          |
-| physical_plan | MergeScanExec: REDACTED
+| physical_plan | CooperativeExec                                                                                                                                             |
+|               |   MergeScanExec: REDACTED
 |               |                                                                                                                                                             |
 +---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -726,13 +779,15 @@ GROUP BY
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_MergeScanExec: REDACTED
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@4 as min(aggr_optimize_not.greptime_value)] REDACTED
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c, d@3 as d], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, c@2 as c, d@3 as d], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 | 1_| 1_|_ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@4 as min(aggr_optimize_not.greptime_value)] REDACTED
@@ -740,6 +795,7 @@ GROUP BY
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, c@2 as c, d@3 as d], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
@@ -758,20 +814,21 @@ GROUP BY
   a,
   b;
 
-+---------------+------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                   |
-+---------------+------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Projection: min(min(aggr_optimize_not.greptime_value)) AS min(aggr_optimize_not.greptime_value)                        |
-|               |   Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b]], aggr=[[min(min(aggr_optimize_not.greptime_value))]] |
-|               |     MergeScan [is_placeholder=false, remote_input=[                                                                    |
-|               | Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b]], aggr=[[min(aggr_optimize_not.greptime_value)]]        |
-|               |   TableScan: aggr_optimize_not                                                                                         |
-|               | ]]                                                                                                                     |
-| physical_plan | ProjectionExec: expr=[min(min(aggr_optimize_not.greptime_value))@2 as min(aggr_optimize_not.greptime_value)]           |
-|               |   AggregateExec: mode=SinglePartitioned, gby=[a@0 as a, b@1 as b], aggr=[min(min(aggr_optimize_not.greptime_value))]   |
-|               |     MergeScanExec: REDACTED
-|               |                                                                                                                        |
-+---------------+------------------------------------------------------------------------------------------------------------------------+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                            |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: min(aggr_optimize_not.greptime_value)                                                                                                                               |
+|               |   Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b]], aggr=[[__min_merge(__min_state(aggr_optimize_not.greptime_value)) AS min(aggr_optimize_not.greptime_value)]] |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                             |
+|               | Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b]], aggr=[[__min_state(aggr_optimize_not.greptime_value)]]                                                         |
+|               |   TableScan: aggr_optimize_not                                                                                                                                                  |
+|               | ]]                                                                                                                                                                              |
+| physical_plan | ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@2 as min(aggr_optimize_not.greptime_value)]                                                                         |
+|               |   AggregateExec: mode=SinglePartitioned, gby=[a@0 as a, b@1 as b], aggr=[min(aggr_optimize_not.greptime_value)]                                                                 |
+|               |     CooperativeExec                                                                                                                                                             |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                                 |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -792,20 +849,23 @@ GROUP BY
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[min(min(aggr_optimize_not.greptime_value))@2 as min(aggr_optimize_not.greptime_value)] REDACTED
-|_|_|_AggregateExec: mode=SinglePartitioned, gby=[a@0 as a, b@1 as b], aggr=[min(min(aggr_optimize_not.greptime_value))] REDACTED
+| 0_| 0_|_ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@2 as min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_AggregateExec: mode=SinglePartitioned, gby=[a@0 as a, b@1 as b], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
@@ -824,20 +884,21 @@ GROUP BY
   a,
   b;
 
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                                |
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Projection: min(min(aggr_optimize_not.greptime_value)) + max(max(aggr_optimize_not.greptime_value)) AS min(aggr_optimize_not.greptime_value) + max(aggr_optimize_not.greptime_value)                |
-|               |   Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b]], aggr=[[min(min(aggr_optimize_not.greptime_value)), max(max(aggr_optimize_not.greptime_value))]]                                  |
-|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                 |
-|               | Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b]], aggr=[[min(aggr_optimize_not.greptime_value), max(aggr_optimize_not.greptime_value)]]                                              |
-|               |   TableScan: aggr_optimize_not                                                                                                                                                                      |
-|               | ]]                                                                                                                                                                                                  |
-| physical_plan | ProjectionExec: expr=[min(min(aggr_optimize_not.greptime_value))@2 + max(max(aggr_optimize_not.greptime_value))@3 as min(aggr_optimize_not.greptime_value) + max(aggr_optimize_not.greptime_value)] |
-|               |   AggregateExec: mode=SinglePartitioned, gby=[a@0 as a, b@1 as b], aggr=[min(min(aggr_optimize_not.greptime_value)), max(max(aggr_optimize_not.greptime_value))]                                    |
-|               |     MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                     |
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: min(aggr_optimize_not.greptime_value) + max(aggr_optimize_not.greptime_value)                                                                                                                                                                                            |
+|               |   Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b]], aggr=[[__min_merge(__min_state(aggr_optimize_not.greptime_value)) AS min(aggr_optimize_not.greptime_value), __max_merge(__max_state(aggr_optimize_not.greptime_value)) AS max(aggr_optimize_not.greptime_value)]] |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                                  |
+|               | Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b]], aggr=[[__min_state(aggr_optimize_not.greptime_value), __max_state(aggr_optimize_not.greptime_value)]]                                                                                                               |
+|               |   TableScan: aggr_optimize_not                                                                                                                                                                                                                                                       |
+|               | ]]                                                                                                                                                                                                                                                                                   |
+| physical_plan | ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@2 + max(aggr_optimize_not.greptime_value)@3 as min(aggr_optimize_not.greptime_value) + max(aggr_optimize_not.greptime_value)]                                                                                            |
+|               |   AggregateExec: mode=SinglePartitioned, gby=[a@0 as a, b@1 as b], aggr=[min(aggr_optimize_not.greptime_value), max(aggr_optimize_not.greptime_value)]                                                                                                                               |
+|               |     CooperativeExec                                                                                                                                                                                                                                                                  |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                                                                                                                                      |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -858,20 +919,23 @@ GROUP BY
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[min(min(aggr_optimize_not.greptime_value))@2 + max(max(aggr_optimize_not.greptime_value))@3 as min(aggr_optimize_not.greptime_value) + max(aggr_optimize_not.greptime_value)] REDACTED
-|_|_|_AggregateExec: mode=SinglePartitioned, gby=[a@0 as a, b@1 as b], aggr=[min(min(aggr_optimize_not.greptime_value)), max(max(aggr_optimize_not.greptime_value))] REDACTED
+| 0_| 0_|_ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@2 + max(aggr_optimize_not.greptime_value)@3 as min(aggr_optimize_not.greptime_value) + max(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_AggregateExec: mode=SinglePartitioned, gby=[a@0 as a, b@1 as b], aggr=[min(aggr_optimize_not.greptime_value), max(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[min(aggr_optimize_not.greptime_value), max(aggr_optimize_not.greptime_value)] REDACTED
+| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value), __max_state(aggr_optimize_not.greptime_value)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[min(aggr_optimize_not.greptime_value), max(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value), __max_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[min(aggr_optimize_not.greptime_value), max(aggr_optimize_not.greptime_value)] REDACTED
+| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value), __max_state(aggr_optimize_not.greptime_value)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[min(aggr_optimize_not.greptime_value), max(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value), __max_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
@@ -900,21 +964,20 @@ FROM
 GROUP BY
   a;
 
-+---------------+------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                   |
-+---------------+------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Projection: aggr_optimize_not.a, min(min(aggr_optimize_not.greptime_value)) AS min(aggr_optimize_not.greptime_value)   |
-|               |   Aggregate: groupBy=[[aggr_optimize_not.a]], aggr=[[min(min(aggr_optimize_not.greptime_value))]]                      |
-|               |     MergeScan [is_placeholder=false, remote_input=[                                                                    |
-|               | Aggregate: groupBy=[[aggr_optimize_not.a]], aggr=[[min(aggr_optimize_not.greptime_value)]]                             |
-|               |   Projection: aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.greptime_value                               |
-|               |     TableScan: aggr_optimize_not                                                                                       |
-|               | ]]                                                                                                                     |
-| physical_plan | ProjectionExec: expr=[a@0 as a, min(min(aggr_optimize_not.greptime_value))@1 as min(aggr_optimize_not.greptime_value)] |
-|               |   AggregateExec: mode=SinglePartitioned, gby=[a@0 as a], aggr=[min(min(aggr_optimize_not.greptime_value))]             |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                     |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[aggr_optimize_not.a]], aggr=[[__min_merge(__min_state(aggr_optimize_not.greptime_value)) AS min(aggr_optimize_not.greptime_value)]] |
+|               |   MergeScan [is_placeholder=false, remote_input=[                                                                                                        |
+|               | Aggregate: groupBy=[[aggr_optimize_not.a]], aggr=[[__min_state(aggr_optimize_not.greptime_value)]]                                                       |
+|               |   Projection: aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.greptime_value                                                                 |
+|               |     TableScan: aggr_optimize_not                                                                                                                         |
+|               | ]]                                                                                                                                                       |
+| physical_plan | AggregateExec: mode=SinglePartitioned, gby=[a@0 as a], aggr=[min(aggr_optimize_not.greptime_value)]                                                      |
+|               |   CooperativeExec                                                                                                                                        |
 |               |     MergeScanExec: REDACTED
-|               |                                                                                                                        |
-+---------------+------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                                          |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -945,20 +1008,22 @@ GROUP BY
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[a@0 as a, min(min(aggr_optimize_not.greptime_value))@1 as min(aggr_optimize_not.greptime_value)] REDACTED
-|_|_|_AggregateExec: mode=SinglePartitioned, gby=[a@0 as a], aggr=[min(min(aggr_optimize_not.greptime_value))] REDACTED
+| 0_| 0_|_AggregateExec: mode=SinglePartitioned, gby=[a@0 as a], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
@@ -969,6 +1034,280 @@ drop table aggr_optimize_not_count;
 Affected Rows: 0
 
 drop table aggr_optimize_not;
+
+Affected Rows: 0
+
+--
+-- Additional test cases for step aggregation pushdown
+--
+CREATE TABLE step_aggr_extended (
+    pk_col_1 STRING,
+    pk_col_2 BIGINT,
+    val_col_1 BIGINT,
+    val_col_2 STRING,
+    val_col_3 BIGINT,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY(pk_col_1, pk_col_2)
+) PARTITION ON COLUMNS (pk_col_1) (
+    pk_col_1 < 'f',
+    pk_col_1 >= 'f'
+);
+
+Affected Rows: 0
+
+INSERT INTO step_aggr_extended VALUES
+    ('a', 1, 100, 'v1', 10, 1672531200000),
+    ('a', 2, 200, 'v2', NULL, 1672531201000),
+    ('g', 1, 300, 'v1', 30, 1672531202000),
+    ('g', 2, 400, 'v2', 40, 1672531203000),
+    ('a', 3, 100, 'v3', 10, 1672531204000),
+    ('g', 3, 300, 'v3', 30, 1672531205000),
+    ('h', 4, 500, NULL, 50, 1672531206000);
+
+Affected Rows: 7
+
+-- Case 12: GROUP BY includes a mix of partition key and non-partition key.
+-- `pk_col_1` is a partition key, `pk_col_2` is not.
+-- This should pushdown entire aggregation to datanodes since it's partitioned by `pk_col_1`.
+-- Expected: Full pushdown of aggregation to datanodes.
+SELECT pk_col_1, pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_1, pk_col_2 ORDER BY pk_col_1, pk_col_2;
+
++----------+----------+-----------------------------------+
+| pk_col_1 | pk_col_2 | sum(step_aggr_extended.val_col_1) |
++----------+----------+-----------------------------------+
+| a        | 1        | 100                               |
+| a        | 2        | 200                               |
+| a        | 3        | 100                               |
+| g        | 1        | 300                               |
+| g        | 2        | 400                               |
+| g        | 3        | 300                               |
+| h        | 4        | 500                               |
++----------+----------+-----------------------------------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT pk_col_1, pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_1, pk_col_2 ORDER BY pk_col_1, pk_col_2;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeSort: step_aggr_extended.pk_col_1 ASC NULLS LAST, step_aggr_extended.pk_col_2 ASC NULLS LAST_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Sort: step_aggr_extended.pk_col_1 ASC NULLS LAST, step_aggr_extended.pk_col_2 ASC NULLS LAST_|
+|_|_Projection: step_aggr_extended.pk_col_1, step_aggr_extended.pk_col_2, sum(step_aggr_extended.val_col_1)_|
+|_|_Aggregate: groupBy=[[step_aggr_extended.pk_col_1, step_aggr_extended.pk_col_2]], aggr=[[sum(step_aggr_extended.val_col_1)]] |
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [pk_col_1@0 ASC NULLS LAST, pk_col_2@1 ASC NULLS LAST]_|
+|_|_CooperativeExec_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 13: COUNT(DISTINCT) aggregation.
+-- `DISTINCT` aggregation is more complex and requires a two-phase distinct calculation in a distributed environment. Currently not supported for pushdown.
+-- Expected: datanode only do table scan, actual aggregation happens on frontend.
+SELECT COUNT(DISTINCT val_col_1) FROM step_aggr_extended;
+
++----------------------------------------------+
+| count(DISTINCT step_aggr_extended.val_col_1) |
++----------------------------------------------+
+| 5                                            |
++----------------------------------------------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT COUNT(DISTINCT val_col_1) FROM step_aggr_extended;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Projection: count(alias1) AS count(DISTINCT step_aggr_extended.val_col_1)_|
+|_|_Aggregate: groupBy=[[]], aggr=[[count(alias1)]]_|
+|_|_Aggregate: groupBy=[[step_aggr_extended.val_col_1 AS alias1]], aggr=[[]]_|
+|_|_Projection: step_aggr_extended.val_col_1_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | ProjectionExec: expr=[count(alias1)@0 as count(DISTINCT step_aggr_extended.val_col_1)]_|
+|_|_AggregateExec: mode=Final, gby=[], aggr=[count(alias1)]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(alias1)]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[alias1@0 as alias1], aggr=[]_|
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_AggregateExec: mode=Partial, gby=[val_col_1@0 as alias1], aggr=[]_|
+|_|_ProjectionExec: expr=[val_col_1@2 as val_col_1]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 14: Aggregation with a HAVING clause.
+-- The `HAVING` clause filters results after aggregation.
+-- Expected: The `HAVING` filter should be applied on the frontend after the final aggregation is complete, not pushed down to datanodes.
+SELECT pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_2 HAVING sum(val_col_1) > 300 ORDER BY pk_col_2;
+
++----------+-----------------------------------+
+| pk_col_2 | sum(step_aggr_extended.val_col_1) |
++----------+-----------------------------------+
+| 1        | 400                               |
+| 2        | 600                               |
+| 3        | 400                               |
+| 4        | 500                               |
++----------+-----------------------------------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_2 HAVING sum(val_col_1) > 300 ORDER BY pk_col_2;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: step_aggr_extended.pk_col_2 ASC NULLS LAST_|
+|_|_Filter: sum(step_aggr_extended.val_col_1) > Int64(300)_|
+|_|_Aggregate: groupBy=[[step_aggr_extended.pk_col_2]], aggr=[[__sum_merge(__sum_state(step_aggr_extended.val_col_1)) AS sum(step_aggr_extended.val_col_1)]] |
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[step_aggr_extended.pk_col_2]], aggr=[[__sum_state(step_aggr_extended.val_col_1)]]_|
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [pk_col_2@0 ASC NULLS LAST]_|
+|_|_SortExec: expr=[pk_col_2@0 ASC NULLS LAST], preserve_partitioning=[true]_|
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_FilterExec: sum(step_aggr_extended.val_col_1)@1 > 300_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[pk_col_2@0 as pk_col_2], aggr=[sum(step_aggr_extended.val_col_1)]_|
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_AggregateExec: mode=Partial, gby=[pk_col_2@0 as pk_col_2], aggr=[sum(step_aggr_extended.val_col_1)]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 15: Aggregation on a column with NULL values.
+-- `SUM` should ignore NULLs. `COUNT(val_col_2)` should count non-nulls, `COUNT(*)` should count all rows.
+-- Expected: Correct aggregation results, proving NULLs are handled properly in a distributed context.
+SELECT SUM(val_col_3), COUNT(val_col_2), COUNT(val_col_3), COUNT(*) FROM step_aggr_extended;
+
++-----------------------------------+-------------------------------------+-------------------------------------+----------+
+| sum(step_aggr_extended.val_col_3) | count(step_aggr_extended.val_col_2) | count(step_aggr_extended.val_col_3) | count(*) |
++-----------------------------------+-------------------------------------+-------------------------------------+----------+
+| 170                               | 6                                   | 6                                   | 7        |
++-----------------------------------+-------------------------------------+-------------------------------------+----------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT SUM(val_col_3), COUNT(val_col_2), COUNT(val_col_3), COUNT(*) FROM step_aggr_extended;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Projection: sum(step_aggr_extended.val_col_3), count(step_aggr_extended.val_col_2), count(step_aggr_extended.val_col_3), count(Int64(1)) AS count(*)_|
+|_|_Aggregate: groupBy=[[]], aggr=[[__sum_merge(__sum_state(step_aggr_extended.val_col_3)) AS sum(step_aggr_extended.val_col_3), __count_merge(__count_state(step_aggr_extended.val_col_2)) AS count(step_aggr_extended.val_col_2), __count_merge(__count_state(step_aggr_extended.val_col_3)) AS count(step_aggr_extended.val_col_3), __count_merge(__count_state(step_aggr_extended.ts)) AS count(Int64(1))]] |
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[__sum_state(step_aggr_extended.val_col_3), __count_state(step_aggr_extended.val_col_2), __count_state(step_aggr_extended.val_col_3), __count_state(step_aggr_extended.ts)]]_|
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | ProjectionExec: expr=[sum(step_aggr_extended.val_col_3)@0 as sum(step_aggr_extended.val_col_3), count(step_aggr_extended.val_col_2)@1 as count(step_aggr_extended.val_col_2), count(step_aggr_extended.val_col_3)@2 as count(step_aggr_extended.val_col_3), count(Int64(1))@3 as count(*)]_|
+|_|_AggregateExec: mode=Final, gby=[], aggr=[sum(step_aggr_extended.val_col_3), count(step_aggr_extended.val_col_2), count(step_aggr_extended.val_col_3), count(Int64(1))]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[sum(step_aggr_extended.val_col_3), count(step_aggr_extended.val_col_2), count(step_aggr_extended.val_col_3), count(Int64(1))]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 16: Aggregation on STRING columns.
+-- `MIN` and `MAX` can operate on strings.
+-- Expected: Correct lexicographical min/max results.
+SELECT MIN(pk_col_1), MAX(val_col_2) FROM step_aggr_extended;
+
++----------------------------------+-----------------------------------+
+| min(step_aggr_extended.pk_col_1) | max(step_aggr_extended.val_col_2) |
++----------------------------------+-----------------------------------+
+| a                                | v3                                |
++----------------------------------+-----------------------------------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT MIN(pk_col_1), MAX(val_col_2) FROM step_aggr_extended;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Aggregate: groupBy=[[]], aggr=[[__min_merge(__min_state(step_aggr_extended.pk_col_1)) AS min(step_aggr_extended.pk_col_1), __max_merge(__max_state(step_aggr_extended.val_col_2)) AS max(step_aggr_extended.val_col_2)]] |
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[__min_state(step_aggr_extended.pk_col_1), __max_state(step_aggr_extended.val_col_2)]]_|
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[min(step_aggr_extended.pk_col_1), max(step_aggr_extended.val_col_2)]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[min(step_aggr_extended.pk_col_1), max(step_aggr_extended.val_col_2)]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 17: Aggregation on an empty input set.
+-- `WHERE` clause filters out all rows.
+-- Expected: Aggregation should return correct default values (e.g., COUNT is 0, SUM is NULL).
+SELECT SUM(val_col_1), COUNT(*) FROM step_aggr_extended WHERE pk_col_1 = 'non_existent';
+
++-----------------------------------+----------+
+| sum(step_aggr_extended.val_col_1) | count(*) |
++-----------------------------------+----------+
+|                                   | 0        |
++-----------------------------------+----------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT SUM(val_col_1), COUNT(*) FROM step_aggr_extended WHERE pk_col_1 = 'non_existent';
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Projection: sum(step_aggr_extended.val_col_1), count(Int64(1)) AS count(*)_|
+|_|_Aggregate: groupBy=[[]], aggr=[[__sum_merge(__sum_state(step_aggr_extended.val_col_1)) AS sum(step_aggr_extended.val_col_1), __count_merge(__count_state(step_aggr_extended.ts)) AS count(Int64(1))]] |
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[__sum_state(step_aggr_extended.val_col_1), __count_state(step_aggr_extended.ts)]]_|
+|_|_Filter: step_aggr_extended.pk_col_1 = Utf8("non_existent")_|
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | ProjectionExec: expr=[sum(step_aggr_extended.val_col_1)@0 as sum(step_aggr_extended.val_col_1), count(Int64(1))@1 as count(*)]_|
+|_|_AggregateExec: mode=Final, gby=[], aggr=[sum(step_aggr_extended.val_col_1), count(Int64(1))]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[sum(step_aggr_extended.val_col_1), count(Int64(1))]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+DROP TABLE step_aggr_extended;
 
 Affected Rows: 0
 

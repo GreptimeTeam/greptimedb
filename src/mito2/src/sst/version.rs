@@ -18,8 +18,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_time::{TimeToLive, Timestamp};
+use store_api::storage::FileId;
 
-use crate::sst::file::{FileHandle, FileId, FileMeta, Level, MAX_LEVEL};
+use crate::sst::file::{FileHandle, FileMeta, Level, MAX_LEVEL};
 use crate::sst::file_purger::FilePurgerRef;
 
 /// A version of all SSTs in a region.
@@ -44,7 +45,8 @@ impl SstVersion {
         &self.levels
     }
 
-    /// Add files to the version.
+    /// Add files to the version. If a file with the same `file_id` already exists,
+    /// it will be overwritten with the new file.
     ///
     /// # Panics
     /// Panics if level of [FileMeta] is greater than [MAX_LEVEL].
@@ -57,8 +59,7 @@ impl SstVersion {
             let level = file.level;
             self.levels[level as usize]
                 .files
-                .entry(file.file_id)
-                .or_insert_with(|| FileHandle::new(file, file_purger.clone()));
+                .insert(file.file_id, FileHandle::new(file, file_purger.clone()));
         }
     }
 

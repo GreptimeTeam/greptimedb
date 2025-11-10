@@ -1,0 +1,23 @@
+-- Migrated from DuckDB test: test/sql/window/test_nthvalue.test
+-- Tests NTH_VALUE, FIRST_VALUE, LAST_VALUE window functions
+
+CREATE TABLE test_data(i INTEGER, v VARCHAR, ts TIMESTAMP TIME INDEX);
+
+INSERT INTO test_data VALUES 
+(1, 'A', 1000),
+(2, 'B', 2000),
+(3, 'C', 3000),
+(4, 'D', 4000),
+(5, 'E', 5000);
+
+-- NTH_VALUE function
+SELECT i, v, NTH_VALUE(v, 2) OVER (ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as nth_val
+FROM test_data ORDER BY i;
+
+-- FIRST_VALUE and LAST_VALUE
+SELECT i, v, 
+  FIRST_VALUE(v) OVER (ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as first_val,
+  LAST_VALUE(v) OVER (ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as last_val
+FROM test_data ORDER BY i;
+
+DROP TABLE test_data;

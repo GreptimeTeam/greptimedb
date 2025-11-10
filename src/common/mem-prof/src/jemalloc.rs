@@ -14,23 +14,25 @@
 
 mod error;
 
-use std::ffi::{c_char, CString};
+use std::ffi::{CString, c_char};
 use std::io::BufReader;
 use std::path::PathBuf;
 
 use error::{
-    BuildTempPathSnafu, DumpProfileDataSnafu, OpenTempFileSnafu, ProfilingNotEnabledSnafu,
-    ReadOptProfSnafu,
+    ActivateProfSnafu, BuildTempPathSnafu, DeactivateProfSnafu, DumpProfileDataSnafu,
+    OpenTempFileSnafu, ProfilingNotEnabledSnafu, ReadOptProfSnafu, ReadProfActiveSnafu,
 };
 use jemalloc_pprof_mappings::MAPPINGS;
-use jemalloc_pprof_utils::{parse_jeheap, FlamegraphOptions, StackProfile};
-use snafu::{ensure, ResultExt};
+use jemalloc_pprof_utils::{FlamegraphOptions, StackProfile, parse_jeheap};
+use snafu::{ResultExt, ensure};
 use tokio::io::AsyncReadExt;
 
 use crate::error::{FlamegraphSnafu, ParseJeHeapSnafu, Result};
 
 const PROF_DUMP: &[u8] = b"prof.dump\0";
 const OPT_PROF: &[u8] = b"opt.prof\0";
+const PROF_ACTIVE: &[u8] = b"prof.active\0";
+const PROF_GDUMP: &[u8] = b"prof.gdump\0";
 
 pub async fn dump_profile() -> Result<Vec<u8>> {
     ensure!(is_prof_enabled()?, ProfilingNotEnabledSnafu);
@@ -93,7 +95,41 @@ pub async fn dump_flamegraph() -> Result<Vec<u8>> {
     let flamegraph = profile.to_flamegraph(&mut opts).context(FlamegraphSnafu)?;
     Ok(flamegraph)
 }
+
+pub fn activate_heap_profile() -> Result<()> {
+    ensure!(is_prof_enabled()?, ProfilingNotEnabledSnafu);
+    unsafe {
+        tikv_jemalloc_ctl::raw::update(PROF_ACTIVE, true).context(ActivateProfSnafu)?;
+    }
+    Ok(())
+}
+
+pub fn deactivate_heap_profile() -> Result<()> {
+    ensure!(is_prof_enabled()?, ProfilingNotEnabledSnafu);
+    unsafe {
+        tikv_jemalloc_ctl::raw::update(PROF_ACTIVE, false).context(DeactivateProfSnafu)?;
+    }
+    Ok(())
+}
+
+pub fn is_heap_profile_active() -> Result<bool> {
+    unsafe { Ok(tikv_jemalloc_ctl::raw::read::<bool>(PROF_ACTIVE).context(ReadProfActiveSnafu)?) }
+}
+
 fn is_prof_enabled() -> Result<bool> {
     // safety: OPT_PROF variable, if present, is always a boolean value.
     Ok(unsafe { tikv_jemalloc_ctl::raw::read::<bool>(OPT_PROF).context(ReadOptProfSnafu)? })
+}
+
+pub fn set_gdump_active(active: bool) -> Result<()> {
+    ensure!(is_prof_enabled()?, ProfilingNotEnabledSnafu);
+    unsafe {
+        tikv_jemalloc_ctl::raw::update(PROF_GDUMP, active).context(error::UpdateGdumpSnafu)?;
+    }
+    Ok(())
+}
+
+pub fn is_gdump_active() -> Result<bool> {
+    // safety: PROF_GDUMP, if present, is a boolean value.
+    unsafe { Ok(tikv_jemalloc_ctl::raw::read::<bool>(PROF_GDUMP).context(error::ReadGdumpSnafu)?) }
 }

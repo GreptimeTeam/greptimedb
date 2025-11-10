@@ -1,0 +1,183 @@
+-- String length function tests
+-- LENGTH function
+SELECT LENGTH('hello');
+
++-----------------------+
+| length(Utf8("hello")) |
++-----------------------+
+| 5                     |
++-----------------------+
+
+SELECT LENGTH('');
+
++------------------+
+| length(Utf8("")) |
++------------------+
+| 0                |
++------------------+
+
+SELECT LENGTH(NULL);
+
++--------------+
+| length(NULL) |
++--------------+
+|              |
++--------------+
+
+SELECT LENGTH('hello world');
+
++-----------------------------+
+| length(Utf8("hello world")) |
++-----------------------------+
+| 11                          |
++-----------------------------+
+
+-- CHAR_LENGTH (character length)
+SELECT CHAR_LENGTH('hello');
+
++----------------------------+
+| char_length(Utf8("hello")) |
++----------------------------+
+| 5                          |
++----------------------------+
+
+SELECT CHAR_LENGTH('');
+
++-----------------------+
+| char_length(Utf8("")) |
++-----------------------+
+| 0                     |
++-----------------------+
+
+SELECT CHAR_LENGTH(NULL);
+
++-------------------+
+| char_length(NULL) |
++-------------------+
+|                   |
++-------------------+
+
+-- CHARACTER_LENGTH (alias for CHAR_LENGTH)
+SELECT CHARACTER_LENGTH('hello world');
+
++---------------------------------------+
+| character_length(Utf8("hello world")) |
++---------------------------------------+
+| 11                                    |
++---------------------------------------+
+
+-- Unicode character length
+SELECT LENGTH('世界') AS a, CHAR_LENGTH('世界') AS b;
+
++---+---+
+| a | b |
++---+---+
+| 2 | 2 |
++---+---+
+
+SELECT LENGTH('🚀🌟') AS a, CHAR_LENGTH('🚀🌟') AS b;
+
++---+---+
+| a | b |
++---+---+
+| 2 | 2 |
++---+---+
+
+SELECT LENGTH('café') AS a, CHAR_LENGTH('café') AS b;
+
++---+---+
+| a | b |
++---+---+
+| 4 | 4 |
++---+---+
+
+-- Test with table data
+CREATE TABLE length_test(s VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO length_test VALUES
+    ('hello', 1000),
+    ('world!', 2000),
+    ('', 3000),
+    ('中文测试', 4000),
+    ('🚀🎉🌟', 5000),
+    (NULL, 6000);
+
+Affected Rows: 6
+
+SELECT s, LENGTH(s) AS a, CHAR_LENGTH(s) AS b FROM length_test ORDER BY ts;
+
++----------+---+---+
+| s        | a | b |
++----------+---+---+
+| hello    | 5 | 5 |
+| world!   | 6 | 6 |
+|          | 0 | 0 |
+| 中文测试 | 4 | 4 |
+| 🚀🎉🌟   | 3 | 3 |
+|          |   |   |
++----------+---+---+
+
+-- BIT_LENGTH (length in bits)
+SELECT BIT_LENGTH('hello');
+
++---------------------------+
+| bit_length(Utf8("hello")) |
++---------------------------+
+| 40                        |
++---------------------------+
+
+SELECT BIT_LENGTH('');
+
++----------------------+
+| bit_length(Utf8("")) |
++----------------------+
+| 0                    |
++----------------------+
+
+SELECT BIT_LENGTH('世界');
+
++--------------------------+
+| bit_length(Utf8("世界")) |
++--------------------------+
+| 48                       |
++--------------------------+
+
+-- OCTET_LENGTH (length in bytes)
+SELECT OCTET_LENGTH('hello');
+
++-----------------------------+
+| octet_length(Utf8("hello")) |
++-----------------------------+
+| 5                           |
++-----------------------------+
+
+SELECT OCTET_LENGTH('');
+
++------------------------+
+| octet_length(Utf8("")) |
++------------------------+
+| 0                      |
++------------------------+
+
+SELECT OCTET_LENGTH('世界');
+
++----------------------------+
+| octet_length(Utf8("世界")) |
++----------------------------+
+| 6                          |
++----------------------------+
+
+SELECT OCTET_LENGTH('🚀');
+
++--------------------------+
+| octet_length(Utf8("🚀")) |
++--------------------------+
+| 4                        |
++--------------------------+
+
+DROP TABLE length_test;
+
+Affected Rows: 0
+

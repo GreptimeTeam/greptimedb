@@ -19,20 +19,20 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
 use api::prom_store::remote::label_matcher::Type as MatcherType;
-use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
+use api::prom_store::remote::{Label, Query, ReadRequest, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
 use common_grpc::precision::Precision;
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::tracing;
 use common_time::timestamp::TimeUnit;
-use datafusion::prelude::{col, lit, regexp_match, Expr};
+use datafusion::prelude::{Expr, col, lit, regexp_match};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::{ConcreteDataType, Value};
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use query::dataframe::DataFrame;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use snap::raw::{Decoder, Encoder};
 
 use crate::error::{self, Result};
@@ -43,6 +43,9 @@ pub const METRIC_NAME_LABEL_BYTES: &[u8] = b"__name__";
 
 pub const DATABASE_LABEL: &str = "__database__";
 pub const DATABASE_LABEL_BYTES: &[u8] = b"__database__";
+
+pub const SCHEMA_LABEL: &str = "__schema__";
+pub const SCHEMA_LABEL_BYTES: &[u8] = b"__schema__";
 
 pub const PHYSICAL_TABLE_LABEL: &str = "__physical_table__";
 pub const PHYSICAL_TABLE_LABEL_BYTES: &[u8] = b"__physical_table__";
@@ -63,7 +66,7 @@ pub fn table_name(q: &Query) -> Result<String> {
         .iter()
         .find_map(|m| {
             if m.name == METRIC_NAME_LABEL {
-                Some(m.value.to_string())
+                Some(m.value.clone())
             } else {
                 None
             }
@@ -71,6 +74,29 @@ pub fn table_name(q: &Query) -> Result<String> {
         .context(error::InvalidPromRemoteRequestSnafu {
             msg: "missing '__name__' label in timeseries",
         })
+}
+
+/// Extract schema from remote read request. Returns the first schema found from any query's matchers.
+/// Prioritizes __schema__ over __database__ labels.
+pub fn extract_schema_from_read_request(request: &ReadRequest) -> Option<String> {
+    for query in &request.queries {
+        for matcher in &query.matchers {
+            if matcher.name == SCHEMA_LABEL && matcher.r#type == MatcherType::Eq as i32 {
+                return Some(matcher.value.clone());
+            }
+        }
+    }
+
+    // If no __schema__ found, look for __database__
+    for query in &request.queries {
+        for matcher in &query.matchers {
+            if matcher.name == DATABASE_LABEL && matcher.r#type == MatcherType::Eq as i32 {
+                return Some(matcher.value.clone());
+            }
+        }
+    }
+
+    None
 }
 
 /// Create a DataFrame from a remote Query
@@ -85,13 +111,13 @@ pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
 
     let mut conditions = Vec::with_capacity(label_matches.len() + 1);
 
-    conditions.push(col(GREPTIME_TIMESTAMP).gt_eq(lit_timestamp_millisecond(start_timestamp_ms)));
-    conditions.push(col(GREPTIME_TIMESTAMP).lt_eq(lit_timestamp_millisecond(end_timestamp_ms)));
+    conditions.push(col(greptime_timestamp()).gt_eq(lit_timestamp_millisecond(start_timestamp_ms)));
+    conditions.push(col(greptime_timestamp()).lt_eq(lit_timestamp_millisecond(end_timestamp_ms)));
 
     for m in label_matches {
         let name = &m.name;
 
-        if name == METRIC_NAME_LABEL {
+        if name == METRIC_NAME_LABEL || name == SCHEMA_LABEL || name == DATABASE_LABEL {
             continue;
         }
 
@@ -137,7 +163,7 @@ fn new_label(name: String, value: String) -> Label {
 }
 
 fn lit_timestamp_millisecond(ts: i64) -> Expr {
-    Expr::Literal(ScalarValue::TimestampMillisecond(Some(ts), None))
+    Expr::Literal(ScalarValue::TimestampMillisecond(Some(ts), None), None)
 }
 
 // A timeseries id
@@ -215,7 +241,8 @@ fn collect_timeseries_ids(table_name: &str, recordbatch: &RecordBatch) -> Vec<Ti
         ));
 
         for (i, column_schema) in recordbatch.schema.column_schemas().iter().enumerate() {
-            if column_schema.name == GREPTIME_VALUE || column_schema.name == GREPTIME_TIMESTAMP {
+            if column_schema.name == greptime_value() || column_schema.name == greptime_timestamp()
+            {
                 continue;
             }
 
@@ -248,7 +275,7 @@ pub fn recordbatches_to_timeseries(
 }
 
 fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Vec<TimeSeries>> {
-    let ts_column = recordbatch.column_by_name(GREPTIME_TIMESTAMP).context(
+    let ts_column = recordbatch.column_by_name(greptime_timestamp()).context(
         error::InvalidPromRemoteReadQueryResultSnafu {
             msg: "missing greptime_timestamp column in query result",
         },
@@ -263,7 +290,7 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
         }
     );
 
-    let field_column = recordbatch.column_by_name(GREPTIME_VALUE).context(
+    let field_column = recordbatch.column_by_name(greptime_value()).context(
         error::InvalidPromRemoteReadQueryResultSnafu {
             msg: "missing greptime_value column in query result",
         },
@@ -355,14 +382,14 @@ pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertR
             // value
             row_writer::write_f64(
                 table_data,
-                GREPTIME_VALUE,
+                greptime_value(),
                 series.samples[0].value,
                 &mut one_row,
             )?;
             // timestamp
             row_writer::write_ts_to_millis(
                 table_data,
-                GREPTIME_TIMESTAMP,
+                greptime_timestamp(),
                 Some(series.samples[0].timestamp),
                 Precision::Millisecond,
                 &mut one_row,
@@ -377,11 +404,11 @@ pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertR
                 let kvs = kvs.clone();
                 row_writer::write_tags(table_data, kvs, &mut one_row)?;
                 // value
-                row_writer::write_f64(table_data, GREPTIME_VALUE, *value, &mut one_row)?;
+                row_writer::write_f64(table_data, greptime_value(), *value, &mut one_row)?;
                 // timestamp
                 row_writer::write_ts_to_millis(
                     table_data,
-                    GREPTIME_TIMESTAMP,
+                    greptime_timestamp(),
                     Some(*timestamp),
                     Precision::Millisecond,
                     &mut one_row,
@@ -602,11 +629,11 @@ mod tests {
 
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
-                GREPTIME_TIMESTAMP,
+                greptime_timestamp(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 true,
             ),
-            ColumnSchema::new(GREPTIME_VALUE, ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("job", ConcreteDataType::string_datatype(), true),
         ]));
@@ -629,7 +656,12 @@ mod tests {
         let plan = query_to_plan(DataFrame::DataFusion(dataframe), &q).unwrap();
         let display_string = format!("{}", plan.display_indent());
 
-        assert_eq!("Filter: ?table?.greptime_timestamp >= TimestampMillisecond(1000, None) AND ?table?.greptime_timestamp <= TimestampMillisecond(2000, None)\n  TableScan: ?table?", display_string);
+        let ts_col = greptime_timestamp();
+        let expected = format!(
+            "Filter: ?table?.{} >= TimestampMillisecond(1000, None) AND ?table?.{} <= TimestampMillisecond(2000, None)\n  TableScan: ?table?",
+            ts_col, ts_col
+        );
+        assert_eq!(expected, display_string);
 
         let q = Query {
             start_timestamp_ms: 1000,
@@ -658,19 +690,24 @@ mod tests {
         let plan = query_to_plan(DataFrame::DataFusion(dataframe), &q).unwrap();
         let display_string = format!("{}", plan.display_indent());
 
-        assert_eq!("Filter: ?table?.greptime_timestamp >= TimestampMillisecond(1000, None) AND ?table?.greptime_timestamp <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\")\n  TableScan: ?table?", display_string);
+        let ts_col = greptime_timestamp();
+        let expected = format!(
+            "Filter: ?table?.{} >= TimestampMillisecond(1000, None) AND ?table?.{} <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\")\n  TableScan: ?table?",
+            ts_col, ts_col
+        );
+        assert_eq!(expected, display_string);
     }
 
     fn column_schemas_with(
         mut kts_iter: Vec<(&str, ColumnDataType, SemanticType)>,
     ) -> Vec<api::v1::ColumnSchema> {
         kts_iter.push((
-            "greptime_value",
+            greptime_value(),
             ColumnDataType::Float64,
             SemanticType::Field,
         ));
         kts_iter.push((
-            "greptime_timestamp",
+            greptime_timestamp(),
             ColumnDataType::TimestampMillisecond,
             SemanticType::Timestamp,
         ));
@@ -805,11 +842,11 @@ mod tests {
     fn test_recordbatches_to_timeseries() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
-                GREPTIME_TIMESTAMP,
+                greptime_timestamp(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 true,
             ),
-            ColumnSchema::new(GREPTIME_VALUE, ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
         ]));
 

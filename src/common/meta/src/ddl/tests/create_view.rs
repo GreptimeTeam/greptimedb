@@ -30,7 +30,7 @@ use crate::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
 use crate::ddl::tests::create_table::test_create_table_task;
 use crate::error::Error;
 use crate::rpc::ddl::CreateViewTask;
-use crate::test_util::{new_ddl_context, MockDatanodeManager};
+use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 pub(crate) fn test_table_names() -> HashSet<table::table_name::TableName> {
     let mut set = HashSet::new();

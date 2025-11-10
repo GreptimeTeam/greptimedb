@@ -402,14 +402,18 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Transform must have exactly one field specified as timestamp Index, but got {count}: {columns}"))]
+    #[snafu(display(
+        "Transform must have exactly one field specified as timestamp Index, but got {count}: {columns}"
+    ))]
     TransformTimestampIndexCount {
         count: usize,
         columns: String,
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Exactly one time-related processor and one timestamp value is required to use auto transform. `ignore_missing` can not be set to true."))]
+    #[snafu(display(
+        "Exactly one time-related processor and one timestamp value is required to use auto transform. `ignore_missing` can not be set to true."
+    ))]
     AutoTransformOneTimestamp {
         #[snafu(implicit)]
         location: Location,
@@ -552,7 +556,9 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Column datatype mismatch. For column: {column}, expected datatype: {expected}, actual datatype: {actual}"))]
+    #[snafu(display(
+        "Column datatype mismatch. For column: {column}, expected datatype: {expected}, actual datatype: {actual}"
+    ))]
     IdentifyPipelineColumnTypeMismatch {
         column: String,
         expected: String,
@@ -578,14 +584,6 @@ pub enum Error {
     TableSuffixRequiredForDispatcherRule,
     #[snafu(display("Value is required for dispatcher rule"))]
     ValueRequiredForDispatcherRule,
-    #[snafu(display(
-        "Reached max nested levels when flattening JSON object: {max_nested_levels}"
-    ))]
-    ReachedMaxNestedLevels {
-        max_nested_levels: usize,
-        #[snafu(implicit)]
-        location: Location,
-    },
 
     #[snafu(display("Pipeline table not found"))]
     PipelineTableNotFound {
@@ -883,7 +881,6 @@ impl ErrorExt for Error {
             | FieldRequiredForDispatcher
             | TableSuffixRequiredForDispatcherRule
             | ValueRequiredForDispatcherRule
-            | ReachedMaxNestedLevels { .. }
             | RequiredTableSuffixTemplate
             | InvalidTableSuffixTemplate { .. }
             | CompileVrl { .. }

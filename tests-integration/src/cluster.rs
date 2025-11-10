@@ -14,6 +14,8 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::net::TcpListener;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,39 +28,43 @@ use cache::{
 use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, MetaKvBackend};
 use catalog::process_manager::ProcessManager;
-use client::client_manager::NodeClients;
 use client::Client;
+use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::DatanodeId;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
-use common_meta::heartbeat::handler::HandlerGroupExecutor;
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
-use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
-use common_meta::DatanodeId;
-use common_runtime::runtime::BuilderBuild;
 use common_runtime::Builder as RuntimeBuilder;
+use common_runtime::runtime::BuilderBuild;
+use common_stat::ResourceStatImpl;
 use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::heartbeat::HeartbeatTask;
-use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::Instance as FeInstance;
+use frontend::instance::builder::FrontendBuilder;
+use frontend::server::Services;
 use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
+use meta_srv::discovery;
 use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
 use object_store::config::ObjectStoreConfig;
+use rand::Rng;
+use servers::grpc::GrpcOptions;
 use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
-use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::server::ServerHandlers;
 use tempfile::TempDir;
@@ -68,8 +74,8 @@ use tower::service_fn;
 use uuid::Uuid;
 
 use crate::test_util::{
-    self, create_datanode_opts, create_tmp_dir_and_datanode_opts, FileDirGuard, StorageType,
-    TestGuard, PEER_PLACEHOLDER_ADDR,
+    self, FileDirGuard, PEER_PLACEHOLDER_ADDR, StorageType, TestGuard, create_datanode_opts,
+    create_tmp_dir_and_datanode_opts,
 };
 
 pub struct GreptimeDbCluster {
@@ -177,6 +183,7 @@ impl GreptimeDbClusterBuilder {
     pub async fn build_with(
         &self,
         datanode_options: Vec<DatanodeOptions>,
+        start_frontend_servers: bool,
         guards: Vec<TestGuard>,
     ) -> GreptimeDbCluster {
         let datanodes = datanode_options.len();
@@ -218,7 +225,9 @@ impl GreptimeDbClusterBuilder {
         self.wait_datanodes_alive(metasrv.metasrv.meta_peer_client(), datanodes)
             .await;
 
-        let mut frontend = self.build_frontend(metasrv.clone(), datanode_clients).await;
+        let mut frontend = self
+            .build_frontend(metasrv.clone(), datanode_clients, start_frontend_servers)
+            .await;
 
         test_util::prepare_another_catalog_and_schema(&frontend.instance).await;
 
@@ -234,10 +243,11 @@ impl GreptimeDbClusterBuilder {
         }
     }
 
-    pub async fn build(&self) -> GreptimeDbCluster {
+    pub async fn build(&self, start_frontend_servers: bool) -> GreptimeDbCluster {
         let datanodes = self.datanodes.unwrap_or(4);
         let (datanode_options, guards) = self.build_datanode_options_and_guards(datanodes).await;
-        self.build_with(datanode_options, guards).await
+        self.build_with(datanode_options, start_frontend_servers, guards)
+            .await
     }
 
     async fn build_datanode_options_and_guards(
@@ -307,15 +317,19 @@ impl GreptimeDbClusterBuilder {
         meta_peer_client: &MetaPeerClientRef,
         expected_datanodes: usize,
     ) {
-        for _ in 0..10 {
-            let alive_datanodes = meta_srv::lease::alive_datanodes(meta_peer_client, u64::MAX)
-                .await
-                .unwrap()
-                .len();
+        for _ in 0..100 {
+            let alive_datanodes = discovery::utils::alive_datanodes(
+                meta_peer_client.as_ref(),
+                Duration::from_secs(u64::MAX),
+                None,
+            )
+            .await
+            .unwrap()
+            .len();
             if alive_datanodes == expected_datanodes {
                 return;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await
+            tokio::time::sleep(Duration::from_micros(100)).await
         }
         panic!("Some Datanodes are not alive in 10 seconds!")
     }
@@ -352,6 +366,7 @@ impl GreptimeDbClusterBuilder {
         &self,
         metasrv: MockInfo,
         datanode_clients: Arc<NodeClients>,
+        start_frontend_servers: bool,
     ) -> Frontend {
         let mut meta_client = MetaClientBuilder::frontend_default_options()
             .channel_manager(metasrv.channel_manager)
@@ -379,8 +394,10 @@ impl GreptimeDbClusterBuilder {
             .build(),
         );
 
-        let information_extension =
-            Arc::new(DistributedInformationExtension::new(meta_client.clone()));
+        let information_extension = Arc::new(DistributedInformationExtension::new(
+            meta_client.clone(),
+            datanode_clients.clone(),
+        ));
         let catalog_manager = KvBackendCatalogManagerBuilder::new(
             information_extension,
             cached_meta_backend.clone(),
@@ -393,36 +410,101 @@ impl GreptimeDbClusterBuilder {
             Arc::new(InvalidateCacheHandler::new(cache_registry.clone())),
         ]);
 
-        let options = FrontendOptions::default();
+        let fe_opts = self.build_frontend_options();
+
+        let mut resource_stat = ResourceStatImpl::default();
+        resource_stat.start_collect_cpu_usage();
+
         let heartbeat_task = HeartbeatTask::new(
-            &options,
+            &fe_opts,
             meta_client.clone(),
             HeartbeatOptions::default(),
             Arc::new(handlers_executor),
+            Arc::new(resource_stat),
         );
 
-        let server_addr = options.grpc.server_addr.clone();
         let instance = FrontendBuilder::new(
-            options,
+            fe_opts.clone(),
             cached_meta_backend.clone(),
             cache_registry.clone(),
             catalog_manager,
             datanode_clients,
             meta_client,
-            Arc::new(ProcessManager::new(server_addr, None)),
+            Arc::new(ProcessManager::new(fe_opts.grpc.server_addr.clone(), None)),
         )
         .with_local_cache_invalidator(cache_registry)
         .try_build()
         .await
         .unwrap();
+
         let instance = Arc::new(instance);
+
+        // Build the servers for the frontend.
+        let servers = if start_frontend_servers {
+            Services::new(fe_opts, instance.clone(), Plugins::default())
+                .build()
+                .unwrap()
+        } else {
+            ServerHandlers::default()
+        };
 
         Frontend {
             instance,
-            servers: ServerHandlers::default(),
+            servers,
             heartbeat_task: Some(heartbeat_task),
             export_metrics_task: None,
         }
+    }
+
+    fn build_frontend_options(&self) -> FrontendOptions {
+        let mut fe_opts = FrontendOptions::default();
+
+        // Choose a random unused port between [14000, 24000] for local test to avoid conflicts.
+        let port_range = 14000..=24000;
+        let max_attempts = 10;
+        let localhost = "127.0.0.1";
+        let construct_addr = |port: u16| format!("{}:{}", localhost, port);
+
+        fe_opts.http.addr = construct_addr(self.choose_random_unused_port(
+            port_range.clone(),
+            max_attempts,
+            localhost,
+        ));
+
+        let grpc_port = self.choose_random_unused_port(port_range.clone(), max_attempts, localhost);
+        fe_opts.grpc.bind_addr = construct_addr(grpc_port);
+        fe_opts.grpc.server_addr = construct_addr(grpc_port);
+
+        fe_opts.mysql.addr = construct_addr(self.choose_random_unused_port(
+            port_range.clone(),
+            max_attempts,
+            localhost,
+        ));
+        fe_opts.postgres.addr =
+            construct_addr(self.choose_random_unused_port(port_range, max_attempts, localhost));
+
+        fe_opts
+    }
+
+    // Choose a random unused port between [start, end].
+    fn choose_random_unused_port(
+        &self,
+        port_range: RangeInclusive<u16>,
+        max_attempts: u16,
+        addr: &str,
+    ) -> u16 {
+        let mut rng = rand::rng();
+
+        let mut attempts = 0;
+        while attempts < max_attempts {
+            let port = rng.random_range(port_range.clone());
+            if TcpListener::bind(format!("{}:{}", addr, port)).is_ok() {
+                return port;
+            }
+            attempts += 1;
+        }
+
+        panic!("No unused port found");
     }
 }
 

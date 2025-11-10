@@ -33,13 +33,13 @@ use datatypes::types::TimestampType;
 use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
     Helper, TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-    TimestampSecondVector, UInt64Vector, UInt8Vector,
+    TimestampSecondVector, UInt8Vector, UInt64Vector,
 };
 use mito_codec::key_values::KeyValue;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{
@@ -51,9 +51,9 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::simple_bulk_memtable::SimpleBulkMemtable;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableBuilder,
-    MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
-    PredicateGroup,
+    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable,
+    MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
+    MemtableStats, RangesOptions,
 };
 use crate::metrics::{
     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT, MEMTABLE_ACTIVE_SERIES_COUNT, READ_ROWS_TOTAL,
@@ -111,6 +111,12 @@ impl MemtableBuilder for TimeSeriesMemtableBuilder {
                 self.merge_mode,
             ))
         }
+    }
+
+    fn use_bulk_insert(&self, _metadata: &RegionMetadataRef) -> bool {
+        // Now if we can use simple bulk memtable, the input request is already
+        // a bulk write request and won't call this method.
+        false
     }
 }
 
@@ -191,7 +197,12 @@ impl TimeSeriesMemtable {
         stats.value_bytes += value_allocated;
 
         // safety: timestamp of kv must be both present and a valid timestamp value.
-        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        let ts = kv
+            .timestamp()
+            .try_into_timestamp()
+            .unwrap()
+            .unwrap()
+            .value();
         stats.min_ts = stats.min_ts.min(ts);
         stats.max_ts = stats.max_ts.max(ts);
         Ok(())
@@ -254,8 +265,8 @@ impl Memtable for TimeSeriesMemtable {
         }
 
         metrics.max_sequence = part.sequence;
-        metrics.max_ts = part.max_ts;
-        metrics.min_ts = part.min_ts;
+        metrics.max_ts = part.max_timestamp;
+        metrics.min_ts = part.min_timestamp;
         metrics.num_rows = part.num_rows();
         self.update_stats(metrics);
         Ok(())
@@ -266,7 +277,7 @@ impl Memtable for TimeSeriesMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         filters: Option<Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator> {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
@@ -279,7 +290,7 @@ impl Memtable for TimeSeriesMemtable {
 
         let iter = self
             .series_set
-            .iter_series(projection, filters, self.dedup, sequence)?;
+            .iter_series(projection, filters, self.dedup, sequence, None)?;
 
         if self.merge_mode == MergeMode::LastNonNull {
             let iter = LastNonNullIter::new(iter);
@@ -292,9 +303,10 @@ impl Memtable for TimeSeriesMemtable {
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
+        options: RangesOptions,
     ) -> Result<MemtableRanges> {
+        let predicate = options.predicate;
+        let sequence = options.sequence;
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -456,7 +468,8 @@ impl SeriesSet {
         projection: HashSet<ColumnId>,
         predicate: Option<Predicate>,
         dedup: bool,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
+        mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Iter> {
         let primary_key_schema = primary_key_schema(&self.region_metadata);
         let primary_key_datatypes = self
@@ -475,6 +488,7 @@ impl SeriesSet {
             self.codec.clone(),
             dedup,
             sequence,
+            mem_scan_metrics,
         )
     }
 }
@@ -522,8 +536,9 @@ struct Iter {
     pk_datatypes: Vec<ConcreteDataType>,
     codec: Arc<DensePrimaryKeyCodec>,
     dedup: bool,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
     metrics: Metrics,
+    mem_scan_metrics: Option<MemScanMetrics>,
 }
 
 impl Iter {
@@ -537,7 +552,8 @@ impl Iter {
         pk_datatypes: Vec<ConcreteDataType>,
         codec: Arc<DensePrimaryKeyCodec>,
         dedup: bool,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
+        mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Self> {
         let predicate = predicate
             .map(|predicate| {
@@ -560,7 +576,20 @@ impl Iter {
             dedup,
             sequence,
             metrics: Metrics::default(),
+            mem_scan_metrics,
         })
+    }
+
+    fn report_mem_scan_metrics(&mut self) {
+        if let Some(mem_scan_metrics) = self.mem_scan_metrics.take() {
+            let inner = crate::memtable::MemScanMetricsData {
+                total_series: self.metrics.total_series,
+                num_rows: self.metrics.num_rows,
+                num_batches: self.metrics.num_batches,
+                scan_cost: self.metrics.scan_cost,
+            };
+            mem_scan_metrics.merge_inner(&inner);
+        }
     }
 }
 
@@ -570,6 +599,9 @@ impl Drop for Iter {
             "Iter {} time series memtable, metrics: {:?}",
             self.metadata.region_id, self.metrics
         );
+
+        // Report MemScanMetrics if not already reported
+        self.report_mem_scan_metrics();
 
         READ_ROWS_TOTAL
             .with_label_values(&["time_series_memtable"])
@@ -631,7 +663,11 @@ impl Iterator for Iter {
             });
             return Some(batch);
         }
+        drop(map); // Explicitly drop the read lock
         self.metrics.scan_cost += start.elapsed();
+
+        // Report MemScanMetrics before returning None
+        self.report_mem_scan_metrics();
 
         None
     }
@@ -773,10 +809,12 @@ impl Series {
             let column_size = frozen[0].fields.len() + 3;
 
             if cfg!(debug_assertions) {
-                debug_assert!(frozen
-                    .iter()
-                    .zip(frozen.iter().skip(1))
-                    .all(|(prev, next)| { prev.fields.len() == next.fields.len() }));
+                debug_assert!(
+                    frozen
+                        .iter()
+                        .zip(frozen.iter().skip(1))
+                        .all(|(prev, next)| { prev.fields.len() == next.fields.len() })
+                );
             }
 
             let arrays = frozen.iter().map(|v| v.columns()).collect::<Vec<_>>();
@@ -804,7 +842,7 @@ impl Series {
 }
 
 /// `ValueBuilder` holds all the vector builders for field columns.
-struct ValueBuilder {
+pub(crate) struct ValueBuilder {
     timestamp: Vec<i64>,
     timestamp_type: ConcreteDataType,
     sequence: Vec<u64>,
@@ -848,7 +886,7 @@ impl ValueBuilder {
     /// Returns the size of field values.
     ///
     /// In this method, we don't check the data type of the value, because it is already checked in the caller.
-    fn push<'a>(
+    pub(crate) fn push<'a>(
         &mut self,
         ts: ValueRef,
         sequence: u64,
@@ -863,7 +901,7 @@ impl ValueBuilder {
         };
 
         self.timestamp
-            .push(ts.as_timestamp().unwrap().unwrap().value());
+            .push(ts.try_into_timestamp().unwrap().unwrap().value());
         self.sequence.push(sequence);
         self.op_type.push(op_type);
         let num_rows = self.timestamp.len();
@@ -884,7 +922,9 @@ impl ValueBuilder {
                             )
                         };
                     mutable_vector.push_nulls(num_rows - 1);
-                    let _ = mutable_vector.push(field_value);
+                    mutable_vector
+                        .push(field_value)
+                        .unwrap_or_else(|e| panic!("unexpected field value: {e:?}"));
                     self.fields[idx] = Some(mutable_vector);
                     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.inc();
                 }
@@ -1079,10 +1119,10 @@ impl ValueBuilder {
 /// [Values] holds an immutable vectors of field columns, including `sequence` and `op_type`.
 #[derive(Clone)]
 pub struct Values {
-    timestamp: VectorRef,
-    sequence: Arc<UInt64Vector>,
-    op_type: Arc<UInt8Vector>,
-    fields: Vec<VectorRef>,
+    pub(crate) timestamp: VectorRef,
+    pub(crate) sequence: Arc<UInt64Vector>,
+    pub(crate) op_type: Arc<UInt8Vector>,
+    pub(crate) fields: Vec<VectorRef>,
 }
 
 impl Values {
@@ -1206,17 +1246,18 @@ struct TimeSeriesIterBuilder {
     projection: HashSet<ColumnId>,
     predicate: Option<Predicate>,
     dedup: bool,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
     merge_mode: MergeMode,
 }
 
 impl IterBuilder for TimeSeriesIterBuilder {
-    fn build(&self) -> Result<BoxedBatchIterator> {
+    fn build(&self, metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
         let iter = self.series_set.iter_series(
             self.projection.clone(),
             self.predicate.clone(),
             self.dedup,
             self.sequence,
+            metrics,
         )?;
 
         if self.merge_mode == MergeMode::LastNonNull {
@@ -1233,8 +1274,9 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use api::helper::ColumnDataTypeWrapper;
+    use api::v1::helper::row;
     use api::v1::value::ValueData;
-    use api::v1::{Mutation, Row, Rows, SemanticType};
+    use api::v1::{Mutation, Rows, SemanticType};
     use common_time::Timestamp;
     use datatypes::prelude::{ConcreteDataType, ScalarVector};
     use datatypes::schema::ColumnSchema;
@@ -1476,24 +1518,14 @@ mod tests {
             .collect();
 
         let rows = (0..len)
-            .map(|i| Row {
-                values: vec![
-                    api::v1::Value {
-                        value_data: Some(ValueData::StringValue(k0.clone())),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::I64Value(k1)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::TimestampMillisecondValue(i as i64)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::I64Value(i as i64)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::F64Value(i as f64)),
-                    },
-                ],
+            .map(|i| {
+                row(vec![
+                    ValueData::StringValue(k0.clone()),
+                    ValueData::I64Value(k1),
+                    ValueData::TimestampMillisecondValue(i as i64),
+                    ValueData::I64Value(i as i64),
+                    ValueData::F64Value(i as f64),
+                ])
             })
             .collect();
         let mutation = api::v1::Mutation {
@@ -1547,30 +1579,13 @@ mod tests {
                             sequence: j as u64,
                             rows: Some(Rows {
                                 schema: column_schemas.clone(),
-                                rows: vec![Row {
-                                    values: vec![
-                                        api::v1::Value {
-                                            value_data: Some(ValueData::StringValue(format!(
-                                                "{}",
-                                                j
-                                            ))),
-                                        },
-                                        api::v1::Value {
-                                            value_data: Some(ValueData::I64Value(j as i64)),
-                                        },
-                                        api::v1::Value {
-                                            value_data: Some(ValueData::TimestampMillisecondValue(
-                                                j as i64,
-                                            )),
-                                        },
-                                        api::v1::Value {
-                                            value_data: Some(ValueData::I64Value(j as i64)),
-                                        },
-                                        api::v1::Value {
-                                            value_data: Some(ValueData::F64Value(j as f64)),
-                                        },
-                                    ],
-                                }],
+                                rows: vec![row(vec![
+                                    ValueData::StringValue(format!("{}", j)),
+                                    ValueData::I64Value(j as i64),
+                                    ValueData::TimestampMillisecondValue(j as i64),
+                                    ValueData::I64Value(j as i64),
+                                    ValueData::F64Value(j as f64),
+                                ])],
                             }),
                             write_hint: None,
                         },
@@ -1642,10 +1657,13 @@ mod tests {
         memtable.write(&kvs).unwrap();
 
         let mut expected_ts: HashMap<i64, usize> = HashMap::new();
-        for ts in kvs
-            .iter()
-            .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
-        {
+        for ts in kvs.iter().map(|kv| {
+            kv.timestamp()
+                .try_into_timestamp()
+                .unwrap()
+                .unwrap()
+                .value()
+        }) {
             *expected_ts.entry(ts).or_default() += if dedup { 1 } else { 2 };
         }
 

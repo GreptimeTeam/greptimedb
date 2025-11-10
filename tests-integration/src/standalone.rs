@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use cache::{
     build_datanode_cache_registry, build_fundamental_cache_registry,
@@ -22,7 +23,6 @@ use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
 use cmd::error::StartFlownodeSnafu;
-use cmd::standalone::StandaloneOptions;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::KvBackendConfig;
@@ -31,15 +31,17 @@ use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use common_meta::ddl_manager::DdlManager;
-use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::procedure_executor::LocalProcedureExecutor;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::build_wal_options_allocator;
-use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
+use common_procedure::options::ProcedureConfig;
+use common_telemetry::logging::SlowQueryOptions;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::DatanodeBuilder;
 use flow::{FlownodeBuilder, FrontendClient, GrpcQueryHandlerWithBoxedError};
@@ -50,8 +52,9 @@ use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::grpc::GrpcOptions;
 use servers::server::ServerHandlers;
 use snafu::ResultExt;
+use standalone::options::StandaloneOptions;
 
-use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
+use crate::test_util::{self, StorageType, TestGuard, create_tmp_dir_and_datanode_opts};
 
 pub struct GreptimeDbStandalone {
     pub frontend: Arc<Frontend>,
@@ -106,7 +109,6 @@ impl GreptimeDbStandaloneBuilder {
         }
     }
 
-    #[cfg(test)]
     #[must_use]
     pub fn with_plugin(self, plugin: Plugins) -> Self {
         Self {
@@ -200,7 +202,7 @@ impl GreptimeDbStandaloneBuilder {
                 .step(10)
                 .build(),
         );
-        let kafka_options = opts.wal.clone().into();
+        let kafka_options = opts.wal.clone().try_into().unwrap();
         let wal_options_allocator = build_wal_options_allocator(&kafka_options, kv_backend.clone())
             .await
             .unwrap();
@@ -213,7 +215,7 @@ impl GreptimeDbStandaloneBuilder {
             flow_id_sequence,
         ));
 
-        let ddl_task_executor = Arc::new(
+        let ddl_manager = Arc::new(
             DdlManager::try_new(
                 DdlContext {
                     node_manager: node_manager.clone(),
@@ -231,6 +233,10 @@ impl GreptimeDbStandaloneBuilder {
             )
             .unwrap(),
         );
+        let procedure_executor = Arc::new(LocalProcedureExecutor::new(
+            ddl_manager,
+            procedure_manager.clone(),
+        ));
 
         let server_addr = opts.frontend_options().grpc.server_addr.clone();
 
@@ -240,7 +246,7 @@ impl GreptimeDbStandaloneBuilder {
             cache_registry.clone(),
             catalog_manager.clone(),
             node_manager.clone(),
-            ddl_task_executor.clone(),
+            procedure_executor.clone(),
             Arc::new(ProcessManager::new(server_addr, None)),
         )
         .with_plugin(plugins)
@@ -263,7 +269,7 @@ impl GreptimeDbStandaloneBuilder {
             catalog_manager.clone(),
             kv_backend.clone(),
             cache_registry.clone(),
-            ddl_task_executor.clone(),
+            procedure_executor.clone(),
             node_manager.clone(),
         )
         .await
@@ -308,13 +314,14 @@ impl GreptimeDbStandaloneBuilder {
 
         let kv_backend_config = KvBackendConfig::default();
         let procedure_config = ProcedureConfig::default();
-        let (kv_backend, procedure_manager) = Instance::try_build_standalone_components(
+
+        let kv_backend = standalone::build_metadata_kvbackend(
             format!("{}/kv", &opts.storage.data_home),
             kv_backend_config,
-            procedure_config,
         )
-        .await
         .unwrap();
+        let procedure_manager =
+            standalone::build_procedure_manager(kv_backend.clone(), procedure_config);
 
         let standalone_opts = StandaloneOptions {
             storage: opts.storage,
@@ -322,6 +329,13 @@ impl GreptimeDbStandaloneBuilder {
             metadata_store: kv_backend_config,
             wal: self.metasrv_wal_config.clone().into(),
             grpc: GrpcOptions::default().with_server_addr("127.0.0.1:4001"),
+            // Enable slow query log with 1s threshold to run the slow query test.
+            slow_query: SlowQueryOptions {
+                enable: true,
+                // Set the threshold to 1s to run the slow query test.
+                threshold: Duration::from_secs(1),
+                ..Default::default()
+            },
             ..StandaloneOptions::default()
         };
 

@@ -6,9 +6,18 @@ license.workspace = true
 
 [features]
 testing = []
-pg_kvbackend = ["dep:tokio-postgres", "dep:backon", "dep:deadpool-postgres", "dep:deadpool"]
+pg_kvbackend = [
+    "dep:tokio-postgres",
+    "dep:backon",
+    "dep:deadpool-postgres",
+    "dep:deadpool",
+    "dep:tokio-postgres-rustls",
+    "dep:rustls-pemfile",
+    "dep:rustls-native-certs",
+    "dep:rustls",
+]
 mysql_kvbackend = ["dep:sqlx", "dep:backon"]
-enterprise = []
+enterprise = ["prost-types"]
 
 [lints]
 workspace = true
@@ -32,6 +41,7 @@ common-procedure.workspace = true
 common-procedure-test.workspace = true
 common-query.workspace = true
 common-recordbatch.workspace = true
+common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
@@ -46,6 +56,7 @@ etcd-client.workspace = true
 flexbuffers = "25.2"
 futures.workspace = true
 futures-util.workspace = true
+greptime-proto.workspace = true
 hex.workspace = true
 humantime-serde.workspace = true
 itertools.workspace = true
@@ -54,20 +65,28 @@ moka.workspace = true
 object-store.workspace = true
 prometheus.workspace = true
 prost.workspace = true
+prost-types = { workspace = true, optional = true }
 rand.workspace = true
 regex.workspace = true
 rskafka.workspace = true
+rustls = { workspace = true, default-features = false, features = ["ring", "logging", "std", "tls12"], optional = true }
+rustls-native-certs = { version = "0.7", optional = true }
+rustls-pemfile = { version = "2.0", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
 session.workspace = true
 snafu.workspace = true
-sqlx = { workspace = true, optional = true }
+sqlx = { workspace = true, features = [
+    "mysql",
+    "chrono",
+], optional = true }
 store-api.workspace = true
 strum.workspace = true
 table = { workspace = true, features = ["testing"] }
 tokio.workspace = true
 tokio-postgres = { workspace = true, optional = true }
+tokio-postgres-rustls = { version = "0.12", optional = true }
 tonic.workspace = true
 tracing.workspace = true
 typetag.workspace = true
@@ -78,5 +97,4 @@ common-procedure = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
 datatypes.workspace = true
-hyper = { version = "0.14", features = ["full"] }
 uuid.workspace = true

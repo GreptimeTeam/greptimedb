@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+arrow-schema.workspace = true
 common-base.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true
@@ -19,6 +20,3 @@ paste.workspace = true
 prost.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
-
-[build-dependencies]
-tonic-build = "0.11"

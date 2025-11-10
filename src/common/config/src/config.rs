@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use config::{Environment, File, FileFormat};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use snafu::ResultExt;
 
 use crate::error::{LoadLayeredConfigSnafu, Result, SerdeJsonSnafu, TomlFormatSnafu};
@@ -213,7 +213,7 @@ mod tests {
                 // Check the configs from environment variables.
                 match &opts.storage.store {
                     object_store::config::ObjectStoreConfig::S3(s3_config) => {
-                        assert_eq!(s3_config.bucket, "mybucket".to_string());
+                        assert_eq!(s3_config.connection.bucket, "mybucket".to_string());
                     }
                     _ => panic!("unexpected store type"),
                 }

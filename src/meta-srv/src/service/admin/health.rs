@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use axum::response::{IntoResponse, Response};
 use tonic::codegen::http;
 
 use crate::error::Result;
@@ -23,6 +24,16 @@ const HTTP_OK: &str = "OK\n";
 
 #[derive(Clone)]
 pub struct HealthHandler;
+
+/// Health check endpoint that returns HTTP 200 OK if the service is healthy.
+#[axum_macros::debug_handler]
+pub(crate) async fn health() -> Response {
+    http::Response::builder()
+        .status(http::StatusCode::OK)
+        .body(HTTP_OK.to_owned())
+        .unwrap()
+        .into_response()
+}
 
 #[async_trait::async_trait]
 impl HttpHandler for HealthHandler {

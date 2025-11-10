@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use api::v1::Rows;
@@ -20,25 +22,36 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use either::Either;
-use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::region_engine::{RegionEngine, RegionRole, SettableRegionRoleState};
 use store_api::region_request::{
     PathType, RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
 
-use crate::compaction::compactor::{open_compaction_region, OpenCompactionRegionRequest};
+use crate::compaction::compactor::{OpenCompactionRegionRequest, open_compaction_region};
 use crate::config::MitoConfig;
 use crate::error;
+use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
 use crate::region::options::RegionOptions;
 use crate::test_util::{
-    build_rows, flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
+    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
 };
 
 #[tokio::test]
 async fn test_engine_open_empty() {
+    test_engine_open_empty_with_format(false).await;
+    test_engine_open_empty_with_format(true).await;
+}
+
+async fn test_engine_open_empty_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("open-empty").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let err = engine
@@ -50,6 +63,7 @@ async fn test_engine_open_empty() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -65,8 +79,18 @@ async fn test_engine_open_empty() {
 
 #[tokio::test]
 async fn test_engine_open_existing() {
+    test_engine_open_existing_with_format(false).await;
+    test_engine_open_existing_with_format(true).await;
+}
+
+async fn test_engine_open_existing_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("open-exiting").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -85,6 +109,7 @@ async fn test_engine_open_existing() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -93,8 +118,18 @@ async fn test_engine_open_existing() {
 
 #[tokio::test]
 async fn test_engine_reopen_region() {
+    test_engine_reopen_region_with_format(false).await;
+    test_engine_reopen_region_with_format(true).await;
+}
+
+async fn test_engine_reopen_region_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("reopen-region").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -110,8 +145,18 @@ async fn test_engine_reopen_region() {
 
 #[tokio::test]
 async fn test_engine_open_readonly() {
+    test_engine_open_readonly_with_format(false).await;
+    test_engine_open_readonly_with_format(true).await;
+}
+
+async fn test_engine_open_readonly_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -153,8 +198,18 @@ async fn test_engine_open_readonly() {
 
 #[tokio::test]
 async fn test_engine_region_open_with_options() {
+    test_engine_region_open_with_options_with_format(false).await;
+    test_engine_region_open_with_options_with_format(true).await;
+}
+
+async fn test_engine_region_open_with_options_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -180,6 +235,7 @@ async fn test_engine_region_open_with_options() {
                 path_type: PathType::Bare,
                 options: HashMap::from([("ttl".to_string(), "4d".to_string())]),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -194,9 +250,22 @@ async fn test_engine_region_open_with_options() {
 
 #[tokio::test]
 async fn test_engine_region_open_with_custom_store() {
+    test_engine_region_open_with_custom_store_with_format(false).await;
+    test_engine_region_open_with_custom_store_with_format(true).await;
+}
+
+async fn test_engine_region_open_with_custom_store_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
-        .create_engine_with_multiple_object_stores(MitoConfig::default(), None, None, &["Gcs"])
+        .create_engine_with_multiple_object_stores(
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+            None,
+            None,
+            &["Gcs"],
+        )
         .await;
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
@@ -226,6 +295,7 @@ async fn test_engine_region_open_with_custom_store() {
                 path_type: PathType::Bare,
                 options: HashMap::from([("storage".to_string(), "Gcs".to_string())]),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -234,23 +304,37 @@ async fn test_engine_region_open_with_custom_store() {
     // The region should not be opened with the default object store.
     let region = engine.get_region(region_id).unwrap();
     let object_store_manager = env.get_object_store_manager().unwrap();
-    assert!(!object_store_manager
-        .default_object_store()
-        .exists(&region.access_layer.build_region_dir(region_id))
-        .await
-        .unwrap());
-    assert!(object_store_manager
-        .find("Gcs")
-        .unwrap()
-        .exists(&region.access_layer.build_region_dir(region_id))
-        .await
-        .unwrap());
+    assert!(
+        !object_store_manager
+            .default_object_store()
+            .exists(&region.access_layer.build_region_dir(region_id))
+            .await
+            .unwrap()
+    );
+    assert!(
+        object_store_manager
+            .find("Gcs")
+            .unwrap()
+            .exists(&region.access_layer.build_region_dir(region_id))
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
 async fn test_open_region_skip_wal_replay() {
+    test_open_region_skip_wal_replay_with_format(false).await;
+    test_open_region_skip_wal_replay_with_format(true).await;
+}
+
+async fn test_open_region_skip_wal_replay_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     env.get_schema_metadata_manager()
@@ -287,17 +371,26 @@ async fn test_open_region_skip_wal_replay() {
     };
     put_rows(&engine, region_id, rows).await;
 
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     // Skip the WAL replay .
     engine
         .handle_request(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                table_dir: table_dir.to_string(),
+                table_dir: table_dir.clone(),
                 path_type: PathType::Bare,
                 options: Default::default(),
                 skip_wal_replay: true,
+                checkpoint: None,
             }),
         )
         .await
@@ -317,7 +410,15 @@ async fn test_open_region_skip_wal_replay() {
     assert_eq!(expected, batches.pretty_print().unwrap());
 
     // Replay the WAL.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     // Open the region again with options.
     engine
         .handle_request(
@@ -328,6 +429,7 @@ async fn test_open_region_skip_wal_replay() {
                 path_type: PathType::Bare,
                 options: Default::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -351,8 +453,18 @@ async fn test_open_region_skip_wal_replay() {
 
 #[tokio::test]
 async fn test_open_region_wait_for_opening_region_ok() {
+    test_open_region_wait_for_opening_region_ok_with_format(false).await;
+    test_open_region_wait_for_opening_region_ok_with_format(true).await;
+}
+
+async fn test_open_region_wait_for_opening_region_ok_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("wait-for-opening-region-ok").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
     let region_id = RegionId::new(1, 1);
     let worker = engine.inner.workers.worker(region_id);
     let (tx, rx) = oneshot::channel();
@@ -370,6 +482,7 @@ async fn test_open_region_wait_for_opening_region_ok() {
                     path_type: PathType::Bare,
                     options: HashMap::default(),
                     skip_wal_replay: false,
+                    checkpoint: None,
                 }),
             )
             .await
@@ -391,8 +504,18 @@ async fn test_open_region_wait_for_opening_region_ok() {
 
 #[tokio::test]
 async fn test_open_region_wait_for_opening_region_err() {
+    test_open_region_wait_for_opening_region_err_with_format(false).await;
+    test_open_region_wait_for_opening_region_err_with_format(true).await;
+}
+
+async fn test_open_region_wait_for_opening_region_err_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("wait-for-opening-region-err").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
     let region_id = RegionId::new(1, 1);
     let worker = engine.inner.workers.worker(region_id);
     let (tx, rx) = oneshot::channel();
@@ -410,6 +533,7 @@ async fn test_open_region_wait_for_opening_region_err() {
                     path_type: PathType::Bare,
                     options: HashMap::default(),
                     skip_wal_replay: false,
+                    checkpoint: None,
                 }),
             )
             .await
@@ -437,8 +561,16 @@ async fn test_open_region_wait_for_opening_region_err() {
 
 #[tokio::test]
 async fn test_open_compaction_region() {
+    test_open_compaction_region_with_format(false).await;
+    test_open_compaction_region_with_format(true).await;
+}
+
+async fn test_open_compaction_region_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let mut mito_config = MitoConfig::default();
+    let mut mito_config = MitoConfig {
+        default_experimental_flat_format: flat_format,
+        ..Default::default()
+    };
     mito_config
         .sanitize(&env.data_home().display().to_string())
         .unwrap();
@@ -490,4 +622,154 @@ async fn test_open_compaction_region() {
     .unwrap();
 
     assert_eq!(region_id, compaction_region.region_id);
+}
+
+/// Returns a dummy fetcher that returns the expr_json only once.
+fn new_dummy_fetcher(region_id: RegionId, expr_json: String) -> PartitionExprFetcherRef {
+    struct DummyFetcher {
+        region_id: RegionId,
+        expr_json: String,
+        fetch_count: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl PartitionExprFetcher for DummyFetcher {
+        async fn fetch_expr(&self, region_id: RegionId) -> Option<String> {
+            if region_id == self.region_id {
+                let count = self.fetch_count.fetch_add(1, Ordering::Relaxed);
+                (count == 0).then(|| self.expr_json.clone())
+            } else {
+                None
+            }
+        }
+    }
+
+    Arc::new(DummyFetcher {
+        region_id,
+        expr_json,
+        fetch_count: AtomicUsize::new(0),
+    })
+}
+
+#[tokio::test]
+async fn test_open_backfills_partition_expr_with_fetcher() {
+    let mut env = TestEnv::with_prefix("open-backfill-fetcher").await;
+
+    // prepare plugins with dummy fetcher
+    let region_id = RegionId::new(100, 1);
+    let expr_json = r#"{\"Expr\":{\"lhs\":{\"Column\":\"a\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"UInt32\":10}}}}"#.to_string();
+    let fetcher = new_dummy_fetcher(region_id, expr_json.clone());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, None, Some(fetcher))
+        .await;
+
+    // create region with partition_expr=None (legacy style)
+    let request = CreateRequestBuilder::new()
+        .table_dir("t")
+        .partition_expr_json(None)
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    let meta = engine.get_region(region_id).unwrap().metadata();
+    assert!(meta.partition_expr.is_none());
+
+    // close and reopen to trigger backfill in opener
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir: request.table_dir.clone(),
+                path_type: PathType::Bare,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    // verify partition_expr is backfilled and persisted
+    let meta = engine.get_region(region_id).unwrap().metadata();
+    assert_eq!(meta.partition_expr.as_deref(), Some(expr_json.as_str()));
+
+    // Set leader and trigger backfill
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+
+    // reopen again to ensure no further changes and still Some
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir: request.table_dir.clone(),
+                path_type: PathType::Bare,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let meta = engine.get_region(region_id).unwrap().metadata();
+    assert_eq!(meta.partition_expr.as_deref(), Some(expr_json.as_str()));
+}
+
+#[tokio::test]
+async fn test_open_keeps_none_without_fetcher() {
+    let mut env = TestEnv::with_prefix("open-no-fetcher").await;
+    // engine without fetcher
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(200, 1);
+    let request = CreateRequestBuilder::new()
+        .table_dir("t2")
+        .partition_expr_json(None)
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    let meta = engine.get_region(region_id).unwrap().metadata();
+    assert!(meta.partition_expr.is_none());
+
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir: request.table_dir.clone(),
+                path_type: PathType::Bare,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let meta = engine.get_region(region_id).unwrap().metadata();
+    assert!(meta.partition_expr.is_none());
 }

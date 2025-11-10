@@ -28,7 +28,7 @@ CREATE TABLE phy (
     ts timestamp time index,
     val double
 ) engine = metric with (
-    "physical_metric_table" = "",   
+    "physical_metric_table" = "",
     "memtable.type" = "partition_tree",
     "memtable.partition_tree.primary_key_encoding" = "sparse"
 );
@@ -47,7 +47,7 @@ INSERT INTO t2 VALUES ('job1', 0, 0), ('job2', 1, 1);
 
 SELECT * from t2;
 
-ADMIN flush_table("phy");
+ADMIN flush_table('phy');
 
 -- SQLNESS ARG restart=true
 INSERT INTO t2 VALUES ('job3', 0, 0), ('job4', 1, 1);

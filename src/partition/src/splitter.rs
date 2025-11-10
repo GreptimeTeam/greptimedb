@@ -19,8 +19,8 @@ use api::v1::{ColumnSchema, Row, Rows};
 use datatypes::value::Value;
 use store_api::storage::RegionNumber;
 
-use crate::error::Result;
 use crate::PartitionRuleRef;
+use crate::error::Result;
 
 pub struct RowSplitter {
     partition_rule: PartitionRuleRef,
@@ -119,7 +119,7 @@ impl<'a> SplitReadRowHelper<'a> {
                     idx.as_ref().map_or(Value::Null, |idx| {
                         helper::pb_value_to_value_ref(
                             &row.values[*idx],
-                            &self.schema[*idx].datatype_extension,
+                            self.schema[*idx].datatype_extension.as_ref(),
                         )
                         .into()
                     })
@@ -134,34 +134,20 @@ mod tests {
     use std::any::Any;
     use std::sync::Arc;
 
+    use api::v1::ColumnDataType;
+    use api::v1::helper::{field_column_schema, tag_column_schema};
     use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, SemanticType};
     use serde::{Deserialize, Serialize};
 
     use super::*;
-    use crate::partition::RegionMask;
     use crate::PartitionRule;
+    use crate::partition::RegionMask;
 
     fn mock_rows() -> Rows {
         let schema = vec![
-            ColumnSchema {
-                column_name: "id".to_string(),
-                datatype: ColumnDataType::String as i32,
-                semantic_type: SemanticType::Tag as i32,
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: "name".to_string(),
-                datatype: ColumnDataType::String as i32,
-                semantic_type: SemanticType::Tag as i32,
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: "age".to_string(),
-                datatype: ColumnDataType::Uint32 as i32,
-                semantic_type: SemanticType::Field as i32,
-                ..Default::default()
-            },
+            tag_column_schema("id", ColumnDataType::String),
+            tag_column_schema("name", ColumnDataType::String),
+            field_column_schema("age", ColumnDataType::Uint32),
         ];
         let rows = vec![
             Row {

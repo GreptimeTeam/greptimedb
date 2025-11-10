@@ -24,8 +24,8 @@ use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarRef, ScalarVectorBuilder};
 use crate::type_id::LogicalTypeId;
-use crate::types::boolean_type::bool_to_numeric;
 use crate::types::DateType;
+use crate::types::boolean_type::bool_to_numeric;
 use crate::value::{Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
@@ -80,7 +80,7 @@ pub trait LogicalPrimitiveType: 'static + Sized {
     fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveVector<Self>>;
 
     /// Cast value ref to the primitive type.
-    fn cast_value_ref(value: ValueRef) -> Result<Option<Self::Wrapper>>;
+    fn cast_value_ref(value: &ValueRef) -> Result<Option<Self::Wrapper>>;
 }
 
 /// A new type for [WrapperType], complement the `Ord` feature for it.
@@ -194,10 +194,10 @@ macro_rules! define_logical_primitive_type {
                     })
             }
 
-            fn cast_value_ref(value: ValueRef) -> Result<Option<$Native>> {
+            fn cast_value_ref(value: &ValueRef) -> Result<Option<$Native>> {
                 match value {
                     ValueRef::Null => Ok(None),
-                    ValueRef::$TypeId(v) => Ok(Some(v.into())),
+                    ValueRef::$TypeId(v) => Ok(Some((*v).into())),
                     other => error::CastTypeSnafu {
                         msg: format!(
                             "Failed to cast value {:?} to primitive type {}",

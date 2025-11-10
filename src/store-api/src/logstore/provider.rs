@@ -15,6 +15,7 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
+use crate::logstore::LogStore;
 use crate::storage::RegionId;
 
 // The Provider of kafka log store
@@ -41,7 +42,7 @@ impl Display for KafkaProvider {
 }
 
 // The Provider of raft engine log store
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RaftEngineProvider {
     pub id: u64,
 }
@@ -58,7 +59,7 @@ impl RaftEngineProvider {
 }
 
 /// The Provider of LogStore
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Provider {
     RaftEngine(RaftEngineProvider),
     Kafka(Arc<KafkaProvider>),
@@ -78,6 +79,18 @@ impl Display for Provider {
 }
 
 impl Provider {
+    /// Returns the initial flushed entry id of the provider.
+    /// This is used to initialize the flushed entry id of the region when creating the region from scratch.
+    ///
+    /// Currently only used for remote WAL.
+    /// For local WAL, the initial flushed entry id is 0.
+    pub fn initial_flushed_entry_id<S: LogStore>(&self, wal: &S) -> u64 {
+        if matches!(self, Provider::Kafka(_)) {
+            return wal.latest_entry_id(self).unwrap_or(0);
+        }
+        0
+    }
+
     pub fn raft_engine_provider(id: u64) -> Provider {
         Provider::RaftEngine(RaftEngineProvider { id })
     }

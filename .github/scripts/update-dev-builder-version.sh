@@ -21,7 +21,7 @@ update_dev_builder_version() {
 
   # Commit the changes.
   git add Makefile
-  git commit -m "ci: update dev-builder image tag"
+  git commit -s -m "ci: update dev-builder image tag"
   git push origin $BRANCH_NAME
 
   # Create a Pull Request.

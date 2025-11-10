@@ -46,7 +46,7 @@ use tokio::sync::mpsc::{self, Sender};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultCompactor};
-use crate::compaction::picker::{new_picker, CompactionTask};
+use crate::compaction::picker::{CompactionTask, new_picker};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -58,10 +58,10 @@ use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
-use crate::read::BoxedBatchReader;
+use crate::read::{BoxedBatchReader, BoxedRecordBatchStream};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionControlRef;
-use crate::region::ManifestContextRef;
+use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequestWithTime};
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
@@ -142,6 +142,17 @@ impl CompactionScheduler {
         schema_metadata_manager: SchemaMetadataManagerRef,
         max_parallelism: usize,
     ) -> Result<()> {
+        // skip compaction if region is in staging state
+        let current_state = manifest_ctx.current_state();
+        if current_state == RegionRoleState::Leader(RegionLeaderState::Staging) {
+            info!(
+                "Skipping compaction for region {} in staging mode, options: {:?}",
+                region_id, compact_options
+            );
+            waiter.send(Ok(0));
+            return Ok(());
+        }
+
         if let Some(status) = self.region_status.get_mut(&region_id) {
             match compact_options {
                 Options::Regular(_) => {
@@ -294,6 +305,7 @@ impl CompactionScheduler {
             &options,
             &request.current_version.options.compaction,
             request.current_version.options.append_mode,
+            Some(self.engine_config.max_background_compactions),
         );
         let region_id = request.region_id();
         let CompactionRequest {
@@ -526,14 +538,12 @@ impl CompactionStatus {
 
     /// Set pending compaction request or replace current value if already exist.
     fn set_pending_request(&mut self, pending: PendingCompaction) {
-        if let Some(mut prev) = self.pending_request.replace(pending) {
+        if let Some(prev) = self.pending_request.replace(pending) {
             debug!(
                 "Replace pending compaction options with new request {:?} for region: {}",
                 prev.options, self.region_id
             );
-            if let Some(waiter) = prev.waiter.take_inner() {
-                waiter.send(ManualCompactionOverrideSnafu.fail());
-            }
+            prev.waiter.send(ManualCompactionOverrideSnafu.fail());
         }
     }
 
@@ -629,15 +639,34 @@ struct CompactionSstReaderBuilder<'a> {
 impl CompactionSstReaderBuilder<'_> {
     /// Builds [BoxedBatchReader] that reads all SST files and yields batches in primary key order.
     async fn build_sst_reader(self) -> Result<BoxedBatchReader> {
-        let mut scan_input = ScanInput::new(self.sst_layer, ProjectionMapper::all(&self.metadata)?)
-            .with_files(self.inputs.to_vec())
-            .with_append_mode(self.append_mode)
-            // We use special cache strategy for compaction.
-            .with_cache(CacheStrategy::Compaction(self.cache))
-            .with_filter_deleted(self.filter_deleted)
-            // We ignore file not found error during compaction.
-            .with_ignore_file_not_found(true)
-            .with_merge_mode(self.merge_mode);
+        let scan_input = self.build_scan_input(false)?.with_compaction(true);
+
+        SeqScan::new(scan_input).build_reader_for_compaction().await
+    }
+
+    /// Builds [BoxedRecordBatchStream] that reads all SST files and yields batches in flat format for compaction.
+    async fn build_flat_sst_reader(self) -> Result<BoxedRecordBatchStream> {
+        let scan_input = self.build_scan_input(true)?.with_compaction(true);
+
+        SeqScan::new(scan_input)
+            .build_flat_reader_for_compaction()
+            .await
+    }
+
+    fn build_scan_input(self, flat_format: bool) -> Result<ScanInput> {
+        let mut scan_input = ScanInput::new(
+            self.sst_layer,
+            ProjectionMapper::all(&self.metadata, flat_format)?,
+        )
+        .with_files(self.inputs.to_vec())
+        .with_append_mode(self.append_mode)
+        // We use special cache strategy for compaction.
+        .with_cache(CacheStrategy::Compaction(self.cache))
+        .with_filter_deleted(self.filter_deleted)
+        // We ignore file not found error during compaction.
+        .with_ignore_file_not_found(true)
+        .with_merge_mode(self.merge_mode)
+        .with_flat_format(flat_format);
 
         // This serves as a workaround of https://github.com/GreptimeTeam/greptimedb/issues/3944
         // by converting time ranges into predicate.
@@ -646,9 +675,7 @@ impl CompactionSstReaderBuilder<'_> {
                 scan_input.with_predicate(time_range_to_predicate(time_range, &self.metadata)?);
         }
 
-        SeqScan::new(scan_input, true)
-            .build_reader_for_compaction()
-            .await
+        Ok(scan_input)
     }
 }
 
@@ -677,20 +704,24 @@ fn time_range_to_predicate(
             ]
         }
         (Some(start), None) => {
-            vec![datafusion_expr::col(ts_col.column_schema.name.clone())
-                .gt_eq(ts_to_lit(*start, ts_col_unit)?)]
+            vec![
+                datafusion_expr::col(ts_col.column_schema.name.clone())
+                    .gt_eq(ts_to_lit(*start, ts_col_unit)?),
+            ]
         }
 
         (None, Some(end)) => {
-            vec![datafusion_expr::col(ts_col.column_schema.name.clone())
-                .lt(ts_to_lit(*end, ts_col_unit)?)]
+            vec![
+                datafusion_expr::col(ts_col.column_schema.name.clone())
+                    .lt(ts_to_lit(*end, ts_col_unit)?),
+            ]
         }
         (None, None) => {
             return Ok(PredicateGroup::default());
         }
     };
 
-    let predicate = PredicateGroup::new(metadata, &exprs);
+    let predicate = PredicateGroup::new(metadata, &exprs)?;
     Ok(predicate)
 }
 
@@ -741,12 +772,16 @@ struct PendingCompaction {
 #[cfg(test)]
 mod tests {
     use api::v1::region::StrictWindow;
+    use common_datasource::compression::CompressionType;
     use tokio::sync::oneshot;
 
     use super::*;
+    use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+    use crate::region::ManifestContext;
+    use crate::sst::FormatType;
     use crate::test_util::mock_schema_metadata_manager;
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
-    use crate::test_util::version_util::{apply_edit, VersionControlBuilder};
+    use crate::test_util::version_util::{VersionControlBuilder, apply_edit};
 
     #[tokio::test]
     async fn test_schedule_empty() {
@@ -895,12 +930,14 @@ mod tests {
             .unwrap();
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(1, job_scheduler.num_jobs());
-        assert!(!scheduler
-            .region_status
-            .get(&builder.region_id())
-            .unwrap()
-            .waiters
-            .is_empty());
+        assert!(
+            !scheduler
+                .region_status
+                .get(&builder.region_id())
+                .unwrap()
+                .waiters
+                .is_empty()
+        );
 
         // On compaction finished and schedule next compaction.
         scheduler
@@ -932,12 +969,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(2, job_scheduler.num_jobs());
-        assert!(!scheduler
-            .region_status
-            .get(&builder.region_id())
-            .unwrap()
-            .waiters
-            .is_empty());
+        assert!(
+            !scheduler
+                .region_status
+                .get(&builder.region_id())
+                .unwrap()
+                .waiters
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1008,12 +1047,14 @@ mod tests {
         // Should schedule 1 compaction.
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(1, job_scheduler.num_jobs());
-        assert!(scheduler
-            .region_status
-            .get(&region_id)
-            .unwrap()
-            .pending_request
-            .is_none());
+        assert!(
+            scheduler
+                .region_status
+                .get(&region_id)
+                .unwrap()
+                .pending_request
+                .is_none()
+        );
 
         // Schedule another manual compaction.
         let (tx, _rx) = oneshot::channel();
@@ -1045,5 +1086,63 @@ mod tests {
 
         let status = scheduler.region_status.get(&builder.region_id()).unwrap();
         assert!(status.pending_request.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_compaction_bypass_in_staging_mode() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+
+        // Create version control and manifest context for staging mode
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = version_control.current().version.metadata.region_id;
+
+        // Create staging manifest context using the same pattern as SchedulerEnv
+        let staging_manifest_ctx = {
+            let manager = RegionManifestManager::new(
+                version_control.current().version.metadata.clone(),
+                0,
+                RegionManifestOptions {
+                    manifest_dir: "".to_string(),
+                    object_store: env.access_layer.object_store().clone(),
+                    compress_type: CompressionType::Uncompressed,
+                    checkpoint_distance: 10,
+                    remove_file_options: Default::default(),
+                },
+                Default::default(),
+                Default::default(),
+                FormatType::PrimaryKey,
+            )
+            .await
+            .unwrap();
+            Arc::new(ManifestContext::new(
+                manager,
+                RegionRoleState::Leader(RegionLeaderState::Staging),
+            ))
+        };
+
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+
+        // Test regular compaction bypass in staging mode
+        let (tx, rx) = oneshot::channel();
+        scheduler
+            .schedule_compaction(
+                region_id,
+                compact_request::Options::Regular(Default::default()),
+                &version_control,
+                &env.access_layer,
+                OptionOutputTx::new(Some(OutputTx::new(tx))),
+                &staging_manifest_ctx,
+                schema_metadata_manager,
+                1,
+            )
+            .await
+            .unwrap();
+
+        let result = rx.await.unwrap();
+        assert_eq!(result.unwrap(), 0); // is there a better way to check this?
+        assert_eq!(0, scheduler.region_status.len());
     }
 }

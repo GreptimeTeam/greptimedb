@@ -19,8 +19,13 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::kafka::common::{
+    DEFAULT_AUTO_PRUNE_INTERVAL, DEFAULT_AUTO_PRUNE_PARALLELISM, DEFAULT_CHECKPOINT_TRIGGER_SIZE,
+    DEFAULT_FLUSH_TRIGGER_SIZE,
+};
 use crate::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use crate::config::raft_engine::RaftEngineConfig;
+use crate::error::{Error, UnsupportedWalProviderSnafu};
 
 /// Wal configurations for metasrv.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
@@ -39,6 +44,7 @@ pub enum MetasrvWalConfig {
 pub enum DatanodeWalConfig {
     RaftEngine(RaftEngineConfig),
     Kafka(DatanodeKafkaConfig),
+    Noop,
 }
 
 impl Default for DatanodeWalConfig {
@@ -47,18 +53,29 @@ impl Default for DatanodeWalConfig {
     }
 }
 
-impl From<DatanodeWalConfig> for MetasrvWalConfig {
-    fn from(config: DatanodeWalConfig) -> Self {
+impl TryFrom<DatanodeWalConfig> for MetasrvWalConfig {
+    type Error = Error;
+
+    fn try_from(config: DatanodeWalConfig) -> Result<Self, Self::Error> {
         match config {
-            DatanodeWalConfig::RaftEngine(_) => Self::RaftEngine,
-            DatanodeWalConfig::Kafka(config) => Self::Kafka(MetasrvKafkaConfig {
+            DatanodeWalConfig::RaftEngine(_) => Ok(Self::RaftEngine),
+            DatanodeWalConfig::Kafka(config) => Ok(Self::Kafka(MetasrvKafkaConfig {
                 connection: config.connection,
                 kafka_topic: config.kafka_topic,
                 auto_create_topics: config.auto_create_topics,
-                auto_prune_interval: config.auto_prune_interval,
-                trigger_flush_threshold: config.trigger_flush_threshold,
-                auto_prune_parallelism: config.auto_prune_parallelism,
-            }),
+                // This field won't be used in standalone mode
+                auto_prune_interval: DEFAULT_AUTO_PRUNE_INTERVAL,
+                // This field won't be used in standalone mode
+                auto_prune_parallelism: DEFAULT_AUTO_PRUNE_PARALLELISM,
+                // This field won't be used in standalone mode
+                flush_trigger_size: DEFAULT_FLUSH_TRIGGER_SIZE,
+                // This field won't be used in standalone mode
+                checkpoint_trigger_size: DEFAULT_CHECKPOINT_TRIGGER_SIZE,
+            })),
+            DatanodeWalConfig::Noop => UnsupportedWalProviderSnafu {
+                provider: "noop".to_string(),
+            }
+            .fail(),
         }
     }
 }
@@ -105,8 +122,8 @@ mod tests {
     use tests::kafka::common::KafkaTopicConfig;
 
     use super::*;
-    use crate::config::{DatanodeKafkaConfig, MetasrvKafkaConfig};
     use crate::TopicSelectorType;
+    use crate::config::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 
     #[test]
     fn test_toml_raft_engine() {
@@ -199,9 +216,10 @@ mod tests {
                 create_topic_timeout: Duration::from_secs(30),
             },
             auto_create_topics: true,
-            auto_prune_interval: Duration::from_secs(0),
-            trigger_flush_threshold: 0,
+            auto_prune_interval: Duration::from_mins(30),
             auto_prune_parallelism: 10,
+            flush_trigger_size: ReadableSize::mb(512),
+            checkpoint_trigger_size: ReadableSize::mb(128),
         };
         assert_eq!(metasrv_wal_config, MetasrvWalConfig::Kafka(expected));
 
