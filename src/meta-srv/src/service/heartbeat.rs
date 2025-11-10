@@ -79,6 +79,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
                         let res = handler_group
                             .handle(req, ctx.clone())
                             .await
+                            .inspect_err(|e| warn!(e; "Failed to handle heartbeat request, pusher: {pusher_id:?}", ))
                             .map_err(|e| e.into());
 
                         is_not_leader = res.as_ref().is_ok_and(|r| r.is_not_leader());
