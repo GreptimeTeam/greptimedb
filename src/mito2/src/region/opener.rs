@@ -961,10 +961,11 @@ fn can_load_cache(state: RegionRoleState) -> bool {
         RegionRoleState::Leader(RegionLeaderState::Writable)
         | RegionRoleState::Leader(RegionLeaderState::Staging)
         | RegionRoleState::Leader(RegionLeaderState::Altering)
-        | RegionRoleState::Leader(RegionLeaderState::Downgrading)
-        | RegionRoleState::Leader(RegionLeaderState::Editing) => true,
-        RegionRoleState::Leader(RegionLeaderState::Dropping)
-        | RegionRoleState::Leader(RegionLeaderState::Truncating) => true,
-        RegionRoleState::Follower => true,
+        | RegionRoleState::Leader(RegionLeaderState::Editing)
+        | RegionRoleState::Follower => true,
+        // The region will be closed soon if it is downgrading.
+        RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        | RegionRoleState::Leader(RegionLeaderState::Dropping)
+        | RegionRoleState::Leader(RegionLeaderState::Truncating) => false,
     }
 }
