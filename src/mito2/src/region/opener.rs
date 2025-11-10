@@ -351,7 +351,7 @@ impl RegionOpener {
         let region = self
             .maybe_open(config, wal)
             .await?
-            .context(EmptyRegionDirSnafu {
+            .with_context(|| EmptyRegionDirSnafu {
                 region_id,
                 region_dir: &region_dir,
             })?;
