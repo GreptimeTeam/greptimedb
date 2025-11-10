@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_meta::key::{CANDIDATES_ROOT, ELECTION_KEY};
-use common_telemetry::{error, warn};
+use common_telemetry::{error, info, warn};
 use common_time::Timestamp;
 use snafu::{OptionExt, ResultExt, ensure};
 use sqlx::mysql::{MySqlArguments, MySqlRow};
@@ -645,6 +645,13 @@ impl Election for MySqlElection {
     }
 
     async fn reset_campaign(&self) {
+        info!("Resetting campaign");
+        if self.is_leader.load(Ordering::Relaxed) {
+            if let Err(err) = self.step_down_without_lock().await {
+                error!(err; "Failed to step down without lock");
+            }
+            info!("Step down without lock successfully, due to reset campaign");
+        }
         if let Err(err) = self.client.lock().await.reset_client().await {
             error!(err; "Failed to reset client");
         }
