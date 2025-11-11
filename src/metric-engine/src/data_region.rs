@@ -20,7 +20,7 @@ use snafu::ResultExt;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    AddColumn, AffectedRows, AlterKind, RegionAlterRequest, RegionPutRequest, RegionRequest,
+    AddColumn, AffectedRows, AlterKind, RegionAlterRequest, RegionRequest,
 };
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{ConcreteDataType, RegionId};
@@ -183,11 +183,11 @@ impl DataRegion {
     pub async fn write_data(
         &self,
         region_id: RegionId,
-        request: RegionPutRequest,
+        request: RegionRequest,
     ) -> Result<AffectedRows> {
         let region_id = utils::to_data_region_id(region_id);
         self.mito
-            .handle_request(region_id, RegionRequest::Put(request))
+            .handle_request(region_id, request)
             .await
             .context(MitoWriteOperationSnafu)
             .map(|result| result.affected_rows)

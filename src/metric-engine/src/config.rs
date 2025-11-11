@@ -23,8 +23,8 @@ pub(crate) const DEFAULT_FLUSH_METADATA_REGION_INTERVAL: Duration = Duration::fr
 /// Configuration for the metric engine.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EngineConfig {
-    /// Experimental feature to use sparse primary key encoding.
-    pub experimental_sparse_primary_key_encoding: bool,
+    /// Whether to use sparse primary key encoding.
+    pub sparse_primary_key_encoding: bool,
     /// The flush interval of the metadata region.
     #[serde(
         with = "humantime_serde",
@@ -37,7 +37,7 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             flush_metadata_region_interval: DEFAULT_FLUSH_METADATA_REGION_INTERVAL,
-            experimental_sparse_primary_key_encoding: false,
+            sparse_primary_key_encoding: true,
         }
     }
 }

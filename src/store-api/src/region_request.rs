@@ -214,7 +214,7 @@ fn make_region_deletes(deletes: DeleteRequests) -> Result<Vec<(RegionId, RegionR
             r.rows.map(|rows| {
                 (
                     region_id,
-                    RegionRequest::Delete(RegionDeleteRequest { rows }),
+                    RegionRequest::Delete(RegionDeleteRequest { rows, hint: None }),
                 )
             })
         })
@@ -423,6 +423,8 @@ pub struct RegionDeleteRequest {
     ///
     /// Each row only contains primary key columns and a time index column.
     pub rows: Rows,
+    /// Write hint.
+    pub hint: Option<WriteHint>,
 }
 
 #[derive(Debug, Clone)]

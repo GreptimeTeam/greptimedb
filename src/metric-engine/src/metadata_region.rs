@@ -536,7 +536,7 @@ impl MetadataRegion {
             .collect();
         let rows = Rows { schema: cols, rows };
 
-        RegionDeleteRequest { rows }
+        RegionDeleteRequest { rows, hint: None }
     }
 
     /// Add logical regions to the metadata region.

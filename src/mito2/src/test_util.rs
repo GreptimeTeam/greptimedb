@@ -1178,7 +1178,7 @@ pub async fn delete_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Delete(RegionDeleteRequest { rows }),
+            RegionRequest::Delete(RegionDeleteRequest { rows, hint: None }),
         )
         .await
         .unwrap();

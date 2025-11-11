@@ -227,7 +227,7 @@ impl MetricEngineInner {
         let mut data_region_options = request.options;
         set_data_region_options(
             &mut data_region_options,
-            self.config.experimental_sparse_primary_key_encoding,
+            self.config.sparse_primary_key_encoding,
         );
         let open_data_region_request = RegionOpenRequest {
             table_dir: request.table_dir.clone(),

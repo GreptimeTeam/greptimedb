@@ -78,7 +78,7 @@ fn test_load_datanode_example_config() {
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
                 RegionEngineConfig::Metric(MetricEngineConfig {
-                    experimental_sparse_primary_key_encoding: false,
+                    sparse_primary_key_encoding: true,
                     flush_metadata_region_interval: Duration::from_secs(30),
                 }),
             ],
@@ -290,7 +290,7 @@ fn test_load_standalone_example_config() {
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
                 RegionEngineConfig::Metric(MetricEngineConfig {
-                    experimental_sparse_primary_key_encoding: false,
+                    sparse_primary_key_encoding: true,
                     flush_metadata_region_interval: Duration::from_secs(30),
                 }),
             ],
