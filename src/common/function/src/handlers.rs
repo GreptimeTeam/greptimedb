@@ -55,7 +55,7 @@ pub trait TableMutationHandler: Send + Sync {
         request: BuildIndexTableRequest,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows>;
-    
+
     /// Trigger a flush task for a table region.
     async fn flush_region(&self, region_id: RegionId, ctx: QueryContextRef)
     -> Result<AffectedRows>;

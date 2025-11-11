@@ -532,7 +532,7 @@ pub async fn delete_files(
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
-    
+
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{
         ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions, SkippingIndexOptions,

@@ -104,7 +104,7 @@ impl IndexOutput {
         indexes
     }
 
-   pub fn build_indexes(&self) -> Vec<ColumnIndexMetadata> {
+    pub fn build_indexes(&self) -> Vec<ColumnIndexMetadata> {
         let mut map: HashMap<ColumnId, IndexTypes> = HashMap::new();
 
         if self.inverted_index.is_available() {
