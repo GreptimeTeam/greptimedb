@@ -60,7 +60,9 @@ use crate::request::{
     WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{FileHandle, FileMeta, IndexType, RegionFileId};
+use crate::sst::file::{
+    ColumnIndexMetadata, FileHandle, FileMeta, IndexType, IndexTypes, RegionFileId,
+};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -100,6 +102,35 @@ impl IndexOutput {
             indexes.push(IndexType::BloomFilterIndex);
         }
         indexes
+    }
+
+   pub fn build_indexes(&self) -> Vec<ColumnIndexMetadata> {
+        let mut map: HashMap<ColumnId, IndexTypes> = HashMap::new();
+
+        if self.inverted_index.is_available() {
+            for &col in &self.inverted_index.columns {
+                map.entry(col).or_default().push(IndexType::InvertedIndex);
+            }
+        }
+        if self.fulltext_index.is_available() {
+            for &col in &self.fulltext_index.columns {
+                map.entry(col).or_default().push(IndexType::FulltextIndex);
+            }
+        }
+        if self.bloom_filter.is_available() {
+            for &col in &self.bloom_filter.columns {
+                map.entry(col)
+                    .or_default()
+                    .push(IndexType::BloomFilterIndex);
+            }
+        }
+
+        map.into_iter()
+            .map(|(column_id, created_indexes)| ColumnIndexMetadata {
+                column_id,
+                created_indexes,
+            })
+            .collect::<Vec<_>>()
     }
 }
 
@@ -416,7 +447,7 @@ impl IndexerBuilderImpl {
 }
 
 /// Type of an index build task.
-#[derive(Debug, Clone, IntoStaticStr)]
+#[derive(Debug, Clone, IntoStaticStr, PartialEq)]
 pub enum IndexBuildType {
     /// Build index when schema change.
     SchemaChange,
@@ -728,6 +759,7 @@ impl IndexBuildTask {
         index_file_id: FileId,
     ) -> Result<RegionEdit> {
         self.file_meta.available_indexes = output.build_available_indexes();
+        self.file_meta.indexes = output.build_indexes();
         self.file_meta.index_file_size = output.file_size;
         self.file_meta.index_file_id = Some(index_file_id);
         let edit = RegionEdit {

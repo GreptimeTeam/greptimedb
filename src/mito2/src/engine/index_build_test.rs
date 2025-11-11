@@ -16,11 +16,13 @@
 //!
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::Rows;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{AlterKind, RegionAlterRequest, RegionRequest, SetIndexOption};
+use store_api::region_request::{AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionRequest, SetIndexOption};
 use store_api::storage::{RegionId, ScanRequest};
+use tokio::time::sleep;
 
 use crate::config::{IndexBuildMode, MitoConfig, Mode};
 use crate::engine::MitoEngine;
@@ -71,11 +73,9 @@ async fn num_of_index_files(engine: &MitoEngine, scanner: &Scanner, region_id: R
     index_files_count
 }
 
-#[allow(dead_code)]
 fn assert_listener_counts(
     listener: &IndexBuildListener,
     expected_begin_count: usize,
-
     expected_success_count: usize,
 ) {
     assert_eq!(listener.begin_count(), expected_begin_count);
@@ -298,4 +298,147 @@ async fn test_index_build_type_schema_change() {
         .unwrap();
     assert_eq!(scanner.num_files(), 1);
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
+}
+
+#[tokio::test]
+async fn test_index_build_type_manual_basic() {
+    let mut env = TestEnv::with_prefix("test_index_build_type_manual_").await;
+    let listener = Arc::new(IndexBuildListener::default());
+    let engine = env
+        .create_engine_with(
+            async_build_mode_config(false), // Disable index file creation on flush.
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    // Create a region with index.
+    let request = CreateRequestBuilder::new().build_with_index();
+    let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Flush and make sure there is no index file (because create_on_flush is disabled).
+    put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    // Index build task is triggered on flush, but not finished.
+    assert_listener_counts(&listener, 1, 0);
+    assert!(scanner.num_files() == 1);
+    assert!(num_of_index_files(&engine, &scanner, region_id).await == 0);
+
+    // Trigger manual index build task and make sure index file is built without flush or compaction.
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    engine.handle_request(region_id, request).await.unwrap();
+    listener.wait_finish(1).await;
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_listener_counts(&listener, 2, 1);
+    assert!(scanner.num_files() == 1);
+    assert!(num_of_index_files(&engine, &scanner, region_id).await == 1);
+}
+
+#[tokio::test]
+async fn test_index_build_type_manual_consistency() {
+    let mut env = TestEnv::with_prefix("test_index_build_type_manual_consistency_").await;
+    let listener = Arc::new(IndexBuildListener::default());
+    let engine = env
+        .create_engine_with(
+            async_build_mode_config(true),
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    // Create a region with index.
+    let create_request = CreateRequestBuilder::new().build_with_index();
+    let table_dir = create_request.table_dir.clone();
+    let column_schemas = rows_schema(&create_request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create_request.clone()))
+        .await
+        .unwrap();
+    assert_listener_counts(&listener, 0, 0);
+
+    // Flush and make sure index file exists.
+    put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
+    listener.wait_finish(1).await; 
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_listener_counts(&listener, 1, 1);
+    assert!(scanner.num_files() == 1);
+    assert!(num_of_index_files(&engine, &scanner, region_id).await == 1);
+
+    // Check index build task for consistent file will be skipped.
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    engine.handle_request(region_id, request).await.unwrap();
+    // Reopen the region to ensure the task wasn't skipped due to insufficient time.
+    reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    // Because the file is consistent, no new index build task is triggered.
+    assert_listener_counts(&listener, 1, 1);
+    assert!(scanner.num_files() == 1);
+    assert!(num_of_index_files(&engine, &scanner, region_id).await == 1);
+
+    let mut altered_metadata = create_request.column_metadatas.clone();
+    // Set index for field_0.
+    altered_metadata[1].column_schema.set_inverted_index(true);
+    let sync_columns_request = RegionAlterRequest {
+        kind: AlterKind::SyncColumns {
+            column_metadatas: altered_metadata,
+        },
+    };
+    // Use SyncColumns to avoid triggering SchemaChange index build.
+    engine
+        .handle_request(region_id, RegionRequest::Alter(sync_columns_request))
+        .await
+        .unwrap();
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    // SyncColumns won't trigger index build.
+    assert_listener_counts(&listener, 1, 1);
+
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    engine.handle_request(region_id, request).await.unwrap();
+    listener.wait_finish(2).await; // previous 1 + new 1
+    // Because the file is inconsistent, new index build task is triggered.
+    assert_listener_counts(&listener, 2, 2);
 }

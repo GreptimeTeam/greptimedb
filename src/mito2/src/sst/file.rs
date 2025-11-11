@@ -26,8 +26,9 @@ use common_time::Timestamp;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
+use store_api::metadata::ColumnMetadata;
 use store_api::region_request::PathType;
-use store_api::storage::{FileId, RegionId};
+use store_api::storage::{ColumnId, FileId, RegionId};
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
@@ -79,6 +80,8 @@ where
 pub type Level = u8;
 /// Maximum level of SSTs.
 pub const MAX_LEVEL: Level = 2;
+/// Type to store index types for a column.
+pub type IndexTypes = SmallVec<[IndexType; 4]>;
 
 /// Cross-region file id.
 ///
@@ -144,6 +147,16 @@ pub struct FileMeta {
     pub file_size: u64,
     /// Available indexes of the file.
     pub available_indexes: SmallVec<[IndexType; 4]>,
+    /// Created indexes of the file for each column.
+    ///
+    /// This is essentially a more granular, column-level version of `available_indexes`,
+    /// primarily used for manual index building in the asynchronous index construction mode.
+    ///
+    /// For backward compatibility, older `FileMeta` versions might only contain `available_indexes`.
+    /// In such cases, we cannot deduce specific column index information from `available_indexes` alone.
+    /// Therefore, defaulting this `indexes` field to an empty list during deserialization is a
+    /// reasonable and necessary step to ensure column information consistency.
+    pub indexes: Vec<ColumnIndexMetadata>,
     /// Size of the index file.
     pub index_file_size: u64,
     /// File ID of the index file.
@@ -206,6 +219,7 @@ impl Debug for FileMeta {
         if !self.available_indexes.is_empty() {
             debug_struct
                 .field("available_indexes", &self.available_indexes)
+                .field("indexes", &self.indexes)
                 .field("index_file_size", &ReadableSize(self.index_file_size));
         }
         debug_struct
@@ -236,6 +250,13 @@ pub enum IndexType {
     BloomFilterIndex,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ColumnIndexMetadata {
+    pub column_id: ColumnId,
+    pub created_indexes: IndexTypes,
+}
+
 impl FileMeta {
     pub fn exists_index(&self) -> bool {
         !self.available_indexes.is_empty()
@@ -259,6 +280,43 @@ impl FileMeta {
 
     pub fn index_file_size(&self) -> u64 {
         self.index_file_size
+    }
+
+    /// Check whether the file index is consistent with the given region metadata.
+    pub fn is_index_consistent_with_region(&self, metadata: &[ColumnMetadata]) -> bool {
+        let id_to_indexes = self
+            .indexes
+            .iter()
+            .map(|index| (index.column_id, index.created_indexes.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        for column in metadata {
+            if !column.column_schema.is_inverted_indexed()
+                && !column.column_schema.is_fulltext_indexed()
+                && !column.column_schema.is_skipping_indexed()
+            {
+                continue;
+            }
+            if let Some(indexes) = id_to_indexes.get(&column.column_id) {
+                if column.column_schema.is_inverted_indexed()
+                    && !indexes.contains(&IndexType::InvertedIndex)
+                {
+                    return false;
+                }
+                if column.column_schema.is_fulltext_indexed()
+                    && !indexes.contains(&IndexType::FulltextIndex)
+                {
+                    return false;
+                }
+                if column.column_schema.is_skipping_indexed()
+                    && !indexes.contains(&IndexType::BloomFilterIndex)
+                {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
     }
 
     /// Returns the cross-region file id.
@@ -474,7 +532,11 @@ pub async fn delete_files(
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
-
+    
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{
+        ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions, SkippingIndexOptions,
+    };
     use datatypes::value::Value;
     use partition::expr::{PartitionExpr, col};
 
@@ -488,6 +550,10 @@ mod tests {
             level,
             file_size: 0,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            }],
             index_file_size: 0,
             index_file_id: None,
             num_rows: 0,
@@ -510,7 +576,7 @@ mod tests {
     fn test_deserialize_from_string() {
         let json_file_meta = "{\"region_id\":0,\"file_id\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55\",\
         \"time_range\":[{\"value\":0,\"unit\":\"Millisecond\"},{\"value\":0,\"unit\":\"Millisecond\"}],\
-        \"available_indexes\":[\"InvertedIndex\"],\"level\":0}";
+        \"available_indexes\":[\"InvertedIndex\"],\"indexes\":[{\"column_id\": 0, \"created_indexes\": [\"InvertedIndex\"]}],\"level\":0}";
         let file_meta = create_file_meta(
             FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap(),
             0,
@@ -535,6 +601,10 @@ mod tests {
             level: 0,
             file_size: 0,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            }],
             index_file_size: 0,
             index_file_id: None,
             num_rows: 0,
@@ -652,5 +722,117 @@ mod tests {
 
         let file_meta_empty: FileMeta = serde_json::from_str(json_with_empty_expr).unwrap();
         assert!(file_meta_empty.partition_expr.is_none());
+    }
+
+    #[test]
+    fn test_is_index_consistent_with_region() {
+        fn new_column_meta(
+            id: ColumnId,
+            name: &str,
+            inverted: bool,
+            fulltext: bool,
+            skipping: bool,
+        ) -> ColumnMetadata {
+            let mut column_schema =
+                ColumnSchema::new(name, ConcreteDataType::string_datatype(), true);
+            if inverted {
+                column_schema = column_schema.with_inverted_index(true);
+            }
+            if fulltext {
+                column_schema = column_schema
+                    .with_fulltext_options(FulltextOptions::new_unchecked(
+                        true,
+                        FulltextAnalyzer::English,
+                        false,
+                        FulltextBackend::Bloom,
+                        1000,
+                        0.01,
+                    ))
+                    .unwrap();
+            }
+            if skipping {
+                column_schema = column_schema
+                    .with_skipping_options(SkippingIndexOptions::new_unchecked(
+                        1024,
+                        0.01,
+                        datatypes::schema::SkippingIndexType::BloomFilter,
+                    ))
+                    .unwrap();
+            }
+
+            ColumnMetadata {
+                column_schema,
+                semantic_type: api::v1::SemanticType::Tag,
+                column_id: id,
+            }
+        }
+
+        // Case 1: Perfect match. File has exactly the required indexes.
+        let mut file_meta = FileMeta {
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 1,
+                created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            }],
+            ..Default::default()
+        };
+        let region_meta = vec![new_column_meta(1, "tag1", true, false, false)];
+        assert!(file_meta.is_index_consistent_with_region(&region_meta));
+
+        // Case 2: Superset match. File has more indexes than required.
+        file_meta.indexes = vec![ColumnIndexMetadata {
+            column_id: 1,
+            created_indexes: SmallVec::from_iter([
+                IndexType::InvertedIndex,
+                IndexType::BloomFilterIndex,
+            ]),
+        }];
+        let region_meta = vec![new_column_meta(1, "tag1", true, false, false)];
+        assert!(file_meta.is_index_consistent_with_region(&region_meta));
+
+        // Case 3: Missing index type. File has the column but lacks the required index type.
+        file_meta.indexes = vec![ColumnIndexMetadata {
+            column_id: 1,
+            created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+        }];
+        let region_meta = vec![new_column_meta(1, "tag1", true, true, false)]; // Requires fulltext too
+        assert!(!file_meta.is_index_consistent_with_region(&region_meta));
+
+        // Case 4: Missing column. Region requires an index on a column not in the file's index list.
+        file_meta.indexes = vec![ColumnIndexMetadata {
+            column_id: 2, // File only has index for column 2
+            created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+        }];
+        let region_meta = vec![new_column_meta(1, "tag1", true, false, false)]; // Requires index on column 1
+        assert!(!file_meta.is_index_consistent_with_region(&region_meta));
+
+        // Case 5: No indexes required by region. Should always be consistent.
+        file_meta.indexes = vec![ColumnIndexMetadata {
+            column_id: 1,
+            created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+        }];
+        let region_meta = vec![new_column_meta(1, "tag1", false, false, false)]; // No index required
+        assert!(file_meta.is_index_consistent_with_region(&region_meta));
+
+        // Case 6: Empty file indexes. Region requires an index.
+        file_meta.indexes = vec![];
+        let region_meta = vec![new_column_meta(1, "tag1", true, false, false)];
+        assert!(!file_meta.is_index_consistent_with_region(&region_meta));
+
+        // Case 7: Multiple columns, one is inconsistent.
+        file_meta.indexes = vec![
+            ColumnIndexMetadata {
+                column_id: 1,
+                created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            },
+            ColumnIndexMetadata {
+                column_id: 2, // Column 2 is missing the required BloomFilterIndex
+                created_indexes: SmallVec::from_iter([IndexType::FulltextIndex]),
+            },
+        ];
+        let region_meta = vec![
+            new_column_meta(1, "tag1", true, false, false),
+            new_column_meta(2, "tag2", false, true, true), // Requires Fulltext and BloomFilter
+        ];
+        assert!(!file_meta.is_index_consistent_with_region(&region_meta));
     }
 }

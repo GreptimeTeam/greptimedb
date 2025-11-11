@@ -85,7 +85,6 @@ impl<S> RegionWorkerLoop<S> {
     }
 
     /// Handles manual build index requests.
-    /// TODO(SNC123): Support admin function of manual index building later.
     pub(crate) async fn handle_build_index_request(
         &mut self,
         region_id: RegionId,
@@ -126,10 +125,20 @@ impl<S> RegionWorkerLoop<S> {
             .collect();
 
         let build_tasks = if request.file_metas.is_empty() {
-            // NOTE: Currently, rebuilding the index will reconstruct the index for all
-            // files in the region, which is a simplified approach and is not yet available for
-            // production use; further optimization is required.
-            all_files.values().cloned().collect::<Vec<_>>()
+            if request.build_type == IndexBuildType::Manual {
+                // Find all files whose index is inconsistent with the region metadata.
+                all_files
+                    .values()
+                    .filter(|file| {
+                        !file
+                            .meta_ref()
+                            .is_index_consistent_with_region(&version.metadata.column_metadatas)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                all_files.values().cloned().collect::<Vec<_>>()
+            }
         } else {
             request
                 .file_metas
