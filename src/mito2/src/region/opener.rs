@@ -401,6 +401,7 @@ impl RegionOpener {
         config: &MitoConfig,
         wal: &Wal<S>,
     ) -> Result<Option<MitoRegionRef>> {
+        let now = Instant::now();
         let region_options = self.options.as_ref().unwrap().clone();
 
         let region_manifest_options = Self::manifest_options(
@@ -492,8 +493,12 @@ impl RegionOpener {
                 .unwrap_or_default()
                 .max(flushed_entry_id);
             info!(
-                "Start replaying memtable at replay_from_entry_id: {} for region {}, manifest version: {}, flushed entry id: {}",
-                replay_from_entry_id, region_id, manifest.manifest_version, flushed_entry_id
+                "Start replaying memtable at replay_from_entry_id: {} for region {}, manifest version: {}, flushed entry id: {}, elapsed: {:?}",
+                replay_from_entry_id,
+                region_id,
+                manifest.manifest_version,
+                flushed_entry_id,
+                now.elapsed()
             );
             replay_memtable(
                 &provider,
@@ -515,8 +520,11 @@ impl RegionOpener {
             }
         } else {
             info!(
-                "Skip the WAL replay for region: {}, manifest version: {}, flushed_entry_id: {}",
-                region_id, manifest.manifest_version, flushed_entry_id
+                "Skip the WAL replay for region: {}, manifest version: {}, flushed_entry_id: {}, elapsed: {:?}",
+                region_id,
+                manifest.manifest_version,
+                flushed_entry_id,
+                now.elapsed()
             );
 
             0

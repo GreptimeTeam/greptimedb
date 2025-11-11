@@ -685,6 +685,9 @@ impl RegionMigrationProcedure {
                     .with_context(|_| error::RetryLaterWithSourceSnafu {
                         reason: format!("Failed to update the table route during the rollback downgraded leader region: {region_id}"),
                     })?;
+            self.context
+                .deregister_failure_detectors_for_candidate_region()
+                .await;
         }
 
         self.context.register_failure_detectors().await;

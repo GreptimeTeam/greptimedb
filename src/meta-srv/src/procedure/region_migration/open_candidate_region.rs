@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::ops::Div;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
@@ -139,12 +140,15 @@ impl OpenCandidateRegion {
             input: open_instruction.to_string(),
         })?;
 
+        let operation_timeout =
+            ctx.next_operation_timeout()
+                .context(error::ExceededDeadlineSnafu {
+                    operation: "Open candidate region",
+                })?;
+        let operation_timeout = operation_timeout.div(2).max(OPEN_CANDIDATE_REGION_TIMEOUT);
         let ch = Channel::Datanode(candidate.id);
         let now = Instant::now();
-        let receiver = ctx
-            .mailbox
-            .send(&ch, msg, OPEN_CANDIDATE_REGION_TIMEOUT)
-            .await?;
+        let receiver = ctx.mailbox.send(&ch, msg, operation_timeout).await?;
 
         match receiver.await {
             Ok(msg) => {
