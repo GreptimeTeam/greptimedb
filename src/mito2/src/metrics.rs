@@ -479,6 +479,18 @@ lazy_static! {
             "greptime_mito_gc_delete_file_count",
             "mito gc deleted file count",
         ).unwrap();
+
+    /// Total number of files downloaded during cache fill on region open.
+    pub static ref CACHE_FILL_DOWNLOADED_FILES: IntCounter = register_int_counter!(
+        "mito_cache_fill_downloaded_files",
+        "mito cache fill downloaded files count",
+    ).unwrap();
+
+    /// Number of files pending download during cache fill on region open.
+    pub static ref CACHE_FILL_PENDING_FILES: IntGauge = register_int_gauge!(
+        "mito_cache_fill_pending_files",
+        "mito cache fill pending files count",
+    ).unwrap();
 }
 
 /// Stager notifier to collect metrics.

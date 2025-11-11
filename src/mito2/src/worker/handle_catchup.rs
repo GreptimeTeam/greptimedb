@@ -111,26 +111,24 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         info!(
             "Reopening the region: {region_id}, manifest version: {manifest_version}, flushed entry id: {flushed_entry_id}"
         );
-        let reopened_region = Arc::new(
-            RegionOpener::new(
-                region_id,
-                region.table_dir(),
-                region.access_layer.path_type(),
-                self.memtable_builder_provider.clone(),
-                self.object_store_manager.clone(),
-                self.purge_scheduler.clone(),
-                self.puffin_manager_factory.clone(),
-                self.intermediate_manager.clone(),
-                self.time_provider.clone(),
-                self.file_ref_manager.clone(),
-                self.partition_expr_fetcher.clone(),
-            )
-            .cache(Some(self.cache_manager.clone()))
-            .options(region.version().options.clone())?
-            .skip_wal_replay(true)
-            .open(&self.config, &self.wal)
-            .await?,
-        );
+        let reopened_region = RegionOpener::new(
+            region_id,
+            region.table_dir(),
+            region.access_layer.path_type(),
+            self.memtable_builder_provider.clone(),
+            self.object_store_manager.clone(),
+            self.purge_scheduler.clone(),
+            self.puffin_manager_factory.clone(),
+            self.intermediate_manager.clone(),
+            self.time_provider.clone(),
+            self.file_ref_manager.clone(),
+            self.partition_expr_fetcher.clone(),
+        )
+        .cache(Some(self.cache_manager.clone()))
+        .options(region.version().options.clone())?
+        .skip_wal_replay(true)
+        .open(&self.config, &self.wal)
+        .await?;
         debug_assert!(!reopened_region.is_writable());
         self.regions.insert_region(reopened_region.clone());
 

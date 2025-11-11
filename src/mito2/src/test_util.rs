@@ -629,6 +629,7 @@ impl TestEnv {
             local_store,
             capacity,
             None,
+            None,
             self.puffin_manager.clone(),
             self.intermediate_manager.clone(),
         )
@@ -647,6 +648,7 @@ impl TestEnv {
         let write_cache = WriteCache::new_fs(
             path,
             capacity,
+            None,
             None,
             self.puffin_manager.clone(),
             self.intermediate_manager.clone(),

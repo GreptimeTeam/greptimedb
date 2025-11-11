@@ -25,6 +25,7 @@ use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
+use crate::cache::file_cache::DEFAULT_INDEX_CACHE_PERCENT;
 use crate::error::Result;
 use crate::gc::GcConfig;
 use crate::memtable::MemtableConfig;
@@ -119,6 +120,12 @@ pub struct MitoConfig {
     /// TTL for write cache.
     #[serde(with = "humantime_serde")]
     pub write_cache_ttl: Option<Duration>,
+    /// Preload index (puffin) files into cache on region open (default: true).
+    pub preload_index_cache: bool,
+    /// Percentage of write cache capacity allocated for index (puffin) files (default: 20).
+    /// The remaining capacity is used for data (parquet) files.
+    /// Must be between 0 and 100 (exclusive).
+    pub index_cache_percent: u8,
 
     // Other configs:
     /// Buffer size for SST writing.
@@ -182,6 +189,8 @@ impl Default for MitoConfig {
             write_cache_path: String::new(),
             write_cache_size: ReadableSize::gb(5),
             write_cache_ttl: None,
+            preload_index_cache: true,
+            index_cache_percent: DEFAULT_INDEX_CACHE_PERCENT,
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
@@ -269,6 +278,15 @@ impl MitoConfig {
         // Sets write cache path if it is empty.
         if self.write_cache_path.trim().is_empty() {
             self.write_cache_path = data_home.to_string();
+        }
+
+        // Validate index_cache_percent is within valid range (0, 100)
+        if self.index_cache_percent == 0 || self.index_cache_percent >= 100 {
+            warn!(
+                "Invalid index_cache_percent {}, resetting to default {}",
+                self.index_cache_percent, DEFAULT_INDEX_CACHE_PERCENT
+            );
+            self.index_cache_percent = DEFAULT_INDEX_CACHE_PERCENT;
         }
 
         self.index.sanitize(data_home, &self.inverted_index)?;

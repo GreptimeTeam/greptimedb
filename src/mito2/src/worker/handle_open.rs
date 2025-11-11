@@ -133,7 +133,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region_count.inc();
 
                     // Insert the Region into the RegionMap.
-                    regions.insert_region(Arc::new(region));
+                    regions.insert_region(region);
 
                     let senders = opening_regions.remove_sender(region_id);
                     for sender in senders {
