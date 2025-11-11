@@ -17,9 +17,44 @@ values
 
 Affected Rows: 1
 
+CREATE TABLE demo_2(host string, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+insert into
+    demo_2(host, ts)
+values
+    ('host4', 1755276557000),
+    ('host5', 1755276558000),
+    ('host6', 1822077263000);
+
+Affected Rows: 3
+
+Copy demo_2 TO '${SQLNESS_HOME}/demo/export/csv/demo_2.csv' with (format='csv');
+
+Affected Rows: 3
+
 Copy demo TO '${SQLNESS_HOME}/demo/export/csv/demo.csv' with (format='csv');
 
 Affected Rows: 3
+
+CREATE TABLE has_header(host string, ts timestamp time index);
+
+Affected Rows: 0
+
+Copy has_header FROM '${SQLNESS_HOME}/demo/export/csv/' with (pattern = 'demo*', format='csv', has_header='true');
+
+Affected Rows: 6
+
+select * from has_header order by ts;
+
++-------+---------------------+
+| host  | ts                  |
++-------+---------------------+
+| host4 | 2025-08-15T16:49:17 |
+| host5 | 2025-08-15T16:49:18 |
+| host6 | 2027-09-27T20:34:23 |
++-------+---------------------+
 
 CREATE TABLE with_filename(host string, cpu double, memory double, ts timestamp time index);
 
@@ -82,7 +117,7 @@ Affected Rows: 0
 
 Copy with_path FROM '${SQLNESS_HOME}/demo/export/csv/' with (format='csv', start_time='2023-06-15 07:02:37');
 
-Affected Rows: 1
+Affected Rows: 7
 
 select * from with_path order by ts;
 
@@ -90,6 +125,9 @@ select * from with_path order by ts;
 | host  | cpu  | memory | ts                  |
 +-------+------+--------+---------------------+
 | host3 | 99.9 | 444.4  | 2024-07-27T10:47:43 |
+| host4 |      |        | 2025-08-15T16:49:17 |
+| host5 |      |        | 2025-08-15T16:49:18 |
+| host6 |      |        | 2027-09-27T20:34:23 |
 +-------+------+--------+---------------------+
 
 CREATE TABLE with_pattern(host string, cpu double, memory double, ts timestamp time index);
@@ -150,11 +188,15 @@ drop table demo;
 
 Affected Rows: 0
 
-drop table with_filename;
+drop table demo_2;
 
 Affected Rows: 0
 
-drop table with_json;
+drop table has_header;
+
+Affected Rows: 0
+
+drop table with_filename;
 
 Affected Rows: 0
 
