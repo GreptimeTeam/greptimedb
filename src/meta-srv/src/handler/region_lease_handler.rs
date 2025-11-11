@@ -19,6 +19,7 @@ use api::v1::meta::{HeartbeatRequest, RegionLease, Role};
 use async_trait::async_trait;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
+use common_telemetry::error;
 use store_api::region_engine::GrantedRegion;
 use store_api::storage::RegionId;
 
@@ -83,36 +84,44 @@ impl HeartbeatHandler for RegionLeaseHandler {
         let regions = stat.regions();
         let datanode_id = stat.id;
 
-        let RenewRegionLeasesResponse {
-            non_exists,
-            renewed,
-        } = self
+        match self
             .region_lease_keeper
             .renew_region_leases(datanode_id, &regions)
-            .await?;
+            .await
+        {
+            Ok(RenewRegionLeasesResponse {
+                non_exists,
+                renewed,
+            }) => {
+                let renewed = if let Some(renewer) = &self.customized_region_lease_renewer {
+                    renewer
+                        .renew(ctx, renewed)
+                        .into_iter()
+                        .map(|region| region.into())
+                        .collect()
+                } else {
+                    renewed
+                        .into_iter()
+                        .map(|(region_id, region_lease_info)| {
+                            GrantedRegion::new(region_id, region_lease_info.role).into()
+                        })
+                        .collect::<Vec<_>>()
+                };
 
-        let renewed = if let Some(renewer) = &self.customized_region_lease_renewer {
-            renewer
-                .renew(ctx, renewed)
-                .into_iter()
-                .map(|region| region.into())
-                .collect()
-        } else {
-            renewed
-                .into_iter()
-                .map(|(region_id, region_lease_info)| {
-                    GrantedRegion::new(region_id, region_lease_info.role).into()
-                })
-                .collect::<Vec<_>>()
-        };
-
-        acc.region_lease = Some(RegionLease {
-            regions: renewed,
-            duration_since_epoch: req.duration_since_epoch,
-            lease_seconds: self.region_lease_seconds,
-            closeable_region_ids: non_exists.iter().map(|region| region.as_u64()).collect(),
-        });
-        acc.inactive_region_ids = non_exists;
+                acc.region_lease = Some(RegionLease {
+                    regions: renewed,
+                    duration_since_epoch: req.duration_since_epoch,
+                    lease_seconds: self.region_lease_seconds,
+                    closeable_region_ids: non_exists.iter().map(|region| region.as_u64()).collect(),
+                });
+                acc.inactive_region_ids = non_exists;
+            }
+            Err(e) => {
+                error!(e; "Failed to renew region leases for datanode: {datanode_id:?}, regions: {:?}", regions);
+                // If we throw error here, the datanode will be marked as failure by region failure handler.
+                // So we only log the error and continue.
+            }
+        }
 
         Ok(HandleControl::Continue)
     }

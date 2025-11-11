@@ -52,6 +52,7 @@ use crate::procedure::region_migration::{
 };
 use crate::region::failure_detector::RegionFailureDetector;
 use crate::selector::SelectorOptions;
+use crate::state::StateRef;
 
 /// `DatanodeHeartbeat` represents the heartbeat signal sent from a datanode.
 /// It includes identifiers for the cluster and datanode, a list of regions being monitored,
@@ -100,16 +101,6 @@ pub(crate) enum Event {
     Dump(tokio::sync::oneshot::Sender<RegionFailureDetector>),
 }
 
-#[cfg(test)]
-impl Event {
-    pub(crate) fn into_region_failure_detectors(self) -> Vec<DetectingRegion> {
-        match self {
-            Self::RegisterFailureDetectors(detecting_regions) => detecting_regions,
-            _ => unreachable!(),
-        }
-    }
-}
-
 impl Debug for Event {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -138,6 +129,9 @@ pub type RegionSupervisorTickerRef = Arc<RegionSupervisorTicker>;
 pub struct RegionSupervisorTicker {
     /// The [`Option`] wrapper allows us to abort the job while dropping the [`RegionSupervisor`].
     tick_handle: Mutex<Option<JoinHandle<()>>>,
+
+    /// The [`Option`] wrapper allows us to abort the job while dropping the [`RegionSupervisor`].
+    initialization_handler: Mutex<Option<JoinHandle<()>>>,
 
     /// The interval of tick.
     tick_interval: Duration,
@@ -182,6 +176,7 @@ impl RegionSupervisorTicker {
         );
         Self {
             tick_handle: Mutex::new(None),
+            initialization_handler: Mutex::new(None),
             tick_interval,
             initialization_delay,
             initialization_retry_period,
@@ -202,7 +197,7 @@ impl RegionSupervisorTicker {
                 self.initialization_retry_period,
             );
             initialization_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            common_runtime::spawn_global(async move {
+            let initialization_handler = common_runtime::spawn_global(async move {
                 loop {
                     initialization_interval.tick().await;
                     let (tx, rx) = oneshot::channel();
@@ -218,6 +213,7 @@ impl RegionSupervisorTicker {
                     }
                 }
             });
+            *self.initialization_handler.lock().unwrap() = Some(initialization_handler);
 
             let sender = self.sender.clone();
             let ticker_loop = tokio::spawn(async move {
@@ -246,6 +242,11 @@ impl RegionSupervisorTicker {
         if let Some(handle) = handle {
             handle.abort();
             info!("The tick loop is stopped.");
+        }
+        let initialization_handler = self.initialization_handler.lock().unwrap().take();
+        if let Some(initialization_handler) = initialization_handler {
+            initialization_handler.abort();
+            info!("The initialization loop is stopped.");
         }
     }
 }
@@ -290,6 +291,8 @@ pub struct RegionSupervisor {
     peer_resolver: PeerResolverRef,
     /// The kv backend.
     kv_backend: KvBackendRef,
+    /// The meta state, used to check if the current metasrv is the leader.
+    state: Option<StateRef>,
 }
 
 /// Controller for managing failure detectors for regions.
@@ -373,12 +376,29 @@ impl RegionSupervisor {
             runtime_switch_manager,
             peer_resolver,
             kv_backend,
+            state: None,
         }
+    }
+
+    /// Sets the meta state.
+    pub(crate) fn with_state(mut self, state: StateRef) -> Self {
+        self.state = Some(state);
+        self
     }
 
     /// Runs the main loop.
     pub(crate) async fn run(&mut self) {
         while let Some(event) = self.receiver.recv().await {
+            if let Some(state) = self.state.as_ref()
+                && !state.read().unwrap().is_leader()
+            {
+                warn!(
+                    "The current metasrv is not the leader, ignore {:?} event",
+                    event
+                );
+                continue;
+            }
+
             match event {
                 Event::InitializeAllRegions(sender) => {
                     match self.is_maintenance_mode_enabled().await {
@@ -413,7 +433,10 @@ impl RegionSupervisor {
                     self.deregister_failure_detectors(detecting_regions).await
                 }
                 Event::HeartbeatArrived(heartbeat) => self.on_heartbeat_arrived(heartbeat),
-                Event::Clear => self.clear(),
+                Event::Clear => {
+                    self.clear();
+                    info!("Region supervisor is initialized.");
+                }
                 #[cfg(test)]
                 Event::Dump(sender) => {
                     let _ = sender.send(self.failure_detector.dump());
@@ -906,6 +929,7 @@ pub(crate) mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(128);
         let ticker = RegionSupervisorTicker {
             tick_handle: Mutex::new(None),
+            initialization_handler: Mutex::new(None),
             tick_interval: Duration::from_millis(10),
             initialization_delay: Duration::from_millis(100),
             initialization_retry_period: Duration::from_millis(100),
@@ -932,6 +956,7 @@ pub(crate) mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(128);
         let ticker = RegionSupervisorTicker {
             tick_handle: Mutex::new(None),
+            initialization_handler: Mutex::new(None),
             tick_interval: Duration::from_millis(1000),
             initialization_delay: Duration::from_millis(50),
             initialization_retry_period: Duration::from_millis(50),
