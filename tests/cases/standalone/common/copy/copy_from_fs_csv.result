@@ -44,7 +44,7 @@ Affected Rows: 0
 
 Copy has_header FROM '${SQLNESS_HOME}/demo/export/csv/' with (pattern = 'demo*', format='csv', has_header='true');
 
-Affected Rows: 6
+Affected Rows: 3
 
 select * from has_header order by ts;
 
@@ -117,7 +117,7 @@ Affected Rows: 0
 
 Copy with_path FROM '${SQLNESS_HOME}/demo/export/csv/' with (format='csv', start_time='2023-06-15 07:02:37');
 
-Affected Rows: 7
+Affected Rows: 4
 
 select * from with_path order by ts;
 
