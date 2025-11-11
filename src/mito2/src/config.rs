@@ -18,6 +18,7 @@ use std::cmp;
 use std::path::Path;
 use std::time::Duration;
 
+use common_base::memory_limit::MemoryLimit;
 use common_base::readable_size::ReadableSize;
 use common_stat::{get_total_cpu_cores, get_total_memory_readable};
 use common_telemetry::warn;
@@ -128,6 +129,9 @@ pub struct MitoConfig {
     pub max_concurrent_scan_files: usize,
     /// Whether to allow stale entries read during replay.
     pub allow_stale_entries: bool,
+    /// Memory limit for table scans across all queries. Setting it to 0 disables the limit.
+    /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
+    pub scan_memory_limit: MemoryLimit,
 
     /// Index configs.
     pub index: IndexConfig,
@@ -182,6 +186,7 @@ impl Default for MitoConfig {
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             allow_stale_entries: false,
+            scan_memory_limit: MemoryLimit::default(),
             index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),

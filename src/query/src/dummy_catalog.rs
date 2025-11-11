@@ -185,7 +185,8 @@ impl TableProvider for DummyTableProvider {
             .handle_query(self.region_id, request.clone())
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        let mut scan_exec = RegionScanExec::new(scanner, request)?;
+        let query_memory_permit = self.engine.register_query_memory_permit();
+        let mut scan_exec = RegionScanExec::new(scanner, request, query_memory_permit)?;
         if let Some(query_ctx) = &self.query_ctx {
             scan_exec.set_explain_verbose(query_ctx.explain_verbose());
         }
