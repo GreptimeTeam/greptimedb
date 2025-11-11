@@ -14,7 +14,7 @@
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use common_telemetry::{TRACER, TRACE_RELOAD_HANDLE};
+use common_telemetry::{TRACE_RELOAD_HANDLE, TRACER};
 
 use crate::error::{InvalidParameterSnafu, Result};
 

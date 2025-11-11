@@ -258,6 +258,7 @@ pub fn init_global_logging(
 ) -> Vec<WorkerGuard> {
     static START: Once = Once::new();
     let mut guards = vec![];
+    let node_id = node_id.unwrap_or_else(|| "none".to_string());
 
     START.call_once(|| {
         // Enable log compatible layer to convert log record to tracing span.
@@ -384,29 +385,26 @@ pub fn init_global_logging(
             .map(Sampler::ParentBased)
             .unwrap_or(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
 
-        let trace_config = opentelemetry_sdk::trace::config()
-            .with_sampler(sampler)
-            .with_resource(opentelemetry_sdk::Resource::new(vec![
+        let resource = opentelemetry_sdk::Resource::builder_empty()
+            .with_attributes([
                 KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
-                KeyValue::new(
-                    resource::SERVICE_INSTANCE_ID,
-                    node_id.unwrap_or("none".to_string()),
-                ),
+                KeyValue::new(resource::SERVICE_INSTANCE_ID, node_id.clone()),
                 KeyValue::new(resource::SERVICE_VERSION, common_version::version()),
                 KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
-            ]));
+            ])
+            .build();
 
-        let tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(build_otlp_exporter(opts))
-            .with_trace_config(trace_config)
-            .install_batch(opentelemetry_sdk::runtime::Tokio)
-            .expect("otlp tracer install failed");
+        let tracer = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(build_otlp_exporter(opts))
+            .with_sampler(sampler)
+            .with_resource(resource)
+            .build()
+            .tracer("greptimedb");
 
         TRACER
             .set(tracer.clone())
             .expect("failed to store otlp tracer");
-        let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer.clone());
         let (dyn_trace_layer, trace_reload_handle) =
             tracing_subscriber::reload::Layer::new(vec![trace_layer]);
 
@@ -458,32 +456,6 @@ pub fn init_global_logging(
             .with(slow_query_logging_layer);
 
         global::set_text_map_propagator(TraceContextPropagator::new());
-
-        let sampler = opts
-            .tracing_sample_ratio
-            .as_ref()
-            .map(create_sampler)
-            .map(Sampler::ParentBased)
-            .unwrap_or(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
-
-        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-            .with_batch_exporter(build_otlp_exporter(opts))
-            .with_sampler(sampler)
-            .with_resource(
-                opentelemetry_sdk::Resource::builder_empty()
-                    .with_attributes([
-                        KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
-                        KeyValue::new(
-                            resource::SERVICE_INSTANCE_ID,
-                            node_id.unwrap_or("none".to_string()),
-                        ),
-                        KeyValue::new(resource::SERVICE_VERSION, common_version::version()),
-                        KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
-                    ])
-                    .build(),
-            )
-            .build();
-        let tracer = provider.tracer("greptimedb");
 
         tracing::subscriber::set_global_default(
             subscriber.with(tracing_opentelemetry::layer().with_tracer(tracer)),
