@@ -185,7 +185,9 @@ mod tests {
     use super::*;
     use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
-    use crate::sst::file::{ColumnIndexMetadata, FileHandle, FileMeta, FileTimeRange, IndexType, RegionFileId};
+    use crate::sst::file::{
+        ColumnIndexMetadata, FileHandle, FileMeta, FileTimeRange, IndexType, RegionFileId,
+    };
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;

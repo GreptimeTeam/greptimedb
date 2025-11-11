@@ -16,13 +16,13 @@
 //!
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use api::v1::Rows;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionRequest, SetIndexOption};
+use store_api::region_request::{
+    AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionRequest, SetIndexOption,
+};
 use store_api::storage::{RegionId, ScanRequest};
-use tokio::time::sleep;
 
 use crate::config::{IndexBuildMode, MitoConfig, Mode};
 use crate::engine::MitoEngine;
@@ -396,7 +396,7 @@ async fn test_index_build_type_manual_consistency() {
 
     // Flush and make sure index file exists.
     put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
-    listener.wait_finish(1).await; 
+    listener.wait_finish(1).await;
     let scanner = engine
         .scanner(region_id, ScanRequest::default())
         .await

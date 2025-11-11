@@ -108,7 +108,7 @@ impl TableMutationHandler for TableMutationOperator {
             .map_err(BoxedError::new)
             .context(query_error::TableMutationSnafu)
     }
-    
+
     async fn flush_region(
         &self,
         region_id: RegionId,
