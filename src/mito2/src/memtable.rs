@@ -399,8 +399,6 @@ impl MemtableBuilderProvider {
     }
 
     pub(crate) fn builder_for_options(&self, options: &RegionOptions) -> MemtableBuilderRef {
-        common_telemetry::info!("Builder for options: {:?}", options);
-
         let dedup = options.need_dedup();
         let merge_mode = options.merge_mode();
         let flat_format = options
