@@ -22,7 +22,9 @@ use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::CsvFormat;
 use common_datasource::file_format::json::JsonFormat;
 use common_datasource::file_format::orc::{ReaderAdapter, infer_orc_schema, new_orc_stream_reader};
-use common_datasource::file_format::{FileFormat, Format, file_to_stream};
+use common_datasource::file_format::{
+    FORMAT_HAS_HEADER, FORMAT_SKIP_BAD_RECORDS, FORMAT_TYPE, FileFormat, Format,
+};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{FS_SCHEMA, build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
@@ -33,6 +35,8 @@ use common_telemetry::{debug, tracing};
 use datafusion::datasource::physical_plan::{CsvSource, FileSource, JsonSource};
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datafusion::parquet::arrow::arrow_reader::ArrowReaderMetadata;
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion_common::SchemaExt;
 use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
@@ -342,6 +346,21 @@ impl StatementExecutor {
             schema: &req.schema_name,
             table: &req.table_name,
         };
+        let file_type = req
+            .with
+            .get(FORMAT_TYPE)
+            .map(|format| format.to_ascii_uppercase())
+            .unwrap_or_else(|| "PARQUET".to_string());
+        let has_header = req
+            .with
+            .get(FORMAT_HAS_HEADER)
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false);
+        let skip_bad_records = req
+            .with
+            .get(FORMAT_SKIP_BAD_RECORDS)
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false);
         let table = self.get_table(&table_ref).await?;
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
         let (object_store, entries) = self.list_copy_from_entries(&req).await?;
@@ -366,6 +385,12 @@ impl StatementExecutor {
                 .await?;
 
             let file_schema = file_metadata.schema();
+            if file_type == "CSV"
+                && has_header
+                && !file_schema.equivalent_names_and_types(&table_schema)
+            {
+                continue;
+            }
             let (file_schema_projection, table_schema_projection, compat_schema) =
                 generated_schema_projection_and_compatible_file_schema(file_schema, &table_schema);
             let projected_file_schema = Arc::new(
@@ -415,7 +440,16 @@ impl StatementExecutor {
             let mut pending = vec![];
 
             while let Some(r) = stream.next().await {
-                let record_batch = r.context(error::ReadDfRecordBatchSnafu)?;
+                let record_batch = match r.context(error::ReadDfRecordBatchSnafu) {
+                    Ok(batch) => batch,
+                    Err(err) => {
+                        if file_type == "CSV" && skip_bad_records {
+                            continue;
+                        } else {
+                            return Err(err);
+                        }
+                    }
+                };
                 let vectors =
                     Helper::try_into_vectors(record_batch.columns()).context(IntoVectorsSnafu)?;
 
