@@ -43,7 +43,7 @@ ALTER TABLE test_alt_format SET 'sst_format' = 'primary_key';
 
 DROP TABLE test_alt_format;
 
-CREATE TABLE alt_format_phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "");
+CREATE TABLE alt_format_phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "", "sst_format" = "primary_key");
 
 CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "alt_format_phy");
 

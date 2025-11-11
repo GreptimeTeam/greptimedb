@@ -126,7 +126,7 @@ DROP TABLE test_alt_format;
 
 Affected Rows: 0
 
-CREATE TABLE alt_format_phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "");
+CREATE TABLE alt_format_phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "", "sst_format" = "primary_key");
 
 Affected Rows: 0
 
