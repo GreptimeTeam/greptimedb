@@ -42,6 +42,7 @@ use crate::procedure::region_migration::{
 };
 use crate::region::failure_detector::RegionFailureDetector;
 use crate::selector::SelectorOptions;
+use crate::state::StateRef;
 
 /// `DatanodeHeartbeat` represents the heartbeat signal sent from a datanode.
 /// It includes identifiers for the cluster and datanode, a list of regions being monitored,
@@ -84,16 +85,6 @@ pub(crate) enum Event {
     Clear,
     #[cfg(test)]
     Dump(tokio::sync::oneshot::Sender<RegionFailureDetector>),
-}
-
-#[cfg(test)]
-impl Event {
-    pub(crate) fn into_region_failure_detectors(self) -> Vec<DetectingRegion> {
-        match self {
-            Self::RegisterFailureDetectors(detecting_regions) => detecting_regions,
-            _ => unreachable!(),
-        }
-    }
 }
 
 impl Debug for Event {
@@ -228,6 +219,8 @@ pub struct RegionSupervisor {
     runtime_switch_manager: RuntimeSwitchManagerRef,
     /// Peer lookup service
     peer_lookup: PeerLookupServiceRef,
+    /// The meta state, used to check if the current metasrv is the leader.
+    state: Option<StateRef>,
 }
 
 /// Controller for managing failure detectors for regions.
@@ -308,12 +301,29 @@ impl RegionSupervisor {
             region_migration_manager,
             runtime_switch_manager,
             peer_lookup,
+            state: None,
         }
+    }
+
+    /// Sets the meta state.
+    pub(crate) fn with_state(mut self, state: StateRef) -> Self {
+        self.state = Some(state);
+        self
     }
 
     /// Runs the main loop.
     pub(crate) async fn run(&mut self) {
         while let Some(event) = self.receiver.recv().await {
+            if let Some(state) = self.state.as_ref()
+                && !state.read().unwrap().is_leader()
+            {
+                warn!(
+                    "The current metasrv is not the leader, ignore {:?} event",
+                    event
+                );
+                continue;
+            }
+
             match event {
                 Event::Tick => {
                     let regions = self.detect_region_failure();
@@ -326,7 +336,10 @@ impl RegionSupervisor {
                     self.deregister_failure_detectors(detecting_regions).await
                 }
                 Event::HeartbeatArrived(heartbeat) => self.on_heartbeat_arrived(heartbeat),
-                Event::Clear => self.clear(),
+                Event::Clear => {
+                    self.clear();
+                    info!("Region supervisor is initialized.");
+                }
                 #[cfg(test)]
                 Event::Dump(sender) => {
                     let _ = sender.send(self.failure_detector.dump());

@@ -160,7 +160,7 @@ impl UpdateMetadata {
                     region_options: region_options.clone(),
                     region_wal_options: region_wal_options.clone(),
                 },
-                table_route_value,
+                &table_route_value,
                 region_routes,
                 &region_options,
                 &region_wal_options,
@@ -168,13 +168,11 @@ impl UpdateMetadata {
             .await
             .context(error::TableMetadataManagerSnafu)
         {
-            ctx.remove_table_route_value();
             return Err(BoxedError::new(err)).context(error::RetryLaterWithSourceSnafu {
                 reason: format!("Failed to update the table route during the upgrading candidate region: {region_id}"),
             });
         };
 
-        ctx.remove_table_route_value();
         ctx.deregister_failure_detectors().await;
         // Consumes the guard.
         ctx.volatile_ctx.opening_region_guard.take();
@@ -305,71 +303,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_failed_to_update_table_route_error() {
-        let state = UpdateMetadata::Upgrade;
-        let env = TestingEnv::new();
-        let persistent_context = new_persistent_context();
-        let mut ctx = env.context_factory().new_context(persistent_context);
-        let opening_keeper = MemoryRegionKeeper::default();
-
-        let table_id = 1024;
-        let table_info = new_test_table_info(table_id, vec![1]).into();
-        let region_routes = vec![
-            RegionRoute {
-                region: Region::new_test(RegionId::new(table_id, 1)),
-                leader_peer: Some(Peer::empty(1)),
-                follower_peers: vec![Peer::empty(5), Peer::empty(3)],
-                leader_state: Some(LeaderState::Downgrading),
-                leader_down_since: Some(current_time_millis()),
-            },
-            RegionRoute {
-                region: Region::new_test(RegionId::new(table_id, 2)),
-                leader_peer: Some(Peer::empty(4)),
-                leader_state: Some(LeaderState::Downgrading),
-                ..Default::default()
-            },
-        ];
-
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
-
-        let table_metadata_manager = env.table_metadata_manager();
-        let original_table_route = table_metadata_manager
-            .table_route_manager()
-            .table_route_storage()
-            .get_with_raw_bytes(table_id)
-            .await
-            .unwrap()
-            .unwrap();
-
-        // modifies the table route.
-        table_metadata_manager
-            .update_leader_region_status(table_id, &original_table_route, |route| {
-                if route.region.id == RegionId::new(1024, 2) {
-                    // Removes the status.
-                    Some(None)
-                } else {
-                    None
-                }
-            })
-            .await
-            .unwrap();
-
-        // sets the old table route.
-        ctx.volatile_ctx.table_route = Some(original_table_route);
-        let guard = opening_keeper
-            .register(2, RegionId::new(table_id, 1))
-            .unwrap();
-        ctx.volatile_ctx.opening_region_guard = Some(guard);
-        let err = state.upgrade_candidate_region(&mut ctx).await.unwrap_err();
-
-        assert!(ctx.volatile_ctx.table_route.is_none());
-        assert!(ctx.volatile_ctx.opening_region_guard.is_some());
-        assert!(err.is_retryable());
-        assert!(format!("{err:?}").contains("Failed to update the table route"));
-    }
-
-    #[tokio::test]
     async fn test_check_metadata() {
         let state = UpdateMetadata::Upgrade;
         let env = TestingEnv::new();
@@ -486,7 +419,6 @@ mod tests {
             .unwrap();
         let region_routes = table_route.region_routes().unwrap();
 
-        assert!(ctx.volatile_ctx.table_route.is_none());
         assert!(ctx.volatile_ctx.opening_region_guard.is_none());
         assert_eq!(region_routes.len(), 1);
         assert!(!region_routes[0].is_leader_downgrading());

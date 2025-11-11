@@ -345,7 +345,8 @@ impl MetasrvBuilder {
                 region_migration_manager.clone(),
                 runtime_switch_manager.clone(),
                 peer_lookup_service.clone(),
-            );
+            )
+            .with_state(state.clone());
 
             Some(RegionFailureHandler::new(
                 region_supervisor,
