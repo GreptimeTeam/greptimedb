@@ -11,7 +11,25 @@ insert into
 values
     ('host3', 99.9, 444.4, 1722077263000);
 
+
+CREATE TABLE demo_2(host string, ts TIMESTAMP time index);
+
+insert into
+    demo_2(host, ts)
+values
+    ('host4', 1755276557000),
+    ('host5', 1755276558000),
+    ('host6', 1822077263000);
+
+Copy demo_2 TO '${SQLNESS_HOME}/demo/export/csv/demo_2.csv' with (format='csv');
+
 Copy demo TO '${SQLNESS_HOME}/demo/export/csv/demo.csv' with (format='csv');
+
+CREATE TABLE has_header(host string, ts timestamp time index);
+
+Copy has_header FROM '${SQLNESS_HOME}/demo/export/csv/' with (pattern = 'demo*', format='csv', has_header='true');
+
+select * from has_header order by ts;
 
 CREATE TABLE with_filename(host string, cpu double, memory double, ts timestamp time index);
 
@@ -57,9 +75,11 @@ select * from demo_with_less_columns order by ts;
 
 drop table demo;
 
-drop table with_filename;
+drop table demo_2;
 
-drop table with_json;
+drop table has_header;
+
+drop table with_filename;
 
 drop table with_path;
 
