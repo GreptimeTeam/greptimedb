@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use common_decimal::Decimal128;
@@ -20,6 +20,7 @@ use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECIS
 use common_time::time::Time;
 use common_time::timestamp::TimeUnit;
 use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp};
+use datatypes::json::value::{JsonNumber, JsonValue, JsonValueRef, JsonVariant};
 use datatypes::prelude::{ConcreteDataType, ValueRef};
 use datatypes::types::{
     IntervalType, JsonFormat, StructField, StructType, TimeType, TimestampType,
@@ -34,9 +35,9 @@ use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{
-    self, ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, JsonNativeTypeExtension,
-    JsonTypeExtension, ListTypeExtension, QueryRequest, Row, SemanticType, StructTypeExtension,
-    VectorTypeExtension,
+    self, ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, JsonList,
+    JsonNativeTypeExtension, JsonObject, JsonTypeExtension, ListTypeExtension, QueryRequest, Row,
+    SemanticType, StructTypeExtension, VectorTypeExtension, json_value,
 };
 use paste::paste;
 use snafu::prelude::*;
@@ -801,21 +802,8 @@ pub fn pb_value_to_value_ref<'a>(
         }
 
         ValueData::JsonValue(inner_value) => {
-            let json_datatype_ext = datatype_ext
-                .as_ref()
-                .and_then(|ext| {
-                    if let Some(TypeExt::JsonNativeType(l)) = &ext.type_ext {
-                        Some(l)
-                    } else {
-                        None
-                    }
-                })
-                .expect("json value must contain datatype ext");
-
-            ValueRef::Json(Box::new(pb_value_to_value_ref(
-                inner_value,
-                json_datatype_ext.datatype_extension.as_deref(),
-            )))
+            let value = decode_json_value(inner_value);
+            ValueRef::Json(Box::new(value))
         }
     }
 }
@@ -938,9 +926,61 @@ pub fn to_proto_value(value: Value) -> v1::Value {
             })),
         },
         Value::Json(v) => v1::Value {
-            value_data: Some(ValueData::JsonValue(Box::new(to_proto_value(*v)))),
+            value_data: Some(ValueData::JsonValue(encode_json_value(*v))),
         },
         Value::Duration(_) => v1::Value { value_data: None },
+    }
+}
+
+fn encode_json_value(value: JsonValue) -> v1::JsonValue {
+    fn helper(json: JsonVariant) -> v1::JsonValue {
+        let value = match json {
+            JsonVariant::Null => None,
+            JsonVariant::Bool(x) => Some(json_value::Value::Boolean(x)),
+            JsonVariant::Number(x) => Some(match x {
+                JsonNumber::PosInt(i) => json_value::Value::Uint(i),
+                JsonNumber::NegInt(i) => json_value::Value::Int(i),
+                JsonNumber::Float(f) => json_value::Value::Float(f.0),
+            }),
+            JsonVariant::String(x) => Some(json_value::Value::Str(x)),
+            JsonVariant::Array(x) => Some(json_value::Value::Array(JsonList {
+                items: x.into_iter().map(helper).collect::<Vec<_>>(),
+            })),
+            JsonVariant::Object(x) => {
+                let entries = x
+                    .into_iter()
+                    .map(|(k, v)| (k, helper(v)))
+                    .collect::<HashMap<_, _>>();
+                Some(json_value::Value::Object(JsonObject { entries }))
+            }
+        };
+        v1::JsonValue { value }
+    }
+    helper(value.into_variant())
+}
+
+fn decode_json_value(value: &v1::JsonValue) -> JsonValueRef<'_> {
+    let Some(value) = &value.value else {
+        return ().into();
+    };
+    match value {
+        json_value::Value::Boolean(x) => (*x).into(),
+        json_value::Value::Int(x) => (*x).into(),
+        json_value::Value::Uint(x) => (*x).into(),
+        json_value::Value::Float(x) => (*x).into(),
+        json_value::Value::Str(x) => (x.as_str()).into(),
+        json_value::Value::Array(array) => array
+            .items
+            .iter()
+            .map(|x| decode_json_value(x).into_variant())
+            .collect::<Vec<_>>()
+            .into(),
+        json_value::Value::Object(x) => x
+            .entries
+            .iter()
+            .map(|(k, v)| (k.as_str(), decode_json_value(v).into_variant()))
+            .collect::<BTreeMap<_, _>>()
+            .into(),
     }
 }
 
@@ -1065,9 +1105,7 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                     .collect();
                 Some(ValueData::StructValue(v1::StructValue { items }))
             }
-            Value::Json(inner_value) => Some(ValueData::JsonValue(Box::new(value_to_grpc_value(
-                *inner_value,
-            )))),
+            Value::Json(v) => Some(ValueData::JsonValue(encode_json_value(*v))),
             Value::Duration(_) => unreachable!(),
         },
     }
@@ -1777,5 +1815,203 @@ mod tests {
             }
             _ => panic!("Unexpected value type"),
         }
+    }
+
+    #[test]
+    fn test_encode_decode_json_value() {
+        let json: JsonValue = ().into();
+        let proto = encode_json_value(json.clone());
+        assert!(proto.value.is_none());
+        let value = decode_json_value(&proto);
+        assert_eq!(json.as_ref(), value);
+
+        let json: JsonValue = true.into();
+        let proto = encode_json_value(json.clone());
+        assert_eq!(proto.value, Some(json_value::Value::Boolean(true)));
+        let value = decode_json_value(&proto);
+        assert_eq!(json.as_ref(), value);
+
+        let json: JsonValue = (-1i64).into();
+        let proto = encode_json_value(json.clone());
+        assert_eq!(proto.value, Some(json_value::Value::Int(-1)));
+        let value = decode_json_value(&proto);
+        assert_eq!(json.as_ref(), value);
+
+        let json: JsonValue = 1u64.into();
+        let proto = encode_json_value(json.clone());
+        assert_eq!(proto.value, Some(json_value::Value::Uint(1)));
+        let value = decode_json_value(&proto);
+        assert_eq!(json.as_ref(), value);
+
+        let json: JsonValue = 1.0f64.into();
+        let proto = encode_json_value(json.clone());
+        assert_eq!(proto.value, Some(json_value::Value::Float(1.0)));
+        let value = decode_json_value(&proto);
+        assert_eq!(json.as_ref(), value);
+
+        let json: JsonValue = "s".into();
+        let proto = encode_json_value(json.clone());
+        assert_eq!(proto.value, Some(json_value::Value::Str("s".to_string())));
+        let value = decode_json_value(&proto);
+        assert_eq!(json.as_ref(), value);
+
+        let json: JsonValue = [1i64, 2, 3].into();
+        let proto = encode_json_value(json.clone());
+        assert_eq!(
+            proto.value,
+            Some(json_value::Value::Array(JsonList {
+                items: vec![
+                    v1::JsonValue {
+                        value: Some(json_value::Value::Int(1))
+                    },
+                    v1::JsonValue {
+                        value: Some(json_value::Value::Int(2))
+                    },
+                    v1::JsonValue {
+                        value: Some(json_value::Value::Int(3))
+                    }
+                ]
+            }))
+        );
+        let value = decode_json_value(&proto);
+        assert_eq!(json.as_ref(), value);
+
+        let json: JsonValue = [(); 0].into();
+        let proto = encode_json_value(json.clone());
+        assert_eq!(
+            proto.value,
+            Some(json_value::Value::Array(JsonList { items: vec![] }))
+        );
+        let value = decode_json_value(&proto);
+        assert_eq!(json.as_ref(), value);
+
+        let json: JsonValue = [("k1", 1i64), ("k2", 2i64), ("k3", 3i64)].into();
+        let proto = encode_json_value(json.clone());
+        assert_eq!(
+            proto.value,
+            Some(json_value::Value::Object(JsonObject {
+                entries: [
+                    (
+                        "k1".to_string(),
+                        v1::JsonValue {
+                            value: Some(json_value::Value::Int(1))
+                        }
+                    ),
+                    (
+                        "k2".to_string(),
+                        v1::JsonValue {
+                            value: Some(json_value::Value::Int(2))
+                        }
+                    ),
+                    (
+                        "k3".to_string(),
+                        v1::JsonValue {
+                            value: Some(json_value::Value::Int(3))
+                        }
+                    )
+                ]
+                .into(),
+            }))
+        );
+        let value = decode_json_value(&proto);
+        assert_eq!(json.as_ref(), value);
+
+        let json: JsonValue = [("null", ()); 0].into();
+        let proto = encode_json_value(json.clone());
+        assert_eq!(
+            proto.value,
+            Some(json_value::Value::Object(JsonObject {
+                entries: HashMap::new(),
+            }))
+        );
+        let value = decode_json_value(&proto);
+        assert_eq!(json.as_ref(), value);
+
+        let json: JsonValue = [
+            ("null", JsonVariant::from(())),
+            ("bool", false.into()),
+            ("list", ["hello", "world"].into()),
+            (
+                "object",
+                [
+                    ("positive_i", JsonVariant::from(42u64)),
+                    ("negative_i", (-42i64).into()),
+                    ("nested", [("what", "blah")].into()),
+                ]
+                .into(),
+            ),
+        ]
+        .into();
+        let proto = encode_json_value(json.clone());
+        assert_eq!(
+            proto.value,
+            Some(json_value::Value::Object(JsonObject {
+                entries: [
+                    ("null".to_string(), v1::JsonValue { value: None }),
+                    (
+                        "bool".to_string(),
+                        v1::JsonValue {
+                            value: Some(json_value::Value::Boolean(false))
+                        }
+                    ),
+                    (
+                        "list".to_string(),
+                        v1::JsonValue {
+                            value: Some(json_value::Value::Array(JsonList {
+                                items: vec![
+                                    v1::JsonValue {
+                                        value: Some(json_value::Value::Str("hello".to_string()))
+                                    },
+                                    v1::JsonValue {
+                                        value: Some(json_value::Value::Str("world".to_string()))
+                                    },
+                                ]
+                            }))
+                        }
+                    ),
+                    (
+                        "object".to_string(),
+                        v1::JsonValue {
+                            value: Some(json_value::Value::Object(JsonObject {
+                                entries: [
+                                    (
+                                        "positive_i".to_string(),
+                                        v1::JsonValue {
+                                            value: Some(json_value::Value::Uint(42))
+                                        }
+                                    ),
+                                    (
+                                        "negative_i".to_string(),
+                                        v1::JsonValue {
+                                            value: Some(json_value::Value::Int(-42))
+                                        }
+                                    ),
+                                    (
+                                        "nested".to_string(),
+                                        v1::JsonValue {
+                                            value: Some(json_value::Value::Object(JsonObject {
+                                                entries: [(
+                                                    "what".to_string(),
+                                                    v1::JsonValue {
+                                                        value: Some(json_value::Value::Str(
+                                                            "blah".to_string()
+                                                        ))
+                                                    }
+                                                )]
+                                                .into()
+                                            }))
+                                        }
+                                    )
+                                ]
+                                .into(),
+                            }))
+                        }
+                    ),
+                ]
+                .into(),
+            }))
+        );
+        let value = decode_json_value(&proto);
+        assert_eq!(json.as_ref(), value);
     }
 }

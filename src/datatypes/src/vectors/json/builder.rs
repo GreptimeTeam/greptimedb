@@ -14,13 +14,13 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-
-use snafu::OptionExt;
+use std::sync::LazyLock;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{Result, TryFromValueSnafu, UnsupportedOperationSnafu};
+use crate::json::value::JsonValueRef;
 use crate::prelude::{ValueRef, Vector, VectorRef};
-use crate::types::JsonType;
+use crate::types::{JsonType, json_type};
 use crate::value::StructValueRef;
 use crate::vectors::{MutableVector, StructVectorBuilder};
 
@@ -40,16 +40,16 @@ impl JsonStructsBuilder {
         self.inner.len()
     }
 
-    fn push(&mut self, value: &ValueRef) -> Result<()> {
-        if self.json_type.is_plain_json() {
-            let value = ValueRef::Struct(StructValueRef::RefList {
-                val: vec![value.clone()],
-                fields: self.json_type.as_struct_type(),
-            });
-            self.inner.try_push_value_ref(&value)
-        } else {
-            self.inner.try_push_value_ref(value)
+    fn push(&mut self, json: &JsonValueRef) -> Result<()> {
+        let mut value = json.as_value_ref();
+        if !json.is_object() {
+            let fields = json_type::plain_json_struct_type(value.data_type());
+            value = ValueRef::Struct(StructValueRef::RefList {
+                val: vec![value],
+                fields,
+            })
         }
+        self.inner.try_push_value_ref(&value)
     }
 
     /// Try to merge (and consume the data of) other json vector builder into this one.
@@ -252,13 +252,17 @@ impl MutableVector for JsonVectorBuilder {
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
-        let data_type = value.data_type();
-        let json_type = data_type.as_json().with_context(|| TryFromValueSnafu {
-            reason: format!("expected json value, got {value:?}"),
-        })?;
+        let ValueRef::Json(value) = value else {
+            return TryFromValueSnafu {
+                reason: format!("expected json value, got {value:?}"),
+            }
+            .fail();
+        };
+        let json_type = value.json_type();
 
         let builder = match self.builders.last_mut() {
             Some(last) => {
+                // TODO(LFC): use "is_include" and amend json value with nulls
                 if &last.json_type != json_type {
                     self.try_create_new_builder(json_type)?
                 } else {
@@ -268,21 +272,16 @@ impl MutableVector for JsonVectorBuilder {
             None => self.try_create_new_builder(json_type)?,
         };
 
-        let ValueRef::Json(value) = value else {
-            // Safety: json datatype value must be the value of json.
-            unreachable!()
-        };
-        builder.push(value)
+        builder.push(value.as_ref())
     }
 
     fn push_null(&mut self) {
-        let null_json_value = ValueRef::Json(Box::new(ValueRef::Null));
-        self.try_push_value_ref(&null_json_value)
+        static NULL_JSON: LazyLock<ValueRef> =
+            LazyLock::new(|| ValueRef::Json(Box::new(().into())));
+        self.try_push_value_ref(&NULL_JSON)
             // Safety: learning from the method "try_push_value_ref", a null json value should be
             // always able to push into any json vectors.
-            .unwrap_or_else(|e| {
-                panic!("failed to push null json value: {null_json_value:?}, error: {e}")
-            });
+            .unwrap_or_else(|e| panic!("failed to push null json value, error: {e}"));
     }
 
     fn extend_slice_of(&mut self, _: &dyn Vector, _: usize, _: usize) -> Result<()> {
@@ -307,12 +306,11 @@ mod tests {
         let value = settings.encode(json).unwrap();
 
         let value = value.as_value_ref();
-        let result = builder.try_push_value_ref(&value);
-        match (result, expected) {
-            (Ok(()), Ok(())) => (),
-            (Err(e), Err(expected)) => assert_eq!(e.to_string(), expected),
-            _ => unreachable!(),
-        }
+        let result = builder
+            .try_push_value_ref(&value)
+            .map_err(|e| e.to_string());
+        let expected = expected.map_err(|e| e.to_string());
+        assert_eq!(result, expected);
     }
 
     #[test]
