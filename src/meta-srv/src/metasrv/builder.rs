@@ -373,7 +373,8 @@ impl MetasrvBuilder {
                 runtime_switch_manager.clone(),
                 meta_peer_client.clone(),
                 leader_cached_kv_backend.clone(),
-            );
+            )
+            .with_state(state.clone());
 
             Some(RegionFailureHandler::new(
                 region_supervisor,

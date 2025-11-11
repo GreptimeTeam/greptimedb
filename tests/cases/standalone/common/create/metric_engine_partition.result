@@ -37,12 +37,37 @@ with (
     on_physical_table = "metric_engine_partition",
 );
 
-Error: 1004(InvalidArguments), Invalid partition rule: logical table in metric engine should not have partition rule, it will be inherited from physical table
+Affected Rows: 0
+
+create table invalid_logical_partition (
+    ts timestamp time index,
+    host string primary key,
+    cpu double,
+)
+partition on columns (host) (
+    host <= 'host1',
+    host > 'host1' and host <= 'host2',
+    host > 'host2' and host <= 'host3',
+    host > 'host3'
+)
+engine = metric
+with (
+    on_physical_table = "metric_engine_partition",
+);
+
+Error: 1004(InvalidArguments), Invalid partition rule: logical table partition rule must match the corresponding physical table's
+ logical table partition exprs:		 [PartitionExpr { lhs: Column("host"), op: LtEq, rhs: Value(String(StringBytes("host1"))) }, PartitionExpr { lhs: Column("host"), op: Gt, rhs: Value(String(StringBytes("host3"))) }, PartitionExpr { lhs: Expr(PartitionExpr { lhs: Column("host"), op: Gt, rhs: Value(String(StringBytes("host1"))) }), op: And, rhs: Expr(PartitionExpr { lhs: Column("host"), op: LtEq, rhs: Value(String(StringBytes("host2"))) }) }, PartitionExpr { lhs: Expr(PartitionExpr { lhs: Column("host"), op: Gt, rhs: Value(String(StringBytes("host2"))) }), op: And, rhs: Expr(PartitionExpr { lhs: Column("host"), op: LtEq, rhs: Value(String(StringBytes("host3"))) }) }]
+ physical table partition exprs:	 [PartitionExpr { lhs: Column("host"), op: LtEq, rhs: Value(String(StringBytes("host1"))) }, PartitionExpr { lhs: Column("host"), op: Gt, rhs: Value(String(StringBytes("host2"))) }, PartitionExpr { lhs: Expr(PartitionExpr { lhs: Column("host"), op: Gt, rhs: Value(String(StringBytes("host1"))) }), op: And, rhs: Expr(PartitionExpr { lhs: Column("host"), op: LtEq, rhs: Value(String(StringBytes("host2"))) }) }]
 
 create table logical_table_2 (
     ts timestamp time index,
     host string primary key,
     cpu double,
+)
+partition on columns (host) (
+    host <= 'host1',
+    host > 'host1' and host <= 'host2',
+    host > 'host2'
 )
 engine = metric
 with (
@@ -414,6 +439,10 @@ EXPLAIN select * from logical_table_4;
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
+
+drop table logical_table_1;
+
+Affected Rows: 0
 
 drop table logical_table_2;
 

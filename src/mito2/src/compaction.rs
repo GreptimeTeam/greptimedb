@@ -305,6 +305,7 @@ impl CompactionScheduler {
             &options,
             &request.current_version.options.compaction,
             request.current_version.options.append_mode,
+            Some(self.engine_config.max_background_compactions),
         );
         let region_id = request.region_id();
         let CompactionRequest {

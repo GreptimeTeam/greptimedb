@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -703,7 +703,8 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     // maintain the mapping: trace_id -> (process_id -> service_name).
     let mut trace_id_to_processes: HashMap<String, HashMap<String, String>> = HashMap::new();
     // maintain the mapping: trace_id -> spans.
-    let mut trace_id_to_spans: HashMap<String, Vec<Span>> = HashMap::new();
+    // use BTreeMap to retain order
+    let mut trace_id_to_spans: BTreeMap<String, Vec<Span>> = BTreeMap::new();
     // maintain the mapping: service.name -> resource.attributes.
     let mut service_to_resource_attributes: HashMap<String, Vec<KeyValue>> = HashMap::new();
 

@@ -97,7 +97,6 @@ lazy_static! {
         ROUTINES,
         SCHEMA_PRIVILEGES,
         TABLE_PRIVILEGES,
-        TRIGGERS,
         GLOBAL_STATUS,
         SESSION_STATUS,
         PARTITIONS,
@@ -207,7 +206,6 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
             ROUTINES => setup_memory_table!(ROUTINES),
             SCHEMA_PRIVILEGES => setup_memory_table!(SCHEMA_PRIVILEGES),
             TABLE_PRIVILEGES => setup_memory_table!(TABLE_PRIVILEGES),
-            TRIGGERS => setup_memory_table!(TRIGGERS),
             GLOBAL_STATUS => setup_memory_table!(GLOBAL_STATUS),
             SESSION_STATUS => setup_memory_table!(SESSION_STATUS),
             KEY_COLUMN_USAGE => Some(Arc::new(InformationSchemaKeyColumnUsage::new(

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_meta::key::{CANDIDATES_ROOT, ELECTION_KEY};
-use common_telemetry::{error, warn};
+use common_telemetry::{error, info, warn};
 use common_time::Timestamp;
 use deadpool_postgres::{Manager, Pool};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -477,6 +477,13 @@ impl Election for PgElection {
     }
 
     async fn reset_campaign(&self) {
+        info!("Resetting campaign");
+        if self.is_leader.load(Ordering::Relaxed) {
+            if let Err(err) = self.step_down_without_lock().await {
+                error!(err; "Failed to step down without lock");
+            }
+            info!("Step down without lock successfully, due to reset campaign");
+        }
         if let Err(err) = self.pg_client.write().await.reset_client().await {
             error!(err; "Failed to reset client");
         }
@@ -774,16 +781,12 @@ impl PgElection {
             key: key.clone(),
             ..Default::default()
         };
-        if self
-            .is_leader
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-            && let Err(e) = self
-                .leader_watcher
-                .send(LeaderChangeMessage::StepDown(Arc::new(leader_key)))
-        {
-            error!(e; "Failed to send leader change message");
-        }
+        send_leader_change_and_set_flags(
+            &self.is_leader,
+            &self.leader_infancy,
+            &self.leader_watcher,
+            LeaderChangeMessage::StepDown(Arc::new(leader_key)),
+        );
         Ok(())
     }
 

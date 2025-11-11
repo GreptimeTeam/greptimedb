@@ -40,7 +40,6 @@ use crate::memtable::{
     BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRanges,
     MemtableRef, MemtableStats, RangesOptions,
 };
-use crate::read::scan_region::PredicateGroup;
 
 /// Empty memtable for test.
 #[derive(Debug, Default)]

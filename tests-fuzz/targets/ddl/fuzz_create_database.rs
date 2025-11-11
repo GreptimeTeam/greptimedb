@@ -31,7 +31,7 @@ use tests_fuzz::generator::create_expr::CreateDatabaseExprGeneratorBuilder;
 use tests_fuzz::ir::CreateDatabaseExpr;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateDatabaseExprTranslator;
-use tests_fuzz::utils::{Connections, init_greptime_connections_via_env};
+use tests_fuzz::utils::{Connections, get_fuzz_override, init_greptime_connections_via_env};
 
 struct FuzzContext {
     greptime: Pool<MySql>,
@@ -50,7 +50,7 @@ struct FuzzInput {
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
+        let seed = get_fuzz_override::<u64>("SEED").unwrap_or(u.int_in_range(u64::MIN..=u64::MAX)?);
         Ok(FuzzInput { seed })
     }
 }

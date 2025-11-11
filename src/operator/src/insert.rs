@@ -54,7 +54,8 @@ use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TWCS_TIME_WINDOW,
+    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TTL_KEY,
+    TWCS_TIME_WINDOW,
 };
 use store_api::storage::{RegionId, TableId};
 use table::TableRef;
@@ -626,6 +627,9 @@ impl Inserter {
                         create_table
                             .table_options
                             .insert(APPEND_MODE_KEY.to_string(), "false".to_string());
+                        // Remove `ttl` key from table options if it exists
+                        create_table.table_options.remove(TTL_KEY);
+
                         let table = self
                             .create_physical_table(create_table, None, ctx, statement_executor)
                             .await?;
