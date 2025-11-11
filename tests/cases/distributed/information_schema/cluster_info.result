@@ -24,7 +24,7 @@ DESC TABLE CLUSTER_INFO;
 +----------------------+----------------------+-----+------+---------+---------------+
 
 -- SQLNESS REPLACE version node_version
--- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
+-- SQLNESS REPLACE (\d+\.\d+(?:\.\d+)*-[a-zA-Z0-9.-]+) Version
 -- SQLNESS REPLACE (\s[a-z0-9]{7,10}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{19,}) Start_time
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
@@ -35,7 +35,7 @@ SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, a
 +++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|0|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||1|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||2|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||0|FLOWNODE|Address|Version|Hash|Start_time|Duration|Duration||1|FRONTEND|Address|Version|Hash|Start_time|Duration|Duration||1|METASRV|Address|Version|Hash|Start_time|Duration||+++++++++
 
 -- SQLNESS REPLACE version node_version
--- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
+-- SQLNESS REPLACE (\d+\.\d+(?:\.\d+)*-[a-zA-Z0-9.-]+) Version
 -- SQLNESS REPLACE (\s[a-z0-9]{7,10}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{19,}) Start_time
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
@@ -46,7 +46,7 @@ SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, a
 +++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|1|METASRV|Address|Version|Hash|Start_time|Duration||+++++++++
 
 -- SQLNESS REPLACE version node_version
--- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
+-- SQLNESS REPLACE (\d+\.\d+(?:\.\d+)*-[a-zA-Z0-9.-]+) Version
 -- SQLNESS REPLACE (\s[a-z0-9]{7,10}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{19,}) Start_time
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
@@ -57,7 +57,7 @@ SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, a
 +++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|1|FRONTEND|Address|Version|Hash|Start_time|Duration|Duration|+++++++++
 
 -- SQLNESS REPLACE version node_version
--- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
+-- SQLNESS REPLACE (\d+\.\d+(?:\.\d+)*-[a-zA-Z0-9.-]+) Version
 -- SQLNESS REPLACE (\s[a-z0-9]{7,10}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{19,}) Start_time
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
@@ -68,7 +68,7 @@ SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, a
 +++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|0|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||1|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||2|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||0|FLOWNODE|Address|Version|Hash|Start_time|Duration|Duration||1|METASRV|Address|Version|Hash|Start_time|Duration||+++++++++
 
 -- SQLNESS REPLACE version node_version
--- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
+-- SQLNESS REPLACE (\d+\.\d+(?:\.\d+)*-[a-zA-Z0-9.-]+) Version
 -- SQLNESS REPLACE (\s[a-z0-9]{7,10}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{19,}) Start_time
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
