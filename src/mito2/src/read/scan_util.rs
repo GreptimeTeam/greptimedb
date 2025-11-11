@@ -426,6 +426,8 @@ struct PartitionMetricsInner {
     yield_cost: Time,
     /// Duration to convert [`Batch`]es.
     convert_cost: Time,
+    /// Aggregated compute time reported to DataFusion.
+    elapsed_compute: Time,
 }
 
 impl PartitionMetricsInner {
@@ -526,6 +528,7 @@ impl PartitionMetrics {
             scan_cost: MetricBuilder::new(metrics_set).subset_time("scan_cost", partition),
             yield_cost: MetricBuilder::new(metrics_set).subset_time("yield_cost", partition),
             convert_cost: MetricBuilder::new(metrics_set).subset_time("convert_cost", partition),
+            elapsed_compute: MetricBuilder::new(metrics_set).elapsed_compute(partition),
         };
         Self(Arc::new(inner))
     }
@@ -545,6 +548,13 @@ impl PartitionMetrics {
         metrics.num_file_ranges += num;
     }
 
+    fn record_elapsed_compute(&self, duration: Duration) {
+        if duration.is_zero() {
+            return;
+        }
+        self.0.elapsed_compute.add_duration(duration);
+    }
+
     /// Merges `build_reader_cost`.
     pub(crate) fn inc_build_reader_cost(&self, cost: Duration) {
         self.0.build_reader_cost.add_duration(cost);
@@ -555,6 +565,7 @@ impl PartitionMetrics {
 
     pub(crate) fn inc_convert_batch_cost(&self, cost: Duration) {
         self.0.convert_cost.add_duration(cost);
+        self.record_elapsed_compute(cost);
     }
 
     /// Reports memtable scan metrics.
@@ -572,7 +583,9 @@ impl PartitionMetrics {
             .build_reader_cost
             .add_duration(metrics.build_reader_cost);
         self.0.scan_cost.add_duration(metrics.scan_cost);
+        self.record_elapsed_compute(metrics.scan_cost);
         self.0.yield_cost.add_duration(metrics.yield_cost);
+        self.record_elapsed_compute(metrics.yield_cost);
 
         let mut metrics_set = self.0.metrics.lock().unwrap();
         metrics_set.merge_scanner_metrics(metrics);
