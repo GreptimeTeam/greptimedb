@@ -1,0 +1,218 @@
+CREATE TABLE test_alt_format(h INTEGER, i INTEGER DEFAULT 0, j TIMESTAMP TIME INDEX, PRIMARY KEY (h)) WITH ('sst_format' = 'primary_key');
+
+Affected Rows: 0
+
+ALTER TABLE test_alt_format SET 'sst_format' = 'primary_key';
+
+Affected Rows: 0
+
+INSERT INTO test_alt_format (h, j) VALUES (10, 0);
+
+Affected Rows: 1
+
+ALTER TABLE test_alt_format ADD COLUMN k INTEGER;
+
+Affected Rows: 0
+
+INSERT INTO test_alt_format (h, j) VALUES (11, 1);
+
+Affected Rows: 1
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT * FROM test_alt_format;
+
++----+---+-------------------------+---+
+| h  | i | j                       | k |
++----+---+-------------------------+---+
+| 10 | 0 | 1970-01-01T00:00:00     |   |
+| 11 | 0 | 1970-01-01T00:00:00.001 |   |
++----+---+-------------------------+---+
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT i, h FROM test_alt_format;
+
++---+----+
+| i | h  |
++---+----+
+| 0 | 10 |
+| 0 | 11 |
++---+----+
+
+ALTER TABLE test_alt_format SET 'sst_format' = 'flat';
+
+Affected Rows: 0
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT * FROM test_alt_format;
+
++----+---+-------------------------+---+
+| h  | i | j                       | k |
++----+---+-------------------------+---+
+| 10 | 0 | 1970-01-01T00:00:00     |   |
+| 11 | 0 | 1970-01-01T00:00:00.001 |   |
++----+---+-------------------------+---+
+
+INSERT INTO test_alt_format (h, j) VALUES (12, 2);
+
+Affected Rows: 1
+
+INSERT INTO test_alt_format (h, j, i, k) VALUES (13, 3, 23, 33);
+
+Affected Rows: 1
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT * FROM test_alt_format;
+
++----+----+-------------------------+----+
+| h  | i  | j                       | k  |
++----+----+-------------------------+----+
+| 10 | 0  | 1970-01-01T00:00:00     |    |
+| 11 | 0  | 1970-01-01T00:00:00.001 |    |
+| 12 | 0  | 1970-01-01T00:00:00.002 |    |
+| 13 | 23 | 1970-01-01T00:00:00.003 | 33 |
++----+----+-------------------------+----+
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT i, h FROM test_alt_format;
+
++----+----+
+| i  | h  |
++----+----+
+| 0  | 10 |
+| 0  | 11 |
+| 0  | 12 |
+| 23 | 13 |
++----+----+
+
+ADMIN flush_table('test_alt_format');
+
++--------------------------------------+
+| ADMIN flush_table('test_alt_format') |
++--------------------------------------+
+| 0                                    |
++--------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT * FROM test_alt_format;
+
++----+----+-------------------------+----+
+| h  | i  | j                       | k  |
++----+----+-------------------------+----+
+| 10 | 0  | 1970-01-01T00:00:00     |    |
+| 11 | 0  | 1970-01-01T00:00:00.001 |    |
+| 12 | 0  | 1970-01-01T00:00:00.002 |    |
+| 13 | 23 | 1970-01-01T00:00:00.003 | 33 |
++----+----+-------------------------+----+
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT i, h FROM test_alt_format;
+
++----+----+
+| i  | h  |
++----+----+
+| 0  | 10 |
+| 0  | 11 |
+| 0  | 12 |
+| 23 | 13 |
++----+----+
+
+-- not allow to change from flat to primary_key
+-- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
+ALTER TABLE test_alt_format SET 'sst_format' = 'primary_key';
+
+Error: 1004(InvalidArguments), Invalid region request, region_id: REDACTED, err: Only allow changing format type to flat
+
+DROP TABLE test_alt_format;
+
+Affected Rows: 0
+
+CREATE TABLE alt_format_phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "", "sst_format" = "primary_key");
+
+Affected Rows: 0
+
+CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "alt_format_phy");
+
+Affected Rows: 0
+
+INSERT INTO t1 (ts, val, host) VALUES
+  ('2022-01-01 00:00:00', 1.23, 'example.com'),
+  ('2022-01-01 00:00:00', 1.23, 'hello.com'),
+  ('2022-01-02 00:00:00', 4.56, 'example.com');
+
+Affected Rows: 3
+
+ALTER TABLE alt_format_phy SET 'sst_format' = 'primary_key';
+
+Affected Rows: 0
+
+ALTER TABLE t1 SET 'sst_format' = 'primary_key';
+
+Error: 1004(InvalidArguments), Alter logical tables invalid arguments: Only support add columns operation
+
+ALTER TABLE t1 ADD COLUMN k STRING PRIMARY KEY;
+
+Affected Rows: 0
+
+SELECT * FROM t1 ORDER BY ts ASC;
+
++-------------+---+---------------------+------+
+| host        | k | ts                  | val  |
++-------------+---+---------------------+------+
+| example.com |   | 2022-01-01T00:00:00 | 1.23 |
+| hello.com   |   | 2022-01-01T00:00:00 | 1.23 |
+| example.com |   | 2022-01-02T00:00:00 | 4.56 |
++-------------+---+---------------------+------+
+
+ALTER TABLE alt_format_phy SET 'sst_format' = 'flat';
+
+Affected Rows: 0
+
+SELECT * FROM t1 ORDER BY ts ASC;
+
++-------------+---+---------------------+------+
+| host        | k | ts                  | val  |
++-------------+---+---------------------+------+
+| example.com |   | 2022-01-01T00:00:00 | 1.23 |
+| hello.com   |   | 2022-01-01T00:00:00 | 1.23 |
+| example.com |   | 2022-01-02T00:00:00 | 4.56 |
++-------------+---+---------------------+------+
+
+SELECT host, ts, val FROM t1 where host = 'example.com' ORDER BY ts ASC;
+
++-------------+---------------------+------+
+| host        | ts                  | val  |
++-------------+---------------------+------+
+| example.com | 2022-01-01T00:00:00 | 1.23 |
+| example.com | 2022-01-02T00:00:00 | 4.56 |
++-------------+---------------------+------+
+
+INSERT INTO t1 (ts, val, host) VALUES
+  ('2022-01-01 00:00:01', 3.0, 'example.com'),
+  ('2022-01-01 00:00:01', 4.0, 'hello.com');
+
+Affected Rows: 2
+
+SELECT host, ts, val FROM t1 where host = 'example.com' ORDER BY ts ASC;
+
++-------------+---------------------+------+
+| host        | ts                  | val  |
++-------------+---------------------+------+
+| example.com | 2022-01-01T00:00:00 | 1.23 |
+| example.com | 2022-01-01T00:00:01 | 3.0  |
+| example.com | 2022-01-02T00:00:00 | 4.56 |
++-------------+---------------------+------+
+
+-- not allow to change from flat to primary_key
+-- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
+ALTER TABLE alt_format_phy SET 'sst_format' = 'primary_key';
+
+Error: 1004(InvalidArguments), Invalid region request, region_id: REDACTED, err: Only allow changing format type to flat
+
+DROP TABLE t1;
+
+Affected Rows: 0
+
+DROP TABLE alt_format_phy;
+
+Affected Rows: 0
+

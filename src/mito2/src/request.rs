@@ -50,6 +50,7 @@ use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
+use crate::region::options::RegionOptions;
 use crate::sst::file::FileMeta;
 use crate::sst::index::IndexBuildType;
 use crate::wal::EntryId;
@@ -948,6 +949,8 @@ pub(crate) struct RegionChangeResult {
     pub(crate) result: Result<()>,
     /// Used for index build in schema change.
     pub(crate) need_index: bool,
+    /// New options for the region.
+    pub(crate) new_options: Option<RegionOptions>,
 }
 
 /// Request to edit a region directly.

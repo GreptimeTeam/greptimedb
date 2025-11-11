@@ -422,6 +422,7 @@ impl MemtableBuilderProvider {
             );
         }
 
+        // The format is not flat.
         match &options.memtable {
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
@@ -440,22 +441,15 @@ impl MemtableBuilderProvider {
                     self.write_buffer_manager.clone(),
                 ))
             }
-            None => self.default_memtable_builder(dedup, merge_mode),
+            None => self.default_primary_key_memtable_builder(dedup, merge_mode),
         }
     }
 
-    fn default_memtable_builder(&self, dedup: bool, merge_mode: MergeMode) -> MemtableBuilderRef {
-        if self.config.default_experimental_flat_format {
-            return Arc::new(
-                BulkMemtableBuilder::new(
-                    self.write_buffer_manager.clone(),
-                    !dedup, // append_mode: true if not dedup, false if dedup
-                    merge_mode,
-                )
-                .with_compact_dispatcher(self.compact_dispatcher.clone()),
-            );
-        }
-
+    fn default_primary_key_memtable_builder(
+        &self,
+        dedup: bool,
+        merge_mode: MergeMode,
+    ) -> MemtableBuilderRef {
         match &self.config.memtable {
             MemtableConfig::PartitionTree(config) => {
                 let mut config = config.clone();

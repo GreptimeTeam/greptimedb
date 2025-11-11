@@ -53,7 +53,7 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, Rem
 use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::MemtableBuilderProvider;
 use crate::memtable::bulk::part::BulkPart;
-use crate::memtable::time_partition::TimePartitions;
+use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
 use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
@@ -65,7 +65,7 @@ use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::FormatType;
 use crate::sst::file::RegionFileId;
-use crate::sst::file_purger::create_local_file_purger;
+use crate::sst::file_purger::{FilePurgerRef, create_local_file_purger};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -255,17 +255,19 @@ impl RegionOpener {
             }
         }
         // Safety: must be set before calling this method.
-        let options = self.options.take().unwrap();
+        let mut options = self.options.take().unwrap();
         let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
         let provider = self.provider::<S>(&options.wal_options)?;
         let metadata = Arc::new(metadata);
-        // Set the sst_format based on options or flat_format flag
+        // Sets the sst_format based on options or flat_format flag
         let sst_format = if let Some(format) = options.sst_format {
             format
         } else if config.default_experimental_flat_format {
+            options.sst_format = Some(FormatType::Flat);
             FormatType::Flat
         } else {
             // Default to PrimaryKeyParquet for newly created regions
+            options.sst_format = Some(FormatType::PrimaryKey);
             FormatType::PrimaryKey
         };
         // Create a manifest manager for this region and writes regions to the manifest file.
@@ -293,7 +295,10 @@ impl RegionOpener {
             part_duration,
         ));
 
-        debug!("Create region {} with options: {:?}", region_id, options);
+        debug!(
+            "Create region {} with options: {:?}, default_flat_format: {}",
+            region_id, options, config.default_experimental_flat_format
+        );
 
         let version = VersionBuilder::new(metadata, mutable)
             .options(options)
@@ -328,9 +333,7 @@ impl RegionOpener {
             last_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(0),
-            memtable_builder,
             written_bytes: Arc::new(AtomicU64::new(0)),
-            sst_format,
             stats: self.stats,
         }))
     }
@@ -402,7 +405,7 @@ impl RegionOpener {
         wal: &Wal<S>,
     ) -> Result<Option<MitoRegionRef>> {
         let now = Instant::now();
-        let region_options = self.options.as_ref().unwrap().clone();
+        let mut region_options = self.options.as_ref().unwrap().clone();
 
         let region_manifest_options = Self::manifest_options(
             config,
@@ -432,6 +435,8 @@ impl RegionOpener {
         } else {
             manifest.metadata.clone()
         };
+        // Updates the region options with the manifest.
+        sanitize_region_options(&manifest, &mut region_options);
 
         let region_id = self.region_id;
         let provider = self.provider::<S>(&region_options.wal_options)?;
@@ -460,6 +465,7 @@ impl RegionOpener {
             self.cache_manager.clone(),
             self.file_ref_manager.clone(),
         );
+        // We should sanitize the region options before creating a new memtable.
         let memtable_builder = self
             .memtable_builder_provider
             .builder_for_options(&region_options);
@@ -476,14 +482,16 @@ impl RegionOpener {
             0,
             part_duration,
         ));
-        let version = VersionBuilder::new(metadata, mutable)
-            .add_files(file_purger.clone(), manifest.files.values().cloned())
-            .flushed_entry_id(manifest.flushed_entry_id)
-            .flushed_sequence(manifest.flushed_sequence)
-            .truncated_entry_id(manifest.truncated_entry_id)
-            .compaction_time_window(manifest.compaction_time_window)
-            .options(region_options)
-            .build();
+
+        // Updates region options by manifest before creating version.
+        let version_builder = version_builder_from_manifest(
+            &manifest,
+            metadata,
+            file_purger.clone(),
+            mutable,
+            region_options,
+        );
+        let version = version_builder.build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
 
@@ -545,8 +553,6 @@ impl RegionOpener {
         }
 
         let now = self.time_provider.current_time_millis();
-        // Read sst_format from manifest
-        let sst_format = manifest.sst_format;
 
         let region = MitoRegion {
             region_id: self.region_id,
@@ -564,8 +570,6 @@ impl RegionOpener {
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
             written_bytes: Arc::new(AtomicU64::new(0)),
-            memtable_builder,
-            sst_format,
             stats: self.stats.clone(),
         };
 
@@ -596,6 +600,37 @@ impl RegionOpener {
                 keep_ttl: config.experimental_manifest_keep_removed_file_ttl,
             },
         })
+    }
+}
+
+/// Creates a version builder from a region manifest.
+pub(crate) fn version_builder_from_manifest(
+    manifest: &RegionManifest,
+    metadata: RegionMetadataRef,
+    file_purger: FilePurgerRef,
+    mutable: TimePartitionsRef,
+    region_options: RegionOptions,
+) -> VersionBuilder {
+    VersionBuilder::new(metadata, mutable)
+        .add_files(file_purger, manifest.files.values().cloned())
+        .flushed_entry_id(manifest.flushed_entry_id)
+        .flushed_sequence(manifest.flushed_sequence)
+        .truncated_entry_id(manifest.truncated_entry_id)
+        .compaction_time_window(manifest.compaction_time_window)
+        .options(region_options)
+}
+
+/// Updates region options by persistent options.
+pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut RegionOptions) {
+    let option_format = options.sst_format.unwrap_or_default();
+    if option_format != manifest.sst_format {
+        common_telemetry::warn!(
+            "Overriding SST format from {:?} to {:?} for region {}",
+            option_format,
+            manifest.sst_format,
+            manifest.metadata.region_id,
+        );
+        options.sst_format = Some(manifest.sst_format);
     }
 }
 

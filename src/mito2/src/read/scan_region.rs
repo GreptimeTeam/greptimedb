@@ -60,6 +60,7 @@ use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, BoxedRecordBatchStream, RecordBatch, Source};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
+use crate::sst::FormatType;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierBuilder, BloomFilterIndexApplierRef,
@@ -221,8 +222,6 @@ pub(crate) struct ScanRegion {
     /// Whether to filter out the deleted rows.
     /// Usually true for normal read, and false for scan for compaction.
     filter_deleted: bool,
-    /// Whether to use flat format.
-    flat_format: bool,
     #[cfg(feature = "enterprise")]
     extension_range_provider: Option<BoxedExtensionRangeProvider>,
 }
@@ -247,7 +246,6 @@ impl ScanRegion {
             ignore_bloom_filter: false,
             start_time: None,
             filter_deleted: true,
-            flat_format: false,
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
@@ -302,13 +300,6 @@ impl ScanRegion {
 
     pub(crate) fn set_filter_deleted(&mut self, filter_deleted: bool) {
         self.filter_deleted = filter_deleted;
-    }
-
-    /// Sets whether to use flat format.
-    #[must_use]
-    pub(crate) fn with_flat_format(mut self, flat_format: bool) -> Self {
-        self.flat_format = flat_format;
-        self
     }
 
     #[cfg(feature = "enterprise")]
@@ -385,18 +376,24 @@ impl ScanRegion {
         self.request.distribution == Some(TimeSeriesDistribution::PerSeries)
     }
 
+    /// Returns true if the region use flat format.
+    fn use_flat_format(&self) -> bool {
+        self.version.options.sst_format.unwrap_or_default() == FormatType::Flat
+    }
+
     /// Creates a scan input.
     async fn scan_input(mut self) -> Result<ScanInput> {
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
+        let flat_format = self.use_flat_format();
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
             Some(p) => {
-                ProjectionMapper::new(&self.version.metadata, p.iter().copied(), self.flat_format)?
+                ProjectionMapper::new(&self.version.metadata, p.iter().copied(), flat_format)?
             }
-            None => ProjectionMapper::all(&self.version.metadata, self.flat_format)?,
+            None => ProjectionMapper::all(&self.version.metadata, flat_format)?,
         };
 
         let ssts = &self.version.ssts;
@@ -463,13 +460,14 @@ impl ScanRegion {
 
         let region_id = self.region_id();
         debug!(
-            "Scan region {}, request: {:?}, time range: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}",
+            "Scan region {}, request: {:?}, time range: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}, flat_format: {}",
             region_id,
             self.request,
             time_range,
             mem_range_builders.len(),
             files.len(),
             self.version.options.append_mode,
+            flat_format,
         );
 
         let (non_field_filters, field_filters) = self.partition_by_field_filters();
@@ -487,7 +485,7 @@ impl ScanRegion {
         ];
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
-        if self.flat_format {
+        if flat_format {
             // The batch is already large enough so we use a small channel size here.
             self.parallel_scan_channel_size = FLAT_SCAN_CHANNEL_SIZE;
         }
@@ -509,7 +507,7 @@ impl ScanRegion {
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
             .with_distribution(self.request.distribution)
-            .with_flat_format(self.flat_format);
+            .with_flat_format(flat_format);
 
         #[cfg(feature = "enterprise")]
         let input = if let Some(provider) = self.extension_range_provider {
