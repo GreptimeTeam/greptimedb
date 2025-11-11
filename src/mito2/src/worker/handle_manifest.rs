@@ -249,6 +249,8 @@ impl<S> RegionWorkerLoop<S> {
                     sender,
                     edit,
                     result,
+                    // we always need to restore region state after region edit
+                    update_region_state: true,
                 }),
             };
 
@@ -292,8 +294,10 @@ impl<S> RegionWorkerLoop<S> {
             );
         }
 
-        // Sets the region as writable.
-        region.switch_state_to_writable(RegionLeaderState::Editing);
+        if edit_result.update_region_state {
+            // Sets the region as writable.
+            region.switch_state_to_writable(RegionLeaderState::Editing);
+        }
 
         let _ = edit_result.sender.send(edit_result.result);
 

@@ -969,6 +969,8 @@ pub(crate) struct RegionEditResult {
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+    /// Whether region state need to be set to Writable after handling this request.
+    pub(crate) update_region_state: bool,
 }
 
 #[derive(Debug)]
