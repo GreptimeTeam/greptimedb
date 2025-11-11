@@ -38,6 +38,7 @@ SELECT * FROM test_alt_format;
 SELECT i, h FROM test_alt_format;
 
 -- not allow to change from flat to primary_key
+-- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
 ALTER TABLE test_alt_format SET 'sst_format' = 'primary_key';
 
 DROP TABLE test_alt_format;
@@ -72,6 +73,7 @@ INSERT INTO t1 (ts, val, host) VALUES
 SELECT host, ts, val FROM t1 where host = 'example.com' ORDER BY ts ASC;
 
 -- not allow to change from flat to primary_key
+-- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
 ALTER TABLE alt_format_phy SET 'sst_format' = 'primary_key';
 
 DROP TABLE t1;

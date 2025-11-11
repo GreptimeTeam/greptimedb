@@ -117,9 +117,10 @@ SELECT i, h FROM test_alt_format;
 +----+----+
 
 -- not allow to change from flat to primary_key
+-- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
 ALTER TABLE test_alt_format SET 'sst_format' = 'primary_key';
 
-Error: 1004(InvalidArguments), Invalid region request, region_id: 4398046511104(1024, 0), err: Only allow changing format type to flat
+Error: 1004(InvalidArguments), Invalid region request, region_id: REDACTED, err: Only allow changing format type to flat
 
 DROP TABLE test_alt_format;
 
@@ -202,9 +203,10 @@ SELECT host, ts, val FROM t1 where host = 'example.com' ORDER BY ts ASC;
 +-------------+---------------------+------+
 
 -- not allow to change from flat to primary_key
+-- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
 ALTER TABLE alt_format_phy SET 'sst_format' = 'primary_key';
 
-Error: 1004(InvalidArguments), Invalid region request, region_id: 4402341478400(1025, 0), err: Only allow changing format type to flat
+Error: 1004(InvalidArguments), Invalid region request, region_id: REDACTED, err: Only allow changing format type to flat
 
 DROP TABLE t1;
 
