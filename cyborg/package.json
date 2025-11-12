@@ -13,7 +13,8 @@
     "conventional-commits-parser": "^5.0.0",
     "dayjs": "^1.11.11",
     "dotenv": "^16.4.5",
-    "lodash": "^4.17.21"
+    "lodash": "^4.17.21",
+    "semver": "^7.7.3"
   },
   "devDependencies": {
     "@types/conventional-commits-parser": "^5.0.0",
