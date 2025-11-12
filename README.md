@@ -66,17 +66,18 @@
 
 ## Introduction
 
-**GreptimeDB** is an open-source, cloud-native database purpose-built for the unified collection and analysis of observability data (metrics, logs, and traces). Whether you’re operating on the edge, in the cloud, or across hybrid environments, GreptimeDB empowers real-time insights at massive scale — all in one system.
+**GreptimeDB** is an open-source, cloud-native database that unifies metrics, logs, and traces, enabling real-time observability at any scale — across edge, cloud, and hybrid environments.
 
 ## Features
 
 |   Feature  | Description |
 | --------- | ----------- |
-| [Unified Observability Data](https://docs.greptime.com/user-guide/concepts/why-greptimedb) | Store metrics, logs, and traces as timestamped, contextual wide events. Query via [SQL](https://docs.greptime.com/user-guide/query-data/sql), [PromQL](https://docs.greptime.com/user-guide/query-data/promql), and [streaming](https://docs.greptime.com/user-guide/flow-computation/overview). |
-| [High Performance & Cost Effective](https://docs.greptime.com/user-guide/manage-data/data-index) | Written in Rust, with a distributed query engine, [rich indexing](https://docs.greptime.com/user-guide/manage-data/data-index), and optimized columnar storage, delivering sub-second responses at PB scale. |
-| [Cloud-Native Architecture](https://docs.greptime.com/user-guide/concepts/architecture) | Designed for [Kubernetes](https://docs.greptime.com/user-guide/deployments-administration/deploy-on-kubernetes/greptimedb-operator-management), with compute/storage separation, native object storage (AWS S3, Azure Blob, etc.) and seamless cross-cloud access. |
-| [Developer-Friendly](https://docs.greptime.com/user-guide/protocols/overview) | Access via SQL/PromQL interfaces, REST API, MySQL/PostgreSQL protocols, and popular ingestion [protocols](https://docs.greptime.com/user-guide/protocols/overview). |
-| [Flexible Deployment](https://docs.greptime.com/user-guide/deployments-administration/overview) | Deploy anywhere: edge (including ARM/[Android](https://docs.greptime.com/user-guide/deployments-administration/run-on-android)) or cloud, with unified APIs and efficient data sync. |
+| [All-in-One Observability](https://docs.greptime.com/user-guide/concepts/why-greptimedb) | OpenTelemetry-native platform unifying metrics, logs, and traces. Query via [SQL](https://docs.greptime.com/user-guide/query-data/sql), [PromQL](https://docs.greptime.com/user-guide/query-data/promql), and [streaming](https://docs.greptime.com/user-guide/flow-computation/overview). |
+| [High Performance](https://docs.greptime.com/user-guide/manage-data/data-index) | Written in Rust with [rich indexing](https://docs.greptime.com/user-guide/manage-data/data-index) (inverted, fulltext, skipping, vector), delivering sub-second responses at PB scale. |
+| [Cost Efficiency](https://docs.greptime.com/user-guide/concepts/architecture) | 50x lower operational and storage costs with compute-storage separation and native object storage (S3, Azure Blob, etc.). |
+| [Cloud-Native & Scalable](https://docs.greptime.com/user-guide/deployments-administration/deploy-on-kubernetes/greptimedb-operator-management) | Purpose-built for [Kubernetes](https://docs.greptime.com/user-guide/deployments-administration/deploy-on-kubernetes/greptimedb-operator-management) with unlimited cross-cloud scaling, handling hundreds of thousands of concurrent requests. |
+| [Developer-Friendly](https://docs.greptime.com/user-guide/protocols/overview) | SQL/PromQL interfaces, built-in web dashboard, REST API, MySQL/PostgreSQL protocol compatibility, and native OpenTelemetry support. |
+| [Flexible Deployment](https://docs.greptime.com/user-guide/deployments-administration/overview) | Deploy anywhere from ARM-based edge devices (including [Android](https://docs.greptime.com/user-guide/deployments-administration/run-on-android)) to cloud, with unified APIs and efficient data sync. |
 
 Learn more in [Why GreptimeDB](https://docs.greptime.com/user-guide/concepts/why-greptimedb) and [Observability 2.0 and the Database for It](https://greptime.com/blogs/2025-04-25-greptimedb-observability2-new-database).
 
@@ -98,6 +99,13 @@ Read [more benchmark reports](https://docs.greptime.com/user-guide/concepts/feat
 
 ## Architecture
 
+  GreptimeDB can run in two modes:
+
+  **Standalone Mode** - Single binary for development and small deployments
+  **Distributed Mode** - Separate components for production scale:
+  - Frontend: Query processing and protocol handling
+  - Datanode: Data storage and retrieval
+  - Metasrv: Metadata management and coordination
 * Read the [architecture](https://docs.greptime.com/contributor-guide/overview/#architecture) document.
 * [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb/1-overview) provides an in-depth look at GreptimeDB:
   <img alt="GreptimeDB System Overview" src="docs/architecture.png">
@@ -156,14 +164,17 @@ cargo run -- standalone start
 
 ## Project Status
 
-> **Status:** Beta.
-> **GA (v1.0):** Targeted for mid 2025.
+> **Status:** Beta — marching toward v1.0 GA!
+> **GA (v1.0):** January 10, 2026
 
-- Being used in production by early adopters
+- Deployed in production by open-source projects and commercial users
 - Stable, actively maintained, with regular releases ([version info](https://docs.greptime.com/nightly/reference/about-greptimedb-version))
 - Suitable for evaluation and pilot deployments
 
-For production use, we recommend using the latest stable release.
+GreptimeDB v1.0 represents a major milestone toward maturity — marking stable APIs, production readiness, and proven performance.
+
+**Roadmap:** Beta1 (Nov 10) → Beta2 (Nov 24) → RC1 (Dec 8) → GA (Jan 10, 2026)
+For production use, we recommend using the latest stable release. Read [v1.0 highlights and release plan](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights) for details.
 [![Star History Chart](https://api.star-history.com/svg?repos=GreptimeTeam/GreptimeDB&type=Date)](https://www.star-history.com/#GreptimeTeam/GreptimeDB&Date)
 
 If you find this project useful, a ⭐ would mean a lot to us!
@@ -203,5 +214,5 @@ Special thanks to all contributors! See [AUTHORS.md](https://github.com/Greptime
 
 - Uses [Apache Arrow™](https://arrow.apache.org/) (memory model)
 - [Apache Parquet™](https://parquet.apache.org/) (file storage)
-- [Apache Arrow DataFusion™](https://arrow.apache.org/datafusion/) (query engine)
+- [Apache DataFusion™](https://arrow.apache.org/datafusion/) (query engine)
 - [Apache OpenDAL™](https://opendal.apache.org/) (data access abstraction)
