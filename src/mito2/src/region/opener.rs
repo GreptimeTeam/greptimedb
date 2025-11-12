@@ -593,7 +593,7 @@ impl RegionOpener {
             compress_type: manifest_compress_type(config.compress_manifest),
             checkpoint_distance: config.manifest_checkpoint_distance,
             remove_file_options: RemoveFileOptions {
-                gc_enabled: config.gc.enable,
+                enable_gc: config.gc.enable,
             },
         })
     }

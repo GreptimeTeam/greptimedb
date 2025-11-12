@@ -195,7 +195,7 @@ mod tests {
                 region_manifest: RegionManifestInfo::Mito {
                     manifest_version: 0,
                     flushed_entry_id: 0,
-                    file_removal_rate: 0,
+                    file_removed_cnt: 0,
                 },
                 data_topic_latest_entry_id: 0,
                 metadata_topic_latest_entry_id: 0,
@@ -225,7 +225,7 @@ mod tests {
                 region_manifest: RegionManifestInfo::Mito {
                     manifest_version: 0,
                     flushed_entry_id: 0,
-                    file_removal_rate: 0,
+                    file_removed_cnt: 0,
                 },
                 data_topic_latest_entry_id: 0,
                 metadata_topic_latest_entry_id: 0,
@@ -255,7 +255,7 @@ mod tests {
                 region_manifest: RegionManifestInfo::Mito {
                     manifest_version: 0,
                     flushed_entry_id: 0,
-                    file_removal_rate: 0,
+                    file_removed_cnt: 0,
                 },
                 data_topic_latest_entry_id: 0,
                 metadata_topic_latest_entry_id: 0,

@@ -404,10 +404,12 @@ impl LocalGcWorker {
         );
 
         let mut manager = region.manifest_ctx.manifest_manager.write().await;
-        let mut manifest = (*manager.manifest()).clone();
-        manifest.removed_files.clear_deleted_files(deleted_files);
-        manager.set_manifest(Arc::new(manifest));
-        debug!("Updated manifest to clear deleted files");
+        let cnt = deleted_files.len();
+        manager.clear_deleted_files(deleted_files);
+        debug!(
+            "Updated region_id={} region manifest to clear {cnt} deleted files",
+            region.region_id(),
+        );
 
         Ok(())
     }

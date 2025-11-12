@@ -497,8 +497,8 @@ pub enum RegionManifestInfo {
     Mito {
         manifest_version: u64,
         flushed_entry_id: u64,
-        /// Number of files removed per hour.
-        file_removal_rate: u64,
+        /// Number of files removed in the manifest's `removed_files` field.
+        file_removed_cnt: u64,
     },
     Metric {
         data_manifest_version: u64,
@@ -514,7 +514,7 @@ impl RegionManifestInfo {
         Self::Mito {
             manifest_version,
             flushed_entry_id,
-            file_removal_rate,
+            file_removed_cnt: file_removal_rate,
         }
     }
 
@@ -607,7 +607,7 @@ impl Default for RegionManifestInfo {
         Self::Mito {
             manifest_version: 0,
             flushed_entry_id: 0,
-            file_removal_rate: 0,
+            file_removed_cnt: 0,
         }
     }
 }

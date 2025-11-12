@@ -322,31 +322,15 @@ impl RemovedFilesRecord {
         (cnt as u64, min_ts_after)
     }
 
-    pub fn update_file_removal_rate_to_stats(&self, stats: &ManifestStats) {
-        let now = Utc::now();
-        let one_hour_ago = now - chrono::Duration::hours(1);
-        let one_hour_ago_ms = one_hour_ago.timestamp_millis();
-        let (cnt, min_ts) = self.file_removed_cnt_after(one_hour_ago_ms);
-        // if min_ts is some, scale the cnt to rate per hour
-        if let Some(min_ts) = min_ts {
-            let duration = now.timestamp_millis() - min_ts;
-            if duration > 0 {
-                let rate = (cnt as f64) * 3_600_000.0 / (duration as f64);
-                stats
-                    .file_removal_rate
-                    .store(rate as u64, std::sync::atomic::Ordering::Relaxed);
-            } else {
-                warn!(
-                    "Duration for calculating file removal rate is non-positive: {}, min_ts: {}, now: {}",
-                    duration, min_ts, now
-                );
-            }
-        } else {
-            // no removed files, cnt should be 0, update anyway
-            stats
-                .file_removal_rate
-                .store(cnt, std::sync::atomic::Ordering::Relaxed);
-        }
+    pub fn update_file_removed_cnt_to_stats(&self, stats: &ManifestStats) {
+        let cnt = self
+            .removed_files
+            .iter()
+            .map(|r| r.file_ids.len() as u64)
+            .sum();
+        stats
+            .file_removed_cnt
+            .store(cnt, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -372,7 +356,7 @@ impl RemovedFilesRecord {
     }
 
     pub fn evict_old_removed_files(&mut self, opt: &RemoveFileOptions) -> Result<()> {
-        if !opt.gc_enabled {
+        if !opt.enable_gc {
             // If GC is not enabled, always keep removed files empty.
             self.removed_files.clear();
             return Ok(());

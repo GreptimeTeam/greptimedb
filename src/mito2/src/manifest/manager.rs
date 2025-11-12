@@ -21,6 +21,7 @@ use futures::TryStreamExt;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::FileId;
 use store_api::{MAX_VERSION, MIN_VERSION, ManifestVersion};
 
 use crate::error::{
@@ -55,14 +56,13 @@ pub struct RegionManifestOptions {
 #[derive(Debug, Clone)]
 pub struct RemoveFileOptions {
     /// Whether GC is enabled. If not, the removed files should always be empty when persisting manifest.
-    pub gc_enabled: bool,
+    pub enable_gc: bool,
 }
 
 #[cfg(any(test, feature = "test"))]
 impl Default for RemoveFileOptions {
-    #[allow(deprecated)]
     fn default() -> Self {
-        Self { gc_enabled: false }
+        Self { enable_gc: false }
     }
 }
 
@@ -210,7 +210,7 @@ impl RegionManifestManager {
         manifest_version.store(version, Ordering::Relaxed);
         manifest
             .removed_files
-            .update_file_removal_rate_to_stats(stats);
+            .update_file_removed_cnt_to_stats(stats);
         Ok(Self {
             store,
             last_version: manifest_version,
@@ -315,7 +315,7 @@ impl RegionManifestManager {
         manifest_version.store(version, Ordering::Relaxed);
         manifest
             .removed_files
-            .update_file_removal_rate_to_stats(stats);
+            .update_file_removed_cnt_to_stats(stats);
         Ok(Some(Self {
             store,
             last_version: manifest_version,
@@ -447,7 +447,7 @@ impl RegionManifestManager {
         let version = self.last_version();
         new_manifest
             .removed_files
-            .update_file_removal_rate_to_stats(&self.stats);
+            .update_file_removed_cnt_to_stats(&self.stats);
         self.manifest = Arc::new(new_manifest);
         let last_version = self.set_version(self.manifest.manifest_version);
         info!(
@@ -477,7 +477,7 @@ impl RegionManifestManager {
         let last_version = self.set_version(manifest.manifest_version);
         manifest
             .removed_files
-            .update_file_removal_rate_to_stats(&self.stats);
+            .update_file_removed_cnt_to_stats(&self.stats);
         self.manifest = Arc::new(manifest);
         info!(
             "Installed region manifest from checkpoint: {}, region: {}",
@@ -534,7 +534,7 @@ impl RegionManifestManager {
         let new_manifest = manifest_builder.try_build()?;
         new_manifest
             .removed_files
-            .update_file_removal_rate_to_stats(&self.stats);
+            .update_file_removed_cnt_to_stats(&self.stats);
         let updated_manifest = self
             .checkpointer
             .update_manifest_removed_files(new_manifest)?;
@@ -544,6 +544,13 @@ impl RegionManifestManager {
             .maybe_do_checkpoint(self.manifest.as_ref(), region_state);
 
         Ok(version)
+    }
+
+    /// Clear deleted files from manifest's `removed_files` field without update version. Notice if datanode exit before checkpoint then new manifest by open region may still contain these deleted files, which is acceptable for gc process.
+    pub fn clear_deleted_files(&mut self, deleted_files: Vec<FileId>) {
+        let mut manifest = (*self.manifest()).clone();
+        manifest.removed_files.clear_deleted_files(deleted_files);
+        self.set_manifest(Arc::new(manifest));
     }
 
     pub(crate) fn set_manifest(&mut self, manifest: Arc<RegionManifest>) {

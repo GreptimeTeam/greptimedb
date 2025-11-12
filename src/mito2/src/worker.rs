@@ -340,8 +340,6 @@ impl WorkerGroup {
         time_provider: TimeProviderRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> Result<WorkerGroup> {
-        use std::sync::Arc;
-
         let (flush_sender, flush_receiver) = watch::channel(());
         let write_buffer_manager = write_buffer_manager.unwrap_or_else(|| {
             Arc::new(

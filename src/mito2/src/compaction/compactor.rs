@@ -172,7 +172,7 @@ pub async fn open_compaction_region(
             compress_type: manifest_compress_type(mito_config.compress_manifest),
             checkpoint_distance: mito_config.manifest_checkpoint_distance,
             remove_file_options: RemoveFileOptions {
-                gc_enabled: mito_config.gc.enable,
+                enable_gc: mito_config.gc.enable,
             },
         };
 
