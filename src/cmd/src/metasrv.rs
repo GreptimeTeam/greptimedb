@@ -23,7 +23,7 @@ use common_config::Configurable;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_version::{short_version, verbose_version};
-use meta_srv::bootstrap::MetasrvInstance;
+use meta_srv::bootstrap::{Extension, MetasrvInstance};
 use meta_srv::metasrv::BackendImpl;
 use snafu::ResultExt;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -89,8 +89,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: MetasrvOptions) -> Result<Instance> {
-        self.subcmd.build(opts).await
+    pub async fn build(&self, opts: MetasrvOptions, extension: Extension) -> Result<Instance> {
+        self.subcmd.build(opts, extension).await
     }
 
     pub fn load_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
@@ -112,9 +112,9 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: MetasrvOptions) -> Result<Instance> {
+    async fn build(&self, opts: MetasrvOptions, extension: Extension) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build(opts).await,
+            SubCommand::Start(cmd) => cmd.build(opts, extension).await,
         }
     }
 
@@ -313,7 +313,7 @@ impl StartCommand {
         Ok(())
     }
 
-    pub async fn build(&self, opts: MetasrvOptions) -> Result<Instance> {
+    pub async fn build(&self, opts: MetasrvOptions, extension: Extension) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -341,7 +341,7 @@ impl StartCommand {
             .await
             .context(StartMetaServerSnafu)?;
 
-        let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins, None)
+        let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins, None, extension)
             .await
             .context(error::BuildMetaServerSnafu)?;
         let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;

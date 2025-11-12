@@ -18,7 +18,6 @@ use clap::{Parser, Subcommand};
 use cmd::datanode::builder::InstanceBuilder;
 use cmd::error::{InitTlsProviderSnafu, Result};
 use cmd::options::GlobalOptions;
-use cmd::standalone::extension::Extension;
 use cmd::{App, cli, datanode, flownode, frontend, metasrv, standalone};
 use common_base::Plugins;
 use common_version::{verbose_version, version};
@@ -126,13 +125,13 @@ async fn start(cli: Command) -> Result<()> {
                 .await
         }
         SubCommand::Metasrv(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
+            cmd.build(cmd.load_options(&cli.global_options)?, Default::default())
                 .await?
                 .run()
                 .await
         }
         SubCommand::Standalone(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?, Extension::default())
+            cmd.build(cmd.load_options(&cli.global_options)?, Default::default())
                 .await?
                 .run()
                 .await

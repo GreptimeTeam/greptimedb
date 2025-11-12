@@ -538,7 +538,7 @@ impl StartCommand {
                     fe_client: frontend_client.clone(),
                 };
                 let trigger_ddl_manager = factory.create(req).await.context(error::OtherSnafu)?;
-                ddl_manager.with_trigger_ddl_manager(Some(trigger_ddl_manager))
+                ddl_manager.with_trigger_ddl_manager_opt(Some(trigger_ddl_manager))
             } else {
                 ddl_manager
             };
