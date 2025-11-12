@@ -367,6 +367,7 @@ impl RegionFlushTask {
             file_metas,
             flushed_bytes,
             series_count,
+            encoded_part_count,
             flush_metrics,
         } = self.do_flush_memtables(version, write_opts).await?;
 
@@ -383,7 +384,7 @@ impl RegionFlushTask {
             total_bytes += meta.file_size;
         }
         info!(
-            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, total_rows: {}, total_bytes: {}, cost: {:?}, metrics: {:?}",
+            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, total_rows: {}, total_bytes: {}, cost: {:?}, encoded_part_count: {}, metrics: {:?}",
             self.region_id,
             self.reason.as_str(),
             file_ids,
@@ -391,6 +392,7 @@ impl RegionFlushTask {
             total_rows,
             total_bytes,
             timer.stop_and_record(),
+            encoded_part_count,
             flush_metrics,
         );
         flush_metrics.observe();
@@ -448,6 +450,7 @@ impl RegionFlushTask {
         let mut file_metas = Vec::with_capacity(memtables.len());
         let mut flushed_bytes = 0;
         let mut series_count = 0;
+        let mut encoded_part_count = 0;
         let mut flush_metrics = Metrics::new(WriteType::Flush);
         let partition_expr = parse_partition_expr(self.partition_expr.as_deref())?;
         for mem in memtables {
@@ -485,6 +488,7 @@ impl RegionFlushTask {
                 } = self
                     .flush_flat_mem_ranges(version, &write_opts, mem_ranges)
                     .await?;
+                encoded_part_count += num_encoded;
                 for (source_idx, result) in results.into_iter().enumerate() {
                     let (max_sequence, ssts_written, metrics) = result?;
                     if ssts_written.is_empty() {
@@ -566,6 +570,7 @@ impl RegionFlushTask {
             file_metas,
             flushed_bytes,
             series_count,
+            encoded_part_count,
             flush_metrics,
         })
     }
@@ -709,6 +714,7 @@ struct DoFlushMemtablesResult {
     file_metas: Vec<FileMeta>,
     flushed_bytes: u64,
     series_count: usize,
+    encoded_part_count: usize,
     flush_metrics: Metrics,
 }
 

@@ -450,10 +450,7 @@ impl MultiBulkPartIter {
             .context(ComputeArrowSnafu)
     }
 
-    fn process_batch(
-        &mut self,
-        record_batch: RecordBatch,
-    ) -> error::Result<Option<RecordBatch>> {
+    fn process_batch(&mut self, record_batch: RecordBatch) -> error::Result<Option<RecordBatch>> {
         let start = Instant::now();
 
         // Apply projection first.
