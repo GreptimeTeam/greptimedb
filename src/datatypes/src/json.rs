@@ -266,7 +266,7 @@ fn encode_json_array_with_context<'a>(
             ensure!(
                 item_type == *current_type,
                 error::InvalidJsonSnafu {
-                    value: "item types in json array are not all equal"
+                    value: "all items in json array must have the same type"
                 }
             );
         } else {
