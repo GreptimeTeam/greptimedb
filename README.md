@@ -112,7 +112,7 @@ GreptimeDB can run in two modes:
   - Datanode: Data storage and retrieval
   - Metasrv: Metadata management and coordination
   
-Read the [architecture](https://docs.greptime.com/contributor-guide/overview/#architecture) document and [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb/1-overview) provides an in-depth look at GreptimeDB:
+Read the [architecture](https://docs.greptime.com/contributor-guide/overview/#architecture) document. [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb/1-overview) provides an in-depth look at GreptimeDB:
   <img alt="GreptimeDB System Overview" src="docs/architecture.png">
 
 ## Try GreptimeDB
