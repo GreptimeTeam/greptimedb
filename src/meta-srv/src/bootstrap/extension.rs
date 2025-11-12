@@ -1,7 +1,5 @@
 #[cfg(feature = "enterprise")]
 pub use ee::*;
-#[cfg(not(feature = "enterprise"))]
-pub use oss::*;
 
 #[cfg(feature = "enterprise")]
 mod ee {
@@ -12,11 +10,6 @@ mod ee {
     use common_meta::kv_backend::KvBackendRef;
 
     use crate::metasrv::{SelectorContext, SelectorRef};
-
-    #[derive(Default)]
-    pub struct Extension {
-        pub trigger_ddl_manager_factory: Option<TriggerDdlManagerFactoryRef>,
-    }
 
     #[async_trait::async_trait]
     pub trait TriggerDdlManagerFactory {
@@ -35,8 +28,8 @@ mod ee {
     }
 }
 
-#[cfg(not(feature = "enterprise"))]
-mod oss {
-    #[derive(Default)]
-    pub struct Extension {}
+#[derive(Default)]
+pub struct Extension {
+    #[cfg(feature = "enterprise")]
+    pub trigger_ddl_manager_factory: Option<TriggerDdlManagerFactoryRef>,
 }
