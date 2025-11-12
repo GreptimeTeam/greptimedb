@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod extension;
+
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -66,6 +68,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{Result, StartFlownodeSnafu};
 use crate::options::{GlobalOptions, GreptimeOptions};
+use crate::standalone::extension::Extension;
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-standalone";
@@ -77,8 +80,12 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
-        self.subcmd.build(opts).await
+    pub async fn build(
+        &self,
+        opts: GreptimeOptions<StandaloneOptions>,
+        extension: Extension,
+    ) -> Result<Instance> {
+        self.subcmd.build(opts, extension).await
     }
 
     pub fn load_options(
@@ -95,9 +102,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
+    async fn build(
+        &self,
+        opts: GreptimeOptions<StandaloneOptions>,
+        extension: Extension,
+    ) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build(opts).await,
+            SubCommand::Start(cmd) => cmd.build(opts, extension).await,
         }
     }
 
@@ -335,7 +346,14 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     /// Build GreptimeDB instance with the loaded options.
-    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
+    pub async fn build(
+        &self,
+        opts: GreptimeOptions<StandaloneOptions>,
+        extension: Extension,
+    ) -> Result<Instance> {
+        #[cfg(not(feature = "enterprise"))]
+        let _ = extension;
+
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -513,11 +531,17 @@ impl StartCommand {
         let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager.clone(), true)
             .context(error::InitDdlManagerSnafu)?;
         #[cfg(feature = "enterprise")]
-        let ddl_manager = {
-            let trigger_ddl_manager: Option<common_meta::ddl_manager::TriggerDdlManagerRef> =
-                plugins.get();
-            ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
-        };
+        let ddl_manager =
+            if let Some(factory) = plugins.get::<extension::TriggerDdlManagerFactoryRef>() {
+                let req = extension::MakeTriggerDdlManagerRequest {
+                    kv_backend: kv_backend.clone(),
+                    fe_client: frontend_client.clone(),
+                };
+                let trigger_ddl_manager = factory.create(req).await.context(error::OtherSnafu)?;
+                ddl_manager.with_trigger_ddl_manager(Some(trigger_ddl_manager))
+            } else {
+                ddl_manager
+            };
 
         let procedure_executor = Arc::new(LocalProcedureExecutor::new(
             Arc::new(ddl_manager),
