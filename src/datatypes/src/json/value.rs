@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
-use std::convert::Into;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
@@ -29,6 +28,8 @@ use crate::value::{ListValue, ListValueRef, StructValue, StructValueRef, Value, 
 
 /// Number in json, can be a positive integer, a negative integer, or a floating number.
 /// Each of which is represented as `u64`, `i64` and `f64`.
+///
+/// This follows how `serde_json` designs number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum JsonNumber {
     PosInt(u64),
@@ -91,6 +92,11 @@ impl Display for JsonNumber {
 }
 
 /// Variants of json.
+///
+/// This follows how [serde_json::Value] designs except that we only choose to use [BTreeMap] to
+/// preserve the fields order by their names in the json object. (By default `serde_json` uses
+/// [BTreeMap], too. But it additionally supports "IndexMap" which preserves the order by insertion
+/// times of fields.)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum JsonVariant {
     Null,
@@ -138,7 +144,7 @@ impl JsonVariant {
 
     fn as_ref(&self) -> JsonVariantRef<'_> {
         match self {
-            JsonVariant::Null => ().into(),
+            JsonVariant::Null => JsonVariantRef::Null,
             JsonVariant::Bool(x) => (*x).into(),
             JsonVariant::Number(x) => match x {
                 JsonNumber::PosInt(i) => (*i).into(),
@@ -241,6 +247,10 @@ pub struct JsonValue {
 }
 
 impl JsonValue {
+    pub fn null() -> Self {
+        ().into()
+    }
+
     pub(crate) fn new(json_variant: JsonVariant) -> Self {
         Self {
             json_type: OnceLock::new(),
@@ -551,6 +561,10 @@ pub struct JsonValueRef<'a> {
 }
 
 impl<'a> JsonValueRef<'a> {
+    pub fn null() -> Self {
+        ().into()
+    }
+
     pub(crate) fn data_type(&self) -> ConcreteDataType {
         ConcreteDataType::Json(self.json_type().clone())
     }

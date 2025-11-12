@@ -2488,7 +2488,7 @@ pub(crate) mod tests {
     #[test]
     fn test_null_value() {
         assert!(Value::Null.is_null());
-        assert!(Value::Json(Box::new(().into())).is_null());
+        assert!(Value::Json(Box::new(JsonValue::null())).is_null());
         assert!(!Value::Boolean(true).is_null());
         assert!(Value::Null < Value::Boolean(false));
         assert!(Value::Boolean(true) > Value::Null);

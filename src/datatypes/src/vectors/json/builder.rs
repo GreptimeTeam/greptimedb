@@ -277,7 +277,7 @@ impl MutableVector for JsonVectorBuilder {
 
     fn push_null(&mut self) {
         static NULL_JSON: LazyLock<ValueRef> =
-            LazyLock::new(|| ValueRef::Json(Box::new(().into())));
+            LazyLock::new(|| ValueRef::Json(Box::new(JsonValueRef::null())));
         self.try_push_value_ref(&NULL_JSON)
             // Safety: learning from the method "try_push_value_ref", a null json value should be
             // always able to push into any json vectors.

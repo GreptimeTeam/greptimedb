@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use common_decimal::Decimal128;
@@ -949,8 +949,11 @@ fn encode_json_value(value: JsonValue) -> v1::JsonValue {
             JsonVariant::Object(x) => {
                 let entries = x
                     .into_iter()
-                    .map(|(k, v)| (k, helper(v)))
-                    .collect::<HashMap<_, _>>();
+                    .map(|(key, v)| v1::json_object::Entry {
+                        key,
+                        value: Some(helper(v)),
+                    })
+                    .collect::<Vec<_>>();
                 Some(json_value::Value::Object(JsonObject { entries }))
             }
         };
@@ -961,7 +964,7 @@ fn encode_json_value(value: JsonValue) -> v1::JsonValue {
 
 fn decode_json_value(value: &v1::JsonValue) -> JsonValueRef<'_> {
     let Some(value) = &value.value else {
-        return ().into();
+        return JsonValueRef::null();
     };
     match value {
         json_value::Value::Boolean(x) => (*x).into(),
@@ -978,7 +981,12 @@ fn decode_json_value(value: &v1::JsonValue) -> JsonValueRef<'_> {
         json_value::Value::Object(x) => x
             .entries
             .iter()
-            .map(|(k, v)| (k.as_str(), decode_json_value(v).into_variant()))
+            .filter_map(|entry| {
+                entry
+                    .value
+                    .as_ref()
+                    .map(|v| (entry.key.as_str(), decode_json_value(v).into_variant()))
+            })
             .collect::<BTreeMap<_, _>>()
             .into(),
     }
@@ -1819,7 +1827,7 @@ mod tests {
 
     #[test]
     fn test_encode_decode_json_value() {
-        let json: JsonValue = ().into();
+        let json = JsonValue::null();
         let proto = encode_json_value(json.clone());
         assert!(proto.value.is_none());
         let value = decode_json_value(&proto);
@@ -1885,32 +1893,31 @@ mod tests {
         let value = decode_json_value(&proto);
         assert_eq!(json.as_ref(), value);
 
-        let json: JsonValue = [("k1", 1i64), ("k2", 2i64), ("k3", 3i64)].into();
+        let json: JsonValue = [("k3", 3i64), ("k2", 2i64), ("k1", 1i64)].into();
         let proto = encode_json_value(json.clone());
         assert_eq!(
             proto.value,
             Some(json_value::Value::Object(JsonObject {
-                entries: [
-                    (
-                        "k1".to_string(),
-                        v1::JsonValue {
+                entries: vec![
+                    v1::json_object::Entry {
+                        key: "k1".to_string(),
+                        value: Some(v1::JsonValue {
                             value: Some(json_value::Value::Int(1))
-                        }
-                    ),
-                    (
-                        "k2".to_string(),
-                        v1::JsonValue {
+                        }),
+                    },
+                    v1::json_object::Entry {
+                        key: "k2".to_string(),
+                        value: Some(v1::JsonValue {
                             value: Some(json_value::Value::Int(2))
-                        }
-                    ),
-                    (
-                        "k3".to_string(),
-                        v1::JsonValue {
+                        }),
+                    },
+                    v1::json_object::Entry {
+                        key: "k3".to_string(),
+                        value: Some(v1::JsonValue {
                             value: Some(json_value::Value::Int(3))
-                        }
-                    )
+                        }),
+                    },
                 ]
-                .into(),
             }))
         );
         let value = decode_json_value(&proto);
@@ -1920,9 +1927,7 @@ mod tests {
         let proto = encode_json_value(json.clone());
         assert_eq!(
             proto.value,
-            Some(json_value::Value::Object(JsonObject {
-                entries: HashMap::new(),
-            }))
+            Some(json_value::Value::Object(JsonObject { entries: vec![] }))
         );
         let value = decode_json_value(&proto);
         assert_eq!(json.as_ref(), value);
@@ -1946,17 +1951,16 @@ mod tests {
         assert_eq!(
             proto.value,
             Some(json_value::Value::Object(JsonObject {
-                entries: [
-                    ("null".to_string(), v1::JsonValue { value: None }),
-                    (
-                        "bool".to_string(),
-                        v1::JsonValue {
+                entries: vec![
+                    v1::json_object::Entry {
+                        key: "bool".to_string(),
+                        value: Some(v1::JsonValue {
                             value: Some(json_value::Value::Boolean(false))
-                        }
-                    ),
-                    (
-                        "list".to_string(),
-                        v1::JsonValue {
+                        }),
+                    },
+                    v1::json_object::Entry {
+                        key: "list".to_string(),
+                        value: Some(v1::JsonValue {
                             value: Some(json_value::Value::Array(JsonList {
                                 items: vec![
                                     v1::JsonValue {
@@ -1967,48 +1971,49 @@ mod tests {
                                     },
                                 ]
                             }))
-                        }
-                    ),
-                    (
-                        "object".to_string(),
-                        v1::JsonValue {
+                        }),
+                    },
+                    v1::json_object::Entry {
+                        key: "null".to_string(),
+                        value: Some(v1::JsonValue { value: None }),
+                    },
+                    v1::json_object::Entry {
+                        key: "object".to_string(),
+                        value: Some(v1::JsonValue {
                             value: Some(json_value::Value::Object(JsonObject {
-                                entries: [
-                                    (
-                                        "positive_i".to_string(),
-                                        v1::JsonValue {
-                                            value: Some(json_value::Value::Uint(42))
-                                        }
-                                    ),
-                                    (
-                                        "negative_i".to_string(),
-                                        v1::JsonValue {
+                                entries: vec![
+                                    v1::json_object::Entry {
+                                        key: "negative_i".to_string(),
+                                        value: Some(v1::JsonValue {
                                             value: Some(json_value::Value::Int(-42))
-                                        }
-                                    ),
-                                    (
-                                        "nested".to_string(),
-                                        v1::JsonValue {
+                                        }),
+                                    },
+                                    v1::json_object::Entry {
+                                        key: "nested".to_string(),
+                                        value: Some(v1::JsonValue {
                                             value: Some(json_value::Value::Object(JsonObject {
-                                                entries: [(
-                                                    "what".to_string(),
-                                                    v1::JsonValue {
+                                                entries: vec![v1::json_object::Entry {
+                                                    key: "what".to_string(),
+                                                    value: Some(v1::JsonValue {
                                                         value: Some(json_value::Value::Str(
                                                             "blah".to_string()
                                                         ))
-                                                    }
-                                                )]
-                                                .into()
+                                                    }),
+                                                },]
                                             }))
-                                        }
-                                    )
+                                        }),
+                                    },
+                                    v1::json_object::Entry {
+                                        key: "positive_i".to_string(),
+                                        value: Some(v1::JsonValue {
+                                            value: Some(json_value::Value::Uint(42))
+                                        }),
+                                    },
                                 ]
-                                .into(),
                             }))
-                        }
-                    ),
+                        }),
+                    },
                 ]
-                .into(),
             }))
         );
         let value = decode_json_value(&proto);
