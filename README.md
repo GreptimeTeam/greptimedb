@@ -79,6 +79,12 @@
 | [Developer-Friendly](https://docs.greptime.com/user-guide/protocols/overview) | SQL/PromQL interfaces, built-in web dashboard, REST API, MySQL/PostgreSQL protocol compatibility, and native [OpenTelemetry](https://docs.greptime.com/user-guide/ingest-data/for-observability/opentelemetry/) support. |
 | [Flexible Deployment](https://docs.greptime.com/user-guide/deployments-administration/overview) | Deploy anywhere from ARM-based edge devices (including [Android](https://docs.greptime.com/user-guide/deployments-administration/run-on-android)) to cloud, with unified APIs and efficient data sync. |
 
+  ✅ **Perfect for:**
+  - Unified observability stack replacing Prometheus + Loki + Tempo
+  - Large-scale metrics with high cardinality (millions to billions of time series)
+  - Large-scale observability platform requiring cost efficiency and scalability
+  - IoT and edge computing with resource and bandwidth constraints
+
 Learn more in [Why GreptimeDB](https://docs.greptime.com/user-guide/concepts/why-greptimedb) and [Observability 2.0 and the Database for It](https://greptime.com/blogs/2025-04-25-greptimedb-observability2-new-database).
 
 ## Quick Comparison
