@@ -106,7 +106,7 @@ GreptimeDB can run in two modes:
   - Datanode: Data storage and retrieval
   - Metasrv: Metadata management and coordination
   
-Read the [architecture](https://docs.greptime.com/contributor-guide/overview/#architecture) document. [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb/1-overview) provides an in-depth look at GreptimeDB:
+Read the [architecture](https://docs.greptime.com/contributor-guide/overview/#architecture) document and [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb/1-overview) provides an in-depth look at GreptimeDB:
   <img alt="GreptimeDB System Overview" src="docs/architecture.png">
 
 ## Try GreptimeDB
@@ -127,7 +127,7 @@ docker run -p 127.0.0.1:4000-4003:4000-4003 \
 ```
 Dashboard: [http://localhost:4000/dashboard](http://localhost:4000/dashboard)
 
-Read more in the [full Install Guide](https://docs.greptime.com/getting-started/installation/overview)
+Read more in the [full Install Guide](https://docs.greptime.com/getting-started/installation/overview).
 
 **Troubleshooting:**
 * Cannot connect to the database? Ensure that ports `4000`, `4001`, `4002`, and `4003` are not blocked by a firewall or used by other services.
@@ -156,10 +156,10 @@ cargo run -- standalone start
 
 ## Tools & Extensions
 
-- **Kubernetes:** [GreptimeDB Operator](https://github.com/GrepTimeTeam/greptimedb-operator)
-- **Helm Charts:** [Greptime Helm Charts](https://github.com/GreptimeTeam/helm-charts)
-- **Dashboard:** [Web UI](https://github.com/GreptimeTeam/dashboard)
-- **SDKs/Ingester:** [Go](https://github.com/GreptimeTeam/greptimedb-ingester-go), [Java](https://github.com/GreptimeTeam/greptimedb-ingester-java), [C++](https://github.com/GreptimeTeam/greptimedb-ingester-cpp), [Erlang](https://github.com/GreptimeTeam/greptimedb-ingester-erl), [Rust](https://github.com/GreptimeTeam/greptimedb-ingester-rust)
+- **Kubernetes**: [GreptimeDB Operator](https://github.com/GrepTimeTeam/greptimedb-operator)
+- **Helm Charts**: [Greptime Helm Charts](https://github.com/GreptimeTeam/helm-charts)
+- **Dashboard**: [Web UI](https://github.com/GreptimeTeam/dashboard)
+- **gRPC Ingester**: [Go](https://github.com/GreptimeTeam/greptimedb-ingester-go), [Java](https://github.com/GreptimeTeam/greptimedb-ingester-java), [C++](https://github.com/GreptimeTeam/greptimedb-ingester-cpp), [Erlang](https://github.com/GreptimeTeam/greptimedb-ingester-erl), [Rust](https://github.com/GreptimeTeam/greptimedb-ingester-rust)
 - **Grafana**: [Official Dashboard](https://github.com/GreptimeTeam/greptimedb/blob/main/grafana/README.md)
 
 ## Project Status
@@ -173,7 +173,7 @@ cargo run -- standalone start
 
 GreptimeDB v1.0 represents a major milestone toward maturity — marking stable APIs, production readiness, and proven performance.
 
-**Roadmap:** Beta1 (Nov 10) → Beta2 (Nov 24) → RC1 (Dec 8) → GA (Jan 10, 2026), read [v1.0 highlights and release plan](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights) for details.
+**Roadmap:** Beta1 (Nov 10) → Beta2 (Nov 24) → RC1 (Dec 8) → GA (Jan 10, 2026), please read [v1.0 highlights and release plan](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights) for details.
 
 For production use, we recommend using the latest stable release.
 [![Star History Chart](https://api.star-history.com/svg?repos=GreptimeTeam/GreptimeDB&type=Date)](https://www.star-history.com/#GreptimeTeam/GreptimeDB&Date)
