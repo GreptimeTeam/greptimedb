@@ -427,7 +427,13 @@ pub async fn handle_get_trace(
     let end_time_ns = query_params.end.map(|end_us| end_us * 1000);
 
     let output = match handler
-        .get_trace(query_ctx, &trace_id, start_time_ns, end_time_ns)
+        .get_trace(
+            query_ctx,
+            &trace_id,
+            start_time_ns,
+            end_time_ns,
+            query_params.limit,
+        )
         .await
     {
         Ok(output) => output,

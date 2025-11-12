@@ -128,6 +128,7 @@ impl JaegerQueryHandler for Instance {
         trace_id: &str,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        limit: Option<usize>,
     ) -> ServerResult<Output> {
         // It's equivalent to the following SQL query:
         //
@@ -155,6 +156,13 @@ impl JaegerQueryHandler for Instance {
             filters.push(col(TIMESTAMP_COLUMN).lt_eq(lit_timestamp_nano(end_time)));
         }
 
+        let limit = if start_time.is_some() && end_time.is_some() {
+            // allow unlimited limit if time range is specified
+            limit
+        } else {
+            limit.or(Some(DEFAULT_LIMIT))
+        };
+
         Ok(query_trace_table(
             ctx,
             self.catalog_manager(),
@@ -162,7 +170,7 @@ impl JaegerQueryHandler for Instance {
             selects,
             filters,
             vec![col(TIMESTAMP_COLUMN).sort(false, false)], // Sort by timestamp in descending order.
-            Some(DEFAULT_LIMIT),
+            limit,
             None,
             vec![],
         )
