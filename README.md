@@ -12,7 +12,7 @@
 
 <div align="center">
 <h3 align="center">
-  <a href="https://docs.greptime.com/">User Guide</a> |
+  <a href="https://docs.greptime.com/user-guide/overview/">User Guide</a> |
   <a href="https://greptimedb.rs/">API Docs</a> |
   <a href="https://github.com/GreptimeTeam/greptimedb/issues/5446">Roadmap 2025</a>
 </h4>
@@ -72,11 +72,11 @@
 
 |   Feature  | Description |
 | --------- | ----------- |
-| [All-in-One Observability](https://docs.greptime.com/user-guide/concepts/why-greptimedb) | OpenTelemetry-native platform unifying metrics, logs, and traces. Query via [SQL](https://docs.greptime.com/user-guide/query-data/sql), [PromQL](https://docs.greptime.com/user-guide/query-data/promql), and [streaming](https://docs.greptime.com/user-guide/flow-computation/overview). |
+| [All-in-One Observability](https://docs.greptime.com/user-guide/concepts/why-greptimedb) | OpenTelemetry-native platform unifying metrics, logs, and traces. Query via [SQL](https://docs.greptime.com/user-guide/query-data/sql), [PromQL](https://docs.greptime.com/user-guide/query-data/promql), and [Flow](https://docs.greptime.com/user-guide/flow-computation/overview). |
 | [High Performance](https://docs.greptime.com/user-guide/manage-data/data-index) | Written in Rust with [rich indexing](https://docs.greptime.com/user-guide/manage-data/data-index) (inverted, fulltext, skipping, vector), delivering sub-second responses at PB scale. |
 | [Cost Efficiency](https://docs.greptime.com/user-guide/concepts/architecture) | 50x lower operational and storage costs with compute-storage separation and native object storage (S3, Azure Blob, etc.). |
 | [Cloud-Native & Scalable](https://docs.greptime.com/user-guide/deployments-administration/deploy-on-kubernetes/greptimedb-operator-management) | Purpose-built for [Kubernetes](https://docs.greptime.com/user-guide/deployments-administration/deploy-on-kubernetes/greptimedb-operator-management) with unlimited cross-cloud scaling, handling hundreds of thousands of concurrent requests. |
-| [Developer-Friendly](https://docs.greptime.com/user-guide/protocols/overview) | SQL/PromQL interfaces, built-in web dashboard, REST API, MySQL/PostgreSQL protocol compatibility, and native OpenTelemetry support. |
+| [Developer-Friendly](https://docs.greptime.com/user-guide/protocols/overview) | SQL/PromQL interfaces, built-in web dashboard, REST API, MySQL/PostgreSQL protocol compatibility, and native [OpenTelemetry](https://docs.greptime.com/user-guide/ingest-data/for-observability/opentelemetry/) support. |
 | [Flexible Deployment](https://docs.greptime.com/user-guide/deployments-administration/overview) | Deploy anywhere from ARM-based edge devices (including [Android](https://docs.greptime.com/user-guide/deployments-administration/run-on-android)) to cloud, with unified APIs and efficient data sync. |
 
 Learn more in [Why GreptimeDB](https://docs.greptime.com/user-guide/concepts/why-greptimedb) and [Observability 2.0 and the Database for It](https://greptime.com/blogs/2025-04-25-greptimedb-observability2-new-database).
@@ -86,10 +86,10 @@ Learn more in [Why GreptimeDB](https://docs.greptime.com/user-guide/concepts/why
 | Feature                         | GreptimeDB            | Traditional TSDB   | Log Stores      |
 |----------------------------------|-----------------------|--------------------|-----------------|
 | Data Types                      | Metrics, Logs, Traces | Metrics only       | Logs only       |
-| Query Language                  | SQL, PromQL, Streaming|  Custom/PromQL     | Custom/DSL      |
+| Query Language                  | SQL, PromQL |  Custom/PromQL     | Custom/DSL      |
 | Deployment                      | Edge + Cloud          | Cloud/On-prem      | Mostly central  |
 | Indexing & Performance          | PB-Scale, Sub-second  | Varies             | Varies          |
-| Integration                     | REST, SQL, Common protocols | Varies     | Varies          |
+| Integration                     | REST API, SQL, Common protocols | Varies     | Varies          |
 
 **Performance:**
 * [GreptimeDB tops JSONBench's billion-record cold run test!](https://greptime.com/blogs/2025-03-18-jsonbench-greptimedb-performance)
@@ -99,15 +99,14 @@ Read [more benchmark reports](https://docs.greptime.com/user-guide/concepts/feat
 
 ## Architecture
 
-  GreptimeDB can run in two modes:
-
-  **Standalone Mode** - Single binary for development and small deployments
-  **Distributed Mode** - Separate components for production scale:
+GreptimeDB can run in two modes:
+* **Standalone Mode** - Single binary for development and small deployments
+* **Distributed Mode** - Separate components for production scale:
   - Frontend: Query processing and protocol handling
   - Datanode: Data storage and retrieval
   - Metasrv: Metadata management and coordination
-* Read the [architecture](https://docs.greptime.com/contributor-guide/overview/#architecture) document.
-* [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb/1-overview) provides an in-depth look at GreptimeDB:
+  
+Read the [architecture](https://docs.greptime.com/contributor-guide/overview/#architecture) document. [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb/1-overview) provides an in-depth look at GreptimeDB:
   <img alt="GreptimeDB System Overview" src="docs/architecture.png">
 
 ## Try GreptimeDB
@@ -127,7 +126,8 @@ docker run -p 127.0.0.1:4000-4003:4000-4003 \
   --postgres-addr 0.0.0.0:4003
 ```
 Dashboard: [http://localhost:4000/dashboard](http://localhost:4000/dashboard)
-[Full Install Guide](https://docs.greptime.com/getting-started/installation/overview)
+
+Read more in the [full Install Guide](https://docs.greptime.com/getting-started/installation/overview)
 
 **Troubleshooting:**
 * Cannot connect to the database? Ensure that ports `4000`, `4001`, `4002`, and `4003` are not blocked by a firewall or used by other services.
@@ -159,7 +159,7 @@ cargo run -- standalone start
 - **Kubernetes:** [GreptimeDB Operator](https://github.com/GrepTimeTeam/greptimedb-operator)
 - **Helm Charts:** [Greptime Helm Charts](https://github.com/GreptimeTeam/helm-charts)
 - **Dashboard:** [Web UI](https://github.com/GreptimeTeam/dashboard)
-- **SDKs/Ingester:** [Go](https://github.com/GreptimeTeam/greptimedb-ingester-go), [Java](https://github.com/GreptimeTeam/greptimedb-ingester-java), [C++](https://github.com/GreptimeTeam/greptimedb-ingester-cpp), [Erlang](https://github.com/GreptimeTeam/greptimedb-ingester-erl), [Rust](https://github.com/GreptimeTeam/greptimedb-ingester-rust), [JS](https://github.com/GreptimeTeam/greptimedb-ingester-js)
+- **SDKs/Ingester:** [Go](https://github.com/GreptimeTeam/greptimedb-ingester-go), [Java](https://github.com/GreptimeTeam/greptimedb-ingester-java), [C++](https://github.com/GreptimeTeam/greptimedb-ingester-cpp), [Erlang](https://github.com/GreptimeTeam/greptimedb-ingester-erl), [Rust](https://github.com/GreptimeTeam/greptimedb-ingester-rust)
 - **Grafana**: [Official Dashboard](https://github.com/GreptimeTeam/greptimedb/blob/main/grafana/README.md)
 
 ## Project Status
@@ -173,8 +173,9 @@ cargo run -- standalone start
 
 GreptimeDB v1.0 represents a major milestone toward maturity — marking stable APIs, production readiness, and proven performance.
 
-**Roadmap:** Beta1 (Nov 10) → Beta2 (Nov 24) → RC1 (Dec 8) → GA (Jan 10, 2026)
-For production use, we recommend using the latest stable release. Read [v1.0 highlights and release plan](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights) for details.
+**Roadmap:** Beta1 (Nov 10) → Beta2 (Nov 24) → RC1 (Dec 8) → GA (Jan 10, 2026), read [v1.0 highlights and release plan](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights) for details.
+
+For production use, we recommend using the latest stable release.
 [![Star History Chart](https://api.star-history.com/svg?repos=GreptimeTeam/GreptimeDB&type=Date)](https://www.star-history.com/#GreptimeTeam/GreptimeDB&Date)
 
 If you find this project useful, a ⭐ would mean a lot to us!
