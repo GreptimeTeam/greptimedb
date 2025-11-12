@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use cache::build_datanode_cache_registry;
@@ -31,17 +32,20 @@ use crate::error::{MetaClientInitSnafu, MissingConfigSnafu, Result, StartDatanod
 use crate::{create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
 /// Builder for Datanode instance.
-pub struct InstanceBuilder {
+pub struct InstanceBuilder<E> {
     guard: Vec<WorkerGuard>,
-    opts: DatanodeOptions,
+    opts: DatanodeOptions<E>,
     datanode_builder: DatanodeBuilder,
 }
 
-impl InstanceBuilder {
+impl<E> InstanceBuilder<E>
+where
+    E: Debug,
+{
     /// Try to create a new [InstanceBuilder], and do some initialization work like allocating
     /// runtime resources, setting up global logging and plugins, etc.
     pub async fn try_new_with_init(
-        mut opts: DatanodeOptions,
+        mut opts: DatanodeOptions<E>,
         mut plugins: Plugins,
     ) -> Result<Self> {
         let guard = Self::init(&mut opts, &mut plugins).await?;
@@ -55,7 +59,10 @@ impl InstanceBuilder {
         })
     }
 
-    async fn init(opts: &mut DatanodeOptions, plugins: &mut Plugins) -> Result<Vec<WorkerGuard>> {
+    async fn init(
+        opts: &mut DatanodeOptions<E>,
+        plugins: &mut Plugins,
+    ) -> Result<Vec<WorkerGuard>> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let dn_opts = &mut opts.component;
@@ -81,7 +88,10 @@ impl InstanceBuilder {
         Ok(guard)
     }
 
-    async fn datanode_builder(opts: &DatanodeOptions, plugins: Plugins) -> Result<DatanodeBuilder> {
+    async fn datanode_builder(
+        opts: &DatanodeOptions<E>,
+        plugins: Plugins,
+    ) -> Result<DatanodeBuilder> {
         let dn_opts = &opts.component;
 
         let member_id = dn_opts

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -64,6 +65,8 @@ use standalone::options::StandaloneOptions;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{Result, StartFlownodeSnafu};
+use crate::extension::common::TableFactoryContext;
+use crate::extension::standalone::Extension;
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
@@ -76,14 +79,18 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
-        self.subcmd.build(opts).await
+    pub async fn build<E: Debug>(
+        &self,
+        opts: GreptimeOptions<StandaloneOptions, E>,
+        extension: Extension,
+    ) -> Result<Instance> {
+        self.subcmd.build(opts, extension).await
     }
 
-    pub fn load_options(
+    pub fn load_options<E: Configurable>(
         &self,
         global_options: &GlobalOptions,
-    ) -> Result<GreptimeOptions<StandaloneOptions>> {
+    ) -> Result<GreptimeOptions<StandaloneOptions, E>> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -94,16 +101,20 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
+    async fn build<E: Debug>(
+        &self,
+        opts: GreptimeOptions<StandaloneOptions, E>,
+        extension: Extension,
+    ) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build(opts).await,
+            SubCommand::Start(cmd) => cmd.build(opts, extension).await,
         }
     }
 
-    fn load_options(
+    fn load_options<E: Configurable>(
         &self,
         global_options: &GlobalOptions,
-    ) -> Result<GreptimeOptions<StandaloneOptions>> {
+    ) -> Result<GreptimeOptions<StandaloneOptions, E>> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -116,33 +127,14 @@ pub struct Instance {
     flownode: FlownodeInstance,
     procedure_manager: ProcedureManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
-
-    // The components of standalone, which make it easier to expand based
-    // on the components.
-    #[cfg(feature = "enterprise")]
-    components: Components,
-
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
-}
-
-#[cfg(feature = "enterprise")]
-pub struct Components {
-    pub plugins: Plugins,
-    pub kv_backend: KvBackendRef,
-    pub frontend_client: Arc<FrontendClient>,
-    pub catalog_manager: catalog::CatalogManagerRef,
 }
 
 impl Instance {
     /// Find the socket addr of a server by its `name`.
     pub fn server_addr(&self, name: &str) -> Option<SocketAddr> {
         self.frontend.server_handlers().addr(name)
-    }
-
-    #[cfg(feature = "enterprise")]
-    pub fn components(&self) -> &Components {
-        &self.components
     }
 }
 
@@ -239,11 +231,11 @@ pub struct StartCommand {
 
 impl StartCommand {
     /// Load the GreptimeDB options from various sources (command line, config file or env).
-    pub fn load_options(
+    pub fn load_options<E: Configurable>(
         &self,
         global_options: &GlobalOptions,
-    ) -> Result<GreptimeOptions<StandaloneOptions>> {
-        let mut opts = GreptimeOptions::<StandaloneOptions>::load_layered_options(
+    ) -> Result<GreptimeOptions<StandaloneOptions, E>> {
+        let mut opts = GreptimeOptions::<StandaloneOptions, E>::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
         )
@@ -337,7 +329,11 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     /// Build GreptimeDB instance with the loaded options.
-    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
+    pub async fn build<E: Debug>(
+        &self,
+        opts: GreptimeOptions<StandaloneOptions, E>,
+        extension: Extension,
+    ) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -422,12 +418,25 @@ impl StartCommand {
         )
         .with_procedure_manager(procedure_manager.clone())
         .with_process_manager(process_manager.clone());
-        #[cfg(feature = "enterprise")]
-        let builder = if let Some(factories) = plugins.get() {
+
+        // for standalone not use grpc, but get a handler to frontend grpc client without
+        // actually make a connection
+        let (frontend_client, frontend_instance_handler) =
+            FrontendClient::from_empty_grpc_handler(opts.query.clone());
+        let frontend_client = Arc::new(frontend_client);
+
+        let builder = if let Some(provider) = extension.info_schema_factories.as_ref() {
+            let factories = provider
+                .create_factories(TableFactoryContext {
+                    fe_client: Some(frontend_client.clone()),
+                })
+                .await
+                .context(crate::error::OtherSnafu)?;
             builder.with_extra_information_table_factories(factories)
         } else {
             builder
         };
+
         let catalog_manager = builder.build();
 
         let table_metadata_manager =
@@ -439,11 +448,6 @@ impl StartCommand {
             ..Default::default()
         };
 
-        // for standalone not use grpc, but get a handler to frontend grpc client without
-        // actually make a connection
-        let (frontend_client, frontend_instance_handler) =
-            FrontendClient::from_empty_grpc_handler(opts.query.clone());
-        let frontend_client = Arc::new(frontend_client);
         let flow_builder = FlownodeBuilder::new(
             flownode_options,
             plugins.clone(),
@@ -515,10 +519,16 @@ impl StartCommand {
         let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager.clone(), true)
             .context(error::InitDdlManagerSnafu)?;
         #[cfg(feature = "enterprise")]
-        let ddl_manager = {
-            let trigger_ddl_manager: Option<common_meta::ddl_manager::TriggerDdlManagerRef> =
-                plugins.get();
-            ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
+        let ddl_manager = if let Some(factory) = extension.trigger_ddl_manager_factory.as_ref() {
+            let req = crate::extension::standalone::TriggerDdlManagerRequest {
+                kv_backend: kv_backend.clone(),
+                catalog_manager: catalog_manager.clone(),
+                fe_client: frontend_client.clone(),
+            };
+            let trigger_ddl_manager = factory.create(req).await.context(error::OtherSnafu)?;
+            ddl_manager.with_trigger_ddl_manager_opt(Some(trigger_ddl_manager))
+        } else {
+            ddl_manager
         };
 
         let procedure_executor = Arc::new(LocalProcedureExecutor::new(
@@ -526,7 +536,7 @@ impl StartCommand {
             procedure_manager.clone(),
         ));
 
-        let fe_instance = FrontendBuilder::new(
+        let builder = FrontendBuilder::new(
             fe_opts.clone(),
             kv_backend.clone(),
             layered_cache_registry.clone(),
@@ -535,10 +545,17 @@ impl StartCommand {
             procedure_executor.clone(),
             process_manager,
         )
-        .with_plugin(plugins.clone())
-        .try_build()
-        .await
-        .context(error::StartFrontendSnafu)?;
+        .with_plugin(plugins.clone());
+        #[cfg(feature = "enterprise")]
+        let builder = if let Some(factory) = extension.trigger_querier_factory {
+            builder.with_trigger_querier(factory)
+        } else {
+            builder
+        };
+        let fe_instance = builder
+            .try_build()
+            .await
+            .context(error::StartFrontendSnafu)?;
         let fe_instance = Arc::new(fe_instance);
 
         // set the frontend client for flownode
@@ -574,22 +591,12 @@ impl StartCommand {
             heartbeat_task: None,
         };
 
-        #[cfg(feature = "enterprise")]
-        let components = Components {
-            plugins,
-            kv_backend,
-            frontend_client,
-            catalog_manager,
-        };
-
         Ok(Instance {
             datanode,
             frontend,
             flownode,
             procedure_manager,
             wal_options_allocator,
-            #[cfg(feature = "enterprise")]
-            components,
             _guard: guard,
         })
     }
@@ -621,10 +628,11 @@ mod tests {
     use common_wal::config::DatanodeWalConfig;
     use frontend::frontend::FrontendOptions;
     use object_store::config::{FileConfig, GcsConfig};
+    use serde::{Deserialize, Serialize};
     use servers::grpc::GrpcOptions;
 
     use super::*;
-    use crate::options::GlobalOptions;
+    use crate::options::{EmptyOptions, GlobalOptions};
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
@@ -713,7 +721,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options(&GlobalOptions::default())
+            .load_options::<EmptyOptions>(&GlobalOptions::default())
             .unwrap()
             .component;
         let fe_opts = options.frontend_options();
@@ -763,6 +771,73 @@ mod tests {
         assert_eq!("./greptimedb_data/test/logs".to_string(), logging_opts.dir);
     }
 
+    #[derive(Default, Serialize, Deserialize)]
+    pub struct ExtensionOptions {
+        pub trigger: Option<TriggerOptions>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub struct TriggerOptions {
+        pub alert_storage: AlertStorageOptions,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(tag = "type")]
+    pub enum AlertStorageOptions {
+        Postgres(PostgresOptions),
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub struct PostgresOptions {
+        pub addr: String,
+    }
+
+    impl Configurable for ExtensionOptions {}
+
+    #[test]
+    fn test_read_config_file_with_extension() {
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            [logging]
+            level = "debug"
+            dir = "./greptimedb_data/test/logs"
+
+            [trigger]
+            [trigger.alert_storage]
+            type = "Postgres"
+            addr = "postgres://localhost:5432/postgres?user=postgres&password=123456"
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
+        let cmd = StartCommand {
+            config_file: Some(file.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+
+        let options = cmd
+            .load_options::<ExtensionOptions>(&Default::default())
+            .unwrap();
+
+        let component = options.component;
+        assert_eq!("debug", component.logging.level.as_ref().unwrap());
+        assert_eq!(
+            "./greptimedb_data/test/logs".to_string(),
+            component.logging.dir
+        );
+
+        let extension = options.extension;
+        assert!(extension.trigger.is_some());
+        let trigger_opts = extension.trigger.unwrap();
+        match trigger_opts.alert_storage {
+            AlertStorageOptions::Postgres(pg_opts) => {
+                assert_eq!(
+                    "postgres://localhost:5432/postgres?user=postgres&password=123456",
+                    pg_opts.addr
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_load_log_options_from_cli() {
         let cmd = StartCommand {
@@ -774,7 +849,7 @@ mod tests {
         };
 
         let opts = cmd
-            .load_options(&GlobalOptions {
+            .load_options::<EmptyOptions>(&GlobalOptions {
                 log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -844,7 +919,10 @@ mod tests {
                     ..Default::default()
                 };
 
-                let opts = command.load_options(&Default::default()).unwrap().component;
+                let opts = command
+                    .load_options::<EmptyOptions>(&Default::default())
+                    .unwrap()
+                    .component;
 
                 // Should be read from env, env > default values.
                 assert_eq!(opts.logging.dir, "/other/log/dir");

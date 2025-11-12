@@ -17,7 +17,7 @@
 use clap::{Parser, Subcommand};
 use cmd::datanode::builder::InstanceBuilder;
 use cmd::error::{InitTlsProviderSnafu, Result};
-use cmd::options::GlobalOptions;
+use cmd::options::{EmptyOptions, GlobalOptions};
 use cmd::{App, cli, datanode, flownode, frontend, metasrv, standalone};
 use common_base::Plugins;
 use common_version::{verbose_version, version};
@@ -108,33 +108,45 @@ async fn start(cli: Command) -> Result<()> {
                 let opts = start.load_options(&cli.global_options)?;
                 let plugins = Plugins::new();
                 let builder = InstanceBuilder::try_new_with_init(opts, plugins).await?;
-                cmd.build_with(builder).await?.run().await
+                cmd.build_with::<EmptyOptions>(builder).await?.run().await
             }
             datanode::SubCommand::Objbench(ref bench) => bench.run().await,
         },
         SubCommand::Flownode(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
-                .await?
-                .run()
-                .await
+            cmd.build(
+                cmd.load_options::<EmptyOptions>(&cli.global_options)?,
+                Default::default(),
+            )
+            .await?
+            .run()
+            .await
         }
         SubCommand::Frontend(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
-                .await?
-                .run()
-                .await
+            cmd.build(
+                cmd.load_options::<EmptyOptions>(&cli.global_options)?,
+                Default::default(),
+            )
+            .await?
+            .run()
+            .await
         }
         SubCommand::Metasrv(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
-                .await?
-                .run()
-                .await
+            cmd.build(
+                cmd.load_options::<EmptyOptions>(&cli.global_options)?,
+                Default::default(),
+            )
+            .await?
+            .run()
+            .await
         }
         SubCommand::Standalone(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
-                .await?
-                .run()
-                .await
+            cmd.build(
+                cmd.load_options::<EmptyOptions>(&cli.global_options)?,
+                Default::default(),
+            )
+            .await?
+            .run()
+            .await
         }
         SubCommand::Cli(cmd) => {
             cmd.build(cmd.load_options(&cli.global_options)?)

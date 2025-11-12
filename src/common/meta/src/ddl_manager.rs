@@ -148,7 +148,7 @@ impl DdlManager {
     }
 
     #[cfg(feature = "enterprise")]
-    pub fn with_trigger_ddl_manager(
+    pub fn with_trigger_ddl_manager_opt(
         mut self,
         trigger_ddl_manager: Option<TriggerDdlManagerRef>,
     ) -> Self {

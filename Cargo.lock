@@ -1938,6 +1938,7 @@ dependencies = [
  "moka",
  "nu-ansi-term",
  "object-store",
+ "operator",
  "parquet",
  "plugins",
  "pprof",

@@ -32,6 +32,8 @@ use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
+#[cfg(feature = "enterprise")]
+use operator::statement::TriggerQuerierFactoryRef;
 use operator::statement::{StatementExecutor, StatementExecutorRef};
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
@@ -58,6 +60,8 @@ pub struct FrontendBuilder {
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
     process_manager: ProcessManagerRef,
+    #[cfg(feature = "enterprise")]
+    trigger_querier_factory: Option<TriggerQuerierFactoryRef>,
 }
 
 impl FrontendBuilder {
@@ -81,6 +85,8 @@ impl FrontendBuilder {
             plugins: None,
             procedure_executor,
             process_manager,
+            #[cfg(feature = "enterprise")]
+            trigger_querier_factory: None,
         }
     }
 
@@ -94,6 +100,14 @@ impl FrontendBuilder {
     pub fn with_plugin(self, plugins: Plugins) -> Self {
         Self {
             plugins: Some(plugins),
+            ..self
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn with_trigger_querier(self, trigger_querier: TriggerQuerierFactoryRef) -> Self {
+        Self {
+            trigger_querier_factory: Some(trigger_querier),
             ..self
         }
     }
@@ -188,12 +202,12 @@ impl FrontendBuilder {
         );
 
         #[cfg(feature = "enterprise")]
-        let statement_executor =
-            if let Some(factory) = plugins.get::<operator::statement::TriggerQuerierFactoryRef>() {
-                statement_executor.with_trigger_querier(factory.create(kv_backend.clone()))
-            } else {
-                statement_executor
-            };
+        let statement_executor = if let Some(factory) = self.trigger_querier_factory.as_ref() {
+            let trigger_querier = factory.create(kv_backend.clone());
+            statement_executor.with_trigger_querier(trigger_querier)
+        } else {
+            statement_executor
+        };
 
         let statement_executor = Arc::new(statement_executor);
 
