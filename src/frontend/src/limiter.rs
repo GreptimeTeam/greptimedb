@@ -245,7 +245,9 @@ impl Limiter {
                         json_value::Value::Object(object) => object
                             .entries
                             .iter()
-                            .map(|(key, val)| key.len() + calc(val))
+                            .flat_map(|entry| {
+                                entry.value.as_ref().map(|v| entry.key.len() + calc(v))
+                            })
                             .sum(),
                     }
                 }

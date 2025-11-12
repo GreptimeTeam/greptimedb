@@ -266,7 +266,7 @@ fn encode_json_array_with_context<'a>(
             ensure!(
                 item_type == *current_type,
                 error::InvalidJsonSnafu {
-                    value: "item types in json array are not all equal"
+                    value: "all items in json array must have the same type"
                 }
             );
         } else {
@@ -906,7 +906,7 @@ mod tests {
         let result = settings.encode_with_type(json, None);
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Invalid JSON: item types in json array are not all equal"
+            "Invalid JSON: all items in json array must have the same type"
         );
     }
 
@@ -2140,7 +2140,7 @@ mod tests {
         let decoded_struct = settings.decode_struct(array_struct);
         assert_eq!(
             decoded_struct.unwrap_err().to_string(),
-            "Invalid JSON: item types in json array are not all equal"
+            "Invalid JSON: all items in json array must have the same type"
         );
     }
 
