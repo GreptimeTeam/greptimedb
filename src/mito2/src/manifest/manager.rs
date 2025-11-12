@@ -54,16 +54,10 @@ pub struct RegionManifestOptions {
 
 /// Options for updating `removed_files` field in [RegionManifest].
 #[derive(Debug, Clone)]
+#[cfg_attr(any(test, feature = "test"), derive(Default))]
 pub struct RemoveFileOptions {
     /// Whether GC is enabled. If not, the removed files should always be empty when persisting manifest.
     pub enable_gc: bool,
-}
-
-#[cfg(any(test, feature = "test"))]
-impl Default for RemoveFileOptions {
-    fn default() -> Self {
-        Self { enable_gc: false }
-    }
 }
 
 // rewrite note:

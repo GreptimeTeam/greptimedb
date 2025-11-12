@@ -18,7 +18,6 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::Utc;
-use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::ManifestVersion;
@@ -303,23 +302,6 @@ impl RemovedFilesRecord {
         }
 
         self.removed_files.retain(|fs| !fs.file_ids.is_empty());
-    }
-
-    /// Count the number of files removed after the given timestamp. Also return the minimum
-    /// timestamp of all removed files.
-    fn file_removed_cnt_after(&self, t_ms: i64) -> (u64, Option<i64>) {
-        let mut cnt = 0;
-        let mut min_ts_after: Option<i64> = None;
-        for record in &self.removed_files {
-            if record.removed_at >= t_ms {
-                cnt += record.file_ids.len();
-                min_ts_after = match min_ts_after {
-                    Some(ts) => Some(ts.min(record.removed_at)),
-                    None => Some(record.removed_at),
-                };
-            }
-        }
-        (cnt as u64, min_ts_after)
     }
 
     pub fn update_file_removed_cnt_to_stats(&self, stats: &ManifestStats) {
