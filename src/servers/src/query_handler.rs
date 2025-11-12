@@ -210,6 +210,7 @@ pub trait JaegerQueryHandler {
         trace_id: &str,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        limit: Option<usize>,
     ) -> Result<Output>;
 
     /// Find traces by query params. It's used for `/api/traces` API.
