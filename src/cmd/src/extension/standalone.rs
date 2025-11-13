@@ -35,6 +35,7 @@ mod ee {
 pub struct Extension {
     #[cfg(feature = "enterprise")]
     pub trigger_ddl_manager_factory: Option<TriggerDdlManagerFactoryRef>,
+    /// Information schema table factory provider.
     #[cfg(feature = "enterprise")]
-    pub information_table_extension: Option<IstFactoryProviderRef>,
+    pub ist_factory_provider: Option<IstFactoryProviderRef>,
 }
