@@ -49,13 +49,8 @@ pub trait LastActiveTs {
 /// Builds a filter closure that checks whether a [`LastActiveTs`] item
 /// is still within the specified active duration, relative to the
 /// current time provided by the given [`SystemTimer`].
-pub fn build_active_filter<T: LastActiveTs>(
-    timer: impl SystemTimer,
-    active_duration: Duration,
-) -> impl Fn(&T) -> bool {
-    move |item: &T| {
-        // The `now` must be constructed inside the closure to avoid using the stale timestamp.
-        let now = timer.current_time_millis();
+pub fn build_active_filter<T: LastActiveTs>(active_duration: Duration) -> impl Fn(i64, &T) -> bool {
+    move |now: i64, item: &T| {
         let active_duration = active_duration.as_millis() as u64;
         let elapsed = now.saturating_sub(item.last_active_ts()) as u64;
         elapsed < active_duration
@@ -68,14 +63,15 @@ pub async fn alive_datanodes(
     active_duration: Duration,
     condition: Option<fn(&NodeWorkloads) -> bool>,
 ) -> Result<Vec<Peer>> {
-    let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
+    let active_filter = build_active_filter(active_duration);
     let condition = condition.unwrap_or(|_| true);
-    Ok(accessor
-        .lease_values(LeaseValueType::Datanode)
-        .await?
+    let lease_values = accessor.lease_values(LeaseValueType::Datanode).await?;
+    // The `now` should be obtained after lease_value is obtained to avoid using the stale timestamp.
+    let now = DefaultSystemTimer.current_time_millis();
+    Ok(lease_values
         .into_iter()
         .filter_map(|(peer_id, lease_value)| {
-            if active_filter(&lease_value) && condition(&lease_value.workloads) {
+            if active_filter(now, &lease_value) && condition(&lease_value.workloads) {
                 Some(Peer::new(peer_id, lease_value.node_addr))
             } else {
                 None
@@ -90,14 +86,15 @@ pub async fn alive_flownodes(
     active_duration: Duration,
     condition: Option<fn(&NodeWorkloads) -> bool>,
 ) -> Result<Vec<Peer>> {
-    let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
+    let active_filter = build_active_filter(active_duration);
     let condition = condition.unwrap_or(|_| true);
-    Ok(accessor
-        .lease_values(LeaseValueType::Flownode)
-        .await?
+    let lease_values = accessor.lease_values(LeaseValueType::Flownode).await?;
+    // The `now` should be obtained after lease_value is obtained to avoid using the stale timestamp.
+    let now = DefaultSystemTimer.current_time_millis();
+    Ok(lease_values
         .into_iter()
         .filter_map(|(peer_id, lease_value)| {
-            if active_filter(&lease_value) && condition(&lease_value.workloads) {
+            if active_filter(now, &lease_value) && condition(&lease_value.workloads) {
                 Some(Peer::new(peer_id, lease_value.node_addr))
             } else {
                 None
@@ -111,13 +108,14 @@ pub async fn alive_frontends(
     lister: &impl NodeInfoAccessor,
     active_duration: Duration,
 ) -> Result<Vec<Peer>> {
-    let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
-    Ok(lister
-        .node_infos(NodeInfoType::Frontend)
-        .await?
+    let active_filter = build_active_filter(active_duration);
+    let node_infos = lister.node_infos(NodeInfoType::Frontend).await?;
+    // The `now` should be obtained after lease_value is obtained to avoid using the stale timestamp.
+    let now = DefaultSystemTimer.current_time_millis();
+    Ok(node_infos
         .into_iter()
         .filter_map(|(_, node_info)| {
-            if active_filter(&node_info) {
+            if active_filter(now, &node_info) {
                 Some(node_info.peer)
             } else {
                 None
@@ -132,11 +130,14 @@ pub async fn alive_datanode(
     peer_id: u64,
     active_duration: Duration,
 ) -> Result<Option<Peer>> {
-    let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
-    let v = lister
+    let active_filter = build_active_filter(active_duration);
+    let lease_value = lister
         .lease_value(LeaseValueType::Datanode, peer_id)
-        .await?
-        .filter(|(_, lease)| active_filter(lease))
+        .await?;
+    // The `now` should be obtained after lease_value is obtained to avoid using the stale timestamp.
+    let now = DefaultSystemTimer.current_time_millis();
+    let v = lease_value
+        .filter(|(_, lease)| active_filter(now, lease))
         .map(|(peer_id, lease)| Peer::new(peer_id, lease.node_addr));
 
     Ok(v)
@@ -180,51 +181,4 @@ pub async fn find_datanode_lease_value(
 
     let lease_value: LeaseValue = kv.value.try_into()?;
     Ok(Some(lease_value))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicI64, Ordering};
-    use std::time::Duration;
-
-    use api::v1::meta::DatanodeWorkloads;
-    use api::v1::meta::heartbeat_request::NodeWorkloads;
-    use common_time::util::SystemTimer;
-
-    use crate::discovery::utils::build_active_filter;
-    use crate::key::LeaseValue;
-
-    #[derive(Clone)]
-    struct MockTime {
-        current_time_millis: Arc<AtomicI64>,
-    }
-
-    impl SystemTimer for MockTime {
-        fn current_time_millis(&self) -> i64 {
-            self.current_time_millis.load(Ordering::Relaxed)
-        }
-
-        fn current_time_rfc3339(&self) -> String {
-            unimplemented!()
-        }
-    }
-
-    #[test]
-    fn test_filter() {
-        let lease_value = LeaseValue {
-            timestamp_millis: 1763004294534,
-            node_addr: "".to_string(),
-            workloads: NodeWorkloads::Datanode(DatanodeWorkloads { types: vec![] }),
-        };
-        let mock_time = MockTime {
-            current_time_millis: Arc::new(AtomicI64::new(1763004294533)),
-        };
-        let filter = build_active_filter::<LeaseValue>(mock_time.clone(), Duration::from_secs(10));
-        // Updates the timer after the closure is created.
-        mock_time
-            .current_time_millis
-            .store(1763004294534, Ordering::Relaxed);
-        assert!(filter(&lease_value));
-    }
 }
