@@ -66,7 +66,6 @@ pub async fn alive_datanodes(
     let active_filter = build_active_filter(active_duration);
     let condition = condition.unwrap_or(|_| true);
     let lease_values = accessor.lease_values(LeaseValueType::Datanode).await?;
-    // The `now` should be obtained after lease_value is obtained to avoid using the stale timestamp.
     let now = DefaultSystemTimer.current_time_millis();
     Ok(lease_values
         .into_iter()
@@ -89,7 +88,6 @@ pub async fn alive_flownodes(
     let active_filter = build_active_filter(active_duration);
     let condition = condition.unwrap_or(|_| true);
     let lease_values = accessor.lease_values(LeaseValueType::Flownode).await?;
-    // The `now` should be obtained after lease_value is obtained to avoid using the stale timestamp.
     let now = DefaultSystemTimer.current_time_millis();
     Ok(lease_values
         .into_iter()
@@ -110,7 +108,6 @@ pub async fn alive_frontends(
 ) -> Result<Vec<Peer>> {
     let active_filter = build_active_filter(active_duration);
     let node_infos = lister.node_infos(NodeInfoType::Frontend).await?;
-    // The `now` should be obtained after lease_value is obtained to avoid using the stale timestamp.
     let now = DefaultSystemTimer.current_time_millis();
     Ok(node_infos
         .into_iter()
@@ -134,7 +131,6 @@ pub async fn alive_datanode(
     let lease_value = lister
         .lease_value(LeaseValueType::Datanode, peer_id)
         .await?;
-    // The `now` should be obtained after lease_value is obtained to avoid using the stale timestamp.
     let now = DefaultSystemTimer.current_time_millis();
     let v = lease_value
         .filter(|(_, lease)| active_filter(now, lease))
