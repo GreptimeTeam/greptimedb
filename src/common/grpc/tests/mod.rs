@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use common_grpc::channel_manager::{
-    ChannelConfig, ChannelManager, ClientTlsOption, ReloadableClientTlsConfig, load_tls_config,
+    ChannelConfig, ChannelManager, ClientTlsOption, load_reloadable_client_tls_config,
     maybe_watch_client_tls_config,
 };
 
@@ -23,7 +21,7 @@ use common_grpc::channel_manager::{
 async fn test_mtls_config() {
     // test no config
     let config = ChannelConfig::new();
-    let re = load_tls_config(config.client_tls.as_ref());
+    let re = load_reloadable_client_tls_config(config.client_tls.clone());
     assert!(re.is_ok());
     assert!(re.unwrap().is_none());
 
@@ -36,7 +34,7 @@ async fn test_mtls_config() {
         watch: false,
     });
 
-    let re = load_tls_config(config.client_tls.as_ref());
+    let re = load_reloadable_client_tls_config(config.client_tls.clone());
     assert!(re.is_err());
 
     // test corrupted file content
@@ -48,7 +46,7 @@ async fn test_mtls_config() {
         watch: false,
     });
 
-    let tls_config = load_tls_config(config.client_tls.as_ref()).unwrap();
+    let tls_config = load_reloadable_client_tls_config(config.client_tls.clone()).unwrap();
     let re = ChannelManager::with_config(config, tls_config);
 
     let re = re.get("127.0.0.1:0");
@@ -63,7 +61,7 @@ async fn test_mtls_config() {
         watch: false,
     });
 
-    let tls_config = load_tls_config(config.client_tls.as_ref()).unwrap();
+    let tls_config = load_reloadable_client_tls_config(config.client_tls.clone()).unwrap();
     let re = ChannelManager::with_config(config, tls_config);
     let re = re.get("127.0.0.1:0");
     let _ = re.unwrap();
@@ -103,14 +101,12 @@ async fn test_reloadable_client_tls_config() {
         watch: true,
     };
 
-    let reloadable_config = Arc::new(
-        ReloadableClientTlsConfig::try_new(client_tls_option)
-            .expect("failed to create reloadable config"),
-    );
+    let reloadable_config = load_reloadable_client_tls_config(Some(client_tls_option))
+        .expect("failed to load tls config")
+        .expect("tls config should be present");
 
     let config = ChannelConfig::new();
-    let manager =
-        ChannelManager::with_reloadable_tls_config(config, Some(reloadable_config.clone()));
+    let manager = ChannelManager::with_config(config, Some(reloadable_config.clone()));
 
     maybe_watch_client_tls_config(reloadable_config.clone(), &manager)
         .expect("failed to watch client config");
@@ -156,14 +152,12 @@ async fn test_channel_manager_with_reloadable_tls() {
         watch: false,
     };
 
-    let reloadable_config = Arc::new(
-        ReloadableClientTlsConfig::try_new(client_tls_option)
-            .expect("failed to create reloadable config"),
-    );
+    let reloadable_config = load_reloadable_client_tls_config(Some(client_tls_option))
+        .expect("failed to load tls config")
+        .expect("tls config should be present");
 
     let config = ChannelConfig::new();
-    let manager =
-        ChannelManager::with_reloadable_tls_config(config, Some(reloadable_config.clone()));
+    let manager = ChannelManager::with_config(config, Some(reloadable_config.clone()));
 
     // Test that we can get a channel
     let channel = manager.get("127.0.0.1:0");
