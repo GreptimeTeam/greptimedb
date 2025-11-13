@@ -57,14 +57,14 @@ mod tests {
 
     #[test]
     fn test_regex_match_basic() {
-        let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_regex_match_basic_");
+        let (_d, factory) = PuffinManagerFactory::new_for_test_block("test_regex_match_basic_");
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         builder
@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn test_regex_match_field_column() {
-        let (_d, facotry) =
+        let (_d, factory) =
             PuffinManagerFactory::new_for_test_block("test_regex_match_field_column_");
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
@@ -91,7 +91,7 @@ mod tests {
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         builder
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn test_regex_match_type_mismatch() {
-        let (_d, facotry) =
+        let (_d, factory) =
             PuffinManagerFactory::new_for_test_block("test_regex_match_type_mismatch_");
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
@@ -118,7 +118,7 @@ mod tests {
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         builder
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn test_regex_match_type_nonexist_column() {
-        let (_d, facotry) =
+        let (_d, factory) =
             PuffinManagerFactory::new_for_test_block("test_regex_match_type_nonexist_column_");
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
@@ -138,7 +138,7 @@ mod tests {
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         let res = builder.collect_regex_match(&nonexistent_column(), &string_lit("abc"));
