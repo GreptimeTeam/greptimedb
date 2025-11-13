@@ -228,6 +228,8 @@ pub struct StartCommand {
     #[clap(long)]
     tls_key_path: Option<String>,
     #[clap(long)]
+    tls_watch: bool,
+    #[clap(long)]
     user_provider: Option<String>,
     #[clap(long, default_value = "GREPTIMEDB_STANDALONE")]
     pub env_prefix: String,
@@ -273,11 +275,15 @@ impl StartCommand {
             tokio_console_addr: global_options.tokio_console_addr.clone(),
         };
 
-        let tls_opts = TlsOption::new(
+        let mut tls_opts = TlsOption::new(
             self.tls_mode.clone(),
             self.tls_cert_path.clone(),
             self.tls_key_path.clone(),
         );
+
+        if self.tls_watch {
+            tls_opts.watch = true;
+        }
 
         if let Some(addr) = &self.http_addr {
             opts.http.addr.clone_from(addr);
