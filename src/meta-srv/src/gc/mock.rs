@@ -363,7 +363,7 @@ fn mock_region_stat(
         region_manifest: RegionManifestInfo::Mito {
             manifest_version: 0,
             flushed_entry_id: 0,
-            file_removal_rate: 0,
+            file_removed_cnt: 0,
         },
         rcus: 0,
         wcus: 0,

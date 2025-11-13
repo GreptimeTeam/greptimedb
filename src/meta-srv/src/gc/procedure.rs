@@ -36,7 +36,6 @@ use crate::handler::HeartbeatMailbox;
 use crate::service::mailbox::{Channel, MailboxRef};
 
 /// TODO(discord9): another procedure which do both get file refs and gc regions.
-
 pub struct GcRegionProcedure {
     mailbox: MailboxRef,
     data: GcRegionData,
