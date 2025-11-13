@@ -334,8 +334,10 @@ impl ExecutionPlan for RegionScanExec {
         context: Arc<TaskContext>,
     ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
-        let span =
-            tracing_context.attach(common_telemetry::tracing::info_span!("read_from_region"));
+        let span = tracing_context.attach(common_telemetry::tracing::info_span!(
+            "read_from_region",
+            partition = partition
+        ));
 
         let ctx = QueryScanContext {
             explain_verbose: self.explain_verbose,

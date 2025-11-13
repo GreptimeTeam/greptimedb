@@ -97,12 +97,16 @@ impl Datanode for RegionInvoker {
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
+        let region_id = request.region_id.to_string();
         let span = request
             .header
             .as_ref()
             .map(|h| TracingContext::from_w3c(&h.tracing_context))
             .unwrap_or_default()
-            .attach(tracing::info_span!("RegionInvoker::handle_query"));
+            .attach(tracing::info_span!(
+                "RegionInvoker::handle_query",
+                region_id = region_id
+            ));
         self.region_server
             .handle_read(request)
             .trace(span)
