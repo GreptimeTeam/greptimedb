@@ -538,6 +538,7 @@ impl StartCommand {
         let ddl_manager = if let Some(factory) = extension.trigger_ddl_manager_factory {
             let req = crate::extension::standalone::TriggerDdlManagerRequest {
                 kv_backend: kv_backend.clone(),
+                catalog_manager: catalog_manager.clone(),
                 fe_client: frontend_client.clone(),
             };
             let trigger_ddl_manager = factory.create(req).await.context(error::OtherSnafu)?;

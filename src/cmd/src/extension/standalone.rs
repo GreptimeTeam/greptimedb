@@ -8,6 +8,7 @@ use crate::extension::common::IstFactoryProviderRef;
 mod ee {
     use std::sync::Arc;
 
+    use catalog::CatalogManagerRef;
     use common_error::ext::BoxedError;
     use common_meta::ddl_manager::TriggerDdlManagerRef;
     use common_meta::kv_backend::KvBackendRef;
@@ -25,6 +26,7 @@ mod ee {
 
     pub struct TriggerDdlManagerRequest {
         pub kv_backend: KvBackendRef,
+        pub catalog_manager: CatalogManagerRef,
         pub fe_client: Arc<FrontendClient>,
     }
 }
