@@ -1,7 +1,8 @@
 #[cfg(feature = "enterprise")]
-use catalog::information_schema::InformationSchemaTableFactoryRef;
-#[cfg(feature = "enterprise")]
 pub use ee::*;
+
+#[cfg(feature = "enterprise")]
+use crate::extension::common::IstFactoryProviderRef;
 
 #[cfg(feature = "enterprise")]
 mod ee {
@@ -35,5 +36,5 @@ pub struct Extension {
     #[cfg(feature = "enterprise")]
     pub trigger_ddl_manager_factory: Option<TriggerDdlManagerFactoryRef>,
     #[cfg(feature = "enterprise")]
-    pub information_table_extension: Option<InformationSchemaTableFactoryRef>,
+    pub information_table_extension: Option<IstFactoryProviderRef>,
 }

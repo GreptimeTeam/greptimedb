@@ -1,8 +1,8 @@
 #[cfg(feature = "enterprise")]
-use catalog::information_schema::InformationSchemaTableFactoryRef;
+use crate::extension::common::IstFactoryProviderRef;
 
 #[derive(Default)]
 pub struct Extension {
     #[cfg(feature = "enterprise")]
-    pub information_table_extension: Option<InformationSchemaTableFactoryRef>,
+    pub information_table_extension: Option<IstFactoryProviderRef>,
 }
