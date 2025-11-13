@@ -21,7 +21,7 @@ use std::hash::Hash;
 use std::ops::Range;
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use object_store::Buffer;
 
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
@@ -216,6 +216,8 @@ where
     }
 
     fn put_page(&self, key: K, page_key: PageKey, value: Bytes) {
+        // Clones the value to ensure it doesn't reference a larger buffer.
+        let value = Bytes::from(value.to_vec());
         CACHE_BYTES
             .with_label_values(&[INDEX_CONTENT_TYPE])
             .add((self.weight_of_content)(&(key, page_key), &value).into());
