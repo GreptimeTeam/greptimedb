@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use client::{Output, OutputData, OutputMeta};
@@ -23,7 +24,8 @@ use common_datasource::file_format::csv::CsvFormat;
 use common_datasource::file_format::json::JsonFormat;
 use common_datasource::file_format::orc::{ReaderAdapter, infer_orc_schema, new_orc_stream_reader};
 use common_datasource::file_format::{
-    FORMAT_HAS_HEADER, FORMAT_SKIP_BAD_RECORDS, FORMAT_TYPE, FileFormat, Format,
+    FORMAT_CONTINUE_ON_ERROR, FORMAT_HAS_HEADER, FORMAT_SKIP_BAD_RECORDS, FORMAT_TYPE, FileFormat,
+    Format,
 };
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{FS_SCHEMA, build_backend, parse_url};
@@ -354,12 +356,17 @@ impl StatementExecutor {
         let has_header = req
             .with
             .get(FORMAT_HAS_HEADER)
-            .and_then(|v| v.parse::<bool>().ok())
+            .and_then(|v| bool::from_str(v).ok())
             .unwrap_or(false);
         let skip_bad_records = req
             .with
             .get(FORMAT_SKIP_BAD_RECORDS)
-            .and_then(|v| v.parse::<bool>().ok())
+            .and_then(|v| bool::from_str(v).ok())
+            .unwrap_or(false);
+        let continue_on_error = req
+            .with
+            .get(FORMAT_CONTINUE_ON_ERROR)
+            .and_then(|v| bool::from_str(v).ok())
             .unwrap_or(false);
         let table = self.get_table(&table_ref).await?;
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
@@ -389,7 +396,15 @@ impl StatementExecutor {
                 && has_header
                 && !file_schema.equivalent_names_and_types(&table_schema)
             {
-                continue;
+                if continue_on_error {
+                    continue;
+                } else {
+                    return error::InvalidHeaderSnafu {
+                        table_schema: table_schema.to_string(),
+                        file_schema: file_schema.to_string(),
+                    }
+                    .fail();
+                }
             }
             let (file_schema_projection, table_schema_projection, compat_schema) =
                 generated_schema_projection_and_compatible_file_schema(file_schema, &table_schema);
