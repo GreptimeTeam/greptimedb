@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod extension;
-
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -67,8 +65,8 @@ use standalone::options::StandaloneOptions;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{Result, StartFlownodeSnafu};
+use crate::extension::standalone::Extension;
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::standalone::extension::Extension;
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-standalone";

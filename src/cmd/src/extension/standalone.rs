@@ -1,26 +1,30 @@
 #[cfg(feature = "enterprise")]
+use catalog::information_schema::InformationSchemaTableFactoryRef;
+#[cfg(feature = "enterprise")]
 pub use ee::*;
 
 #[cfg(feature = "enterprise")]
 mod ee {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
+    use catalog::information_schema::InformationSchemaTableFactoryRef;
     use common_error::ext::BoxedError;
     use common_meta::ddl_manager::TriggerDdlManagerRef;
     use common_meta::kv_backend::KvBackendRef;
     use flow::FrontendClient;
 
     #[async_trait::async_trait]
-    pub trait TriggerDdlManagerFactory {
+    pub trait TriggerDdlManagerFactory: Send + Sync {
         async fn create(
             &self,
-            req: MakeTriggerDdlManagerRequest,
+            ctx: TriggerDdlManagerRequest,
         ) -> Result<TriggerDdlManagerRef, BoxedError>;
     }
 
-    pub type TriggerDdlManagerFactoryRef = Arc<dyn TriggerDdlManagerFactory + Send + Sync>;
+    pub type TriggerDdlManagerFactoryRef = Arc<dyn TriggerDdlManagerFactory>;
 
-    pub struct MakeTriggerDdlManagerRequest {
+    pub struct TriggerDdlManagerRequest {
         pub kv_backend: KvBackendRef,
         pub fe_client: Arc<FrontendClient>,
     }
@@ -30,4 +34,6 @@ mod ee {
 pub struct Extension {
     #[cfg(feature = "enterprise")]
     pub trigger_ddl_manager_factory: Option<TriggerDdlManagerFactoryRef>,
+    #[cfg(feature = "enterprise")]
+    pub information_table_extension: Option<InformationSchemaTableFactoryRef>,
 }

@@ -15,13 +15,13 @@ mod ee {
     pub trait TriggerDdlManagerFactory {
         async fn create(
             &self,
-            req: MakeTriggerDdlManagerRequest,
+            req: TriggerDdlManagerRequest,
         ) -> Result<TriggerDdlManagerRef, BoxedError>;
     }
 
     pub type TriggerDdlManagerFactoryRef = Arc<dyn TriggerDdlManagerFactory + Send + Sync>;
 
-    pub struct MakeTriggerDdlManagerRequest {
+    pub struct TriggerDdlManagerRequest {
         pub kv_backend: KvBackendRef,
         pub selector: SelectorRef,
         pub select_ctx: SelectorContext,

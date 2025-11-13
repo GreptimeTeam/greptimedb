@@ -411,9 +411,9 @@ impl MetasrvBuilder {
             .context(error::InitDdlManagerSnafu)?;
         #[cfg(feature = "enterprise")]
         let ddl_manager = if let Some(extension) = extension {
-            use crate::bootstrap::MakeTriggerDdlManagerRequest;
+            use crate::bootstrap::TriggerDdlManagerRequest;
 
-            let req = MakeTriggerDdlManagerRequest {
+            let req = TriggerDdlManagerRequest {
                 kv_backend: kv_backend.clone(),
                 selector: selector.clone(),
                 select_ctx: selector_ctx.clone(),
