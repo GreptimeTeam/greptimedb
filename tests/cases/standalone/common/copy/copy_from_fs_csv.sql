@@ -27,7 +27,7 @@ Copy demo TO '${SQLNESS_HOME}/demo/export/csv/demo.csv' with (format='csv');
 
 CREATE TABLE has_header(host string, ts timestamp time index);
 
-Copy has_header FROM '${SQLNESS_HOME}/demo/export/csv/' with (pattern = 'demo*', format='csv', has_header='true');
+Copy has_header FROM '${SQLNESS_HOME}/demo/export/csv/' with (pattern = 'demo*', format='csv', has_header='true', continue_on_error='true');
 
 select * from has_header order by ts;
 
