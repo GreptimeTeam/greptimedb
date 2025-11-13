@@ -49,16 +49,14 @@ pub trait LastActiveTs {
 /// Builds a filter closure that checks whether a [`LastActiveTs`] item
 /// is still within the specified active duration, relative to the
 /// current time provided by the given [`SystemTimer`].
-///
-/// The returned closure uses the timestamp at the time of building,
-/// so the "now" reference point is fixed when this function is called.
 pub fn build_active_filter<T: LastActiveTs>(
     timer: impl SystemTimer,
     active_duration: Duration,
 ) -> impl Fn(&T) -> bool {
-    let now = timer.current_time_millis();
-    let active_duration = active_duration.as_millis() as u64;
     move |item: &T| {
+        // The `now` must be constructed inside the closure to avoid using the stale timestamp.
+        let now = timer.current_time_millis();
+        let active_duration = active_duration.as_millis() as u64;
         let elapsed = now.saturating_sub(item.last_active_ts()) as u64;
         elapsed < active_duration
     }
@@ -182,4 +180,51 @@ pub async fn find_datanode_lease_value(
 
     let lease_value: LeaseValue = kv.value.try_into()?;
     Ok(Some(lease_value))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::time::Duration;
+
+    use api::v1::meta::DatanodeWorkloads;
+    use api::v1::meta::heartbeat_request::NodeWorkloads;
+    use common_time::util::SystemTimer;
+
+    use crate::discovery::utils::build_active_filter;
+    use crate::key::LeaseValue;
+
+    #[derive(Clone)]
+    struct MockTime {
+        current_time_millis: Arc<AtomicI64>,
+    }
+
+    impl SystemTimer for MockTime {
+        fn current_time_millis(&self) -> i64 {
+            self.current_time_millis.load(Ordering::Relaxed)
+        }
+
+        fn current_time_rfc3339(&self) -> String {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn test_filter() {
+        let lease_value = LeaseValue {
+            timestamp_millis: 1763004294534,
+            node_addr: "".to_string(),
+            workloads: NodeWorkloads::Datanode(DatanodeWorkloads { types: vec![] }),
+        };
+        let mock_time = MockTime {
+            current_time_millis: Arc::new(AtomicI64::new(1763004294533)),
+        };
+        let filter = build_active_filter::<LeaseValue>(mock_time.clone(), Duration::from_secs(10));
+        // Updates the timer after the closure is created.
+        mock_time
+            .current_time_millis
+            .store(1763004294534, Ordering::Relaxed);
+        assert!(filter(&lease_value));
+    }
 }
