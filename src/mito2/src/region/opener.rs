@@ -879,7 +879,7 @@ impl RegionLoadCacheTask {
         let object_store = self.region.access_layer.object_store();
         let version_control = &self.region.version_control;
 
-        // Collects IndexKeys and file sizes for files that need to be downloaded
+        // Collects IndexKeys, file sizes, and max timestamps for files that need to be downloaded
         let mut files_to_download = Vec::new();
         let mut files_already_cached = 0;
 
@@ -896,7 +896,11 @@ impl RegionLoadCacheTask {
                         );
 
                         if !file_cache.contains_key(&puffin_key) {
-                            files_to_download.push((puffin_key, file_meta.index_file_size));
+                            files_to_download.push((
+                                puffin_key,
+                                file_meta.index_file_size,
+                                file_meta.time_range.1, // max timestamp
+                            ));
                         } else {
                             files_already_cached += 1;
                         }
@@ -906,6 +910,10 @@ impl RegionLoadCacheTask {
             // Releases the Version after the scope to avoid holding the memtables and file handles
             // for a long time.
         }
+
+        // Sorts files by max timestamp in descending order to loads latest files first
+        files_to_download.sort_by(|a, b| b.2.cmp(&a.2));
+
         let total_files = files_to_download.len() as i64;
 
         info!(
@@ -918,7 +926,7 @@ impl RegionLoadCacheTask {
         let mut files_downloaded = 0;
         let mut files_skipped = 0;
 
-        for (puffin_key, file_size) in files_to_download {
+        for (puffin_key, file_size, max_timestamp) in files_to_download {
             let current_size = file_cache.puffin_cache_size();
             let capacity = file_cache.puffin_cache_capacity();
             let region_state = self.region.state();
@@ -933,8 +941,8 @@ impl RegionLoadCacheTask {
             // Checks if adding this file would exceed capacity
             if current_size + file_size > capacity {
                 info!(
-                    "Stopping index cache preload due to capacity limit, region: {}, file_id: {}, current_size: {}, file_size: {}, capacity: {}",
-                    region_id, puffin_key.file_id, current_size, file_size, capacity
+                    "Stopping index cache preload due to capacity limit, region: {}, file_id: {}, current_size: {}, file_size: {}, capacity: {}, file_timestamp: {:?}",
+                    region_id, puffin_key.file_id, current_size, file_size, capacity, max_timestamp
                 );
                 files_skipped = (total_files - files_downloaded) as usize;
                 CACHE_FILL_PENDING_FILES.sub(total_files - files_downloaded);
