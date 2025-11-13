@@ -46,12 +46,12 @@ use crate::error::{
     BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu,
     MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
-use crate::options::{GlobalOptions, GreptimeOptions};
+use crate::options::{GlobalOptions, GreptimeOptions, NoopPluginOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-flownode";
 
-type FlownodeOptions = GreptimeOptions<flow::FlownodeOptions>;
+type FlownodeOptions = GreptimeOptions<flow::FlownodeOptions, NoopPluginOptions>;
 
 pub struct Instance {
     flownode: FlownodeInstance,

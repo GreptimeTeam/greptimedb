@@ -51,10 +51,10 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, Result};
 use crate::extension::frontend::Extension;
-use crate::options::{GlobalOptions, GreptimeOptions};
+use crate::options::{GlobalOptions, GreptimeOptions, NoopPluginOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
-type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions>;
+type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions, NoopPluginOptions>;
 
 pub struct Instance {
     frontend: Frontend,

@@ -38,11 +38,11 @@ use crate::datanode::objbench::ObjbenchCommand;
 use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
 };
-use crate::options::{GlobalOptions, GreptimeOptions};
+use crate::options::{GlobalOptions, GreptimeOptions, NoopPluginOptions};
 
 pub const APP_NAME: &str = "greptime-datanode";
 
-type DatanodeOptions = GreptimeOptions<datanode::config::DatanodeOptions>;
+type DatanodeOptions = GreptimeOptions<datanode::config::DatanodeOptions, NoopPluginOptions>;
 
 pub struct Instance {
     datanode: Datanode,
@@ -113,6 +113,7 @@ impl Command {
                 Ok(DatanodeOptions {
                     runtime: Default::default(),
                     plugins: Default::default(),
+                    plugin_option: Default::default(),
                     component: opts,
                 })
             }

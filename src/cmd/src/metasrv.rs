@@ -29,10 +29,10 @@ use snafu::ResultExt;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, LoadLayeredConfigSnafu, Result, StartMetaServerSnafu};
-use crate::options::{GlobalOptions, GreptimeOptions};
+use crate::options::{GlobalOptions, GreptimeOptions, NoopPluginOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
-type MetasrvOptions = GreptimeOptions<meta_srv::metasrv::MetasrvOptions>;
+type MetasrvOptions = GreptimeOptions<meta_srv::metasrv::MetasrvOptions, NoopPluginOptions>;
 
 pub const APP_NAME: &str = "greptime-metasrv";
 

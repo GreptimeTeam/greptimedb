@@ -66,10 +66,11 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{Result, StartFlownodeSnafu};
 use crate::extension::standalone::Extension;
-use crate::options::{GlobalOptions, GreptimeOptions};
+use crate::options::{GlobalOptions, NoopPluginOptions};
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-standalone";
+pub type GreptimeOptions<T> = crate::options::GreptimeOptions<T, NoopPluginOptions>;
 
 #[derive(Parser)]
 pub struct Command {
