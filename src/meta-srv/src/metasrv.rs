@@ -49,6 +49,7 @@ use common_procedure::options::ProcedureConfig;
 use common_stat::ResourceStatRef;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{error, info, warn};
+use common_time::util::DefaultSystemTimer;
 use common_wal::config::MetasrvWalConfig;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
@@ -735,6 +736,7 @@ impl Metasrv {
     /// A datanode is considered alive when it's still within the lease period.
     pub(crate) async fn lookup_datanode_peer(&self, peer_id: u64) -> Result<Option<Peer>> {
         discovery::utils::alive_datanode(
+            &DefaultSystemTimer,
             self.meta_peer_client.as_ref(),
             peer_id,
             Duration::from_secs(distributed_time_constants::DATANODE_LEASE_SECS),
