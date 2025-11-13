@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -70,7 +71,7 @@ use crate::options::{GlobalOptions, NoopPluginOptions};
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-standalone";
-pub type GreptimeOptions<T> = crate::options::GreptimeOptions<T, NoopPluginOptions>;
+pub type GreptimeOptions<T, E> = crate::options::GreptimeOptions<T, E>;
 
 #[derive(Parser)]
 pub struct Command {
@@ -81,16 +82,16 @@ pub struct Command {
 impl Command {
     pub async fn build(
         &self,
-        opts: GreptimeOptions<StandaloneOptions>,
+        opts: GreptimeOptions<StandaloneOptions, NoopPluginOptions>,
         extension: Extension,
     ) -> Result<Instance> {
         self.subcmd.build(opts, extension).await
     }
 
-    pub fn load_options(
+    pub fn load_options<E: Configurable>(
         &self,
         global_options: &GlobalOptions,
-    ) -> Result<GreptimeOptions<StandaloneOptions>> {
+    ) -> Result<GreptimeOptions<StandaloneOptions, E>> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -103,7 +104,7 @@ enum SubCommand {
 impl SubCommand {
     async fn build(
         &self,
-        opts: GreptimeOptions<StandaloneOptions>,
+        opts: GreptimeOptions<StandaloneOptions, NoopPluginOptions>,
         extension: Extension,
     ) -> Result<Instance> {
         match self {
@@ -111,10 +112,10 @@ impl SubCommand {
         }
     }
 
-    fn load_options(
+    fn load_options<E: Configurable>(
         &self,
         global_options: &GlobalOptions,
-    ) -> Result<GreptimeOptions<StandaloneOptions>> {
+    ) -> Result<GreptimeOptions<StandaloneOptions, E>> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -248,11 +249,11 @@ pub struct StartCommand {
 
 impl StartCommand {
     /// Load the GreptimeDB options from various sources (command line, config file or env).
-    pub fn load_options(
+    pub fn load_options<E: Configurable>(
         &self,
         global_options: &GlobalOptions,
-    ) -> Result<GreptimeOptions<StandaloneOptions>> {
-        let mut opts = GreptimeOptions::<StandaloneOptions>::load_layered_options(
+    ) -> Result<GreptimeOptions<StandaloneOptions, E>> {
+        let mut opts = GreptimeOptions::<StandaloneOptions, E>::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
         )
@@ -345,9 +346,9 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     /// Build GreptimeDB instance with the loaded options.
-    pub async fn build(
+    pub async fn build<E: Debug>(
         &self,
-        opts: GreptimeOptions<StandaloneOptions>,
+        opts: GreptimeOptions<StandaloneOptions, E>,
         extension: Extension,
     ) -> Result<Instance> {
         #[cfg(not(feature = "enterprise"))]
@@ -744,7 +745,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options(&GlobalOptions::default())
+            .load_options::<NoopPluginOptions>(&GlobalOptions::default())
             .unwrap()
             .component;
         let fe_opts = options.frontend_options();
@@ -802,7 +803,7 @@ mod tests {
         };
 
         let opts = cmd
-            .load_options(&GlobalOptions {
+            .load_options::<NoopPluginOptions>(&GlobalOptions {
                 log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -870,7 +871,10 @@ mod tests {
                     ..Default::default()
                 };
 
-                let opts = command.load_options(&Default::default()).unwrap().component;
+                let opts = command
+                    .load_options::<NoopPluginOptions>(&Default::default())
+                    .unwrap()
+                    .component;
 
                 // Should be read from env, env > default values.
                 assert_eq!(opts.logging.dir, "/other/log/dir");

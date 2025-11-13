@@ -109,7 +109,6 @@ mod tests {
 
     use crate::error::Result as CmdResult;
     use crate::options::GlobalOptions;
-    use crate::standalone::extension::Extension;
     use crate::{App, cli, standalone};
 
     #[tokio::test(flavor = "multi_thread")]
@@ -125,7 +124,7 @@ mod tests {
 
         let standalone_opts = standalone.load_options(&GlobalOptions::default()).unwrap();
         let mut instance = standalone
-            .build(standalone_opts, Extension::default())
+            .build(standalone_opts, Default::default())
             .await?;
         instance.start().await?;
 
