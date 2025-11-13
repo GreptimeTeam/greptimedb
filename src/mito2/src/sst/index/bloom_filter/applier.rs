@@ -19,7 +19,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use common_base::range_read::RangeReader;
-use common_telemetry::warn;
+use common_telemetry::{tracing, warn};
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
 use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
 use index::target::IndexTarget;
@@ -133,6 +133,10 @@ impl BloomFilterIndexApplier {
     ///
     /// Row group id existing in the returned result means that the row group is searched.
     /// Empty ranges means that the row group is searched but no rows are found.
+    #[tracing::instrument(
+        skip_all,
+        fields(file_id = %file_id)
+    )]
     pub async fn apply(
         &self,
         file_id: RegionFileId,

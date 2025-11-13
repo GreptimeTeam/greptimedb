@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
+use common_telemetry::tracing;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, Time};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::Stream;
@@ -640,6 +641,14 @@ pub(crate) struct SeriesDistributorMetrics {
 }
 
 /// Scans memtable ranges at `index`.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        region_id = %stream_ctx.input.region_metadata().region_id,
+        row_group_index = %index.index,
+        source = "mem"
+    )
+)]
 pub(crate) fn scan_mem_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
@@ -670,6 +679,14 @@ pub(crate) fn scan_mem_ranges(
 }
 
 /// Scans memtable ranges at `index` using flat format that returns RecordBatch.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        region_id = %stream_ctx.input.region_metadata().region_id,
+        row_group_index = %index.index,
+        source = "mem_flat"
+    )
+)]
 pub(crate) fn scan_flat_mem_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
@@ -698,6 +715,14 @@ pub(crate) fn scan_flat_mem_ranges(
 }
 
 /// Scans file ranges at `index`.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        region_id = %stream_ctx.input.region_metadata().region_id,
+        row_group_index = %index.index,
+        source = read_type
+    )
+)]
 pub(crate) async fn scan_file_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
@@ -721,6 +746,14 @@ pub(crate) async fn scan_file_ranges(
 }
 
 /// Scans file ranges at `index` using flat reader that returns RecordBatch.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        region_id = %stream_ctx.input.region_metadata().region_id,
+        row_group_index = %index.index,
+        source = read_type
+    )
+)]
 pub(crate) async fn scan_flat_file_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
@@ -744,6 +777,10 @@ pub(crate) async fn scan_flat_file_ranges(
 }
 
 /// Build the stream of scanning the input [`FileRange`]s.
+#[tracing::instrument(
+    skip_all,
+    fields(read_type = read_type, range_count = ranges.len())
+)]
 pub fn build_file_range_scan_stream(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
@@ -779,6 +816,10 @@ pub fn build_file_range_scan_stream(
 }
 
 /// Build the stream of scanning the input [`FileRange`]s using flat reader that returns RecordBatch.
+#[tracing::instrument(
+    skip_all,
+    fields(read_type = read_type, range_count = ranges.len())
+)]
 pub fn build_flat_file_range_scan_stream(
     _stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,

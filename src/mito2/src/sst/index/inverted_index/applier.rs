@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use common_base::range_read::RangeReader;
-use common_telemetry::warn;
+use common_telemetry::{tracing, warn};
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
@@ -125,6 +125,10 @@ impl InvertedIndexApplier {
     }
 
     /// Applies predicates to the provided SST file id and returns the relevant row group ids
+    #[tracing::instrument(
+        skip_all,
+        fields(file_id = %file_id)
+    )]
     pub async fn apply(
         &self,
         file_id: RegionFileId,

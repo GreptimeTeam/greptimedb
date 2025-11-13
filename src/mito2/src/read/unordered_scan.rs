@@ -21,6 +21,7 @@ use std::time::Instant;
 use async_stream::{stream, try_stream};
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
+use common_telemetry::tracing;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -71,6 +72,10 @@ impl UnorderedScan {
     }
 
     /// Scans the region and returns a stream.
+    #[tracing::instrument(
+        skip_all,
+        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
+    )]
     pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         let metrics_set = ExecutionPlanMetricsSet::new();
         let part_num = self.properties.num_partitions();
@@ -92,6 +97,13 @@ impl UnorderedScan {
     }
 
     /// Scans a [PartitionRange] by its `identifier` and returns a stream.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %stream_ctx.input.region_metadata().region_id,
+            part_range_id = part_range_id
+        )
+    )]
     fn scan_partition_range(
         stream_ctx: Arc<StreamContext>,
         part_range_id: usize,
@@ -138,6 +150,13 @@ impl UnorderedScan {
     }
 
     /// Scans a [PartitionRange] by its `identifier` and returns a flat stream of RecordBatch.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %stream_ctx.input.region_metadata().region_id,
+            part_range_id = part_range_id
+        )
+    )]
     fn scan_flat_partition_range(
         stream_ctx: Arc<StreamContext>,
         part_range_id: usize,
@@ -214,6 +233,13 @@ impl UnorderedScan {
         part_metrics
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        )
+    )]
     fn scan_partition_impl(
         &self,
         ctx: &QueryScanContext,
@@ -252,6 +278,13 @@ impl UnorderedScan {
         )))
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        )
+    )]
     fn scan_batch_in_partition(
         &self,
         partition: usize,
@@ -336,6 +369,13 @@ impl UnorderedScan {
         Ok(Box::pin(stream))
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        )
+    )]
     fn scan_flat_batch_in_partition(
         &self,
         partition: usize,

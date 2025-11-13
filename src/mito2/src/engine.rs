@@ -374,6 +374,7 @@ impl MitoEngine {
     }
 
     /// Scans a region.
+    #[tracing::instrument(skip_all, fields(region_id = %region_id))]
     fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
         self.inner.scan_region(region_id, request)
     }
@@ -940,6 +941,7 @@ impl EngineInner {
     }
 
     /// Handles the scan `request` and returns a [ScanRegion].
+    #[tracing::instrument(skip_all, fields(region_id = %region_id))]
     fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
         let query_start = Instant::now();
         // Reading a region doesn't need to go through the region worker thread.

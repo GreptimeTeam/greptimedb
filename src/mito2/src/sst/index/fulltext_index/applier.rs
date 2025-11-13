@@ -18,7 +18,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use common_base::range_read::RangeReader;
-use common_telemetry::warn;
+use common_telemetry::{tracing, warn};
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
 use index::bloom_filter::reader::BloomFilterReaderImpl;
 use index::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
@@ -124,6 +124,10 @@ impl FulltextIndexApplier {
 impl FulltextIndexApplier {
     /// Applies fine-grained fulltext index to the specified SST file.
     /// Returns the row ids that match the queries.
+    #[tracing::instrument(
+        skip_all,
+        fields(file_id = %file_id)
+    )]
     pub async fn apply_fine(
         &self,
         file_id: RegionFileId,
@@ -240,6 +244,10 @@ impl FulltextIndexApplier {
     ///
     /// Row group id existing in the returned result means that the row group is searched.
     /// Empty ranges means that the row group is searched but no rows are found.
+    #[tracing::instrument(
+        skip_all,
+        fields(file_id = %file_id)
+    )]
     pub async fn apply_coarse(
         &self,
         file_id: RegionFileId,
