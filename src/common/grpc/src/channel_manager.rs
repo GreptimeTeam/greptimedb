@@ -53,7 +53,6 @@ pub struct ChannelManager {
 struct Inner {
     id: u64,
     config: ChannelConfig,
-    client_tls_config: Option<ClientTlsConfig>,
     reloadable_client_tls_config: Option<Arc<ReloadableClientTlsConfig>>,
     pool: Arc<Pool>,
     channel_recycle_started: AtomicBool,
@@ -82,7 +81,6 @@ impl Inner {
         Self {
             id,
             config,
-            client_tls_config: None,
             reloadable_client_tls_config: None,
             pool,
             channel_recycle_started: AtomicBool::new(false),
@@ -96,29 +94,16 @@ impl ChannelManager {
         Default::default()
     }
 
-    /// unified with config function that support tls config
-    /// use [`load_tls_config`] to load tls config from file system
-    pub fn with_config(config: ChannelConfig, tls_config: Option<ClientTlsConfig>) -> Self {
-        let mut inner = Inner::with_config(config.clone());
-        if let Some(tls_config) = tls_config {
-            inner.client_tls_config = Some(tls_config);
-        }
-        Self {
-            inner: Arc::new(inner),
-        }
-    }
-
-    /// Create a ChannelManager with a reloadable TLS config
-    /// This allows TLS certificates to be reloaded dynamically when files change
-    pub fn with_reloadable_tls_config(
+    /// Create a ChannelManager with configuration and optional TLS config
+    ///
+    /// Use [`load_reloadable_client_tls_config`] to create TLS configuration from `ClientTlsOption`.
+    /// The TLS config supports both static (watch disabled) and dynamic reloading (watch enabled).
+    pub fn with_config(
         config: ChannelConfig,
         reloadable_tls_config: Option<Arc<ReloadableClientTlsConfig>>,
     ) -> Self {
         let mut inner = Inner::with_config(config.clone());
-        if let Some(reloadable_config) = reloadable_tls_config.clone() {
-            inner.reloadable_client_tls_config = Some(reloadable_config.clone());
-            inner.client_tls_config = reloadable_config.get_client_config();
-        }
+        inner.reloadable_client_tls_config = reloadable_tls_config;
         Self {
             inner: Arc::new(inner),
         }
@@ -200,12 +185,12 @@ impl ChannelManager {
     }
 
     fn build_endpoint(&self, addr: &str) -> Result<Endpoint> {
-        // Get the latest TLS config, either from reloadable config or static config
-        let tls_config = if let Some(reloadable_config) = &self.inner.reloadable_client_tls_config {
-            reloadable_config.get_client_config()
-        } else {
-            self.inner.client_tls_config.clone()
-        };
+        // Get the latest TLS config from reloadable config (which handles both static and dynamic cases)
+        let tls_config = self
+            .inner
+            .reloadable_client_tls_config
+            .as_ref()
+            .and_then(|c| c.get_client_config());
 
         let http_prefix = if tls_config.is_some() {
             "https"
@@ -282,7 +267,7 @@ impl ChannelManager {
     }
 }
 
-pub fn load_tls_config(tls_option: Option<&ClientTlsOption>) -> Result<Option<ClientTlsConfig>> {
+fn load_tls_config(tls_option: Option<&ClientTlsOption>) -> Result<Option<ClientTlsConfig>> {
     let path_config = match tls_option {
         Some(path_config) if path_config.enabled => path_config,
         _ => return Ok(None),
@@ -308,6 +293,20 @@ pub fn load_tls_config(tls_option: Option<&ClientTlsOption>) -> Result<Option<Cl
         tls_config = tls_config.identity(client_identity);
     }
     Ok(Some(tls_config))
+}
+
+/// Load client TLS configuration from `ClientTlsOption` and return a `ReloadableClientTlsConfig`.
+/// This is the primary way to create TLS configuration for the ChannelManager.
+pub fn load_reloadable_client_tls_config(
+    tls_option: Option<ClientTlsOption>,
+) -> Result<Option<Arc<ReloadableClientTlsConfig>>> {
+    match tls_option {
+        Some(option) if option.enabled => {
+            let reloadable = ReloadableClientTlsConfig::try_new(option)?;
+            Ok(Some(Arc::new(reloadable)))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// A mutable container for TLS client config
