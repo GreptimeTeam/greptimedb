@@ -2326,7 +2326,10 @@ async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(
         &instance,
-        &format!("copy tsbs_cpu from '{}' WITH(FORMAT='csv');", &filepath),
+        &format!(
+            "copy tsbs_cpu from '{}' WITH(FORMAT='csv', header='false');",
+            &filepath
+        ),
     )
     .await;
 
