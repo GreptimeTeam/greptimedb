@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use client::{Output, OutputData, OutputMeta};
@@ -23,10 +22,7 @@ use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::CsvFormat;
 use common_datasource::file_format::json::JsonFormat;
 use common_datasource::file_format::orc::{ReaderAdapter, infer_orc_schema, new_orc_stream_reader};
-use common_datasource::file_format::{
-    FORMAT_CONTINUE_ON_ERROR, FORMAT_HAS_HEADER, FORMAT_SKIP_BAD_RECORDS, FORMAT_TYPE, FileFormat,
-    Format,
-};
+use common_datasource::file_format::{FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{FS_SCHEMA, build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
@@ -348,26 +344,6 @@ impl StatementExecutor {
             schema: &req.schema_name,
             table: &req.table_name,
         };
-        let file_type = req
-            .with
-            .get(FORMAT_TYPE)
-            .map(|format| format.to_ascii_uppercase())
-            .unwrap_or_else(|| "PARQUET".to_string());
-        let has_header = req
-            .with
-            .get(FORMAT_HAS_HEADER)
-            .and_then(|v| bool::from_str(v).ok())
-            .unwrap_or(false);
-        let skip_bad_records = req
-            .with
-            .get(FORMAT_SKIP_BAD_RECORDS)
-            .and_then(|v| bool::from_str(v).ok())
-            .unwrap_or(false);
-        let continue_on_error = req
-            .with
-            .get(FORMAT_CONTINUE_ON_ERROR)
-            .and_then(|v| bool::from_str(v).ok())
-            .unwrap_or(false);
         let table = self.get_table(&table_ref).await?;
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
         let (object_store, entries) = self.list_copy_from_entries(&req).await?;
@@ -382,6 +358,11 @@ impl StatementExecutor {
             .into_iter()
             .collect::<Vec<_>>();
 
+        let csv_format_opt = match &format {
+            Format::Csv(csv_format) => Some(csv_format),
+            _ => None,
+        };
+
         for entry in entries.iter() {
             if entry.metadata().mode() != EntryMode::FILE {
                 continue;
@@ -392,11 +373,12 @@ impl StatementExecutor {
                 .await?;
 
             let file_schema = file_metadata.schema();
-            if file_type == "CSV"
-                && has_header
+
+            if let Some(csv_format) = csv_format_opt
+                && csv_format.header
                 && !file_schema.equivalent_names_and_types(&table_schema)
             {
-                if continue_on_error {
+                if csv_format.continue_on_error {
                     continue;
                 } else {
                     return error::InvalidHeaderSnafu {
@@ -405,7 +387,8 @@ impl StatementExecutor {
                     }
                     .fail();
                 }
-            }
+            };
+
             let (file_schema_projection, table_schema_projection, compat_schema) =
                 generated_schema_projection_and_compatible_file_schema(file_schema, &table_schema);
             let projected_file_schema = Arc::new(
@@ -458,11 +441,12 @@ impl StatementExecutor {
                 let record_batch = match r.context(error::ReadDfRecordBatchSnafu) {
                     Ok(batch) => batch,
                     Err(err) => {
-                        if file_type == "CSV" && skip_bad_records {
+                        if let Some(csv_format) = csv_format_opt
+                            && csv_format.skip_bad_records
+                        {
                             continue;
-                        } else {
-                            return Err(err);
                         }
+                        return Err(err);
                     }
                 };
                 let vectors =
