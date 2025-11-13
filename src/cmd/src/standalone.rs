@@ -67,7 +67,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{Result, StartFlownodeSnafu};
 use crate::extension::standalone::Extension;
-use crate::options::{GlobalOptions, NoopPluginOptions};
+use crate::options::GlobalOptions;
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-standalone";
@@ -80,9 +80,9 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(
+    pub async fn build<E: Debug>(
         &self,
-        opts: GreptimeOptions<StandaloneOptions, NoopPluginOptions>,
+        opts: GreptimeOptions<StandaloneOptions, E>,
         extension: Extension,
     ) -> Result<Instance> {
         self.subcmd.build(opts, extension).await
@@ -102,9 +102,9 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(
+    async fn build<E: Debug>(
         &self,
-        opts: GreptimeOptions<StandaloneOptions, NoopPluginOptions>,
+        opts: GreptimeOptions<StandaloneOptions, E>,
         extension: Extension,
     ) -> Result<Instance> {
         match self {
@@ -447,9 +447,12 @@ impl StartCommand {
 
         #[cfg(feature = "enterprise")]
         let builder = if let Some(provider) = extension.ist_factory_provider {
-            let factories = provider.create_factories(crate::extension::common::IstContext {
-                fe_client: Some(frontend_client.clone()),
-            });
+            let factories = provider
+                .create_factories(crate::extension::common::IstContext {
+                    fe_client: Some(frontend_client.clone()),
+                })
+                .await
+                .context(crate::error::OtherSnafu)?;
             builder.with_extra_information_table_factories(factories)
         } else {
             builder
@@ -656,7 +659,7 @@ mod tests {
     use servers::grpc::GrpcOptions;
 
     use super::*;
-    use crate::options::GlobalOptions;
+    use crate::options::{GlobalOptions, NoopPluginOptions};
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {

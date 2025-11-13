@@ -442,8 +442,10 @@ impl StartCommand {
         .with_process_manager(process_manager.clone());
         #[cfg(feature = "enterprise")]
         let builder = if let Some(provider) = extension.ist_factory_provider {
-            let factories =
-                provider.create_factories(crate::extension::common::IstContext { fe_client: None });
+            let factories = provider
+                .create_factories(crate::extension::common::IstContext { fe_client: None })
+                .await
+                .context(crate::error::OtherSnafu)?;
             builder.with_extra_information_table_factories(factories)
         } else {
             builder
