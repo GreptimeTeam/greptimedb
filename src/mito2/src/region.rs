@@ -47,10 +47,8 @@ use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
-use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
-use crate::sst::FormatType;
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location::{index_file_path, sst_file_path};
 use crate::time_provider::TimeProviderRef;
@@ -140,10 +138,6 @@ pub struct MitoRegion {
     pub(crate) topic_latest_entry_id: AtomicU64,
     /// The total bytes written to the region.
     pub(crate) written_bytes: Arc<AtomicU64>,
-    /// Memtable builder for the region.
-    pub(crate) memtable_builder: MemtableBuilderRef,
-    /// Format type of the SST file.
-    pub(crate) sst_format: FormatType,
     /// manifest stats
     stats: ManifestStats,
 }
@@ -198,11 +192,6 @@ impl MitoRegion {
     /// Returns last compaction timestamp in millis.
     pub(crate) fn last_compaction_millis(&self) -> i64 {
         self.last_compaction_millis.load(Ordering::Relaxed)
-    }
-
-    /// Returns format type of the SST file.
-    pub(crate) fn sst_format(&self) -> FormatType {
-        self.sst_format
     }
 
     /// Update compaction time to current time.
@@ -460,11 +449,12 @@ impl MitoRegion {
         if self.state() == RegionRoleState::Leader(RegionLeaderState::Writable) {
             // Persist backfilled metadata if manifest is missing fields (e.g., partition_expr)
             let manifest_meta = &manager.manifest().metadata;
-            let current_meta = &self.version().metadata;
+            let current_version = self.version();
+            let current_meta = &current_version.metadata;
             if manifest_meta.partition_expr.is_none() && current_meta.partition_expr.is_some() {
                 let action = RegionMetaAction::Change(RegionChange {
                     metadata: current_meta.clone(),
-                    sst_format: self.sst_format(),
+                    sst_format: current_version.options.sst_format.unwrap_or_default(),
                 });
                 let result = manager
                     .update(
@@ -1220,7 +1210,6 @@ mod tests {
     use crate::sst::FormatType;
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
-    use crate::test_util::memtable_util::EmptyMemtableBuilder;
     use crate::test_util::scheduler_util::SchedulerEnv;
     use crate::test_util::version_util::VersionControlBuilder;
     use crate::time_provider::StdTimeProvider;
@@ -1391,8 +1380,6 @@ mod tests {
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
             written_bytes: Arc::new(AtomicU64::new(0)),
-            memtable_builder: Arc::new(EmptyMemtableBuilder::default()),
-            sst_format: FormatType::PrimaryKey,
             stats: ManifestStats::default(),
         };
 

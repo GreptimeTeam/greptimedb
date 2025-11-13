@@ -776,7 +776,7 @@ impl RegionMigrationProcedure {
                 info!(
                     "Rollbacking downgraded region leader table route, table: {table_id}, regions: {regions:?}"
                 );
-                let table_metadata_manager = ctx.table_metadata_manager.clone();
+                let table_metadata_manager = &ctx.table_metadata_manager;
                 table_metadata_manager
                     .update_leader_region_status(table_id, &table_route, |route| {
                         if regions.contains(&route.region.id) {
@@ -786,12 +786,16 @@ impl RegionMigrationProcedure {
                         }
                     })
                     .await
-                    .context(error::TableMetadataManagerSnafu)?;
-                info!(
-                    "Rolling back downgraded region leader table route, table_id: {table_id}, regions: {regions:?}"
-                );
+                    .context(error::TableMetadataManagerSnafu)
+                    .map_err(BoxedError::new)
+                    .with_context(|_| error::RetryLaterWithSourceSnafu {
+                        reason: format!("Failed to update the table route during the rollback downgraded leader region: {regions:?}"),
+                    })?;
             }
         }
+        self.context
+            .deregister_failure_detectors_for_candidate_region()
+            .await;
         self.context.register_failure_detectors().await;
 
         Ok(())

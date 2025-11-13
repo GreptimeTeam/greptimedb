@@ -50,6 +50,7 @@ use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
+use crate::region::options::RegionOptions;
 use crate::sst::file::FileMeta;
 use crate::sst::index::IndexBuildType;
 use crate::wal::EntryId;
@@ -658,7 +659,8 @@ impl WorkerRequest {
             }
             RegionRequest::Delete(v) => {
                 let mut write_request =
-                    WriteRequest::new(region_id, OpType::Delete, v.rows, region_metadata.clone())?;
+                    WriteRequest::new(region_id, OpType::Delete, v.rows, region_metadata.clone())?
+                        .with_hint(v.hint);
                 if write_request.primary_key_encoding() == PrimaryKeyEncoding::Dense
                     && let Some(region_metadata) = &region_metadata
                 {
@@ -947,6 +949,8 @@ pub(crate) struct RegionChangeResult {
     pub(crate) result: Result<()>,
     /// Used for index build in schema change.
     pub(crate) need_index: bool,
+    /// New options for the region.
+    pub(crate) new_options: Option<RegionOptions>,
 }
 
 /// Request to edit a region directly.
@@ -969,6 +973,8 @@ pub(crate) struct RegionEditResult {
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+    /// Whether region state need to be set to Writable after handling this request.
+    pub(crate) update_region_state: bool,
 }
 
 #[derive(Debug)]

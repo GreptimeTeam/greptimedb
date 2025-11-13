@@ -14,8 +14,6 @@
 
 //! Handling create request.
 
-use std::sync::Arc;
-
 use common_telemetry::info;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataBuilder;
@@ -84,7 +82,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.region_count.inc();
 
         // Insert the MitoRegion into the RegionMap.
-        self.regions.insert_region(Arc::new(region));
+        self.regions.insert_region(region);
 
         Ok(0)
     }

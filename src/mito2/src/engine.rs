@@ -83,7 +83,8 @@ use async_trait::async_trait;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::{MemoryPermit, QueryMemoryTracker, SendableRecordBatchStream};
+use common_stat::get_total_memory_bytes;
 use common_telemetry::{info, tracing, warn};
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use futures::future::{join_all, try_join_all};
@@ -122,7 +123,9 @@ use crate::extension::BoxedExtensionRangeProviderFactory;
 use crate::gc::GcLimiterRef;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableStats;
-use crate::metrics::HANDLE_REQUEST_ELAPSED;
+use crate::metrics::{
+    HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_USAGE_BYTES, SCAN_REQUESTS_REJECTED_TOTAL,
+};
 use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
@@ -147,6 +150,7 @@ pub struct MitoEngineBuilder<'a, S: LogStore> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     plugins: Plugins,
+    max_concurrent_queries: usize,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
@@ -162,6 +166,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         file_ref_manager: FileReferenceManagerRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
+        max_concurrent_queries: usize,
     ) -> Self {
         Self {
             data_home,
@@ -172,6 +177,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             file_ref_manager,
             plugins,
             partition_expr_fetcher,
+            max_concurrent_queries,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         }
@@ -204,10 +210,22 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         )
         .await?;
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
+        let total_memory = get_total_memory_bytes().max(0) as u64;
+        let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
+        let scan_memory_tracker =
+            QueryMemoryTracker::new(scan_memory_limit, self.max_concurrent_queries)
+                .with_on_update(|usage| {
+                    SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+                })
+                .with_on_reject(|| {
+                    SCAN_REQUESTS_REJECTED_TOTAL.inc();
+                });
+
         let inner = EngineInner {
             workers,
             config,
             wal_raw_entry_reader,
+            scan_memory_tracker,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         };
@@ -250,6 +268,7 @@ impl MitoEngine {
             file_ref_manager,
             partition_expr_fetcher,
             plugins,
+            0, // Default: no limit on concurrent queries
         );
         builder.try_build().await
     }
@@ -614,6 +633,8 @@ struct EngineInner {
     config: Arc<MitoConfig>,
     /// The Wal raw entry reader.
     wal_raw_entry_reader: Arc<dyn RawEntryReader>,
+    /// Memory tracker for table scans.
+    scan_memory_tracker: QueryMemoryTracker,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
@@ -938,8 +959,7 @@ impl EngineInner {
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
-        .with_start_time(query_start)
-        .with_flat_format(self.config.default_experimental_flat_format);
+        .with_start_time(query_start);
 
         #[cfg(feature = "enterprise")]
         let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);
@@ -1105,6 +1125,10 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)
     }
 
+    fn register_query_memory_permit(&self) -> Option<Arc<MemoryPermit>> {
+        Some(Arc::new(self.inner.scan_memory_tracker.register_permit()))
+    }
+
     async fn get_committed_sequence(
         &self,
         region_id: RegionId,
@@ -1249,6 +1273,15 @@ impl MitoEngine {
 
         let config = Arc::new(config);
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
+        let total_memory = get_total_memory_bytes().max(0) as u64;
+        let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
+        let scan_memory_tracker = QueryMemoryTracker::new(scan_memory_limit, 0)
+            .with_on_update(|usage| {
+                SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+            })
+            .with_on_reject(|| {
+                SCAN_REQUESTS_REJECTED_TOTAL.inc();
+            });
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
@@ -1265,6 +1298,7 @@ impl MitoEngine {
                 .await?,
                 config,
                 wal_raw_entry_reader,
+                scan_memory_tracker,
                 #[cfg(feature = "enterprise")]
                 extension_range_provider_factory: None,
             }),

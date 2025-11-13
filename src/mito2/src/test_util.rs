@@ -629,6 +629,7 @@ impl TestEnv {
             local_store,
             capacity,
             None,
+            None,
             self.puffin_manager.clone(),
             self.intermediate_manager.clone(),
         )
@@ -647,6 +648,7 @@ impl TestEnv {
         let write_cache = WriteCache::new_fs(
             path,
             capacity,
+            None,
             None,
             self.puffin_manager.clone(),
             self.intermediate_manager.clone(),
@@ -1178,7 +1180,7 @@ pub async fn delete_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Delete(RegionDeleteRequest { rows }),
+            RegionRequest::Delete(RegionDeleteRequest { rows, hint: None }),
         )
         .await
         .unwrap();

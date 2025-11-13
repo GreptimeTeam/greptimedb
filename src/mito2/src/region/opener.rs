@@ -41,6 +41,7 @@ use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
+use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::config::MitoConfig;
 use crate::error;
 use crate::error::{
@@ -52,21 +53,23 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, Rem
 use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::MemtableBuilderProvider;
 use crate::memtable::bulk::part::BulkPart;
-use crate::memtable::time_partition::TimePartitions;
+use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
+use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
-    ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState,
+    ManifestContext, ManifestStats, MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState,
 };
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::FormatType;
-use crate::sst::file_purger::create_local_file_purger;
+use crate::sst::file::RegionFileId;
+use crate::sst::file_purger::{FilePurgerRef, create_local_file_purger};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
-use crate::sst::location::region_dir_from_table_dir;
+use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
@@ -217,7 +220,7 @@ impl RegionOpener {
         mut self,
         config: &MitoConfig,
         wal: &Wal<S>,
-    ) -> Result<MitoRegion> {
+    ) -> Result<MitoRegionRef> {
         let region_id = self.region_id;
         let region_dir = self.region_dir();
         let metadata = self.build_metadata()?;
@@ -252,17 +255,19 @@ impl RegionOpener {
             }
         }
         // Safety: must be set before calling this method.
-        let options = self.options.take().unwrap();
+        let mut options = self.options.take().unwrap();
         let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
         let provider = self.provider::<S>(&options.wal_options)?;
         let metadata = Arc::new(metadata);
-        // Set the sst_format based on options or flat_format flag
+        // Sets the sst_format based on options or flat_format flag
         let sst_format = if let Some(format) = options.sst_format {
             format
         } else if config.default_experimental_flat_format {
+            options.sst_format = Some(FormatType::Flat);
             FormatType::Flat
         } else {
             // Default to PrimaryKeyParquet for newly created regions
+            options.sst_format = Some(FormatType::PrimaryKey);
             FormatType::PrimaryKey
         };
         // Create a manifest manager for this region and writes regions to the manifest file.
@@ -290,7 +295,10 @@ impl RegionOpener {
             part_duration,
         ));
 
-        debug!("Create region {} with options: {:?}", region_id, options);
+        debug!(
+            "Create region {} with options: {:?}, default_flat_format: {}",
+            region_id, options, config.default_experimental_flat_format
+        );
 
         let version = VersionBuilder::new(metadata, mutable)
             .options(options)
@@ -305,7 +313,7 @@ impl RegionOpener {
         ));
         let now = self.time_provider.current_time_millis();
 
-        Ok(MitoRegion {
+        Ok(Arc::new(MitoRegion {
             region_id,
             version_control,
             access_layer: access_layer.clone(),
@@ -325,11 +333,9 @@ impl RegionOpener {
             last_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(0),
-            memtable_builder,
             written_bytes: Arc::new(AtomicU64::new(0)),
-            sst_format,
             stats: self.stats,
-        })
+        }))
     }
 
     /// Opens an existing region in read only mode.
@@ -339,7 +345,7 @@ impl RegionOpener {
         mut self,
         config: &MitoConfig,
         wal: &Wal<S>,
-    ) -> Result<MitoRegion> {
+    ) -> Result<MitoRegionRef> {
         let region_id = self.region_id;
         let region_dir = self.region_dir();
         let region = self
@@ -397,8 +403,9 @@ impl RegionOpener {
         &mut self,
         config: &MitoConfig,
         wal: &Wal<S>,
-    ) -> Result<Option<MitoRegion>> {
-        let region_options = self.options.as_ref().unwrap().clone();
+    ) -> Result<Option<MitoRegionRef>> {
+        let now = Instant::now();
+        let mut region_options = self.options.as_ref().unwrap().clone();
 
         let region_manifest_options = Self::manifest_options(
             config,
@@ -428,6 +435,8 @@ impl RegionOpener {
         } else {
             manifest.metadata.clone()
         };
+        // Updates the region options with the manifest.
+        sanitize_region_options(&manifest, &mut region_options);
 
         let region_id = self.region_id;
         let provider = self.provider::<S>(&region_options.wal_options)?;
@@ -456,6 +465,7 @@ impl RegionOpener {
             self.cache_manager.clone(),
             self.file_ref_manager.clone(),
         );
+        // We should sanitize the region options before creating a new memtable.
         let memtable_builder = self
             .memtable_builder_provider
             .builder_for_options(&region_options);
@@ -472,14 +482,16 @@ impl RegionOpener {
             0,
             part_duration,
         ));
-        let version = VersionBuilder::new(metadata, mutable)
-            .add_files(file_purger.clone(), manifest.files.values().cloned())
-            .flushed_entry_id(manifest.flushed_entry_id)
-            .flushed_sequence(manifest.flushed_sequence)
-            .truncated_entry_id(manifest.truncated_entry_id)
-            .compaction_time_window(manifest.compaction_time_window)
-            .options(region_options)
-            .build();
+
+        // Updates region options by manifest before creating version.
+        let version_builder = version_builder_from_manifest(
+            &manifest,
+            metadata,
+            file_purger.clone(),
+            mutable,
+            region_options,
+        );
+        let version = version_builder.build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
 
@@ -489,8 +501,12 @@ impl RegionOpener {
                 .unwrap_or_default()
                 .max(flushed_entry_id);
             info!(
-                "Start replaying memtable at replay_from_entry_id: {} for region {}, manifest version: {}, flushed entry id: {}",
-                replay_from_entry_id, region_id, manifest.manifest_version, flushed_entry_id
+                "Start replaying memtable at replay_from_entry_id: {} for region {}, manifest version: {}, flushed entry id: {}, elapsed: {:?}",
+                replay_from_entry_id,
+                region_id,
+                manifest.manifest_version,
+                flushed_entry_id,
+                now.elapsed()
             );
             replay_memtable(
                 &provider,
@@ -512,8 +528,11 @@ impl RegionOpener {
             }
         } else {
             info!(
-                "Skip the WAL replay for region: {}, manifest version: {}, flushed_entry_id: {}",
-                region_id, manifest.manifest_version, flushed_entry_id
+                "Skip the WAL replay for region: {}, manifest version: {}, flushed_entry_id: {}, elapsed: {:?}",
+                region_id,
+                manifest.manifest_version,
+                flushed_entry_id,
+                now.elapsed()
             );
 
             0
@@ -534,13 +553,11 @@ impl RegionOpener {
         }
 
         let now = self.time_provider.current_time_millis();
-        // Read sst_format from manifest
-        let sst_format = manifest.sst_format;
 
         let region = MitoRegion {
             region_id: self.region_id,
-            version_control,
-            access_layer,
+            version_control: version_control.clone(),
+            access_layer: access_layer.clone(),
             // Region is always opened in read only mode.
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
@@ -553,10 +570,13 @@ impl RegionOpener {
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
             written_bytes: Arc::new(AtomicU64::new(0)),
-            memtable_builder,
-            sst_format,
             stats: self.stats.clone(),
         };
+
+        let region = Arc::new(region);
+
+        maybe_load_cache(&region, config, &self.cache_manager);
+
         Ok(Some(region))
     }
 
@@ -580,6 +600,37 @@ impl RegionOpener {
                 keep_ttl: config.experimental_manifest_keep_removed_file_ttl,
             },
         })
+    }
+}
+
+/// Creates a version builder from a region manifest.
+pub(crate) fn version_builder_from_manifest(
+    manifest: &RegionManifest,
+    metadata: RegionMetadataRef,
+    file_purger: FilePurgerRef,
+    mutable: TimePartitionsRef,
+    region_options: RegionOptions,
+) -> VersionBuilder {
+    VersionBuilder::new(metadata, mutable)
+        .add_files(file_purger, manifest.files.values().cloned())
+        .flushed_entry_id(manifest.flushed_entry_id)
+        .flushed_sequence(manifest.flushed_sequence)
+        .truncated_entry_id(manifest.truncated_entry_id)
+        .compaction_time_window(manifest.compaction_time_window)
+        .options(region_options)
+}
+
+/// Updates region options by persistent options.
+pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut RegionOptions) {
+    let option_format = options.sst_format.unwrap_or_default();
+    if option_format != manifest.sst_format {
+        common_telemetry::warn!(
+            "Overriding SST format from {:?} to {:?} for region {}",
+            option_format,
+            manifest.sst_format,
+            manifest.metadata.region_id,
+        );
+        options.sst_format = Some(manifest.sst_format);
     }
 }
 
@@ -808,4 +859,156 @@ where
 /// Returns the directory to the manifest files.
 pub(crate) fn new_manifest_dir(region_dir: &str) -> String {
     join_dir(region_dir, "manifest")
+}
+
+/// A task to load and fill the region file cache.
+pub(crate) struct RegionLoadCacheTask {
+    region: MitoRegionRef,
+}
+
+impl RegionLoadCacheTask {
+    pub(crate) fn new(region: MitoRegionRef) -> Self {
+        Self { region }
+    }
+
+    /// Fills the file cache with index files from the region.
+    pub(crate) async fn fill_cache(&self, file_cache: FileCacheRef) {
+        let region_id = self.region.region_id;
+        let table_dir = self.region.access_layer.table_dir();
+        let path_type = self.region.access_layer.path_type();
+        let object_store = self.region.access_layer.object_store();
+        let version_control = &self.region.version_control;
+
+        // Collects IndexKeys and file sizes for files that need to be downloaded
+        let mut files_to_download = Vec::new();
+        let mut files_already_cached = 0;
+
+        {
+            let version = version_control.current().version;
+            for level in version.ssts.levels() {
+                for file_handle in level.files.values() {
+                    let file_meta = file_handle.meta_ref();
+                    if file_meta.exists_index() {
+                        let puffin_key = IndexKey::new(
+                            file_meta.region_id,
+                            file_meta.index_file_id().file_id(),
+                            FileType::Puffin,
+                        );
+
+                        if !file_cache.contains_key(&puffin_key) {
+                            files_to_download.push((puffin_key, file_meta.index_file_size));
+                        } else {
+                            files_already_cached += 1;
+                        }
+                    }
+                }
+            }
+            // Releases the Version after the scope to avoid holding the memtables and file handles
+            // for a long time.
+        }
+        let total_files = files_to_download.len() as i64;
+
+        info!(
+            "Starting background index cache preload for region {}, total_files_to_download: {}, files_already_cached: {}",
+            region_id, total_files, files_already_cached
+        );
+
+        CACHE_FILL_PENDING_FILES.add(total_files);
+
+        let mut files_downloaded = 0;
+        let mut files_skipped = 0;
+
+        for (puffin_key, file_size) in files_to_download {
+            let current_size = file_cache.puffin_cache_size();
+            let capacity = file_cache.puffin_cache_capacity();
+            let region_state = self.region.state();
+            if !can_load_cache(region_state) {
+                info!(
+                    "Stopping index cache by state: {:?}, region: {}, current_size: {}, capacity: {}",
+                    region_state, region_id, current_size, capacity
+                );
+                break;
+            }
+
+            // Checks if adding this file would exceed capacity
+            if current_size + file_size > capacity {
+                info!(
+                    "Stopping index cache preload due to capacity limit, region: {}, file_id: {}, current_size: {}, file_size: {}, capacity: {}",
+                    region_id, puffin_key.file_id, current_size, file_size, capacity
+                );
+                files_skipped = (total_files - files_downloaded) as usize;
+                CACHE_FILL_PENDING_FILES.sub(total_files - files_downloaded);
+                break;
+            }
+
+            let index_remote_path = location::index_file_path(
+                table_dir,
+                RegionFileId::new(puffin_key.region_id, puffin_key.file_id),
+                path_type,
+            );
+
+            match file_cache
+                .download(puffin_key, &index_remote_path, object_store, file_size)
+                .await
+            {
+                Ok(_) => {
+                    debug!(
+                        "Downloaded index file to write cache, region: {}, file_id: {}",
+                        region_id, puffin_key.file_id
+                    );
+                    files_downloaded += 1;
+                    CACHE_FILL_DOWNLOADED_FILES.inc_by(1);
+                    CACHE_FILL_PENDING_FILES.dec();
+                }
+                Err(e) => {
+                    warn!(
+                        e; "Failed to download index file to write cache, region: {}, file_id: {}",
+                        region_id, puffin_key.file_id
+                    );
+                    CACHE_FILL_PENDING_FILES.dec();
+                }
+            }
+        }
+
+        info!(
+            "Completed background cache fill task for region {}, total_files: {}, files_downloaded: {}, files_already_cached: {}, files_skipped: {}",
+            region_id, total_files, files_downloaded, files_already_cached, files_skipped
+        );
+    }
+}
+
+/// Loads all index (Puffin) files from the version into the write cache.
+fn maybe_load_cache(
+    region: &MitoRegionRef,
+    config: &MitoConfig,
+    cache_manager: &Option<CacheManagerRef>,
+) {
+    let Some(cache_manager) = cache_manager else {
+        return;
+    };
+    let Some(write_cache) = cache_manager.write_cache() else {
+        return;
+    };
+
+    let preload_enabled = config.preload_index_cache;
+    if !preload_enabled {
+        return;
+    }
+
+    let task = RegionLoadCacheTask::new(region.clone());
+    write_cache.load_region_cache(task);
+}
+
+fn can_load_cache(state: RegionRoleState) -> bool {
+    match state {
+        RegionRoleState::Leader(RegionLeaderState::Writable)
+        | RegionRoleState::Leader(RegionLeaderState::Staging)
+        | RegionRoleState::Leader(RegionLeaderState::Altering)
+        | RegionRoleState::Leader(RegionLeaderState::Editing)
+        | RegionRoleState::Follower => true,
+        // The region will be closed soon if it is downgrading.
+        RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        | RegionRoleState::Leader(RegionLeaderState::Dropping)
+        | RegionRoleState::Leader(RegionLeaderState::Truncating) => false,
+    }
 }

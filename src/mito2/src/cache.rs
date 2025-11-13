@@ -53,6 +53,8 @@ const VECTOR_TYPE: &str = "vector";
 const PAGE_TYPE: &str = "page";
 /// Metrics type key for files on the local store.
 const FILE_TYPE: &str = "file";
+/// Metrics type key for index files (puffin) on the local store.
+const INDEX_TYPE: &str = "index";
 /// Metrics type key for selector result cache.
 const SELECTOR_RESULT_TYPE: &str = "selector_result";
 

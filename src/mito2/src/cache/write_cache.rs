@@ -23,6 +23,7 @@ use futures::AsyncWriteExt;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::access_layer::{
     FilePathProvider, Metrics, RegionFilePathFactory, SstInfoArray, SstWriteRequest,
@@ -30,9 +31,8 @@ use crate::access_layer::{
 };
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
-use crate::metrics::{
-    UPLOAD_BYTES_TOTAL, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL, WRITE_CACHE_DOWNLOAD_ELAPSED,
-};
+use crate::metrics::UPLOAD_BYTES_TOTAL;
+use crate::region::opener::RegionLoadCacheTask;
 use crate::sst::file::RegionFileId;
 use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -51,6 +51,8 @@ pub struct WriteCache {
     puffin_manager_factory: PuffinManagerFactory,
     /// Intermediate manager for index.
     intermediate_manager: IntermediateManager,
+    /// Sender for region load cache tasks.
+    task_sender: UnboundedSender<RegionLoadCacheTask>,
 }
 
 pub type WriteCacheRef = Arc<WriteCache>;
@@ -62,16 +64,25 @@ impl WriteCache {
         local_store: ObjectStore,
         cache_capacity: ReadableSize,
         ttl: Option<Duration>,
+        index_cache_percent: Option<u8>,
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
-        let file_cache = Arc::new(FileCache::new(local_store, cache_capacity, ttl));
-        file_cache.recover(false).await;
+        let (task_sender, task_receiver) = unbounded_channel();
+
+        let file_cache = Arc::new(FileCache::new(
+            local_store,
+            cache_capacity,
+            ttl,
+            index_cache_percent,
+        ));
+        file_cache.recover(false, Some(task_receiver)).await;
 
         Ok(Self {
             file_cache,
             puffin_manager_factory,
             intermediate_manager,
+            task_sender,
         })
     }
 
@@ -80,6 +91,7 @@ impl WriteCache {
         cache_dir: &str,
         cache_capacity: ReadableSize,
         ttl: Option<Duration>,
+        index_cache_percent: Option<u8>,
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
@@ -90,6 +102,7 @@ impl WriteCache {
             local_store,
             cache_capacity,
             ttl,
+            index_cache_percent,
             puffin_manager_factory,
             intermediate_manager,
         )
@@ -272,85 +285,9 @@ impl WriteCache {
         remote_store: &ObjectStore,
         file_size: u64,
     ) -> Result<()> {
-        if let Err(e) = self
-            .download_without_cleaning(index_key, remote_path, remote_store, file_size)
+        self.file_cache
+            .download(index_key, remote_path, remote_store, file_size)
             .await
-        {
-            let filename = index_key.to_string();
-            TempFileCleaner::clean_atomic_dir_files(&self.file_cache.local_store(), &[&filename])
-                .await;
-
-            return Err(e);
-        }
-        Ok(())
-    }
-
-    async fn download_without_cleaning(
-        &self,
-        index_key: IndexKey,
-        remote_path: &str,
-        remote_store: &ObjectStore,
-        file_size: u64,
-    ) -> Result<()> {
-        const DOWNLOAD_READER_CONCURRENCY: usize = 8;
-        const DOWNLOAD_READER_CHUNK_SIZE: ReadableSize = ReadableSize::mb(8);
-
-        let file_type = index_key.file_type;
-        let timer = WRITE_CACHE_DOWNLOAD_ELAPSED
-            .with_label_values(&[match file_type {
-                FileType::Parquet => "download_parquet",
-                FileType::Puffin => "download_puffin",
-            }])
-            .start_timer();
-
-        let reader = remote_store
-            .reader_with(remote_path)
-            .concurrent(DOWNLOAD_READER_CONCURRENCY)
-            .chunk(DOWNLOAD_READER_CHUNK_SIZE.as_bytes() as usize)
-            .await
-            .context(error::OpenDalSnafu)?
-            .into_futures_async_read(0..file_size)
-            .await
-            .context(error::OpenDalSnafu)?;
-
-        let cache_path = self.file_cache.cache_file_path(index_key);
-        let mut writer = self
-            .file_cache
-            .local_store()
-            .writer(&cache_path)
-            .await
-            .context(error::OpenDalSnafu)?
-            .into_futures_async_write();
-
-        let region_id = index_key.region_id;
-        let file_id = index_key.file_id;
-        let bytes_written =
-            futures::io::copy(reader, &mut writer)
-                .await
-                .context(error::DownloadSnafu {
-                    region_id,
-                    file_id,
-                    file_type,
-                })?;
-        writer.close().await.context(error::DownloadSnafu {
-            region_id,
-            file_id,
-            file_type,
-        })?;
-
-        WRITE_CACHE_DOWNLOAD_BYTES_TOTAL.inc_by(bytes_written);
-
-        let elapsed = timer.stop_and_record();
-        debug!(
-            "Successfully download file '{}' to local '{}', file size: {}, region: {}, cost: {:?}s",
-            remote_path, cache_path, bytes_written, region_id, elapsed,
-        );
-
-        let index_value = IndexValue {
-            file_size: bytes_written as _,
-        };
-        self.file_cache.put(index_key, index_value).await;
-        Ok(())
     }
 
     /// Uploads a Parquet file or a Puffin file to the remote object store.
@@ -423,6 +360,13 @@ impl WriteCache {
         self.file_cache.put(index_key, index_value).await;
 
         Ok(())
+    }
+
+    /// Sends a region load cache task to the background processing queue.
+    ///
+    /// If the receiver has been dropped, the error is ignored.
+    pub(crate) fn load_region_cache(&self, task: RegionLoadCacheTask) {
+        let _ = self.task_sender.send(task);
     }
 }
 

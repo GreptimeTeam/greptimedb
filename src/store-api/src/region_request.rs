@@ -51,7 +51,7 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
+    SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -214,7 +214,7 @@ fn make_region_deletes(deletes: DeleteRequests) -> Result<Vec<(RegionId, RegionR
             r.rows.map(|rows| {
                 (
                     region_id,
-                    RegionRequest::Delete(RegionDeleteRequest { rows }),
+                    RegionRequest::Delete(RegionDeleteRequest { rows, hint: None }),
                 )
             })
         })
@@ -423,6 +423,8 @@ pub struct RegionDeleteRequest {
     ///
     /// Each row only contains primary key columns and a time index column.
     pub rows: Rows,
+    /// Write hint.
+    pub hint: Option<WriteHint>,
 }
 
 #[derive(Debug, Clone)]
@@ -879,11 +881,7 @@ impl AlterKind {
             AlterKind::ModifyColumnTypes { columns } => columns
                 .iter()
                 .any(|col_to_change| col_to_change.need_alter(metadata)),
-            AlterKind::SetRegionOptions { .. } => {
-                // we need to update region options for `ChangeTableOptions`.
-                // todo: we need to check if ttl has ever changed.
-                true
-            }
+            AlterKind::SetRegionOptions { .. } => true,
             AlterKind::UnsetRegionOptions { .. } => true,
             AlterKind::SetIndexes { options, .. } => options
                 .iter()
@@ -1256,6 +1254,8 @@ pub enum SetRegionOption {
     Ttl(Option<TimeToLive>),
     // Modifying TwscOptions with values as (option name, new value).
     Twsc(String, String),
+    // Modifying the SST format.
+    Format(String),
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1273,6 +1273,7 @@ impl TryFrom<&PbOption> for SetRegionOption {
             TWCS_TRIGGER_FILE_NUM | TWCS_MAX_OUTPUT_FILE_SIZE | TWCS_TIME_WINDOW => {
                 Ok(Self::Twsc(key.clone(), value.clone()))
             }
+            SST_FORMAT_KEY => Ok(Self::Format(value.clone())),
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
     }

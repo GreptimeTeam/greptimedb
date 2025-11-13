@@ -15,6 +15,7 @@
 //! Handling open request.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use common_telemetry::info;
 use object_store::util::join_path;
@@ -119,6 +120,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
+        let now = Instant::now();
         let regions = self.regions.clone();
         let wal = self.wal.clone();
         let config = self.config.clone();
@@ -129,11 +131,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         common_runtime::spawn_global(async move {
             match opener.open(&config, &wal).await {
                 Ok(region) => {
-                    info!("Region {} is opened, worker: {}", region_id, worker_id);
+                    info!(
+                        "Region {} is opened, worker: {}, elapsed: {:?}",
+                        region_id,
+                        worker_id,
+                        now.elapsed()
+                    );
                     region_count.inc();
 
                     // Insert the Region into the RegionMap.
-                    regions.insert_region(Arc::new(region));
+                    regions.insert_region(region);
 
                     let senders = opening_regions.remove_sender(region_id);
                     for sender in senders {

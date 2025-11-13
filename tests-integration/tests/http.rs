@@ -1497,6 +1497,8 @@ auto_flush_interval = "30m"
 enable_write_cache = false
 write_cache_path = ""
 write_cache_size = "5GiB"
+preload_index_cache = true
+index_cache_percent = 20
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
 max_concurrent_scan_files = 384
@@ -1584,6 +1586,8 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "enable_virtual_host_style =",
         "cache_path =",
         "cache_capacity =",
+        "memory_pool_size =",
+        "scan_memory_limit =",
         "sas_token =",
         "scope =",
         "num_workers =",

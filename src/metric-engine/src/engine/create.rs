@@ -528,7 +528,7 @@ impl MetricEngineInner {
         // set data region options
         set_data_region_options(
             &mut data_region_request.options,
-            self.config.experimental_sparse_primary_key_encoding,
+            self.config.sparse_primary_key_encoding,
         );
 
         data_region_request

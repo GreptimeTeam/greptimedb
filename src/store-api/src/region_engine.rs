@@ -23,7 +23,7 @@ use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole
 use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{EmptyRecordBatchStream, MemoryPermit, SendableRecordBatchStream};
 use common_time::Timestamp;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType};
@@ -782,6 +782,11 @@ pub trait RegionEngine: Send + Sync {
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError>;
+
+    /// Registers and returns a query memory permit.
+    fn register_query_memory_permit(&self) -> Option<Arc<MemoryPermit>> {
+        None
+    }
 
     /// Retrieves region's metadata.
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError>;
