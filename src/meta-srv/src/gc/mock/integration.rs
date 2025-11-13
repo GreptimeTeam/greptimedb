@@ -38,10 +38,10 @@ async fn test_full_gc_workflow() {
     let mut region_stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10); // 200MB
 
     if let RegionManifestInfo::Mito {
-        file_removal_rate, ..
+        file_removed_cnt, ..
     } = &mut region_stat.region_manifest
     {
-        *file_removal_rate = 5;
+        *file_removed_cnt = 5;
     }
 
     let table_stats = HashMap::from([(table_id, vec![region_stat])]);
@@ -126,13 +126,13 @@ async fn test_tracker_cleanup() {
     let region_id = RegionId::new(table_id, 1);
     let peer = Peer::new(1, "");
 
-    // Create region stat with proper file_removal_rate to ensure it gets selected as candidate
+    // Create region stat with proper file_removed_cnt to ensure it gets selected as candidate
     let mut region_stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10); // 200MB
     if let RegionManifestInfo::Mito {
-        file_removal_rate, ..
+        file_removed_cnt, ..
     } = &mut region_stat.region_manifest
     {
-        *file_removal_rate = 5;
+        *file_removed_cnt = 5;
     }
 
     let table_stats = HashMap::from([(table_id, vec![region_stat])]);
