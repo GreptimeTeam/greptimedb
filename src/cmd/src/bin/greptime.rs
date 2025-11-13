@@ -119,7 +119,7 @@ async fn start(cli: Command) -> Result<()> {
                 .await
         }
         SubCommand::Frontend(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
+            cmd.build(cmd.load_options(&cli.global_options)?, Default::default())
                 .await?
                 .run()
                 .await

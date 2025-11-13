@@ -50,6 +50,7 @@ use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, Result};
+use crate::extension::frontend::Extension;
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
@@ -110,8 +111,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
-        self.subcmd.build(opts).await
+    pub async fn build(&self, opts: FrontendOptions, extension: Extension) -> Result<Instance> {
+        self.subcmd.build(opts, extension).await
     }
 
     pub fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
@@ -125,9 +126,9 @@ pub enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
+    async fn build(&self, opts: FrontendOptions, extension: Extension) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build(opts).await,
+            SubCommand::Start(cmd) => cmd.build(opts, extension).await,
         }
     }
 
@@ -308,7 +309,10 @@ impl StartCommand {
         Ok(())
     }
 
-    async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
+    async fn build(&self, opts: FrontendOptions, extension: Extension) -> Result<Instance> {
+        #[cfg(not(feature = "enterprise"))]
+        let _ = extension;
+
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -415,7 +419,9 @@ impl StartCommand {
         )
         .with_process_manager(process_manager.clone());
         #[cfg(feature = "enterprise")]
-        let builder = if let Some(factories) = plugins.get() {
+        let builder = if let Some(provider) = extension.ist_factory_provider {
+            let factories =
+                provider.create_factories(crate::extension::common::IstContext { fe_client: None });
             builder.with_extra_information_table_factories(factories)
         } else {
             builder
