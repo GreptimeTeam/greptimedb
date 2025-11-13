@@ -208,18 +208,7 @@ pub async fn infer_schemas(
 
 /// Writes data to a compressed writer if the data is not empty.
 ///
-/// This is a helper function that checks if the data slice contains any bytes
-/// before writing to avoid unnecessary operations with empty data.
-///
-/// # Arguments
-///
-/// * `compressed_writer` - The mutable reference to the compressed writer
-/// * `data` - The byte slice to write to the writer
-///
-/// # Returns
-///
-/// Returns `Ok(())` if the write operation succeeds or if data is empty,
-/// otherwise returns an error if the write operation fails.
+/// Does nothing if `data` is empty; otherwise writes all data and returns any error.
 async fn write_to_compressed_writer(
     compressed_writer: &mut CompressedWriter,
     data: &[u8],
@@ -233,31 +222,12 @@ async fn write_to_compressed_writer(
     Ok(())
 }
 
-/// Streams record batches to a file with compression support.
+/// Streams [SendableRecordBatchStream] to a file with optional compression support.
+/// Data is buffered and flushed according to the given `threshold`.
+/// Ensures that writer resources are cleanly released and that an empty file is not
+/// created if no rows are written.
 ///
-/// This function provides a generic implementation for writing record batches to files
-/// with various compression types. It handles buffering, threshold-based flushing,
-/// and proper resource cleanup.
-///
-/// # Arguments
-///
-/// * `stream` - The input stream of record batches to write
-/// * `store` - The object store where the file will be written
-/// * `path` - The path of the file to write
-/// * `threshold` - The buffer size threshold that triggers flushing to disk
-/// * `concurrency` - The concurrency level for the writer
-/// * `compression_type` - The type of compression to apply to the output
-/// * `encoder_factory` - A factory function that creates an encoder for the specific format
-///
-/// # Returns
-///
-/// Returns the total number of rows written to the file, or an error if the operation fails.
-///
-/// # Notes
-///
-/// - If no rows are written, the file is not created to avoid empty files
-/// - The function handles both buffered writing and final flushing of remaining data
-/// - Proper cleanup of resources is guaranteed even in case of errors
+/// Returns the total number of rows successfully written.
 pub async fn stream_to_file<E>(
     mut stream: SendableRecordBatchStream,
     store: ObjectStore,
@@ -323,29 +293,10 @@ where
     Ok(rows)
 }
 
-/// Builds a `FileStream` for reading data from a file source.
+/// Creates a [FileStream] for reading data from a file with optional column projection
+/// and compression support.
 ///
-/// This function creates a configured FileStream that can read data from a file
-/// with optional column projection and compression support.
-///
-/// # Arguments
-///
-/// * `store` - The object store containing the file to read
-/// * `filename` - The name of the file to read
-/// * `file_schema` - The schema reference describing the file structure
-/// * `file_source` - The file source implementation for the specific format
-/// * `projection` - Optional list of column indices to read (None for all columns)
-/// * `compression_type` - The type of compression applied to the file
-///
-/// # Returns
-///
-/// Returns a pinned, boxed SendableRecordBatchStream that can be used to read
-/// the file data as record batches, or an error if the stream creation fails.
-///
-/// # Notes
-///
-/// - The function configures the stream with appropriate compression settings
-/// - Column projection can be used to read only a subset of columns for efficiency
+/// Returns [SendableRecordBatchStream].
 pub async fn file_to_stream(
     store: &ObjectStore,
     filename: &str,

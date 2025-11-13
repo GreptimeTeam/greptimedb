@@ -137,9 +137,16 @@ impl DfRecordBatchEncoder for json::Writer<SharedBuffer, LineDelimited> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
+    use common_recordbatch::{RecordBatch, RecordBatches};
     use common_test_util::find_workspace_path;
     use datafusion::datasource::physical_plan::{FileSource, JsonSource};
-    use futures_util::StreamExt;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{Float64Vector, StringVector, UInt32Vector, VectorRef};
+    use futures::TryStreamExt;
 
     use super::*;
     use crate::file_format::{
@@ -217,14 +224,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_compressed_json() {
-        use std::sync::Arc;
-
-        use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
-        use common_recordbatch::{RecordBatch, RecordBatches};
-        use datatypes::prelude::ConcreteDataType;
-        use datatypes::schema::{ColumnSchema, Schema};
-        use datatypes::vectors::{Float64Vector, StringVector, UInt32Vector, VectorRef};
-
         // Create test data
         let column_schemas = vec![
             ColumnSchema::new("id", ConcreteDataType::uint32_datatype(), false),
@@ -273,10 +272,10 @@ mod tests {
             };
 
             // Create a temporary file path
-            let temp_dir = std::env::temp_dir();
+            let temp_dir = common_test_util::temp_dir::create_temp_dir("test_compressed_json");
             let compressed_file_name =
                 format!("test_compressed_json.{}", compression_type.file_extension());
-            let compressed_file_path = temp_dir.join(&compressed_file_name);
+            let compressed_file_path = temp_dir.path().join(&compressed_file_name);
             let compressed_file_path_str = compressed_file_path.to_str().unwrap();
 
             // Create a simple file store for testing
@@ -352,7 +351,7 @@ mod tests {
                 .with_schema(schema.clone())
                 .with_batch_size(8192);
 
-            let mut stream = file_to_stream(
+            let stream = file_to_stream(
                 &store,
                 compressed_file_path_str,
                 schema.clone(),
@@ -363,76 +362,24 @@ mod tests {
             .await
             .unwrap();
 
-            // Collect all record batches
-            let mut record_batches = vec![];
-            while let Some(batch) = stream.next().await {
-                record_batches.push(batch.unwrap());
-            }
-
-            // Verify we got all 9 rows
-            let total_rows: usize = record_batches.iter().map(|b| b.num_rows()).sum();
-            assert_eq!(
-                total_rows, 9,
-                "Expected 9 rows for {:?}, but got {}",
-                compression_type, total_rows
-            );
-
-            // Convert record batches to a format we can easily verify
-            let mut parsed_data: Vec<(u32, String, f64)> = Vec::new();
-            for batch in record_batches {
-                let id_col = batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<datatypes::arrow::array::Int64Array>()
-                    .unwrap();
-                let name_col = batch
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<datatypes::arrow::array::StringArray>()
-                    .unwrap();
-                let value_col = batch
-                    .column(2)
-                    .as_any()
-                    .downcast_ref::<datatypes::arrow::array::Float64Array>()
-                    .unwrap();
-
-                for i in 0..batch.num_rows() {
-                    parsed_data.push((
-                        id_col.value(i) as u32,
-                        name_col.value(i).to_string(),
-                        value_col.value(i),
-                    ));
-                }
-            }
-
-            // Verify the data content matches the original
-            let expected_ids = vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9];
-            let expected_names = vec![
-                "Alice", "Bob", "Charlie", "David", "Eva", "Frank", "Grace", "Henry", "Ivy",
-            ];
-            let expected_values = vec![10.5, 20.3, 30.7, 40.1, 50.2, 60.3, 70.4, 80.5, 90.6];
-
-            for (i, (id, name, value)) in parsed_data.iter().enumerate() {
-                assert_eq!(
-                    id, &expected_ids[i],
-                    "ID mismatch at row {} for {:?}",
-                    i, compression_type
-                );
-                assert_eq!(
-                    name, &expected_names[i],
-                    "Name mismatch at row {} for {:?}",
-                    i, compression_type
-                );
-                assert!(
-                    (value - expected_values[i]).abs() < 1e-6,
-                    "Value mismatch at row {} for {:?}",
-                    i,
-                    compression_type
-                );
-            }
-
-            // Clean up
-            let _ = std::fs::remove_file(&compressed_file_path);
+            let batches = stream.try_collect::<Vec<_>>().await.unwrap();
+            let pretty_print = arrow::util::pretty::pretty_format_batches(&batches)
+                .unwrap()
+                .to_string();
+            let expected = r#"+----+---------+-------+
+| id | name    | value |
++----+---------+-------+
+| 1  | Alice   | 10.5  |
+| 2  | Bob     | 20.3  |
+| 3  | Charlie | 30.7  |
+| 4  | David   | 40.1  |
+| 5  | Eva     | 50.2  |
+| 6  | Frank   | 60.3  |
+| 7  | Grace   | 70.4  |
+| 8  | Henry   | 80.5  |
+| 9  | Ivy     | 90.6  |
++----+---------+-------+"#;
+            assert_eq!(expected, pretty_print);
         }
     }
 }

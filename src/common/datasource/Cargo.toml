@@ -46,4 +46,3 @@ url = "2.3"
 
 [dev-dependencies]
 common-test-util.workspace = true
-futures-util.workspace = true
