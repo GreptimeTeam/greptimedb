@@ -48,7 +48,7 @@ fn parse_parallelism_from_option_map(options: &HashMap<String, String>) -> usize
     options
         .get(PARALLELISM_KEY)
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or_else(|| get_total_cpu_cores())
+        .unwrap_or_else(get_total_cpu_cores)
         .max(1)
 }
 
