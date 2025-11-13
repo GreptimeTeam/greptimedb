@@ -38,6 +38,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to watch config file path: {}", path))]
+    FileWatch {
+        path: String,
+        #[snafu(source)]
+        error: notify::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Write type mismatch, column name: {}, expected: {}, actual: {}",
         column_name,
@@ -108,6 +117,7 @@ impl ErrorExt for Error {
         match self {
             Error::InvalidTlsConfig { .. }
             | Error::InvalidConfigFilePath { .. }
+            | Error::FileWatch { .. }
             | Error::TypeMismatch { .. }
             | Error::InvalidFlightData { .. }
             | Error::NotSupported { .. } => StatusCode::InvalidArguments,

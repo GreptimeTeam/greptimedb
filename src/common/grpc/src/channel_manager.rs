@@ -12,15 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::channel;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use lazy_static::lazy_static;
+use notify::{EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tokio_util::sync::CancellationToken;
@@ -29,7 +32,7 @@ use tonic::transport::{
 };
 use tower::Service;
 
-use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, Result};
+use crate::error::{CreateChannelSnafu, FileWatchSnafu, InvalidConfigFilePathSnafu, Result};
 
 const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_GRPC_REQUEST_TIMEOUT_SECS: u64 = 10;
@@ -51,6 +54,7 @@ struct Inner {
     id: u64,
     config: ChannelConfig,
     client_tls_config: Option<ClientTlsConfig>,
+    reloadable_client_tls_config: Option<Arc<ReloadableClientTlsConfig>>,
     pool: Arc<Pool>,
     channel_recycle_started: AtomicBool,
     cancel: CancellationToken,
@@ -79,6 +83,7 @@ impl Inner {
             id,
             config,
             client_tls_config: None,
+            reloadable_client_tls_config: None,
             pool,
             channel_recycle_started: AtomicBool::new(false),
             cancel,
@@ -97,6 +102,22 @@ impl ChannelManager {
         let mut inner = Inner::with_config(config.clone());
         if let Some(tls_config) = tls_config {
             inner.client_tls_config = Some(tls_config);
+        }
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
+    /// Create a ChannelManager with a reloadable TLS config
+    /// This allows TLS certificates to be reloaded dynamically when files change
+    pub fn with_reloadable_tls_config(
+        config: ChannelConfig,
+        reloadable_tls_config: Option<Arc<ReloadableClientTlsConfig>>,
+    ) -> Self {
+        let mut inner = Inner::with_config(config.clone());
+        if let Some(reloadable_config) = reloadable_tls_config.clone() {
+            inner.reloadable_client_tls_config = Some(reloadable_config.clone());
+            inner.client_tls_config = reloadable_config.get_client_config();
         }
         Self {
             inner: Arc::new(inner),
@@ -172,8 +193,21 @@ impl ChannelManager {
         self.pool().retain_channel(f);
     }
 
+    /// Clear all channels to force reconnection.
+    /// This should be called when TLS configuration changes to ensure new connections use updated certificates.
+    pub fn clear_all_channels(&self) {
+        self.pool().retain_channel(|_, _| false);
+    }
+
     fn build_endpoint(&self, addr: &str) -> Result<Endpoint> {
-        let http_prefix = if self.inner.client_tls_config.is_some() {
+        // Get the latest TLS config, either from reloadable config or static config
+        let tls_config = if let Some(reloadable_config) = &self.inner.reloadable_client_tls_config {
+            reloadable_config.get_client_config()
+        } else {
+            self.inner.client_tls_config.clone()
+        };
+
+        let http_prefix = if tls_config.is_some() {
             "https"
         } else {
             "http"
@@ -212,9 +246,9 @@ impl ChannelManager {
         if let Some(enabled) = self.config().http2_adaptive_window {
             endpoint = endpoint.http2_adaptive_window(enabled);
         }
-        if let Some(tls_config) = &self.inner.client_tls_config {
+        if let Some(tls_config) = tls_config {
             endpoint = endpoint
-                .tls_config(tls_config.clone())
+                .tls_config(tls_config)
                 .context(CreateChannelSnafu { addr })?;
         }
 
@@ -276,6 +310,144 @@ pub fn load_tls_config(tls_option: Option<&ClientTlsOption>) -> Result<Option<Cl
     Ok(Some(tls_config))
 }
 
+/// A mutable container for TLS client config
+///
+/// This struct allows dynamic reloading of client certificates and keys
+#[derive(Debug)]
+pub struct ReloadableClientTlsConfig {
+    tls_option: ClientTlsOption,
+    config: RwLock<Option<ClientTlsConfig>>,
+    version: AtomicUsize,
+}
+
+impl ReloadableClientTlsConfig {
+    /// Create client config by loading configuration from `ClientTlsOption`
+    pub fn try_new(tls_option: ClientTlsOption) -> Result<ReloadableClientTlsConfig> {
+        let client_config = load_tls_config(Some(&tls_option))?;
+        Ok(Self {
+            tls_option,
+            config: RwLock::new(client_config),
+            version: AtomicUsize::new(0),
+        })
+    }
+
+    /// Reread client certificates and keys from file system.
+    pub fn reload(&self) -> Result<()> {
+        let client_config = load_tls_config(Some(&self.tls_option))?;
+        *self.config.write().unwrap() = client_config;
+        self.version.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Get the client config held by this container
+    pub fn get_client_config(&self) -> Option<ClientTlsConfig> {
+        self.config.read().unwrap().clone()
+    }
+
+    /// Get associated `ClientTlsOption`
+    pub fn get_tls_option(&self) -> &ClientTlsOption {
+        &self.tls_option
+    }
+
+    /// Get version of current config
+    ///
+    /// this version will auto increase when client config get reloaded.
+    pub fn get_version(&self) -> usize {
+        self.version.load(Ordering::Relaxed)
+    }
+
+    fn cert_path(&self) -> Option<&Path> {
+        self.tls_option
+            .client_cert_path
+            .as_ref()
+            .map(|p| Path::new(p.as_str()))
+    }
+
+    fn key_path(&self) -> Option<&Path> {
+        self.tls_option
+            .client_key_path
+            .as_ref()
+            .map(|p| Path::new(p.as_str()))
+    }
+
+    fn server_ca_cert_path(&self) -> Option<&Path> {
+        self.tls_option
+            .server_ca_cert_path
+            .as_ref()
+            .map(|p| Path::new(p.as_str()))
+    }
+
+    fn watch_enabled(&self) -> bool {
+        self.tls_option.enabled && self.tls_option.watch
+    }
+}
+
+pub fn maybe_watch_client_tls_config(
+    client_tls_config: Arc<ReloadableClientTlsConfig>,
+    channel_manager: &ChannelManager,
+) -> Result<()> {
+    if !client_tls_config.watch_enabled() {
+        return Ok(());
+    }
+
+    let client_tls_config_for_watcher = client_tls_config.clone();
+    let channel_manager_for_watcher = channel_manager.clone();
+
+    let (tx, rx) = channel::<notify::Result<notify::Event>>();
+    let mut watcher = notify::recommended_watcher(tx).context(FileWatchSnafu { path: "<none>" })?;
+
+    // Watch client cert if present
+    if let Some(cert_path) = client_tls_config.cert_path() {
+        watcher
+            .watch(cert_path, RecursiveMode::NonRecursive)
+            .with_context(|_| FileWatchSnafu {
+                path: cert_path.display().to_string(),
+            })?;
+    }
+
+    // Watch client key if present
+    if let Some(key_path) = client_tls_config.key_path() {
+        watcher
+            .watch(key_path, RecursiveMode::NonRecursive)
+            .with_context(|_| FileWatchSnafu {
+                path: key_path.display().to_string(),
+            })?;
+    }
+
+    // Watch server CA cert if present
+    if let Some(ca_path) = client_tls_config.server_ca_cert_path() {
+        watcher
+            .watch(ca_path, RecursiveMode::NonRecursive)
+            .with_context(|_| FileWatchSnafu {
+                path: ca_path.display().to_string(),
+            })?;
+    }
+
+    std::thread::spawn(move || {
+        let _watcher = watcher;
+        while let Ok(res) = rx.recv() {
+            if let Ok(event) = res {
+                match event.kind {
+                    EventKind::Modify(_) | EventKind::Create(_) => {
+                        info!("Detected TLS cert/key file change: {:?}", event);
+                        if let Err(err) = client_tls_config_for_watcher.reload() {
+                            error!(err; "Failed to reload TLS client config");
+                        } else {
+                            info!("Reloaded TLS cert/key file successfully.");
+                            // Clear all existing channels to force reconnection with new certificates
+                            channel_manager_for_watcher.clear_all_channels();
+                            info!("Cleared all existing channels to use new TLS certificates.");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientTlsOption {
     /// Whether to enable TLS for client.
@@ -283,6 +455,7 @@ pub struct ClientTlsOption {
     pub server_ca_cert_path: Option<String>,
     pub client_cert_path: Option<String>,
     pub client_key_path: Option<String>,
+    pub watch: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -602,6 +775,7 @@ mod tests {
                 server_ca_cert_path: Some("some_server_path".to_string()),
                 client_cert_path: Some("some_cert_path".to_string()),
                 client_key_path: Some("some_key_path".to_string()),
+                watch: false,
             });
 
         assert_eq!(
@@ -623,6 +797,7 @@ mod tests {
                     server_ca_cert_path: Some("some_server_path".to_string()),
                     client_cert_path: Some("some_cert_path".to_string()),
                     client_key_path: Some("some_key_path".to_string()),
+                    watch: false,
                 }),
                 max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
                 max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
