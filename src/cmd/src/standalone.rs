@@ -436,12 +436,23 @@ impl StartCommand {
         )
         .with_procedure_manager(procedure_manager.clone())
         .with_process_manager(process_manager.clone());
+
+        // for standalone not use grpc, but get a handler to frontend grpc client without
+        // actually make a connection
+        let (frontend_client, frontend_instance_handler) =
+            FrontendClient::from_empty_grpc_handler(opts.query.clone());
+        let frontend_client = Arc::new(frontend_client);
+
         #[cfg(feature = "enterprise")]
-        let builder = if let Some(factories) = plugins.get() {
+        let builder = if let Some(provider) = extension.ist_factory_provider {
+            let factories = provider.create_factories(crate::extension::common::IstContext {
+                fe_client: Some(frontend_client.clone()),
+            });
             builder.with_extra_information_table_factories(factories)
         } else {
             builder
         };
+
         let catalog_manager = builder.build();
 
         let table_metadata_manager =
@@ -453,11 +464,6 @@ impl StartCommand {
             ..Default::default()
         };
 
-        // for standalone not use grpc, but get a handler to frontend grpc client without
-        // actually make a connection
-        let (frontend_client, frontend_instance_handler) =
-            FrontendClient::from_empty_grpc_handler(opts.query.clone());
-        let frontend_client = Arc::new(frontend_client);
         let flow_builder = FlownodeBuilder::new(
             flownode_options,
             plugins.clone(),
@@ -529,17 +535,16 @@ impl StartCommand {
         let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager.clone(), true)
             .context(error::InitDdlManagerSnafu)?;
         #[cfg(feature = "enterprise")]
-        let ddl_manager =
-            if let Some(factory) = plugins.get::<extension::TriggerDdlManagerFactoryRef>() {
-                let req = extension::MakeTriggerDdlManagerRequest {
-                    kv_backend: kv_backend.clone(),
-                    fe_client: frontend_client.clone(),
-                };
-                let trigger_ddl_manager = factory.create(req).await.context(error::OtherSnafu)?;
-                ddl_manager.with_trigger_ddl_manager_opt(Some(trigger_ddl_manager))
-            } else {
-                ddl_manager
+        let ddl_manager = if let Some(factory) = extension.trigger_ddl_manager_factory {
+            let req = crate::extension::standalone::TriggerDdlManagerRequest {
+                kv_backend: kv_backend.clone(),
+                fe_client: frontend_client.clone(),
             };
+            let trigger_ddl_manager = factory.create(req).await.context(error::OtherSnafu)?;
+            ddl_manager.with_trigger_ddl_manager_opt(Some(trigger_ddl_manager))
+        } else {
+            ddl_manager
+        };
 
         let procedure_executor = Arc::new(LocalProcedureExecutor::new(
             Arc::new(ddl_manager),

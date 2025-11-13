@@ -6,10 +6,8 @@ use crate::extension::common::IstFactoryProviderRef;
 
 #[cfg(feature = "enterprise")]
 mod ee {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
-    use catalog::information_schema::InformationSchemaTableFactoryRef;
     use common_error::ext::BoxedError;
     use common_meta::ddl_manager::TriggerDdlManagerRef;
     use common_meta::kv_backend::KvBackendRef;

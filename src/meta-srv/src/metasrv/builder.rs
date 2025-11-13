@@ -194,6 +194,8 @@ impl MetasrvBuilder {
             table_metadata_allocator,
             extension,
         } = self;
+        #[cfg(not(feature = "enterprise"))]
+        let _ = extension;
 
         let options = options.unwrap_or_default();
 
@@ -410,26 +412,20 @@ impl MetasrvBuilder {
         let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager_c, true)
             .context(error::InitDdlManagerSnafu)?;
         #[cfg(feature = "enterprise")]
-        let ddl_manager = if let Some(extension) = extension {
-            use crate::bootstrap::TriggerDdlManagerRequest;
-
-            let req = TriggerDdlManagerRequest {
-                kv_backend: kv_backend.clone(),
-                selector: selector.clone(),
-                select_ctx: selector_ctx.clone(),
+        let ddl_manager =
+            if let Some(factory) = extension.and_then(|e| e.trigger_ddl_manager_factory) {
+                let trigger_ddl_manager = factory
+                    .create(crate::bootstrap::TriggerDdlManagerRequest {
+                        kv_backend: kv_backend.clone(),
+                        selector: selector.clone(),
+                        select_ctx: selector_ctx.clone(),
+                    })
+                    .await
+                    .context(error::OtherSnafu)?;
+                ddl_manager.with_trigger_ddl_manager_opt(Some(trigger_ddl_manager))
+            } else {
+                ddl_manager
             };
-            let trigger_ddl_manager = extension
-                .trigger_ddl_manager_factory
-                .unwrap()
-                .create(req)
-                .await
-                .context(error::OtherSnafu)?;
-            ddl_manager.with_trigger_ddl_manager_opt(Some(trigger_ddl_manager))
-        } else {
-            ddl_manager
-        };
-        #[cfg(not(feature = "enterprise"))]
-        let _ = extension;
 
         let ddl_manager = Arc::new(ddl_manager);
 
