@@ -48,7 +48,8 @@ fn parse_parallelism_from_option_map(options: &HashMap<String, String>) -> usize
     options
         .get(PARALLELISM_KEY)
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(get_total_cpu_cores())
+        .unwrap_or_else(|| get_total_cpu_cores())
+        .max(1)
 }
 
 impl StatementExecutor {
@@ -270,15 +271,18 @@ async fn list_files_to_copy(req: &CopyDatabaseRequest, suffix: &str) -> error::R
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
+    use common_stat::get_total_cpu_cores;
     use object_store::ObjectStore;
     use object_store::services::Fs;
     use object_store::util::normalize_dir;
     use path_slash::PathExt;
     use table::requests::CopyDatabaseRequest;
 
-    use crate::statement::copy_database::{list_files_to_copy, parse_file_name_to_copy};
+    use crate::statement::copy_database::{
+        list_files_to_copy, parse_file_name_to_copy, parse_parallelism_from_option_map,
+    };
 
     #[tokio::test]
     async fn test_list_files_and_parse_table_name() {
@@ -316,5 +320,17 @@ mod tests {
                 .collect::<HashSet<_>>(),
             listed
         );
+    }
+
+    #[test]
+    fn test_parse_parallelism_from_option_map() {
+        let options = HashMap::new();
+        assert_eq!(
+            parse_parallelism_from_option_map(&options),
+            get_total_cpu_cores()
+        );
+
+        let options = HashMap::from([("parallelism".to_string(), "0".to_string())]);
+        assert_eq!(parse_parallelism_from_option_map(&options), 1);
     }
 }
