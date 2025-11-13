@@ -703,8 +703,12 @@ pub(crate) fn scan_flat_mem_ranges(
     }
 }
 
+/// Files with row count greater than this threshold can contribute to the estimation.
 const SPLIT_ROW_THRESHOLD: u64 = DEFAULT_ROW_GROUP_SIZE as u64;
+/// Number of series threshold for splitting batches.
 const NUM_SERIES_THRESHOLD: u64 = 10240;
+/// Minimum batch size after splitting. The batch size is less than 60 because a series may only have
+/// 60 samples per hour.
 const BATCH_SIZE_THRESHOLD: u64 = 50;
 
 /// Returns true if splitting flat record batches may improve merge performance.
@@ -712,10 +716,13 @@ pub(crate) fn should_split_flat_batches_for_merge(
     stream_ctx: &Arc<StreamContext>,
     range_meta: &RangeMeta,
 ) -> bool {
-    // Number of files to scan.
-    let mut num_scan_files = 0;
+    // Number of files to split and scan.
+    let mut num_files_to_split = 0;
     let mut num_mem_rows = 0;
     let mut num_mem_series = 0;
+    // Checks each file range, returns early if any range is not splittable.
+    // For mem ranges, we collect the total number of rows and series because the number of rows in a
+    // mem range may be too small.
     for index in &range_meta.row_group_indices {
         if stream_ctx.is_mem_range_index(*index) {
             let memtable = &stream_ctx.input.memtables[index.index];
@@ -723,33 +730,27 @@ pub(crate) fn should_split_flat_batches_for_merge(
             let stats = memtable.stats();
             num_mem_rows += stats.num_rows();
             num_mem_series += stats.series_count();
-        } else if !stream_ctx.is_file_range_index(*index) {
-            // Skips non-file and non-mem ranges.
-        } else {
-            assert!(stream_ctx.is_file_range_index(*index));
-
+        } else if stream_ctx.is_file_range_index(*index) {
             // This is a file range.
             let file_index = index.index - stream_ctx.input.num_memtables();
             let file = &stream_ctx.input.files[file_index];
-            if file.meta_ref().num_rows < SPLIT_ROW_THRESHOLD {
-                // If the file doesn't have enough rows, skips it.
-                continue;
-            }
-            if file.meta_ref().num_series == 0 {
-                // Number of series is unavailable.
+            if file.meta_ref().num_rows < SPLIT_ROW_THRESHOLD || file.meta_ref().num_series == 0 {
+                // If the file doesn't have enough rows, or the number of series is unavailable, skips it.
                 continue;
             }
             debug_assert!(file.meta_ref().num_rows > 0);
             if !can_split_series(file.meta_ref().num_rows, file.meta_ref().num_series) {
-                // We don't skip if we find that we can't split batches in a file.
+                // We can't split batches in a file.
                 return false;
             } else {
-                num_scan_files += 1;
+                num_files_to_split += 1;
             }
         }
+        // Skips non-file and non-mem ranges.
     }
 
-    if num_scan_files > 0 {
+    if num_files_to_split > 0 {
+        // We mainly consider file ranges because they have enough data for sampling.
         true
     } else if num_mem_series > 0 && num_mem_rows > 0 {
         // If we don't have files to scan, we check whether to split by the memtable.
