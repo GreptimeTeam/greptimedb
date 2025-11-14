@@ -16,6 +16,7 @@ pub mod builder;
 #[allow(clippy::print_stdout)]
 mod objbench;
 
+use std::fmt::Debug;
 use std::path::Path;
 use std::time::Duration;
 
@@ -38,7 +39,7 @@ use crate::datanode::objbench::ObjbenchCommand;
 use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
 };
-use crate::options::{GlobalOptions, GreptimeOptions, NoopPluginOptions};
+use crate::options::{GlobalOptions, GreptimeOptions};
 
 pub const APP_NAME: &str = "greptime-datanode";
 
@@ -98,10 +99,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build_with(
-        &self,
-        builder: InstanceBuilder<NoopPluginOptions>,
-    ) -> Result<Instance> {
+    pub async fn build_with<E: Debug>(&self, builder: InstanceBuilder<E>) -> Result<Instance> {
         self.subcmd.build_with(builder).await
     }
 
@@ -119,7 +117,7 @@ impl Command {
                 Ok(DatanodeOptions {
                     runtime: Default::default(),
                     plugins: Default::default(),
-                    plugin_option: Default::default(),
+                    extension: Default::default(),
                     component: opts,
                 })
             }
@@ -135,7 +133,7 @@ pub enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build_with(&self, builder: InstanceBuilder<NoopPluginOptions>) -> Result<Instance> {
+    async fn build_with<E: Debug>(&self, builder: InstanceBuilder<E>) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => {
                 info!("Building datanode with {:#?}", cmd);
@@ -343,7 +341,7 @@ mod tests {
     use servers::heartbeat_options::HeartbeatOptions;
 
     use super::*;
-    use crate::options::{GlobalOptions, NoopPluginOptions};
+    use crate::options::{EmptyOptions, GlobalOptions};
 
     #[test]
     fn test_deprecated_cli_options() {
@@ -368,7 +366,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options::<NoopPluginOptions>(&Default::default())
+            .load_options::<EmptyOptions>(&Default::default())
             .unwrap()
             .component;
         assert_eq!("127.0.0.1:4001".to_string(), options.grpc.bind_addr);
@@ -431,7 +429,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options::<NoopPluginOptions>(&Default::default())
+            .load_options::<EmptyOptions>(&Default::default())
             .unwrap()
             .component;
 
@@ -500,7 +498,7 @@ mod tests {
                 metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
                 ..Default::default()
             })
-            .load_options::<NoopPluginOptions>(&GlobalOptions::default())
+            .load_options::<EmptyOptions>(&GlobalOptions::default())
             .is_err()
         );
 
@@ -510,7 +508,7 @@ mod tests {
                 node_id: Some(42),
                 ..Default::default()
             })
-            .load_options::<NoopPluginOptions>(&GlobalOptions::default())
+            .load_options::<EmptyOptions>(&GlobalOptions::default())
             .is_ok()
         );
     }
@@ -519,7 +517,7 @@ mod tests {
     fn test_load_log_options_from_cli() {
         let mut cmd = StartCommand::default();
 
-        let result = cmd.load_options::<NoopPluginOptions>(&GlobalOptions {
+        let result = cmd.load_options::<EmptyOptions>(&GlobalOptions {
             log_dir: Some("./greptimedb_data/test/logs".to_string()),
             log_level: Some("debug".to_string()),
 
@@ -532,7 +530,7 @@ mod tests {
         cmd.node_id = Some(42);
 
         let options = cmd
-            .load_options::<NoopPluginOptions>(&GlobalOptions {
+            .load_options::<EmptyOptions>(&GlobalOptions {
                 log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -622,7 +620,7 @@ mod tests {
                 };
 
                 let opts = command
-                    .load_options::<NoopPluginOptions>(&Default::default())
+                    .load_options::<EmptyOptions>(&Default::default())
                     .unwrap()
                     .component;
 
@@ -652,7 +650,7 @@ mod tests {
                 // Should be default value.
                 assert_eq!(
                     opts.http.addr,
-                    DatanodeOptions::<NoopPluginOptions>::default()
+                    DatanodeOptions::<EmptyOptions>::default()
                         .component
                         .http
                         .addr

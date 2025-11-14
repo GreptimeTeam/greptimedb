@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
+use std::fmt::{self, Debug};
 use std::path::Path;
 use std::time::Duration;
 
@@ -29,7 +29,7 @@ use snafu::ResultExt;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, LoadLayeredConfigSnafu, Result, StartMetaServerSnafu};
-use crate::options::{GlobalOptions, GreptimeOptions, NoopPluginOptions};
+use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
 type MetasrvOptions<E> = GreptimeOptions<meta_srv::metasrv::MetasrvOptions, E>;
@@ -89,10 +89,10 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(
+    pub async fn build<E: Debug>(
         &self,
-        opts: MetasrvOptions<NoopPluginOptions>,
-        extension: Extension,
+        opts: MetasrvOptions<E>,
+        extension: Option<Extension>,
     ) -> Result<Instance> {
         self.subcmd.build(opts, extension).await
     }
@@ -119,10 +119,10 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(
+    async fn build<E: Debug>(
         &self,
-        opts: MetasrvOptions<NoopPluginOptions>,
-        extension: Extension,
+        opts: MetasrvOptions<E>,
+        extension: Option<Extension>,
     ) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts, extension).await,
@@ -191,7 +191,7 @@ pub struct StartCommand {
     backend: Option<BackendImpl>,
 }
 
-impl fmt::Debug for StartCommand {
+impl Debug for StartCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StartCommand")
             .field("rpc_bind_addr", &self.rpc_bind_addr)
@@ -330,10 +330,10 @@ impl StartCommand {
         Ok(())
     }
 
-    pub async fn build<E: fmt::Debug>(
+    pub async fn build<E: Debug>(
         &self,
         opts: MetasrvOptions<E>,
-        extension: Extension,
+        extension: Option<Extension>,
     ) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
@@ -385,6 +385,7 @@ mod tests {
     use meta_srv::selector::SelectorType;
 
     use super::*;
+    use crate::options::EmptyOptions;
 
     #[test]
     fn test_read_from_cmd() {
@@ -397,7 +398,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options::<NoopPluginOptions>(&Default::default())
+            .load_options::<EmptyOptions>(&Default::default())
             .unwrap()
             .component;
         assert_eq!("127.0.0.1:3002".to_string(), options.grpc.bind_addr);
@@ -432,7 +433,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options::<NoopPluginOptions>(&Default::default())
+            .load_options::<EmptyOptions>(&Default::default())
             .unwrap()
             .component;
         assert_eq!("127.0.0.1:3002".to_string(), options.grpc.bind_addr);
@@ -473,7 +474,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options::<NoopPluginOptions>(&GlobalOptions {
+            .load_options::<EmptyOptions>(&GlobalOptions {
                 log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -539,7 +540,7 @@ mod tests {
                 };
 
                 let opts = command
-                    .load_options::<NoopPluginOptions>(&Default::default())
+                    .load_options::<EmptyOptions>(&Default::default())
                     .unwrap()
                     .component;
 

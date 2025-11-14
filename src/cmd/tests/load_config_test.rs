@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use cmd::options::{GreptimeOptions, NoopPluginOptions};
+use cmd::options::{EmptyOptions, GreptimeOptions};
 use common_base::memory_limit::MemoryLimit;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
@@ -42,13 +42,13 @@ use store_api::path_utils::WAL_DIR;
 #[test]
 fn test_load_datanode_example_config() {
     let example_config = common_test_util::find_workspace_path("config/datanode.example.toml");
-    let options = GreptimeOptions::<DatanodeOptions, NoopPluginOptions>::load_layered_options(
+    let options = GreptimeOptions::<DatanodeOptions, EmptyOptions>::load_layered_options(
         example_config.to_str(),
         "",
     )
     .unwrap();
 
-    let expected = GreptimeOptions::<DatanodeOptions, NoopPluginOptions> {
+    let expected = GreptimeOptions::<DatanodeOptions, EmptyOptions> {
         component: DatanodeOptions {
             node_id: Some(42),
             default_column_prefix: Some("greptime".to_string()),
@@ -116,12 +116,12 @@ fn test_load_datanode_example_config() {
 #[test]
 fn test_load_frontend_example_config() {
     let example_config = common_test_util::find_workspace_path("config/frontend.example.toml");
-    let options = GreptimeOptions::<FrontendOptions, NoopPluginOptions>::load_layered_options(
+    let options = GreptimeOptions::<FrontendOptions, EmptyOptions>::load_layered_options(
         example_config.to_str(),
         "",
     )
     .unwrap();
-    let expected = GreptimeOptions::<FrontendOptions, NoopPluginOptions> {
+    let expected = GreptimeOptions::<FrontendOptions, EmptyOptions> {
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
             default_column_prefix: Some("greptime".to_string()),
@@ -179,12 +179,12 @@ fn test_load_frontend_example_config() {
 #[test]
 fn test_load_metasrv_example_config() {
     let example_config = common_test_util::find_workspace_path("config/metasrv.example.toml");
-    let options = GreptimeOptions::<MetasrvOptions, NoopPluginOptions>::load_layered_options(
+    let options = GreptimeOptions::<MetasrvOptions, EmptyOptions>::load_layered_options(
         example_config.to_str(),
         "",
     )
     .unwrap();
-    let expected = GreptimeOptions::<MetasrvOptions, NoopPluginOptions> {
+    let expected = GreptimeOptions::<MetasrvOptions, EmptyOptions> {
         component: MetasrvOptions {
             selector: SelectorType::default(),
             data_home: DEFAULT_DATA_HOME.to_string(),
@@ -230,12 +230,12 @@ fn test_load_metasrv_example_config() {
 #[test]
 fn test_load_flownode_example_config() {
     let example_config = common_test_util::find_workspace_path("config/flownode.example.toml");
-    let options = GreptimeOptions::<FlownodeOptions, NoopPluginOptions>::load_layered_options(
+    let options = GreptimeOptions::<FlownodeOptions, EmptyOptions>::load_layered_options(
         example_config.to_str(),
         "",
     )
     .unwrap();
-    let expected = GreptimeOptions::<FlownodeOptions, NoopPluginOptions> {
+    let expected = GreptimeOptions::<FlownodeOptions, EmptyOptions> {
         component: FlownodeOptions {
             node_id: Some(14),
             flow: Default::default(),
@@ -288,12 +288,12 @@ fn test_load_flownode_example_config() {
 #[test]
 fn test_load_standalone_example_config() {
     let example_config = common_test_util::find_workspace_path("config/standalone.example.toml");
-    let options = GreptimeOptions::<StandaloneOptions, NoopPluginOptions>::load_layered_options(
+    let options = GreptimeOptions::<StandaloneOptions, EmptyOptions>::load_layered_options(
         example_config.to_str(),
         "",
     )
     .unwrap();
-    let expected = GreptimeOptions::<StandaloneOptions, NoopPluginOptions> {
+    let expected = GreptimeOptions::<StandaloneOptions, EmptyOptions> {
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
             default_column_prefix: Some("greptime".to_string()),

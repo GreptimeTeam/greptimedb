@@ -67,11 +67,10 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{Result, StartFlownodeSnafu};
 use crate::extension::standalone::Extension;
-use crate::options::GlobalOptions;
+use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-standalone";
-pub type GreptimeOptions<T, E> = crate::options::GreptimeOptions<T, E>;
 
 #[derive(Parser)]
 pub struct Command {
@@ -83,7 +82,7 @@ impl Command {
     pub async fn build<E: Debug>(
         &self,
         opts: GreptimeOptions<StandaloneOptions, E>,
-        extension: Extension,
+        extension: Option<Extension>,
     ) -> Result<Instance> {
         self.subcmd.build(opts, extension).await
     }
@@ -105,7 +104,7 @@ impl SubCommand {
     async fn build<E: Debug>(
         &self,
         opts: GreptimeOptions<StandaloneOptions, E>,
-        extension: Extension,
+        extension: Option<Extension>,
     ) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts, extension).await,
@@ -349,7 +348,7 @@ impl StartCommand {
     pub async fn build<E: Debug>(
         &self,
         opts: GreptimeOptions<StandaloneOptions, E>,
-        extension: Extension,
+        extension: Option<Extension>,
     ) -> Result<Instance> {
         #[cfg(not(feature = "enterprise"))]
         let _ = extension;
@@ -446,7 +445,9 @@ impl StartCommand {
         let frontend_client = Arc::new(frontend_client);
 
         #[cfg(feature = "enterprise")]
-        let builder = if let Some(provider) = extension.ist_factory_provider {
+        let builder = if let Some(provider) =
+            extension.and_then(|e| e.infomation_schema_table_factory_provider)
+        {
             let factories = provider
                 .create_factories(crate::extension::common::IstContext {
                     fe_client: Some(frontend_client.clone()),
@@ -659,7 +660,7 @@ mod tests {
     use servers::grpc::GrpcOptions;
 
     use super::*;
-    use crate::options::{GlobalOptions, NoopPluginOptions};
+    use crate::options::{EmptyOptions, GlobalOptions};
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
@@ -748,7 +749,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options::<NoopPluginOptions>(&GlobalOptions::default())
+            .load_options::<EmptyOptions>(&GlobalOptions::default())
             .unwrap()
             .component;
         let fe_opts = options.frontend_options();
@@ -806,7 +807,7 @@ mod tests {
         };
 
         let opts = cmd
-            .load_options::<NoopPluginOptions>(&GlobalOptions {
+            .load_options::<EmptyOptions>(&GlobalOptions {
                 log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -875,7 +876,7 @@ mod tests {
                 };
 
                 let opts = command
-                    .load_options::<NoopPluginOptions>(&Default::default())
+                    .load_options::<EmptyOptions>(&Default::default())
                     .unwrap()
                     .component;
 

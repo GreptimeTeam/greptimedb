@@ -44,9 +44,9 @@ pub struct GreptimeOptions<T, E> {
     /// The plugin options.
     pub plugins: Vec<PluginOptions>,
 
-    /// The options of plugin.
+    /// Extension for custom options.
     #[serde(flatten)]
-    pub plugin_option: E,
+    pub extension: E,
 
     /// The options of each component (like Datanode or Standalone) of GreptimeDB.
     #[serde(flatten)]
@@ -60,6 +60,6 @@ impl<T: Configurable, E: Configurable> Configurable for GreptimeOptions<T, E> {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-pub struct NoopPluginOptions;
+pub struct EmptyOptions;
 
-impl Configurable for NoopPluginOptions {}
+impl Configurable for EmptyOptions {}

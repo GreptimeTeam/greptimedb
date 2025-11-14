@@ -52,7 +52,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, Result};
 use crate::extension::frontend::Extension;
-use crate::options::{GlobalOptions, GreptimeOptions, NoopPluginOptions};
+use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
 type FrontendOptions<E> = GreptimeOptions<frontend::frontend::FrontendOptions, E>;
@@ -112,9 +112,9 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(
+    pub async fn build<E: Debug>(
         &self,
-        opts: FrontendOptions<NoopPluginOptions>,
+        opts: FrontendOptions<E>,
         extension: Extension,
     ) -> Result<Instance> {
         self.subcmd.build(opts, extension).await
@@ -134,9 +134,9 @@ pub enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(
+    async fn build<E: Debug>(
         &self,
-        opts: FrontendOptions<NoopPluginOptions>,
+        opts: FrontendOptions<E>,
         extension: Extension,
     ) -> Result<Instance> {
         match self {
@@ -516,7 +516,7 @@ mod tests {
     use servers::http::HttpOptions;
 
     use super::*;
-    use crate::options::GlobalOptions;
+    use crate::options::{EmptyOptions, GlobalOptions};
 
     #[test]
     fn test_try_from_start_command() {
@@ -532,7 +532,7 @@ mod tests {
         };
 
         let opts = command
-            .load_options::<NoopPluginOptions>(&Default::default())
+            .load_options::<EmptyOptions>(&Default::default())
             .unwrap()
             .component;
 
@@ -545,7 +545,7 @@ mod tests {
         assert_eq!(internal_grpc.bind_addr, "127.0.0.1:4010");
         assert_eq!(internal_grpc.server_addr, "10.0.0.24:4010");
 
-        let default_opts = FrontendOptions::<NoopPluginOptions>::default().component;
+        let default_opts = FrontendOptions::<EmptyOptions>::default().component;
 
         assert_eq!(opts.grpc.bind_addr, default_opts.grpc.bind_addr);
         assert!(opts.mysql.enable);
@@ -585,7 +585,7 @@ mod tests {
         };
 
         let fe_opts = command
-            .load_options::<NoopPluginOptions>(&Default::default())
+            .load_options::<EmptyOptions>(&Default::default())
             .unwrap()
             .component;
 
@@ -636,7 +636,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options::<NoopPluginOptions>(&GlobalOptions {
+            .load_options::<EmptyOptions>(&GlobalOptions {
                 log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -721,7 +721,7 @@ mod tests {
                 };
 
                 let fe_opts = command
-                    .load_options::<NoopPluginOptions>(&Default::default())
+                    .load_options::<EmptyOptions>(&Default::default())
                     .unwrap()
                     .component;
 

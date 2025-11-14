@@ -263,7 +263,7 @@ pub async fn metasrv_builder(
     opts: &MetasrvOptions,
     plugins: Plugins,
     kv_backend: Option<KvBackendRef>,
-    extension: extension::Extension,
+    extension: Option<extension::Extension>,
 ) -> Result<MetasrvBuilder> {
     let (mut kv_backend, election) = match (kv_backend, &opts.backend) {
         (Some(kv_backend), _) => (kv_backend, None),
@@ -425,7 +425,7 @@ pub async fn metasrv_builder(
         .election(election)
         .meta_peer_client(meta_peer_client)
         .plugins(plugins)
-        .extension(extension))
+        .extension_opt(extension))
 }
 
 pub(crate) fn build_default_meta_peer_client(

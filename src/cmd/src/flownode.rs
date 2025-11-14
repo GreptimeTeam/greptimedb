@@ -47,7 +47,7 @@ use crate::error::{
     BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu,
     MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
-use crate::options::{GlobalOptions, GreptimeOptions, NoopPluginOptions};
+use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-flownode";
@@ -131,7 +131,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: FlownodeOptions<NoopPluginOptions>) -> Result<Instance> {
+    pub async fn build<E: Debug>(&self, opts: FlownodeOptions<E>) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
@@ -151,7 +151,7 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: FlownodeOptions<NoopPluginOptions>) -> Result<Instance> {
+    async fn build<E: Debug>(&self, opts: FlownodeOptions<E>) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }

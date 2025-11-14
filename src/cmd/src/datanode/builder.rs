@@ -18,7 +18,6 @@ use std::sync::Arc;
 use cache::build_datanode_cache_registry;
 use catalog::kvbackend::MetaKvBackend;
 use common_base::Plugins;
-use common_config::Configurable;
 use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_telemetry::info;
 use common_version::{short_version, verbose_version};
@@ -41,7 +40,7 @@ pub struct InstanceBuilder<E> {
 
 impl<E> InstanceBuilder<E>
 where
-    E: Configurable + Debug,
+    E: Debug,
 {
     /// Try to create a new [InstanceBuilder], and do some initialization work like allocating
     /// runtime resources, setting up global logging and plugins, etc.

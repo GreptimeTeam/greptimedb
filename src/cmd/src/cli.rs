@@ -108,7 +108,7 @@ mod tests {
     use common_telemetry::logging::LoggingOptions;
 
     use crate::error::Result as CmdResult;
-    use crate::options::{GlobalOptions, NoopPluginOptions};
+    use crate::options::{EmptyOptions, GlobalOptions};
     use crate::{App, cli, standalone};
 
     #[tokio::test(flavor = "multi_thread")]
@@ -123,7 +123,7 @@ mod tests {
         ]);
 
         let standalone_opts = standalone
-            .load_options::<NoopPluginOptions>(&GlobalOptions::default())
+            .load_options::<EmptyOptions>(&GlobalOptions::default())
             .unwrap();
         let mut instance = standalone
             .build(standalone_opts, Default::default())

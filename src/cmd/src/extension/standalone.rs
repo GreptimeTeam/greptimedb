@@ -37,5 +37,5 @@ pub struct Extension {
     pub trigger_ddl_manager_factory: Option<TriggerDdlManagerFactoryRef>,
     /// Information schema table factory provider.
     #[cfg(feature = "enterprise")]
-    pub ist_factory_provider: Option<IstFactoryProviderRef>,
+    pub infomation_schema_table_factory_provider: Option<IstFactoryProviderRef>,
 }
