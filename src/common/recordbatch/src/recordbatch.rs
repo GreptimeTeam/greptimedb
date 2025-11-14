@@ -12,15 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::slice;
 use std::sync::Arc;
 
+use arrow_schema::extension::ExtensionType;
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion_common::arrow::array::ArrayRef;
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::{DataType as ArrowDataType, SchemaRef as ArrowSchemaRef};
-use datatypes::arrow::array::RecordBatchOptions;
+use datatypes::arrow::array::{Array, RecordBatchOptions};
+use datatypes::arrow::datatypes::{Field, Schema};
+use datatypes::extension::json::JsonExtensionType;
 use datatypes::prelude::DataType;
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::{Helper, VectorRef};
@@ -246,6 +250,47 @@ impl RecordBatch {
         );
         let columns = self.columns.iter().map(|vector| vector.slice(offset, len));
         RecordBatch::new(self.schema.clone(), columns)
+    }
+}
+
+/// Align the schema's datatypes with the actual arrays', only if there are json arrays.
+/// Because the actual datatype of json array is determined by its values, not by the pre-defined
+/// schema. So the datatype in schema could be lagged behind the actual one in the array.
+pub fn maybe_align_schema_with_json_arrays<'a>(
+    schema: &'a ArrowSchemaRef,
+    arrays: &[ArrayRef],
+) -> Cow<'a, ArrowSchemaRef> {
+    if schema
+        .fields()
+        .iter()
+        .any(|f| f.extension_type_name() == Some(JsonExtensionType::NAME))
+    {
+        let mut fields = Vec::with_capacity(schema.fields().len());
+        for (f, a) in schema.fields().iter().zip(arrays.iter()) {
+            if f.extension_type_name() == Some(JsonExtensionType::NAME) {
+                let field_type = f.data_type();
+                let array_type = a.data_type();
+                match (field_type, array_type) {
+                    (ArrowDataType::Struct(x), ArrowDataType::Struct(y)) if x != y => {
+                        common_telemetry::debug!(
+                            "Align field {} datatype: {field_type} => {array_type}",
+                            f.name(),
+                        );
+                        let field = Field::new_struct(f.name(), y.clone(), f.is_nullable())
+                            .with_metadata(f.metadata().clone());
+                        fields.push(Arc::new(field));
+                    }
+                    _ => fields.push(f.clone()),
+                }
+            } else {
+                fields.push(f.clone())
+            }
+        }
+        let schema = Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
+        Cow::Owned(schema)
+    } else {
+        // Fast path: must not need to align if there are no json types.
+        Cow::Borrowed(schema)
     }
 }
 

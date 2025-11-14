@@ -669,8 +669,7 @@ impl<'a> ParserContext<'a> {
         // Must immediately parse the JSON datatype format because it is closely after the "JSON"
         // datatype, like this: "JSON(format = ...)".
         if matches!(data_type, DataType::JSON) {
-            let options = json::parse_json_datatype_options(parser)?;
-            extensions.json_datatype_options = Some(options);
+            extensions.json_datatype_options = json::parse_json_datatype_options(parser)?;
         }
 
         let mut options = vec![];
@@ -856,7 +855,7 @@ impl<'a> ParserContext<'a> {
             );
 
             let column_type = get_unalias_type(column_type);
-            let data_type = sql_data_type_to_concrete_data_type(&column_type)?;
+            let data_type = sql_data_type_to_concrete_data_type(&column_type, column_extensions)?;
             ensure!(
                 data_type == ConcreteDataType::string_datatype(),
                 InvalidColumnOptionSnafu {

@@ -23,11 +23,11 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::types::cast;
 use datatypes::value::Value;
 use get_size2::GetSize;
-use itertools::Itertools;
 pub(crate) use relation::{ColumnType, Key, RelationDesc, RelationType};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
+use crate::error::ConvertToGrpcRowSnafu;
 use crate::expr::error::{CastValueSnafu, EvalError, InvalidArgumentSnafu};
 use crate::utils::get_value_heap_size;
 
@@ -199,14 +199,17 @@ impl From<ProtoRow> for Row {
     }
 }
 
-impl From<Row> for ProtoRow {
-    fn from(row: Row) -> Self {
+impl TryFrom<Row> for ProtoRow {
+    type Error = crate::error::Error;
+
+    fn try_from(row: Row) -> Result<Self, Self::Error> {
         let values = row
             .unpack()
             .into_iter()
             .map(value_to_grpc_value)
-            .collect_vec();
-        ProtoRow { values }
+            .collect::<api::error::Result<Vec<_>>>()
+            .context(ConvertToGrpcRowSnafu)?;
+        Ok(ProtoRow { values })
     }
 }
 #[cfg(test)]

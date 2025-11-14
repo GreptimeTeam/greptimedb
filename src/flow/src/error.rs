@@ -304,6 +304,13 @@ pub enum Error {
         location: Location,
         source: common_grpc::error::Error,
     },
+
+    #[snafu(display("Failed to convert to GRPC row"))]
+    ConvertToGrpcRow {
+        source: api::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 /// the outer message is the full error stack, and inner message in header is the last error message that can be show directly to user
@@ -364,6 +371,7 @@ impl ErrorExt for Error {
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
 
             Error::ConvertColumnSchema { source, .. } => source.status_code(),
+            Error::ConvertToGrpcRow { source, .. } => source.status_code(),
         }
     }
 

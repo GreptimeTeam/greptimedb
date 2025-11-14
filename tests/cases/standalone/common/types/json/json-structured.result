@@ -1,0 +1,79 @@
+CREATE TABLE t (ts TIMESTAMP TIME INDEX, j JSON(format = "structured"));
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| j      | Json<Struct<>>       |     | YES  |         | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
+INSERT INTO t VALUES
+(1762128001000, '{"int": 1}'),
+(1762128002000, '{"int": 2, "list": [-2.0]}'),
+(1762128003000, '{"int": 3, "list": [-3.0], "nested": {"bool": false}}'),
+(1762128004000, '{"int": 4, "list": [-4.0], "nested": {"string": "a"}}'),
+(1762128005000, '{"int": 5, "list": [-5.0], "nested": {"string": "b", "bool": true}}');
+
+Affected Rows: 6
+
+INSERT INTO t VALUES (1762128006000, '{"int": -1, "list": [1.0], "nested": {"string": "c", "bool": false}}');
+
+Affected Rows: 1
+
+INSERT INTO t VALUES (1762128007000, '{"int": -2, "list": [2.0], "nested": {"string": "d"}}');
+
+Affected Rows: 1
+
+INSERT INTO t VALUES (1762128008000, '{"int": -3, "list": [3.0], "nested": {"bool": true}}');
+
+Affected Rows: 1
+
+INSERT INTO t VALUES (1762128009000, '{"int": -4, "list": [4.0]}');
+
+Affected Rows: 1
+
+INSERT INTO t VALUES (1762128010000, '{"int": -5}');
+
+Affected Rows: 1
+
+INSERT INTO t VALUES (1762128011000, '{}');
+
+Error: 1004(InvalidArguments), Invalid InsertRequest, reason: empty structs are not supported, consider adding a dummy field
+
+INSERT INTO t VALUES
+(1762128012000, '{"int": 6, "list": [-6.0], "nested": {"string": "e", "bool": true}}'),
+(1762128013000, '{"int": 7, "list": [-7.0], "nested": {"string": "f", "bool": true}}'),
+(1762128014000, '{"int": 8, "list": [-8.0], "nested": {"string": "g", "bool": true}}');
+
+Affected Rows: 3
+
+SELECT ts, j FROM t;
+
++---------------------+--------------------------------------------------+
+| ts                  | j                                                |
++---------------------+--------------------------------------------------+
+| 2025-11-03 00:00:00 | {int:,list:,nested:NULL}                         |
+| 2025-11-03 00:00:01 | {int:1,list:,nested:NULL}                        |
+| 2025-11-03 00:00:02 | {int:2,list:[-2.0],nested:NULL}                  |
+| 2025-11-03 00:00:03 | {int:3,list:[-3.0],nested:{bool:false,string:}}  |
+| 2025-11-03 00:00:04 | {int:4,list:[-4.0],nested:{bool:,string:a}}      |
+| 2025-11-03 00:00:05 | {int:5,list:[-5.0],nested:{bool:true,string:b}}  |
+| 2025-11-03 00:00:06 | {int:-1,list:[1.0],nested:{bool:false,string:c}} |
+| 2025-11-03 00:00:07 | {int:-2,list:[2.0],nested:{bool:,string:d}}      |
+| 2025-11-03 00:00:08 | {int:-3,list:[3.0],nested:{bool:true,string:}}   |
+| 2025-11-03 00:00:09 | {int:-4,list:[4.0],nested:NULL}                  |
+| 2025-11-03 00:00:10 | {int:-5,list:,nested:NULL}                       |
+| 2025-11-03 00:00:11 | {int:,list:,nested:NULL}                         |
+| 2025-11-03 00:00:12 | {int:6,list:[-6.0],nested:{bool:true,string:e}}  |
+| 2025-11-03 00:00:13 | {int:7,list:[-7.0],nested:{bool:true,string:f}}  |
+| 2025-11-03 00:00:14 | {int:8,list:[-8.0],nested:{bool:true,string:g}}  |
++---------------------+--------------------------------------------------+
+
+DROP table t;
+
+Affected Rows: 0
+

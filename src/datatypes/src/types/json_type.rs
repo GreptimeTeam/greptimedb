@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
-use arrow_schema::Fields;
 use common_base::bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -35,7 +35,7 @@ use crate::vectors::json::builder::JsonVectorBuilder;
 use crate::vectors::{BinaryVectorBuilder, MutableVector};
 
 pub const JSON_TYPE_NAME: &str = "Json";
-const JSON_PLAIN_FIELD_NAME: &str = "__plain__";
+const JSON_PLAIN_FIELD_NAME: &str = "__json_plain__";
 const JSON_PLAIN_FIELD_METADATA_KEY: &str = "is_plain_json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default)]
@@ -68,7 +68,7 @@ impl JsonType {
     /// - if not, the json is one of bool, number, string or array, make it a special field called
     ///   [JSON_PLAIN_FIELD_NAME] with metadata [JSON_PLAIN_FIELD_METADATA_KEY] = `"true"` in a
     ///   struct with only that field.
-    pub(crate) fn as_struct_type(&self) -> StructType {
+    pub fn as_struct_type(&self) -> StructType {
         match &self.format {
             JsonFormat::Jsonb => StructType::default(),
             JsonFormat::Native(inner) => match inner.as_ref() {
@@ -98,7 +98,7 @@ impl JsonType {
     }
 
     /// Try to merge this json type with others, error on datatype conflict.
-    pub(crate) fn merge(&mut self, other: &JsonType) -> Result<()> {
+    pub fn merge(&mut self, other: &JsonType) -> Result<()> {
         match (&self.format, &other.format) {
             (JsonFormat::Jsonb, JsonFormat::Jsonb) => Ok(()),
             (JsonFormat::Native(this), JsonFormat::Native(that)) => {
@@ -113,7 +113,8 @@ impl JsonType {
         }
     }
 
-    pub(crate) fn is_mergeable(&self, other: &JsonType) -> bool {
+    /// Check if it can merge with `other` json type.
+    pub fn is_mergeable(&self, other: &JsonType) -> bool {
         match (&self.format, &other.format) {
             (JsonFormat::Jsonb, JsonFormat::Jsonb) => true,
             (JsonFormat::Native(this), JsonFormat::Native(that)) => {
@@ -121,6 +122,49 @@ impl JsonType {
             }
             _ => false,
         }
+    }
+
+    /// Check if it includes all fields in `other` json type.
+    pub fn is_include(&self, other: &JsonType) -> bool {
+        match (&self.format, &other.format) {
+            (JsonFormat::Jsonb, JsonFormat::Jsonb) => true,
+            (JsonFormat::Native(this), JsonFormat::Native(that)) => {
+                is_include(this.as_ref(), that.as_ref())
+            }
+            _ => false,
+        }
+    }
+}
+
+fn is_include(this: &ConcreteDataType, that: &ConcreteDataType) -> bool {
+    fn is_include_struct(this: &StructType, that: &StructType) -> bool {
+        let this_fields = this.fields();
+        let this_fields = this_fields
+            .iter()
+            .map(|x| (x.name(), x))
+            .collect::<HashMap<_, _>>();
+
+        for that_field in that.fields().iter() {
+            let Some(this_field) = this_fields.get(that_field.name()) else {
+                return false;
+            };
+            if !is_include(this_field.data_type(), that_field.data_type()) {
+                return false;
+            }
+        }
+        true
+    }
+
+    match (this, that) {
+        (this, that) if this == that => true,
+        (ConcreteDataType::List(this), ConcreteDataType::List(that)) => {
+            is_include(this.item_type(), that.item_type())
+        }
+        (ConcreteDataType::Struct(this), ConcreteDataType::Struct(that)) => {
+            is_include_struct(this, that)
+        }
+        (_, ConcreteDataType::Null(_)) => true,
+        _ => false,
     }
 }
 
@@ -223,7 +267,7 @@ impl DataType for JsonType {
     fn as_arrow_type(&self) -> ArrowDataType {
         match self.format {
             JsonFormat::Jsonb => ArrowDataType::Binary,
-            JsonFormat::Native(_) => ArrowDataType::Struct(Fields::empty()),
+            JsonFormat::Native(_) => self.as_struct_type().as_arrow_type(),
         }
     }
 
@@ -239,6 +283,12 @@ impl DataType for JsonType {
             Value::Binary(v) => Some(Value::Binary(v)),
             _ => None,
         }
+    }
+}
+
+impl Display for JsonType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
     }
 }
 

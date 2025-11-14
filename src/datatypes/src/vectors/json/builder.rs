@@ -334,12 +334,12 @@ mod tests {
         }
         let vector = builder.to_vector();
         let expected = r#"
-+----------------+
-| StructVector   |
-+----------------+
-| {__plain__: 1} |
-| {__plain__: 2} |
-+----------------+"#;
++---------------------+
+| StructVector        |
++---------------------+
+| {__json_plain__: 1} |
+| {__json_plain__: 2} |
++---------------------+"#;
         assert_eq!(pretty_print(vector), expected.trim());
         Ok(())
     }

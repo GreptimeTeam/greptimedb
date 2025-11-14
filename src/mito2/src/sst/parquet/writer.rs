@@ -413,7 +413,7 @@ where
         let arrow_batch = write_format.convert_batch(&batch)?;
 
         let start = Instant::now();
-        self.maybe_init_writer(write_format.arrow_schema(), opts)
+        self.maybe_init_writer(arrow_batch.schema_ref(), opts)
             .await?
             .write(&arrow_batch)
             .await

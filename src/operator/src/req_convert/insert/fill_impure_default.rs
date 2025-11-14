@@ -22,7 +22,9 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
 use table::metadata::{TableInfo, TableInfoRef};
 
-use crate::error::{ConvertColumnDefaultConstraintSnafu, Result, UnexpectedSnafu};
+use crate::error::{
+    ConvertColumnDefaultConstraintSnafu, ConvertToGrpcValueSnafu, Result, UnexpectedSnafu,
+};
 use crate::expr_helper::column_schemas_to_defs;
 use crate::insert::InstantAndNormalInsertRequests;
 
@@ -62,7 +64,8 @@ impl ImpureDefaultFiller {
                         column.default_constraint()
                     ),
                 })?;
-            let grpc_default_value = api::helper::to_proto_value(default_value);
+            let grpc_default_value =
+                api::helper::value_to_grpc_value(default_value).context(ConvertToGrpcValueSnafu)?;
             let def = column_schemas_to_defs(vec![column], &pk_names)?.swap_remove(0);
             let grpc_column_schema = api::v1::ColumnSchema {
                 column_name: def.name,

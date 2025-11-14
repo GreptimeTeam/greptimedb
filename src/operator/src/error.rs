@@ -899,6 +899,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to convert to GRPC value"))]
+    ConvertToGrpcValue {
+        source: api::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -1018,7 +1025,9 @@ impl ErrorExt for Error {
             Error::CreateLogicalTables { .. } => StatusCode::Unexpected,
             Error::BuildRecordBatch { source, .. } => source.status_code(),
             Error::UpgradeCatalogManagerRef { .. } => StatusCode::Internal,
-            Error::ColumnOptions { source, .. } => source.status_code(),
+            Error::ColumnOptions { source, .. } | Error::ConvertToGrpcValue { source, .. } => {
+                source.status_code()
+            }
             Error::DecodeFlightData { source, .. } => source.status_code(),
             Error::ComputeArrow { .. } => StatusCode::Internal,
             Error::InvalidTimeIndexType { .. } => StatusCode::InvalidArguments,

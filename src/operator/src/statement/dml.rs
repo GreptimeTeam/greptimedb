@@ -28,7 +28,7 @@ impl StatementExecutor {
         if insert.can_extract_values() {
             // Fast path: plain insert ("insert with literal values") is executed directly
             self.inserter
-                .handle_statement_insert(insert.as_ref(), &query_ctx)
+                .handle_statement_insert(insert.as_ref(), &query_ctx, self)
                 .await
         } else {
             // Slow path: insert with subquery. Execute using query engine.

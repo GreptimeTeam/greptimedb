@@ -96,6 +96,7 @@ impl PrimaryKeyWriteFormat {
     }
 
     /// Gets the arrow schema to store in parquet.
+    #[cfg(test)]
     pub(crate) fn arrow_schema(&self) -> &SchemaRef {
         &self.arrow_schema
     }
@@ -135,7 +136,11 @@ impl PrimaryKeyWriteFormat {
         }
         columns.push(batch.op_types().to_arrow_array());
 
-        RecordBatch::try_new(self.arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
+        let schema = common_recordbatch::recordbatch::maybe_align_schema_with_json_arrays(
+            &self.arrow_schema,
+            &columns,
+        );
+        RecordBatch::try_new(schema.as_ref().clone(), columns).context(NewRecordBatchSnafu)
     }
 }
 

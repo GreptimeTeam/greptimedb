@@ -18,7 +18,7 @@ pub mod adapter;
 pub mod cursor;
 pub mod error;
 pub mod filter;
-mod recordbatch;
+pub mod recordbatch;
 pub mod util;
 
 use std::fmt;
