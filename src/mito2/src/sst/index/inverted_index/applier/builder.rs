@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn test_collect_and_basic() {
-        let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_collect_and_basic_");
+        let (_d, factory) = PuffinManagerFactory::new_for_test_block("test_collect_and_basic_");
 
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
@@ -346,7 +346,7 @@ mod tests {
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         let expr = Expr::BinaryExpr(BinaryExpr {

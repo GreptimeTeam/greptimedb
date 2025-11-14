@@ -70,14 +70,14 @@ mod tests {
 
     #[test]
     fn test_collect_between_basic() {
-        let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_collect_between_basic_");
+        let (_d, factory) = PuffinManagerFactory::new_for_test_block("test_collect_between_basic_");
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         let between = Between {
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn test_collect_between_negated() {
-        let (_d, facotry) =
+        let (_d, factory) =
             PuffinManagerFactory::new_for_test_block("test_collect_between_negated_");
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
@@ -118,7 +118,7 @@ mod tests {
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         let between = Between {
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_collect_between_field_column() {
-        let (_d, facotry) =
+        let (_d, factory) =
             PuffinManagerFactory::new_for_test_block("test_collect_between_field_column_");
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
@@ -142,7 +142,7 @@ mod tests {
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         let between = Between {
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_collect_between_type_mismatch() {
-        let (_d, facotry) =
+        let (_d, factory) =
             PuffinManagerFactory::new_for_test_block("test_collect_between_type_mismatch_");
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
@@ -183,7 +183,7 @@ mod tests {
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         let between = Between {
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_collect_between_nonexistent_column() {
-        let (_d, facotry) =
+        let (_d, factory) =
             PuffinManagerFactory::new_for_test_block("test_collect_between_nonexistent_column_");
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
@@ -208,7 +208,7 @@ mod tests {
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         let between = Between {
