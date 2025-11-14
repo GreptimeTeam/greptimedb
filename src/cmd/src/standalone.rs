@@ -521,17 +521,18 @@ impl StartCommand {
         let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager.clone(), true)
             .context(error::InitDdlManagerSnafu)?;
         #[cfg(feature = "enterprise")]
-        let ddl_manager = if let Some(factory) = extension.trigger_ddl_manager_factory {
-            let req = crate::extension::standalone::TriggerDdlManagerRequest {
-                kv_backend: kv_backend.clone(),
-                catalog_manager: catalog_manager.clone(),
-                fe_client: frontend_client.clone(),
+        let ddl_manager =
+            if let Some(factory) = extension.and_then(|e| e.trigger_ddl_manager_factory) {
+                let req = crate::extension::standalone::TriggerDdlManagerRequest {
+                    kv_backend: kv_backend.clone(),
+                    catalog_manager: catalog_manager.clone(),
+                    fe_client: frontend_client.clone(),
+                };
+                let trigger_ddl_manager = factory.create(req).await.context(error::OtherSnafu)?;
+                ddl_manager.with_trigger_ddl_manager_opt(Some(trigger_ddl_manager))
+            } else {
+                ddl_manager
             };
-            let trigger_ddl_manager = factory.create(req).await.context(error::OtherSnafu)?;
-            ddl_manager.with_trigger_ddl_manager_opt(Some(trigger_ddl_manager))
-        } else {
-            ddl_manager
-        };
 
         let procedure_executor = Arc::new(LocalProcedureExecutor::new(
             Arc::new(ddl_manager),
