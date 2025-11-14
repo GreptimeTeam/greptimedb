@@ -177,6 +177,8 @@ pub struct StartCommand {
     #[clap(long)]
     tls_key_path: Option<String>,
     #[clap(long)]
+    tls_watch: bool,
+    #[clap(long)]
     user_provider: Option<String>,
     #[clap(long)]
     disable_dashboard: Option<bool>,
@@ -230,6 +232,7 @@ impl StartCommand {
             self.tls_mode.clone(),
             self.tls_cert_path.clone(),
             self.tls_key_path.clone(),
+            self.tls_watch,
         );
 
         if let Some(addr) = &self.http_addr {

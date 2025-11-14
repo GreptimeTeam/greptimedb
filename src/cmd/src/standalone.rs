@@ -275,15 +275,12 @@ impl StartCommand {
             tokio_console_addr: global_options.tokio_console_addr.clone(),
         };
 
-        let mut tls_opts = TlsOption::new(
+        let tls_opts = TlsOption::new(
             self.tls_mode.clone(),
             self.tls_cert_path.clone(),
             self.tls_key_path.clone(),
+            self.tls_watch,
         );
-
-        if self.tls_watch {
-            tls_opts.watch = true;
-        }
 
         if let Some(addr) = &self.http_addr {
             opts.http.addr.clone_from(addr);
@@ -775,6 +772,9 @@ mod tests {
     fn test_load_log_options_from_cli() {
         let cmd = StartCommand {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+            mysql_addr: Some("127.0.0.1:4002".to_string()),
+            postgres_addr: Some("127.0.0.1:4003".to_string()),
+            tls_watch: true,
             ..Default::default()
         };
 
@@ -791,6 +791,8 @@ mod tests {
 
         assert_eq!("./greptimedb_data/test/logs", opts.logging.dir);
         assert_eq!("debug", opts.logging.level.unwrap());
+        assert_eq!(true, opts.mysql.tls.watch);
+        assert_eq!(true, opts.postgres.tls.watch);
     }
 
     #[test]

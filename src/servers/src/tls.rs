@@ -68,7 +68,12 @@ pub struct TlsOption {
 }
 
 impl TlsOption {
-    pub fn new(mode: Option<TlsMode>, cert_path: Option<String>, key_path: Option<String>) -> Self {
+    pub fn new(
+        mode: Option<TlsMode>,
+        cert_path: Option<String>,
+        key_path: Option<String>,
+        watch: bool,
+    ) -> Self {
         let mut tls_option = TlsOption::default();
 
         if let Some(mode) = mode {
@@ -81,6 +86,10 @@ impl TlsOption {
 
         if let Some(key_path) = key_path {
             tls_option.key_path = key_path
+        };
+
+        if watch {
+            tls_option.watch = watch
         };
 
         tls_option
@@ -242,13 +251,16 @@ mod tests {
 
     #[test]
     fn test_new_tls_option() {
-        assert_eq!(TlsOption::default(), TlsOption::new(None, None, None));
+        assert_eq!(
+            TlsOption::default(),
+            TlsOption::new(None, None, None, false)
+        );
         assert_eq!(
             TlsOption {
                 mode: Disable,
                 ..Default::default()
             },
-            TlsOption::new(Some(Disable), None, None)
+            TlsOption::new(Some(Disable), None, None, false)
         );
         assert_eq!(
             TlsOption {
@@ -261,7 +273,8 @@ mod tests {
             TlsOption::new(
                 Some(Disable),
                 Some("/path/to/cert_path".to_string()),
-                Some("/path/to/key_path".to_string())
+                Some("/path/to/key_path".to_string()),
+                false
             )
         );
     }
