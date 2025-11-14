@@ -758,7 +758,7 @@ pub(crate) async fn build_flat_sources(
         }
     }
 
-    let should_split = should_split_flat_batches_for_merge(&stream_ctx, range_meta);
+    let should_split = should_split_flat_batches_for_merge(stream_ctx, range_meta);
     sources.reserve(range_meta.row_group_indices.len());
     for index in &range_meta.row_group_indices {
         let stream = if stream_ctx.is_mem_range_index(*index) {
