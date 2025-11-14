@@ -22,8 +22,8 @@ use arrow_schema::{DataType, IntervalUnit};
 use common_decimal::Decimal128;
 use common_recordbatch::RecordBatch;
 use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
+use datafusion::parquet::data_type::AsBytes;
 use datafusion_common::ScalarValue;
-use datatypes::types::jsonb_to_string;
 use datatypes::value::Value;
 use snafu::ResultExt;
 
@@ -70,7 +70,12 @@ impl HttpOutputWriter {
             value
         };
 
-        let value = serde_json::Value::try_from(value).context(ToJsonSnafu)?;
+        let value = match value {
+            Value::Json(box Value::Binary(json)) => {
+                datatypes::types::jsonb_to_serde_json(json.as_bytes()).context(ConvertSqlValueSnafu)
+            }
+            value => serde_json::Value::try_from(value).context(ToJsonSnafu),
+        }?;
 
         let current = self
             .current
@@ -179,7 +184,7 @@ impl HttpOutputWriter {
                         let array = array.as_binary::<i32>();
                         let v = array.value(i);
                         if schema.data_type.is_json() {
-                            let v = jsonb_to_string(v).context(ConvertSqlValueSnafu)?;
+                            let v = Value::Json(Box::new(v.into()));
                             self.push(v)?;
                         } else {
                             self.push(v)?;
@@ -189,7 +194,7 @@ impl HttpOutputWriter {
                         let array = array.as_binary::<i64>();
                         let v = array.value(i);
                         if schema.data_type.is_json() {
-                            let v = jsonb_to_string(v).context(ConvertSqlValueSnafu)?;
+                            let v = Value::Json(Box::new(v.into()));
                             self.push(v)?;
                         } else {
                             self.push(v)?;
@@ -199,7 +204,7 @@ impl HttpOutputWriter {
                         let array = array.as_binary_view();
                         let v = array.value(i);
                         if schema.data_type.is_json() {
-                            let v = jsonb_to_string(v).context(ConvertSqlValueSnafu)?;
+                            let v = Value::Json(Box::new(v.into()));
                             self.push(v)?;
                         } else {
                             self.push(v)?;

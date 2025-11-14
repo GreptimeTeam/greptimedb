@@ -16,6 +16,7 @@
 #![feature(try_blocks)]
 #![feature(exclusive_wrapper)]
 #![feature(if_let_guard)]
+#![feature(box_patterns)]
 
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;
