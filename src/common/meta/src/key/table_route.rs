@@ -669,6 +669,10 @@ impl TableRouteStorage {
             .collect())
     }
 
+    /// Returns batch of [`TableRouteValue`] wrapped with [`DeserializedValueWithBytes`].
+    ///
+    /// The return value is a vector of [`Option<DeserializedValueWithBytes<TableRouteValue>>`].
+    /// Note: This method remaps the addresses of the table routes, but does not update their raw byte representations.
     pub async fn batch_get_with_raw_bytes(
         &self,
         table_ids: &[TableId],
