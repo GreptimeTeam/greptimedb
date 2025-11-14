@@ -330,6 +330,12 @@ impl RegionScanner for SeriesScan {
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
+        let span = tracing::info_span!(
+            "SeriesScan::scan_partition",
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        );
+        let _enter = span.enter();
         self.scan_partition_impl(ctx, metrics_set, partition)
             .map_err(BoxedError::new)
     }
