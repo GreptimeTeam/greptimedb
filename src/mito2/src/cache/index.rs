@@ -21,7 +21,7 @@ use std::hash::Hash;
 use std::ops::Range;
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use object_store::Buffer;
 
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
