@@ -96,8 +96,9 @@ impl ChannelManager {
 
     /// Create a ChannelManager with configuration and optional TLS config
     ///
-    /// Use [`load_reloadable_client_tls_config`] to create TLS configuration from `ClientTlsOption`.
+    /// Use [`load_client_tls_config`] to create TLS configuration from `ClientTlsOption`.
     /// The TLS config supports both static (watch disabled) and dynamic reloading (watch enabled).
+    /// If you want to use dynamic reloading, please **manually** invoke [`maybe_watch_client_tls_config`] after this method.
     pub fn with_config(
         config: ChannelConfig,
         reloadable_tls_config: Option<Arc<ReloadableClientTlsConfig>>,
@@ -321,7 +322,7 @@ pub struct ReloadableClientTlsConfig {
 
 impl ReloadableClientTlsConfig {
     /// Create client config by loading configuration from `ClientTlsOption`
-    pub fn try_new(tls_option: ClientTlsOption) -> Result<ReloadableClientTlsConfig> {
+    fn try_new(tls_option: ClientTlsOption) -> Result<ReloadableClientTlsConfig> {
         let client_config = load_tls_config(Some(&tls_option))?;
         Ok(Self {
             tls_option,
@@ -331,7 +332,7 @@ impl ReloadableClientTlsConfig {
     }
 
     /// Reread client certificates and keys from file system.
-    pub fn reload(&self) -> Result<()> {
+    fn reload(&self) -> Result<()> {
         let client_config = load_tls_config(Some(&self.tls_option))?;
         *self.config.write().unwrap() = client_config;
         self.version.fetch_add(1, Ordering::Relaxed);
