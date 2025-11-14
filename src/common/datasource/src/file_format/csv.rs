@@ -357,14 +357,14 @@ mod tests {
             CompressionType::Zstd,
         ];
 
+        // Create a temporary file path
+        let temp_dir = common_test_util::temp_dir::create_temp_dir("test_compressed_csv");
         for compression_type in compression_types {
             let format = CsvFormat {
                 compression_type,
                 ..CsvFormat::default()
             };
 
-            // Create a temporary file path
-            let temp_dir = common_test_util::temp_dir::create_temp_dir("test_compressed_csv");
             // Use correct format without Debug formatter
             let compressed_file_name =
                 format!("test_compressed_csv.{}", compression_type.file_extension());

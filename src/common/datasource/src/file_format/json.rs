@@ -265,14 +265,14 @@ mod tests {
             CompressionType::Zstd,
         ];
 
+        // Create a temporary file path
+        let temp_dir = common_test_util::temp_dir::create_temp_dir("test_compressed_json");
         for compression_type in compression_types {
             let format = JsonFormat {
                 compression_type,
                 ..JsonFormat::default()
             };
 
-            // Create a temporary file path
-            let temp_dir = common_test_util::temp_dir::create_temp_dir("test_compressed_json");
             let compressed_file_name =
                 format!("test_compressed_json.{}", compression_type.file_extension());
             let compressed_file_path = temp_dir.path().join(&compressed_file_name);
