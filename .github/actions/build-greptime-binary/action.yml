@@ -44,10 +44,10 @@ runs:
       shell: bash
       run: |
         if [[ '${{ inputs.large-page-size }}' == 'true' ]]; then
-            echo 'EXTRA_BUILD_ENVS="JEMALLOC_SYS_WITH_LG_PAGE=16"' >> $GITHUB_ENV
-          else
-            echo 'EXTRA_BUILD_ENVS=' >> $GITHUB_ENV
-          fi
+          echo 'EXTRA_BUILD_ENVS="JEMALLOC_SYS_WITH_LG_PAGE=16"' >> $GITHUB_ENV
+        else
+          echo 'EXTRA_BUILD_ENVS=' >> $GITHUB_ENV
+        fi
 
     - name: Build greptime binary
       shell: bash

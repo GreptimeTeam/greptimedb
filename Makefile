@@ -18,7 +18,6 @@ ARCH := $(shell uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
 OUTPUT_DIR := $(shell if [ "$(RELEASE)" = "true" ]; then echo "release"; elif [ ! -z "$(CARGO_PROFILE)" ]; then echo "$(CARGO_PROFILE)" ; else echo "debug"; fi)
 SQLNESS_OPTS ?=
 EXTRA_BUILD_ENVS ?=
-EXTRA_BUILD_ENVS ?=
 ASSEMBLED_EXTRA_BUILD_ENV := $(foreach var,$(EXTRA_BUILD_ENVS),-e $(var))
 
 # The arguments for running integration tests.
