@@ -7440,6 +7440,7 @@ dependencies = [
  "lazy_static",
  "local-ip-address",
  "once_cell",
+ "ordered-float 4.6.0",
  "parking_lot 0.12.4",
  "prometheus",
  "prost 0.13.5",

@@ -518,7 +518,7 @@ impl RegionServer {
 
         let manifest_info = match manifest_info {
             ManifestInfo::MitoManifestInfo(info) => {
-                RegionManifestInfo::mito(info.data_manifest_version, 0)
+                RegionManifestInfo::mito(info.data_manifest_version, 0, 0)
             }
             ManifestInfo::MetricManifestInfo(info) => RegionManifestInfo::metric(
                 info.data_manifest_version,

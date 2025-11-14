@@ -474,7 +474,7 @@ lazy_static! {
         .unwrap();
 
     /// Counter for the number of files deleted by the GC worker.
-    pub static ref GC_DEL_FILE_CNT: IntGauge =
+    pub static ref GC_DELETE_FILE_CNT: IntGauge =
         register_int_gauge!(
             "greptime_mito_gc_delete_file_count",
             "mito gc deleted file count",

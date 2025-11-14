@@ -1111,9 +1111,8 @@ mod tests {
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
                 },
-                Default::default(),
-                Default::default(),
                 FormatType::PrimaryKey,
+                &Default::default(),
             )
             .await
             .unwrap();
