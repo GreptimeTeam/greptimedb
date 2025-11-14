@@ -88,7 +88,7 @@ impl TlsOption {
             tls_option.key_path = key_path
         };
 
-        tls_option.watch = watch
+        tls_option.watch = watch;
 
         tls_option
     }
