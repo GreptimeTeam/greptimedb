@@ -791,8 +791,8 @@ mod tests {
 
         assert_eq!("./greptimedb_data/test/logs", opts.logging.dir);
         assert_eq!("debug", opts.logging.level.unwrap());
-        assert_eq!(true, opts.mysql.tls.watch);
-        assert_eq!(true, opts.postgres.tls.watch);
+        assert!(opts.mysql.tls.watch);
+        assert!(opts.postgres.tls.watch);
     }
 
     #[test]
