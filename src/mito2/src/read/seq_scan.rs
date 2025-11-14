@@ -819,7 +819,7 @@ pub(crate) async fn build_flat_sources(
         return Ok(());
     }
 
-    let should_split = should_split_flat_batches_for_merge(&stream_ctx, range_meta);
+    let should_split = should_split_flat_batches_for_merge(stream_ctx, range_meta);
     sources.reserve(num_indices);
     let mut ordered_sources = Vec::with_capacity(num_indices);
     ordered_sources.resize_with(num_indices, || None);
