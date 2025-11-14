@@ -429,7 +429,7 @@ impl StartCommand {
         let builder = if let Some(provider) = extension.and_then(|e| e.info_schema_factory_provider)
         {
             let factories = provider
-                .create_factories(crate::extension::common::IstContext {
+                .create_factories(crate::extension::common::ProviderContext {
                     fe_client: Some(frontend_client.clone()),
                 })
                 .await
