@@ -73,7 +73,7 @@ impl TwcsPicker {
             {
                 let (kept_files, ignored_files) = files_to_merge
                     .into_iter()
-                    .partition(|fg| fg.size() <= max_size as usize && fg.is_all_level_0());
+                    .partition(|fg| fg.size() <= max_size as usize);
                 files_to_merge = kept_files;
                 info!(
                     "Skipped {} large files in append mode for region {}, window {}, max_size: {}",
