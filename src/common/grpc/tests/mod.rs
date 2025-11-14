@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_grpc::channel_manager::{
-    ChannelConfig, ChannelManager, ClientTlsOption, load_reloadable_client_tls_config,
+    ChannelConfig, ChannelManager, ClientTlsOption, load_client_tls_config,
     maybe_watch_client_tls_config,
 };
 
@@ -21,7 +21,7 @@ use common_grpc::channel_manager::{
 async fn test_mtls_config() {
     // test no config
     let config = ChannelConfig::new();
-    let re = load_reloadable_client_tls_config(config.client_tls.clone());
+    let re = load_client_tls_config(config.client_tls.clone());
     assert!(re.is_ok());
     assert!(re.unwrap().is_none());
 
@@ -34,7 +34,7 @@ async fn test_mtls_config() {
         watch: false,
     });
 
-    let re = load_reloadable_client_tls_config(config.client_tls.clone());
+    let re = load_client_tls_config(config.client_tls.clone());
     assert!(re.is_err());
 
     // test corrupted file content
@@ -46,7 +46,7 @@ async fn test_mtls_config() {
         watch: false,
     });
 
-    let tls_config = load_reloadable_client_tls_config(config.client_tls.clone()).unwrap();
+    let tls_config = load_client_tls_config(config.client_tls.clone()).unwrap();
     let re = ChannelManager::with_config(config, tls_config);
 
     let re = re.get("127.0.0.1:0");
@@ -61,7 +61,7 @@ async fn test_mtls_config() {
         watch: false,
     });
 
-    let tls_config = load_reloadable_client_tls_config(config.client_tls.clone()).unwrap();
+    let tls_config = load_client_tls_config(config.client_tls.clone()).unwrap();
     let re = ChannelManager::with_config(config, tls_config);
     let re = re.get("127.0.0.1:0");
     let _ = re.unwrap();
@@ -101,7 +101,7 @@ async fn test_reloadable_client_tls_config() {
         watch: true,
     };
 
-    let reloadable_config = load_reloadable_client_tls_config(Some(client_tls_option))
+    let reloadable_config = load_client_tls_config(Some(client_tls_option))
         .expect("failed to load tls config")
         .expect("tls config should be present");
 
@@ -152,7 +152,7 @@ async fn test_channel_manager_with_reloadable_tls() {
         watch: false,
     };
 
-    let reloadable_config = load_reloadable_client_tls_config(Some(client_tls_option))
+    let reloadable_config = load_client_tls_config(Some(client_tls_option))
         .expect("failed to load tls config")
         .expect("tls config should be present");
 

@@ -297,7 +297,7 @@ fn load_tls_config(tls_option: Option<&ClientTlsOption>) -> Result<Option<Client
 
 /// Load client TLS configuration from `ClientTlsOption` and return a `ReloadableClientTlsConfig`.
 /// This is the primary way to create TLS configuration for the ChannelManager.
-pub fn load_reloadable_client_tls_config(
+pub fn load_client_tls_config(
     tls_option: Option<ClientTlsOption>,
 ) -> Result<Option<Arc<ReloadableClientTlsConfig>>> {
     match tls_option {
