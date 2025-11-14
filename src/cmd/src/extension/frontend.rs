@@ -1,9 +1,6 @@
-#[cfg(feature = "enterprise")]
-use crate::extension::common::IstFactoryProviderRef;
+use crate::extension::common::InformationSchemaTableFactoryProviderRef;
 
 #[derive(Default)]
 pub struct Extension {
-    /// Information schema table factory provider.
-    #[cfg(feature = "enterprise")]
-    pub ist_factory_provider: Option<IstFactoryProviderRef>,
+    pub info_schema_factory_provider: Option<InformationSchemaTableFactoryProviderRef>,
 }

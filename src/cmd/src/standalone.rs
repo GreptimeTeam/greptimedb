@@ -127,33 +127,14 @@ pub struct Instance {
     flownode: FlownodeInstance,
     procedure_manager: ProcedureManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
-
-    // The components of standalone, which make it easier to expand based
-    // on the components.
-    #[cfg(feature = "enterprise")]
-    components: Components,
-
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
-}
-
-#[cfg(feature = "enterprise")]
-pub struct Components {
-    pub plugins: Plugins,
-    pub kv_backend: KvBackendRef,
-    pub frontend_client: Arc<FrontendClient>,
-    pub catalog_manager: catalog::CatalogManagerRef,
 }
 
 impl Instance {
     /// Find the socket addr of a server by its `name`.
     pub fn server_addr(&self, name: &str) -> Option<SocketAddr> {
         self.frontend.server_handlers().addr(name)
-    }
-
-    #[cfg(feature = "enterprise")]
-    pub fn components(&self) -> &Components {
-        &self.components
     }
 }
 
@@ -445,8 +426,7 @@ impl StartCommand {
         let frontend_client = Arc::new(frontend_client);
 
         #[cfg(feature = "enterprise")]
-        let builder = if let Some(provider) =
-            extension.and_then(|e| e.infomation_schema_table_factory_provider)
+        let builder = if let Some(provider) = extension.and_then(|e| e.info_schema_factory_provider)
         {
             let factories = provider
                 .create_factories(crate::extension::common::IstContext {
@@ -610,22 +590,12 @@ impl StartCommand {
             export_metrics_task,
         };
 
-        #[cfg(feature = "enterprise")]
-        let components = Components {
-            plugins,
-            kv_backend,
-            frontend_client,
-            catalog_manager,
-        };
-
         Ok(Instance {
             datanode,
             frontend,
             flownode,
             procedure_manager,
             wal_options_allocator,
-            #[cfg(feature = "enterprise")]
-            components,
             _guard: guard,
         })
     }
