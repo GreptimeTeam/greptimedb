@@ -35,8 +35,9 @@ update_homebrew_greptime_version() {
     --body "This PR updates the GreptimeDB version." \
     --base main \
     --head $BRANCH_NAME \
-    --reviewer zyy17 \
-    --reviewer daviderli614
+    --reviewer sunng87 \
+    --reviewer daviderli614 \
+    --reviewer killme2008
 }
 
 update_homebrew_greptime_version
