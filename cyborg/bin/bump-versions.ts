@@ -15,6 +15,7 @@
  */
 
 import * as core from "@actions/core";
+import semver from "semver";
 import {obtainClient} from "@/common";
 
 interface RepoConfig {
@@ -57,18 +58,28 @@ const REPO_CONFIGS: Record<string, RepoConfig> = {
         return ['bump-nightly-version.yml', version];
       }
 
-      const parts = version.split('.');
-      if (parts.length !== 3) {
-        throw new Error('Invalid version format');
+      // Parse the version using semver library
+      const parsedVersion = semver.parse(version);
+      if (!parsedVersion) {
+        throw new Error(`Invalid semantic version format: ${version}`);
       }
 
-      // If patch version (last number) is 0, it's a major version
-      // Return only major.minor version
-      if (parts[2] === '0') {
-        return ['bump-version.yml', `${parts[0]}.${parts[1]}`];
+      // 如果有预发布标识，抛出错误让人工判断
+      if (parsedVersion.prerelease && parsedVersion.prerelease.length > 0) {
+        throw new Error(
+          `预发布版本 "${version}" 需要人工判断使用哪个 workflow。\n` +
+          `请根据具体情况选择:\n` +
+          `  - bump-version.yml (用于 major.minor 格式，如 ${parsedVersion.major}.${parsedVersion.minor})\n` +
+          `  - bump-patch-version.yml (用于patch版本，如 ${parsedVersion.major}.${parsedVersion.minor}.${parsedVersion.patch})\n` +
+          `考虑因素包括: 这是第一个预发布版本吗？是否接近正式 release？`
+        );
       }
 
-      // Otherwise it's a patch version, use full version
+      // 正式版本的原有逻辑
+      if (parsedVersion.patch === 0) {
+        return ['bump-version.yml', `${parsedVersion.major}.${parsedVersion.minor}`];
+      }
+
       return ['bump-patch-version.yml', version];
     }
   }
