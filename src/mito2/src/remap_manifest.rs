@@ -426,6 +426,7 @@ mod tests {
             level: 0,
             file_size: 1024,
             available_indexes: SmallVec::new(),
+            indexes: Default::default(),
             index_file_size: 0,
             index_file_id: None,
             num_rows: 100,

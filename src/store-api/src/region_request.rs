@@ -22,9 +22,10 @@ use api::v1::column_def::{
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    AlterRequest, AlterRequests, BulkInsertRequest, CloseRequest, CompactRequest, CreateRequest,
-    CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
-    OpenRequest, TruncateRequest, alter_request, compact_request, region_request, truncate_request,
+    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CloseRequest,
+    CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
+    FlushRequest, InsertRequests, OpenRequest, TruncateRequest, alter_request, compact_request,
+    region_request, truncate_request,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -166,6 +167,7 @@ impl RegionRequest {
             region_request::Body::Alter(alter) => make_region_alter(alter),
             region_request::Body::Flush(flush) => make_region_flush(flush),
             region_request::Body::Compact(compact) => make_region_compact(compact),
+            region_request::Body::BuildIndex(index) => make_region_build_index(index),
             region_request::Body::Truncate(truncate) => make_region_truncate(truncate),
             region_request::Body::Creates(creates) => make_region_creates(creates),
             region_request::Body::Drops(drops) => make_region_drops(drops),
@@ -351,6 +353,14 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
             options,
             parallelism,
         }),
+    )])
+}
+
+fn make_region_build_index(index: BuildIndexRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let region_id = index.region_id.into();
+    Ok(vec![(
+        region_id,
+        RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
     )])
 }
 

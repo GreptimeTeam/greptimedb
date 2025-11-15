@@ -767,6 +767,7 @@ mod tests {
                 level: 0,
                 file_size: info.file_size,
                 available_indexes: info.index_metadata.build_available_indexes(),
+                indexes: info.index_metadata.build_indexes(),
                 index_file_size: info.index_metadata.file_size,
                 index_file_id: None,
                 num_row_groups: info.num_row_groups,

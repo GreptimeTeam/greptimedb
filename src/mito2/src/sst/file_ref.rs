@@ -217,7 +217,7 @@ mod tests {
     use store_api::storage::{FileId, RegionId};
 
     use super::*;
-    use crate::sst::file::{FileMeta, FileTimeRange, IndexType, RegionFileId};
+    use crate::sst::file::{ColumnIndexMetadata, FileMeta, FileTimeRange, IndexType, RegionFileId};
 
     #[tokio::test]
     async fn test_file_ref_mgr() {
@@ -234,6 +234,10 @@ mod tests {
             level: 0,
             file_size: 4096,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            }],
             index_file_size: 4096,
             index_file_id: None,
             num_rows: 1024,
