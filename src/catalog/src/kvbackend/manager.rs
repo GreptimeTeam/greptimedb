@@ -53,9 +53,9 @@ use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
     ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
 };
-#[cfg(feature = "enterprise")]
-use crate::information_schema::InformationSchemaTableFactoryRef;
-use crate::information_schema::{InformationExtensionRef, InformationSchemaProvider};
+use crate::information_schema::{
+    InformationExtensionRef, InformationSchemaProvider, InformationSchemaTableFactoryRef,
+};
 use crate::kvbackend::TableCacheRef;
 use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::SystemSchemaProvider;
@@ -557,7 +557,6 @@ pub(super) struct SystemCatalog {
     pub(super) numbers_table_provider: NumbersTableProvider,
     pub(super) backend: KvBackendRef,
     pub(super) process_manager: Option<ProcessManagerRef>,
-    #[cfg(feature = "enterprise")]
     pub(super) extra_information_table_factories:
         std::collections::HashMap<String, InformationSchemaTableFactoryRef>,
 }
@@ -628,7 +627,6 @@ impl SystemCatalog {
                         self.process_manager.clone(),
                         self.backend.clone(),
                     );
-                    #[cfg(feature = "enterprise")]
                     let provider = provider
                         .with_extra_table_factories(self.extra_information_table_factories.clone());
                     Arc::new(provider)

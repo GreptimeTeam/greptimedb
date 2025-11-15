@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub use extension::*;
+
+mod extension;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -259,6 +263,7 @@ pub async fn metasrv_builder(
     opts: &MetasrvOptions,
     plugins: Plugins,
     kv_backend: Option<KvBackendRef>,
+    extension: Option<extension::Extension>,
 ) -> Result<MetasrvBuilder> {
     let (mut kv_backend, election) = match (kv_backend, &opts.backend) {
         (Some(kv_backend), _) => (kv_backend, None),
@@ -419,7 +424,8 @@ pub async fn metasrv_builder(
         .selector(selector)
         .election(election)
         .meta_peer_client(meta_peer_client)
-        .plugins(plugins))
+        .plugins(plugins)
+        .extension_opt(extension))
 }
 
 pub(crate) fn build_default_meta_peer_client(

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,37 +52,18 @@ use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_hea
 
 pub const APP_NAME: &str = "greptime-flownode";
 
-type FlownodeOptions = GreptimeOptions<flow::FlownodeOptions>;
+type FlownodeOptions<E> = GreptimeOptions<flow::FlownodeOptions, E>;
 
 pub struct Instance {
     flownode: FlownodeInstance,
-
-    // The components of flownode, which make it easier to expand based
-    // on the components.
-    #[cfg(feature = "enterprise")]
-    components: Components,
-
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
 }
 
-#[cfg(feature = "enterprise")]
-pub struct Components {
-    pub catalog_manager: catalog::CatalogManagerRef,
-    pub fe_client: Arc<FrontendClient>,
-    pub kv_backend: common_meta::kv_backend::KvBackendRef,
-}
-
 impl Instance {
-    pub fn new(
-        flownode: FlownodeInstance,
-        #[cfg(feature = "enterprise")] components: Components,
-        guard: Vec<WorkerGuard>,
-    ) -> Self {
+    pub fn new(flownode: FlownodeInstance, guard: Vec<WorkerGuard>) -> Self {
         Self {
             flownode,
-            #[cfg(feature = "enterprise")]
-            components,
             _guard: guard,
         }
     }
@@ -93,11 +75,6 @@ impl Instance {
     /// allow customizing flownode for downstream projects
     pub fn flownode_mut(&mut self) -> &mut FlownodeInstance {
         &mut self.flownode
-    }
-
-    #[cfg(feature = "enterprise")]
-    pub fn components(&self) -> &Components {
-        &self.components
     }
 }
 
@@ -130,11 +107,14 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: FlownodeOptions) -> Result<Instance> {
+    pub async fn build<E: Debug>(&self, opts: FlownodeOptions<E>) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<FlownodeOptions> {
+    pub fn load_options<E: Configurable>(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<FlownodeOptions<E>> {
         match &self.subcmd {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -147,7 +127,7 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: FlownodeOptions) -> Result<Instance> {
+    async fn build<E: Debug>(&self, opts: FlownodeOptions<E>) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
@@ -187,7 +167,10 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<FlownodeOptions> {
+    fn load_options<E: Configurable>(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<FlownodeOptions<E>> {
         let mut opts = FlownodeOptions::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
@@ -200,10 +183,10 @@ impl StartCommand {
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
-    fn merge_with_cli_options(
+    fn merge_with_cli_options<E>(
         &self,
         global_options: &GlobalOptions,
-        opts: &mut FlownodeOptions,
+        opts: &mut FlownodeOptions<E>,
     ) -> Result<()> {
         let opts = &mut opts.component;
 
@@ -269,7 +252,7 @@ impl StartCommand {
         Ok(())
     }
 
-    async fn build(&self, opts: FlownodeOptions) -> Result<Instance> {
+    async fn build<E: Debug>(&self, opts: FlownodeOptions<E>) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -430,16 +413,6 @@ impl StartCommand {
             .set_frontend_invoker(invoker)
             .await;
 
-        #[cfg(feature = "enterprise")]
-        let components = Components {
-            catalog_manager: catalog_manager.clone(),
-            fe_client: frontend_client,
-            kv_backend: cached_meta_backend,
-        };
-
-        #[cfg(not(feature = "enterprise"))]
-        return Ok(Instance::new(flownode, guard));
-        #[cfg(feature = "enterprise")]
-        Ok(Instance::new(flownode, components, guard))
+        Ok(Instance::new(flownode, guard))
     }
 }
