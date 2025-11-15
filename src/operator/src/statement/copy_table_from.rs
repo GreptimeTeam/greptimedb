@@ -37,6 +37,7 @@ use datafusion::datasource::physical_plan::{
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datafusion::parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion_common::SchemaExt;
 use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
@@ -380,6 +381,11 @@ impl StatementExecutor {
             .into_iter()
             .collect::<Vec<_>>();
 
+        let csv_format_opt = match &format {
+            Format::Csv(csv_format) => Some(csv_format),
+            _ => None,
+        };
+
         for entry in entries.iter() {
             if entry.metadata().mode() != EntryMode::FILE {
                 continue;
@@ -390,6 +396,22 @@ impl StatementExecutor {
                 .await?;
 
             let file_schema = file_metadata.schema();
+
+            if let Some(csv_format) = csv_format_opt
+                && csv_format.header
+                && !file_schema.equivalent_names_and_types(&table_schema)
+            {
+                if csv_format.continue_on_error {
+                    continue;
+                } else {
+                    return error::InvalidHeaderSnafu {
+                        table_schema: table_schema.to_string(),
+                        file_schema: file_schema.to_string(),
+                    }
+                    .fail();
+                }
+            };
+
             let (file_schema_projection, table_schema_projection, compat_schema) =
                 generated_schema_projection_and_compatible_file_schema(file_schema, &table_schema);
             let projected_file_schema = Arc::new(
@@ -439,7 +461,17 @@ impl StatementExecutor {
             let mut pending = vec![];
 
             while let Some(r) = stream.next().await {
-                let record_batch = r.context(error::ReadDfRecordBatchSnafu)?;
+                let record_batch = match r.context(error::ReadDfRecordBatchSnafu) {
+                    Ok(batch) => batch,
+                    Err(err) => {
+                        if let Some(csv_format) = csv_format_opt
+                            && csv_format.skip_bad_records
+                        {
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                };
                 let vectors =
                     Helper::try_into_vectors(record_batch.columns()).context(IntoVectorsSnafu)?;
 

@@ -36,6 +36,9 @@ use crate::share_buffer::SharedBuffer;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CsvFormat {
     pub has_header: bool,
+    pub header: bool,
+    pub skip_bad_records: bool,
+    pub continue_on_error: bool,
     pub delimiter: u8,
     pub schema_infer_max_record: Option<usize>,
     pub compression_type: CompressionType,
@@ -83,6 +86,33 @@ impl TryFrom<&HashMap<String, String>> for CsvFormat {
                 .build()
             })?;
         };
+        if let Some(header) = value.get(file_format::FORMAT_HEADER) {
+            format.header = header.parse().map_err(|_| {
+                error::ParseFormatSnafu {
+                    key: file_format::FORMAT_HEADER,
+                    value: header,
+                }
+                .build()
+            })?;
+        }
+        if let Some(skip_bad_records) = value.get(file_format::FORMAT_SKIP_BAD_RECORDS) {
+            format.skip_bad_records = skip_bad_records.parse().map_err(|_| {
+                error::ParseFormatSnafu {
+                    key: file_format::FORMAT_SKIP_BAD_RECORDS,
+                    value: skip_bad_records,
+                }
+                .build()
+            })?;
+        }
+        if let Some(continue_on_error) = value.get(file_format::FORMAT_CONTINUE_ON_ERROR) {
+            format.continue_on_error = continue_on_error.parse().map_err(|_| {
+                error::ParseFormatSnafu {
+                    key: file_format::FORMAT_CONTINUE_ON_ERROR,
+                    value: continue_on_error,
+                }
+                .build()
+            })?;
+        }
         if let Some(timestamp_format) = value.get(file_format::TIMESTAMP_FORMAT) {
             format.timestamp_format = Some(timestamp_format.clone());
         }
@@ -100,6 +130,9 @@ impl Default for CsvFormat {
     fn default() -> Self {
         Self {
             has_header: true,
+            header: true,
+            skip_bad_records: false,
+            continue_on_error: true,
             delimiter: b',',
             schema_infer_max_record: Some(file_format::DEFAULT_SCHEMA_INFER_MAX_RECORD),
             compression_type: CompressionType::Uncompressed,
@@ -291,6 +324,9 @@ mod tests {
                 schema_infer_max_record: Some(2000),
                 delimiter: b'\t',
                 has_header: false,
+                continue_on_error: true,
+                header: true,
+                skip_bad_records: false,
                 timestamp_format: None,
                 time_format: None,
                 date_format: None
