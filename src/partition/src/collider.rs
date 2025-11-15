@@ -173,6 +173,9 @@ impl<'a> Collider<'a> {
         for (column, mut column_values) in values {
             column_values.sort_unstable();
             column_values.dedup(); // Remove duplicates
+
+            // allowed because we have carefully implemented `Hash` to eliminate the mutable
+            #[allow(clippy::mutable_key_type)]
             let mut value_map = HashMap::with_capacity(column_values.len());
             let mut start_value = ZERO;
             for value in column_values {
