@@ -444,14 +444,10 @@ impl Stream for StreamWithMetricWrapper {
                 }
                 match result {
                     Ok(record_batch) => {
-                        let batch_mem_size = record_batch
-                            .columns()
-                            .iter()
-                            .map(|vec_ref| vec_ref.memory_size())
-                            .sum::<usize>();
                         // we don't record elapsed time here
                         // since it's calling storage api involving I/O ops
-                        this.metric.record_mem_usage(batch_mem_size);
+                        this.metric
+                            .record_mem_usage(record_batch.array_memory_size());
                         this.metric.record_output(record_batch.num_rows());
                         Poll::Ready(Some(Ok(record_batch.into_df_record_batch())))
                     }

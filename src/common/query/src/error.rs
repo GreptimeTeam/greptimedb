@@ -52,9 +52,6 @@ pub enum Error {
         data_type: ArrowDatatype,
     },
 
-    #[snafu(display("Failed to downcast vector: {}", err_msg))]
-    DowncastVector { err_msg: String },
-
     #[snafu(display("Invalid input type: {}", err_msg))]
     InvalidInputType {
         #[snafu(implicit)]
@@ -209,8 +206,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::DowncastVector { .. }
-            | Error::InvalidInputState { .. }
+            Error::InvalidInputState { .. }
             | Error::ToScalarValue { .. }
             | Error::GetScalarVector { .. }
             | Error::ArrowCompute { .. }

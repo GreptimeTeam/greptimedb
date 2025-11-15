@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use arrow::array::{ArrayRef, UInt32Array};
 use catalog::RegisterTableRequest;
 use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
@@ -97,11 +98,10 @@ async fn test_datafusion_query_engine() -> Result<()> {
     let batch = &numbers[0];
     assert_eq!(1, batch.num_columns());
     assert_eq!(batch.column(0).len(), limit);
-    let expected: Vec<u32> = (0u32..limit as u32).collect();
-    assert_eq!(
-        *batch.column(0),
-        Arc::new(UInt32Vector::from_slice(expected)) as VectorRef
-    );
+    let expected = Arc::new(UInt32Array::from_iter_values(
+        (0u32..limit as u32).collect::<Vec<_>>(),
+    )) as ArrayRef;
+    assert_eq!(batch.column(0), &expected);
 
     Ok(())
 }
