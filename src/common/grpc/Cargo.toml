@@ -23,6 +23,7 @@ datatypes.workspace = true
 flatbuffers = "25.2"
 hyper.workspace = true
 lazy_static.workspace = true
+notify.workspace = true
 prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -37,6 +38,7 @@ vec1 = "1.12"
 criterion = "0.4"
 hyper-util = { workspace = true, features = ["tokio"] }
 rand.workspace = true
+tempfile.workspace = true
 
 [[bench]]
 name = "bench_main"
