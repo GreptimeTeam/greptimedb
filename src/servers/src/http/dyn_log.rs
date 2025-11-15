@@ -15,7 +15,7 @@
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use common_telemetry::tracing_subscriber::filter;
-use common_telemetry::{RELOAD_HANDLE, info};
+use common_telemetry::{LOG_RELOAD_HANDLE, info};
 use snafu::OptionExt;
 
 use crate::error::{InternalSnafu, InvalidParameterSnafu, Result};
@@ -29,7 +29,7 @@ pub async fn dyn_log_handler(level: String) -> Result<impl IntoResponse> {
         .build()
     })?;
     let mut old_filter = None;
-    RELOAD_HANDLE
+    LOG_RELOAD_HANDLE
         .get()
         .context(InternalSnafu {
             err_msg: "Reload handle not initialized",
