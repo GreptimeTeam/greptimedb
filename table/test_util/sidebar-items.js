@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["empty_table","memtable","table_info"],"struct":["EmptyTable","MemTable"]};

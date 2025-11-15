@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CONTINUE_ON_ERROR_KEY","COPY_DATABASE_TIME_END_KEY","COPY_DATABASE_TIME_START_KEY"],"fn":["list_files_to_copy","parse_file_name_to_copy"]};

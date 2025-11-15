@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["convert_identifier","convert_one_expr","convert_value","create_table_info","find_partition_columns","find_partition_entries","parse_partitions","parse_partitions_for_logical_validation","verify_alter"]};

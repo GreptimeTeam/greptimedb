@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["analyzer","commutativity","merge_scan","merge_sort","planner","predicate_extractor","region_pruner"],"struct":["ConstraintPruner","DistExtensionPlanner","DistPlannerAnalyzer","DistPlannerOptions","MergeScanExec","MergeScanLogicalPlan","MergeSortExtensionPlanner","PredicateExtractor"]};
