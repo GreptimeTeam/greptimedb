@@ -44,8 +44,9 @@ use crate::read::merge::MergeReaderBuilder;
 use crate::read::range::{RangeBuilderList, RangeMeta};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    PartitionMetrics, PartitionMetricsList, scan_file_ranges, scan_flat_file_ranges,
-    scan_flat_mem_ranges, scan_mem_ranges,
+    PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, scan_file_ranges,
+    scan_flat_file_ranges, scan_flat_mem_ranges, scan_mem_ranges,
+    should_split_flat_batches_for_merge,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{
@@ -757,6 +758,7 @@ pub(crate) async fn build_flat_sources(
         }
     }
 
+    let should_split = should_split_flat_batches_for_merge(stream_ctx, range_meta);
     sources.reserve(range_meta.row_group_indices.len());
     for index in &range_meta.row_group_indices {
         let stream = if stream_ctx.is_mem_range_index(*index) {
@@ -780,8 +782,25 @@ pub(crate) async fn build_flat_sources(
         } else {
             scan_util::maybe_scan_flat_other_ranges(stream_ctx, *index, part_metrics).await?
         };
+
+        let stream = if should_split {
+            Box::pin(SplitRecordBatchStream::new(stream)) as _
+        } else {
+            stream
+        };
+
         sources.push(stream);
     }
+
+    if should_split {
+        common_telemetry::debug!(
+            "Splitting record batches, region: {}, sources: {}, part_range: {:?}",
+            stream_ctx.input.region_metadata().region_id,
+            sources.len(),
+            part_range,
+        );
+    }
+
     Ok(())
 }
 
