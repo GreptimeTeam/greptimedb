@@ -31,7 +31,7 @@ mod catchup_test;
 #[cfg(test)]
 mod close_test;
 #[cfg(test)]
-mod compaction_test;
+pub(crate) mod compaction_test;
 #[cfg(test)]
 mod create_test;
 #[cfg(test)]
@@ -297,15 +297,12 @@ impl MitoEngine {
         let file_ref_mgr = self.file_ref_manager();
 
         let region_ids = region_ids.into_iter().collect::<Vec<_>>();
-
-        // Convert region IDs to MitoRegionRef objects, error if any region doesn't exist
+        // Convert region IDs to MitoRegionRef objects, ignore regions that do not exist on current datanode
+        // as regions on other datanodes are not managed by this engine.
         let regions: Vec<MitoRegionRef> = region_ids
             .into_iter()
-            .map(|region_id| {
-                self.find_region(region_id)
-                    .with_context(|| RegionNotFoundSnafu { region_id })
-            })
-            .collect::<Result<_>>()?;
+            .filter_map(|region_id| self.find_region(region_id))
+            .collect();
 
         file_ref_mgr
             .get_snapshot_of_unmanifested_refs(regions)
@@ -369,7 +366,11 @@ impl MitoEngine {
     }
 
     /// Returns a scanner to scan for `request`.
-    async fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+    pub(crate) async fn scanner(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<Scanner> {
         self.scan_region(region_id, request)?.scanner().await
     }
 

@@ -15,7 +15,7 @@
 use common_meta::instruction::{GcRegions, GcRegionsReply, InstructionReply};
 use common_telemetry::{debug, warn};
 use mito2::gc::LocalGcWorker;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{FileRefsManifest, RegionId};
 
 use crate::error::{GcMitoEngineSnafu, InvalidGcArgsSnafu, Result, UnexpectedSnafu};
@@ -34,20 +34,6 @@ impl InstructionHandler for GcRegionsHandler {
     ) -> Option<InstructionReply> {
         let region_ids = gc_regions.regions.clone();
         debug!("Received gc regions instruction: {:?}", region_ids);
-
-        let is_same_table = region_ids.windows(2).all(|w| {
-            let t1 = w[0].table_id();
-            let t2 = w[1].table_id();
-            t1 == t2
-        });
-        if !is_same_table {
-            return Some(InstructionReply::GcRegions(GcRegionsReply {
-                result: Err(format!(
-                    "Regions to GC should belong to the same table, found: {:?}",
-                    region_ids
-                )),
-            }));
-        }
 
         let (region_id, gc_worker) = match self
             .create_gc_worker(
@@ -103,6 +89,8 @@ impl InstructionHandler for GcRegionsHandler {
 }
 
 impl GcRegionsHandler {
+    /// Create a GC worker for the given region IDs.
+    /// Return the first region ID(after sort by given region id) and the GC worker.
     async fn create_gc_worker(
         &self,
         ctx: &HandlerContext,
@@ -112,22 +100,51 @@ impl GcRegionsHandler {
     ) -> Result<(RegionId, LocalGcWorker)> {
         // always use the smallest region id on datanode as the target region id
         region_ids.sort_by_key(|r| r.region_number());
+
+        ensure!(
+            region_ids.windows(2).all(|w| {
+                let t1 = w[0].table_id();
+                let t2 = w[1].table_id();
+                t1 == t2
+            }),
+            InvalidGcArgsSnafu {
+                msg: format!(
+                    "Regions to GC should belong to the same table, found: {:?}",
+                    region_ids
+                ),
+            }
+        );
+
         let mito_engine = ctx
             .region_server
             .mito_engine()
             .with_context(|| UnexpectedSnafu {
                 violated: "MitoEngine not found".to_string(),
             })?;
-        let region_id = *region_ids.first().with_context(|| UnexpectedSnafu {
-            violated: "No region ids provided".to_string(),
+
+        let region_id = *region_ids.first().with_context(|| InvalidGcArgsSnafu {
+            msg: "No region ids provided".to_string(),
         })?;
 
-        let mito_config = mito_engine.mito_config();
+        // also need to ensure all regions are on this datanode
+        ensure!(
+            region_ids
+                .iter()
+                .all(|rid| mito_engine.find_region(*rid).is_some()),
+            InvalidGcArgsSnafu {
+                msg: format!(
+                    "Some regions are not on current datanode:{:?}",
+                    region_ids
+                        .iter()
+                        .filter(|rid| mito_engine.find_region(**rid).is_none())
+                        .collect::<Vec<_>>()
+                ),
+            }
+        );
 
         // Find the access layer from one of the regions that exists on this datanode
-        let access_layer = region_ids
-            .iter()
-            .find_map(|rid| mito_engine.find_region(*rid))
+        let access_layer = mito_engine
+            .find_region(region_id)
             .with_context(|| InvalidGcArgsSnafu {
                 msg: format!(
                     "None of the regions is on current datanode:{:?}",
@@ -136,14 +153,25 @@ impl GcRegionsHandler {
             })?
             .access_layer();
 
+        let mito_regions = region_ids
+            .iter()
+            .map(|rid| {
+                mito_engine
+                    .find_region(*rid)
+                    .map(|r| (*rid, r))
+                    .with_context(|| InvalidGcArgsSnafu {
+                        msg: format!("Region {} not found on datanode", rid),
+                    })
+            })
+            .collect::<Result<_>>()?;
+
         let cache_manager = mito_engine.cache_manager();
 
         let gc_worker = LocalGcWorker::try_new(
             access_layer.clone(),
             Some(cache_manager),
-            region_ids.into_iter().collect(),
-            Default::default(),
-            mito_config.clone().into(),
+            mito_regions,
+            mito_engine.mito_config().gc.clone(),
             file_ref_manifest.clone(),
             &mito_engine.gc_limiter(),
             full_file_listing,

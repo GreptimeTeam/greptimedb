@@ -221,9 +221,9 @@ pub struct TestEnv {
     data_home: TempDir,
     intermediate_manager: IntermediateManager,
     puffin_manager: PuffinManagerFactory,
-    log_store: Option<LogStoreImpl>,
+    pub(crate) log_store: Option<LogStoreImpl>,
     log_store_factory: LogStoreFactory,
-    object_store_manager: Option<ObjectStoreManagerRef>,
+    pub(crate) object_store_manager: Option<ObjectStoreManagerRef>,
     schema_metadata_manager: SchemaMetadataManagerRef,
     file_ref_manager: FileReferenceManagerRef,
     kv_backend: KvBackendRef,
@@ -287,7 +287,7 @@ impl TestEnv {
         self.object_store_manager.clone()
     }
 
-    async fn new_mito_engine(&self, config: MitoConfig) -> MitoEngine {
+    pub(crate) async fn new_mito_engine(&self, config: MitoConfig) -> MitoEngine {
         async fn create<S: LogStore>(
             zelf: &TestEnv,
             config: MitoConfig,
@@ -541,35 +541,42 @@ impl TestEnv {
 
     /// Returns the log store and object store manager.
     async fn create_log_and_object_store_manager(&self) -> (LogStoreImpl, ObjectStoreManager) {
+        let log_store = self.create_log_store().await;
+        let object_store_manager = self.create_object_store_manager();
+
+        (log_store, object_store_manager)
+    }
+
+    pub(crate) async fn create_log_store(&self) -> LogStoreImpl {
         let data_home = self.data_home.path();
         let wal_path = data_home.join("wal");
-        let object_store_manager = self.create_object_store_manager();
 
         match &self.log_store_factory {
             LogStoreFactory::RaftEngine(factory) => {
                 let log_store = factory.create_log_store(wal_path).await;
-                (
-                    LogStoreImpl::RaftEngine(Arc::new(log_store)),
-                    object_store_manager,
-                )
+
+                LogStoreImpl::RaftEngine(Arc::new(log_store))
             }
             LogStoreFactory::Kafka(factory) => {
                 let log_store = factory.create_log_store().await;
 
-                (
-                    LogStoreImpl::Kafka(Arc::new(log_store)),
-                    object_store_manager,
-                )
+                LogStoreImpl::Kafka(Arc::new(log_store))
             }
         }
     }
 
-    fn create_object_store_manager(&self) -> ObjectStoreManager {
+    pub(crate) fn create_object_store_manager(&self) -> ObjectStoreManager {
         let data_home = self.data_home.path();
         let data_path = data_home.join("data").as_path().display().to_string();
         let builder = Fs::default().root(&data_path);
         let object_store = ObjectStore::new(builder).unwrap().finish();
         ObjectStoreManager::new("default", object_store)
+    }
+
+    pub(crate) fn create_in_memory_object_store_manager(&self) -> ObjectStoreManager {
+        let builder = object_store::services::Memory::default();
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+        ObjectStoreManager::new("memory", object_store)
     }
 
     /// If `initial_metadata` is `Some`, creates a new manifest. If `initial_metadata`
@@ -608,14 +615,13 @@ impl TestEnv {
                 metadata,
                 0,
                 manifest_opts,
-                Default::default(),
-                Default::default(),
                 FormatType::PrimaryKey,
+                &Default::default(),
             )
             .await
             .map(Some)
         } else {
-            RegionManifestManager::open(manifest_opts, Default::default(), Default::default()).await
+            RegionManifestManager::open(manifest_opts, &Default::default()).await
         }
     }
 
