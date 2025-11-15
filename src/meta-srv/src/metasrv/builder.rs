@@ -194,8 +194,6 @@ impl MetasrvBuilder {
             table_metadata_allocator,
             extension,
         } = self;
-        #[cfg(not(feature = "enterprise"))]
-        let _ = extension;
 
         let options = options.unwrap_or_default();
 
@@ -426,6 +424,8 @@ impl MetasrvBuilder {
             } else {
                 ddl_manager
             };
+        #[cfg(not(feature = "enterprise"))]
+        let _ = extension;
 
         let ddl_manager = Arc::new(ddl_manager);
 

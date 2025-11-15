@@ -19,7 +19,7 @@ use catalog::information_schema::InformationSchemaTableFactoryRef;
 use common_error::ext::BoxedError;
 use flow::FrontendClient;
 
-/// Providers a set of factories for creating information schema tables.
+/// Provides a set of factories for creating information schema tables.
 ///
 /// For example, the enterprise version will provider some information schema
 /// tables, such as `information_schema.triggers` and `information_schema.alerts`

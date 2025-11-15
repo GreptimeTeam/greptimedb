@@ -383,6 +383,7 @@ mod tests {
     use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
     use meta_srv::selector::SelectorType;
+    use serde::{Deserialize, Serialize};
 
     use super::*;
     use crate::options::EmptyOptions;
@@ -461,6 +462,73 @@ mod tests {
             options.procedure.max_metadata_value_size,
             Some(ReadableSize::kb(1500))
         );
+    }
+
+    #[derive(Default, Serialize, Deserialize)]
+    pub struct ExtensionOptions {
+        pub trigger: Option<TriggerOptions>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub struct TriggerOptions {
+        pub alert_storage: AlertStorageOptions,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(tag = "type")]
+    pub enum AlertStorageOptions {
+        Postgres(PostgresOptions),
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub struct PostgresOptions {
+        pub addr: String,
+    }
+
+    impl Configurable for ExtensionOptions {}
+
+    #[test]
+    fn test_read_config_file_with_extension() {
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            [logging]
+            level = "debug"
+            dir = "./greptimedb_data/test/logs"
+
+            [trigger]
+            [trigger.alert_storage]
+            type = "Postgres"
+            addr = "postgres://localhost:5432/postgres?user=postgres&password=123456"
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
+        let cmd = StartCommand {
+            config_file: Some(file.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+
+        let options = cmd
+            .load_options::<ExtensionOptions>(&Default::default())
+            .unwrap();
+
+        let component = options.component;
+        assert_eq!("debug", component.logging.level.as_ref().unwrap());
+        assert_eq!(
+            "./greptimedb_data/test/logs".to_string(),
+            component.logging.dir
+        );
+
+        let extension = options.extension;
+        assert!(extension.trigger.is_some());
+        let trigger_opts = extension.trigger.unwrap();
+        match trigger_opts.alert_storage {
+            AlertStorageOptions::Postgres(pg_opts) => {
+                assert_eq!(
+                    "postgres://localhost:5432/postgres?user=postgres&password=123456",
+                    pg_opts.addr
+                );
+            }
+        }
     }
 
     #[test]
