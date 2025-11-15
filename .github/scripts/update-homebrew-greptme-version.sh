@@ -37,7 +37,9 @@ update_homebrew_greptime_version() {
     --head $BRANCH_NAME \
     --reviewer sunng87 \
     --reviewer daviderli614 \
-    --reviewer killme2008
+    --reviewer killme2008 \
+    --reviewer evenyag \
+    --reviewer fengjiachun
 }
 
 update_homebrew_greptime_version
