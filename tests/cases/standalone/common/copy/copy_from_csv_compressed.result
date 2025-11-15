@@ -1,0 +1,233 @@
+-- Test compressed CSV import functionality
+-- First, create and export data with different compression types
+CREATE TABLE test_csv_export(
+    `id` UINT32,
+    `name` STRING,
+    `value` DOUBLE,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+-- Insert test data
+INSERT INTO test_csv_export(`id`, `name`, `value`, ts) VALUES 
+    (1, 'Alice', 10.5, 1640995200000),
+    (2, 'Bob', 20.3, 1640995260000),
+    (3, 'Charlie', 30.7, 1640995320000),
+    (4, 'David', 40.1, 1640995380000),
+    (5, 'Eve', 50.9, 1640995440000);
+
+Affected Rows: 5
+
+-- Export with different compression types
+COPY test_csv_export TO '${SQLNESS_HOME}/import/test_csv_uncompressed.csv' WITH (format='csv');
+
+Affected Rows: 5
+
+COPY test_csv_export TO '${SQLNESS_HOME}/import/test_csv_gzip.csv.gz' WITH (format='csv', compression_type='gzip');
+
+Affected Rows: 5
+
+COPY test_csv_export TO '${SQLNESS_HOME}/import/test_csv_zstd.csv.zst' WITH (format='csv', compression_type='zstd');
+
+Affected Rows: 5
+
+COPY test_csv_export TO '${SQLNESS_HOME}/import/test_csv_bzip2.csv.bz2' WITH (format='csv', compression_type='bzip2');
+
+Affected Rows: 5
+
+COPY test_csv_export TO '${SQLNESS_HOME}/import/test_csv_xz.csv.xz' WITH (format='csv', compression_type='xz');
+
+Affected Rows: 5
+
+-- Test importing uncompressed CSV
+CREATE TABLE test_csv_import_uncompressed(
+    `id` UINT32,
+    `name` STRING,
+    `value` DOUBLE,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+COPY test_csv_import_uncompressed FROM '${SQLNESS_HOME}/import/test_csv_uncompressed.csv' WITH (format='csv');
+
+Affected Rows: 5
+
+SELECT COUNT(*) as uncompressed_count FROM test_csv_import_uncompressed;
+
++--------------------+
+| uncompressed_count |
++--------------------+
+| 5                  |
++--------------------+
+
+-- Test importing GZIP compressed CSV
+CREATE TABLE test_csv_import_gzip(
+    `id` UINT32,
+    `name` STRING,
+    `value` DOUBLE,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+COPY test_csv_import_gzip FROM '${SQLNESS_HOME}/import/test_csv_gzip.csv.gz' WITH (format='csv', compression_type='gzip');
+
+Affected Rows: 5
+
+SELECT COUNT(*) as gzip_count FROM test_csv_import_gzip;
+
++------------+
+| gzip_count |
++------------+
+| 5          |
++------------+
+
+SELECT `id`, `name`, `value` FROM test_csv_import_gzip WHERE `id` = 1;
+
++----+-------+-------+
+| id | name  | value |
++----+-------+-------+
+| 1  | Alice | 10.5  |
++----+-------+-------+
+
+-- Test importing ZSTD compressed CSV
+CREATE TABLE test_csv_import_zstd(
+    `id` UINT32,
+    `name` STRING,
+    `value` DOUBLE,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+COPY test_csv_import_zstd FROM '${SQLNESS_HOME}/import/test_csv_zstd.csv.zst' WITH (format='csv', compression_type='zstd');
+
+Affected Rows: 5
+
+SELECT COUNT(*) as zstd_count FROM test_csv_import_zstd;
+
++------------+
+| zstd_count |
++------------+
+| 5          |
++------------+
+
+SELECT `id`, `name`, `value` FROM test_csv_import_zstd WHERE `id` = 2;
+
++----+------+-------+
+| id | name | value |
++----+------+-------+
+| 2  | Bob  | 20.3  |
++----+------+-------+
+
+-- Test importing BZIP2 compressed CSV
+CREATE TABLE test_csv_import_bzip2(
+    `id` UINT32,
+    `name` STRING,
+    `value` DOUBLE,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+COPY test_csv_import_bzip2 FROM '${SQLNESS_HOME}/import/test_csv_bzip2.csv.bz2' WITH (format='csv', compression_type='bzip2');
+
+Affected Rows: 5
+
+SELECT COUNT(*) as bzip2_count FROM test_csv_import_bzip2;
+
++-------------+
+| bzip2_count |
++-------------+
+| 5           |
++-------------+
+
+SELECT `id`, `name`, `value` FROM test_csv_import_bzip2 WHERE `id` = 3;
+
++----+---------+-------+
+| id | name    | value |
++----+---------+-------+
+| 3  | Charlie | 30.7  |
++----+---------+-------+
+
+-- Test importing XZ compressed CSV
+CREATE TABLE test_csv_import_xz(
+    `id` UINT32,
+    `name` STRING,
+    `value` DOUBLE,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+COPY test_csv_import_xz FROM '${SQLNESS_HOME}/import/test_csv_xz.csv.xz' WITH (format='csv', compression_type='xz');
+
+Affected Rows: 5
+
+SELECT COUNT(*) as xz_count FROM test_csv_import_xz;
+
++----------+
+| xz_count |
++----------+
+| 5        |
++----------+
+
+SELECT `id`, `name`, `value` FROM test_csv_import_xz WHERE `id` = 4;
+
++----+-------+-------+
+| id | name  | value |
++----+-------+-------+
+| 4  | David | 40.1  |
++----+-------+-------+
+
+-- Verify data integrity by comparing all imported tables
+SELECT source, count FROM (
+    SELECT 'uncompressed' as source, COUNT(*) as count, 1 as order_key FROM test_csv_import_uncompressed
+    UNION ALL
+    SELECT 'gzip', COUNT(*) as count, 2 as order_key FROM test_csv_import_gzip
+    UNION ALL
+    SELECT 'zstd', COUNT(*) as count, 3 as order_key FROM test_csv_import_zstd
+    UNION ALL
+    SELECT 'bzip2', COUNT(*) as count, 4 as order_key FROM test_csv_import_bzip2
+    UNION ALL
+    SELECT 'xz', COUNT(*) as count, 5 as order_key FROM test_csv_import_xz
+) AS subquery
+ORDER BY order_key;
+
++--------------+-------+
+| source       | count |
++--------------+-------+
+| uncompressed | 5     |
+| gzip         | 5     |
+| zstd         | 5     |
+| bzip2        | 5     |
+| xz           | 5     |
++--------------+-------+
+
+-- Clean up
+DROP TABLE test_csv_export;
+
+Affected Rows: 0
+
+DROP TABLE test_csv_import_uncompressed;
+
+Affected Rows: 0
+
+DROP TABLE test_csv_import_gzip;
+
+Affected Rows: 0
+
+DROP TABLE test_csv_import_zstd;
+
+Affected Rows: 0
+
+DROP TABLE test_csv_import_bzip2;
+
+Affected Rows: 0
+
+DROP TABLE test_csv_import_xz;
+
+Affected Rows: 0
+

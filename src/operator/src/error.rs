@@ -578,7 +578,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
-        error: datafusion::error::DataFusionError,
+        error: common_datasource::error::Error,
     },
 
     #[snafu(display(
