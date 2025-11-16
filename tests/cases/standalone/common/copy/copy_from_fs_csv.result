@@ -27,30 +27,16 @@ Affected Rows: 0
 
 Copy with_filename FROM '${SQLNESS_HOME}/demo/export/csv/demo.csv' with (format='csv', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:39');
 
-Affected Rows: 0
+Affected Rows: 2
 
 select * from with_filename order by ts;
 
-++
-++
-
-CREATE TABLE with_json(host string, cpu double, memory double, jsons JSON, ts timestamp time index);
-
-Affected Rows: 0
-
-Copy with_json FROM '${SQLNESS_HOME}/demo/export/json/demo.json' with (format='json');
-
-Affected Rows: 3
-
-select host, cpu, memory, json_to_string(jsons), ts from with_json order by ts;
-
-+-------+------+--------+---------------------------------+---------------------+
-| host  | cpu  | memory | json_to_string(with_json.jsons) | ts                  |
-+-------+------+--------+---------------------------------+---------------------+
-| host1 | 66.6 | 1024.0 | {"foo":"bar"}                   | 2022-06-15T07:02:37 |
-| host2 | 88.8 | 333.3  | {"a":null,"foo":"bar"}          | 2022-06-15T07:02:38 |
-| host3 | 99.9 | 444.4  |                                 | 2024-07-27T10:47:43 |
-+-------+------+--------+---------------------------------+---------------------+
++-------+------+--------+---------------------+
+| host  | cpu  | memory | ts                  |
++-------+------+--------+---------------------+
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
++-------+------+--------+---------------------+
 
 CREATE TABLE with_json(host string, cpu double, memory double, jsons JSON, ts timestamp time index);
 
@@ -96,12 +82,15 @@ Affected Rows: 0
 
 Copy with_path FROM '${SQLNESS_HOME}/demo/export/csv/' with (format='csv', start_time='2023-06-15 07:02:37');
 
-Affected Rows: 0
+Affected Rows: 1
 
 select * from with_path order by ts;
 
-++
-++
++-------+------+--------+---------------------+
+| host  | cpu  | memory | ts                  |
++-------+------+--------+---------------------+
+| host3 | 99.9 | 444.4  | 2024-07-27T10:47:43 |
++-------+------+--------+---------------------+
 
 CREATE TABLE with_pattern(host string, cpu double, memory double, ts timestamp time index);
 
@@ -109,12 +98,17 @@ Affected Rows: 0
 
 Copy with_pattern FROM '${SQLNESS_HOME}/demo/export/csv/' WITH (pattern = 'demo.*', format='csv', end_time='2025-06-15 07:02:39');
 
-Affected Rows: 0
+Affected Rows: 3
 
 select * from with_pattern order by ts;
 
-++
-++
++-------+------+--------+---------------------+
+| host  | cpu  | memory | ts                  |
++-------+------+--------+---------------------+
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
+| host3 | 99.9 | 444.4  | 2024-07-27T10:47:43 |
++-------+------+--------+---------------------+
 
 CREATE TABLE demo_with_external_column(host string, cpu double, memory double, ts timestamp time index, external_column string default 'default_value');
 
@@ -122,12 +116,17 @@ Affected Rows: 0
 
 Copy demo_with_external_column FROM '${SQLNESS_HOME}/demo/export/csv/demo.csv' WITH (format='csv');
 
-Affected Rows: 0
+Affected Rows: 3
 
 select * from demo_with_external_column order by ts;
 
-++
-++
++-------+------+--------+---------------------+-----------------+
+| host  | cpu  | memory | ts                  | external_column |
++-------+------+--------+---------------------+-----------------+
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 | default_value   |
+| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 | default_value   |
+| host3 | 99.9 | 444.4  | 2024-07-27T10:47:43 | default_value   |
++-------+------+--------+---------------------+-----------------+
 
 CREATE TABLE demo_with_less_columns(host string, memory double, ts timestamp time index);
 
@@ -135,12 +134,17 @@ Affected Rows: 0
 
 Copy demo_with_less_columns FROM '${SQLNESS_HOME}/demo/export/csv/demo.csv' WITH (format='csv');
 
-Affected Rows: 0
+Affected Rows: 3
 
 select * from demo_with_less_columns order by ts;
 
-++
-++
++-------+--------+---------------------+
+| host  | memory | ts                  |
++-------+--------+---------------------+
+| host1 | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 333.3  | 2022-06-15T07:02:38 |
+| host3 | 444.4  | 2024-07-27T10:47:43 |
++-------+--------+---------------------+
 
 drop table demo;
 
