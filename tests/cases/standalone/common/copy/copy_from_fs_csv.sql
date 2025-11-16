@@ -89,3 +89,4 @@ drop table demo_with_less_columns;
 drop table csv_null_prefix;
 
 drop table csv_null_prefix_import;
+

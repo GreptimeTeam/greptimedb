@@ -131,7 +131,7 @@ impl Default for CsvFormat {
     fn default() -> Self {
         Self {
             has_header: true,
-            header: true,
+            header: false,
             skip_bad_records: false,
             continue_on_error: true,
             delimiter: b',',
@@ -365,7 +365,7 @@ mod tests {
                 delimiter: b'\t',
                 has_header: false,
                 continue_on_error: true,
-                header: true,
+                header: false,
                 skip_bad_records: false,
                 timestamp_format: None,
                 time_format: None,
