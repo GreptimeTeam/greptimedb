@@ -48,7 +48,6 @@ use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
 use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
-use servers::export_metrics::ExportMetricsTask;
 use servers::server::ServerHandlers;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::path_utils::WAL_DIR;
@@ -84,7 +83,6 @@ pub struct Datanode {
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leases_notifier: Option<Arc<Notify>>,
     plugins: Plugins,
-    export_metrics_task: Option<ExportMetricsTask>,
 }
 
 impl Datanode {
@@ -95,10 +93,6 @@ impl Datanode {
         self.wait_coordinated().await;
 
         self.start_telemetry();
-
-        if let Some(t) = self.export_metrics_task.as_ref() {
-            t.start(None).context(StartServerSnafu)?
-        }
 
         self.services.start_all().await.context(StartServerSnafu)
     }
@@ -319,10 +313,6 @@ impl DatanodeBuilder {
             None
         };
 
-        let export_metrics_task =
-            ExportMetricsTask::try_new(&self.opts.export_metrics, Some(&self.plugins))
-                .context(StartServerSnafu)?;
-
         Ok(Datanode {
             services: ServerHandlers::default(),
             heartbeat_task,
@@ -331,7 +321,6 @@ impl DatanodeBuilder {
             region_event_receiver,
             leases_notifier,
             plugins: self.plugins.clone(),
-            export_metrics_task,
         })
     }
 

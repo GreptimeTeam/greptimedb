@@ -57,7 +57,6 @@ use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
-use servers::export_metrics::ExportMetricsTask;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
 use standalone::StandaloneInformationExtension;
@@ -565,9 +564,6 @@ impl StartCommand {
         .context(StartFlownodeSnafu)?;
         flow_streaming_engine.set_frontend_invoker(invoker).await;
 
-        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
-            .context(error::ServersSnafu)?;
-
         let servers = Services::new(opts, fe_instance.clone(), plugins.clone())
             .build()
             .context(error::StartFrontendSnafu)?;
@@ -576,7 +572,6 @@ impl StartCommand {
             instance: fe_instance,
             servers,
             heartbeat_task: None,
-            export_metrics_task,
         };
 
         #[cfg(feature = "enterprise")]

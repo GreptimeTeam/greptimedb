@@ -28,7 +28,6 @@ use frontend::service_config::{
 use mito2::config::MitoConfig;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
-use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 
@@ -55,7 +54,6 @@ pub struct StandaloneOptions {
     pub user_provider: Option<String>,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
-    pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
     pub init_regions_in_background: bool,
     pub init_regions_parallelism: usize,
@@ -85,7 +83,6 @@ impl Default for StandaloneOptions {
             procedure: ProcedureConfig::default(),
             flow: FlowConfig::default(),
             logging: LoggingOptions::default(),
-            export_metrics: ExportMetricsOption::default(),
             user_provider: None,
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),
@@ -134,8 +131,6 @@ impl StandaloneOptions {
             meta_client: None,
             logging: cloned_opts.logging,
             user_provider: cloned_opts.user_provider,
-            // Handle the export metrics task run by standalone to frontend for execution
-            export_metrics: cloned_opts.export_metrics,
             max_in_flight_write_bytes: cloned_opts.max_in_flight_write_bytes,
             slow_query: cloned_opts.slow_query,
             ..Default::default()
