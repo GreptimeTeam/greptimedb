@@ -24,6 +24,7 @@ pub(crate) mod open_candidate_region;
 pub mod test_util;
 pub(crate) mod update_metadata;
 pub(crate) mod upgrade_candidate_region;
+pub(crate) mod utils;
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -100,9 +101,14 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistentContext {
     /// The table catalog.
-    pub(crate) catalog: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) catalog: Option<String>,
     /// The table schema.
-    pub(crate) schema: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) schema: Option<String>,
+    /// The catalog and schema of the regions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) catalog_and_schema: Vec<(String, String)>,
     /// The [Peer] of migration source.
     pub(crate) from_peer: Peer,
     /// The [Peer] of migration destination.
@@ -124,9 +130,17 @@ fn default_timeout() -> Duration {
 
 impl PersistentContext {
     pub fn lock_key(&self) -> Vec<StringKey> {
-        let mut lock_keys = Vec::with_capacity(self.region_ids.len() + 2);
-        lock_keys.push(CatalogLock::Read(&self.catalog).into());
-        lock_keys.push(SchemaLock::read(&self.catalog, &self.schema).into());
+        let mut lock_keys =
+            Vec::with_capacity(self.region_ids.len() + 2 + self.catalog_and_schema.len() * 2);
+        if let (Some(catalog), Some(schema)) = (&self.catalog, &self.schema) {
+            lock_keys.push(CatalogLock::Read(catalog).into());
+            lock_keys.push(SchemaLock::read(catalog, schema).into());
+        }
+        for (catalog, schema) in self.catalog_and_schema.iter() {
+            lock_keys.push(CatalogLock::Read(catalog).into());
+            lock_keys.push(SchemaLock::read(catalog, schema).into());
+        }
+
         // Sort the region ids to ensure the same order of region ids.
         let mut region_ids = self.region_ids.clone();
         region_ids.sort_unstable();

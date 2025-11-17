@@ -32,7 +32,6 @@ use common_meta::rpc::store::RangeRequest;
 use common_runtime::JoinHandle;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
-use error::Error::{LeaderPeerChanged, MigrationRunning, RegionMigrated, TableRouteNotFound};
 use futures::{StreamExt, TryStreamExt};
 use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
@@ -47,6 +46,7 @@ use crate::metasrv::{RegionStatAwareSelectorRef, SelectTarget, SelectorContext, 
 use crate::procedure::region_migration::manager::{
     RegionMigrationManagerRef, RegionMigrationTriggerReason,
 };
+use crate::procedure::region_migration::utils::RegionMigrationTask;
 use crate::procedure::region_migration::{
     DEFAULT_REGION_MIGRATION_TIMEOUT, RegionMigrationProcedureTask,
 };
@@ -575,11 +575,21 @@ impl RegionSupervisor {
                 .await
             {
                 Ok(tasks) => {
+                    let mut grouped_tasks: HashMap<(u64, u64), Vec<_>> = HashMap::new();
                     for (task, count) in tasks {
-                        let region_id = task.region_id;
-                        let datanode_id = task.from_peer.id;
-                        if let Err(err) = self.do_failover(task, count).await {
-                            error!(err; "Failed to execute region failover for region: {}, datanode: {}", region_id, datanode_id);
+                        grouped_tasks
+                            .entry((task.from_peer.id, task.to_peer.id))
+                            .or_default()
+                            .push((task, count));
+                    }
+
+                    for ((from_peer_id, to_peer_id), tasks) in grouped_tasks {
+                        let region_ids = tasks
+                            .iter()
+                            .map(|(task, _)| task.region_id)
+                            .collect::<Vec<_>>();
+                        if let Err(err) = self.do_failover_tasks(tasks).await {
+                            error!(err; "Failed to execute region failover for regions: {:?}, from_peer: {}, to_peer: {}", region_ids, from_peer_id, to_peer_id);
                         }
                     }
                 }
@@ -688,56 +698,92 @@ impl RegionSupervisor {
         Ok(tasks)
     }
 
-    async fn do_failover(&mut self, task: RegionMigrationProcedureTask, count: u32) -> Result<()> {
-        let from_peer_id = task.from_peer.id;
-        let to_peer_id = task.to_peer.id;
-        let region_id = task.region_id;
-
-        info!(
-            "Failover for region: {}, from_peer: {}, to_peer: {}, timeout: {:?}, tries: {}",
-            task.region_id, task.from_peer, task.to_peer, task.timeout, count
-        );
-
-        if let Err(err) = self.region_migration_manager.submit_procedure(task).await {
-            return match err {
-                RegionMigrated { .. } => {
-                    info!(
-                        "Region has been migrated to target peer: {}, removed failover detector for region: {}, datanode: {}",
-                        to_peer_id, region_id, from_peer_id
-                    );
-                    self.deregister_failure_detectors(vec![(from_peer_id, region_id)])
-                        .await;
-                    Ok(())
-                }
-                // Returns Ok if it's running or table is dropped.
-                MigrationRunning { .. } => {
-                    info!(
-                        "Another region migration is running, skip failover for region: {}, datanode: {}",
-                        region_id, from_peer_id
-                    );
-                    Ok(())
-                }
-                TableRouteNotFound { .. } => {
-                    self.deregister_failure_detectors(vec![(from_peer_id, region_id)])
-                        .await;
-                    info!(
-                        "Table route is not found, the table is dropped, removed failover detector for region: {}, datanode: {}",
-                        region_id, from_peer_id
-                    );
-                    Ok(())
-                }
-                LeaderPeerChanged { .. } => {
-                    self.deregister_failure_detectors(vec![(from_peer_id, region_id)])
-                        .await;
-                    info!(
-                        "Region's leader peer changed, removed failover detector for region: {}, datanode: {}",
-                        region_id, from_peer_id
-                    );
-                    Ok(())
-                }
-                err => Err(err),
-            };
+    async fn do_failover_tasks(
+        &mut self,
+        tasks: Vec<(RegionMigrationProcedureTask, u32)>,
+    ) -> Result<()> {
+        if tasks.is_empty() {
+            warn!("No failover tasks to execute");
+            return Ok(());
+        }
+        let max_count = tasks.iter().map(|(_, count)| *count).max().unwrap_or(1);
+        let region_ids = tasks.iter().map(|(r, _)| r.region_id).collect::<Vec<_>>();
+        let from_peer = tasks[0].0.from_peer.clone();
+        let from_peer_id = from_peer.id;
+        let to_peer = tasks[0].0.to_peer.clone();
+        let to_peer_id = to_peer.id;
+        let timeout = Duration::from_secs(120) * max_count;
+        let trigger_reason = RegionMigrationTriggerReason::Failover;
+        let task = RegionMigrationTask {
+            region_ids,
+            from_peer,
+            to_peer,
+            timeout,
+            trigger_reason,
         };
+        let result = self
+            .region_migration_manager
+            .submit_region_migration_task(task)
+            .await?;
+        if !result.migrated.is_empty() {
+            let detecting_regions = result
+                .migrated
+                .iter()
+                .map(|region_id| (from_peer_id, *region_id))
+                .collect::<Vec<_>>();
+            self.deregister_failure_detectors(detecting_regions).await;
+            info!(
+                "Region has been migrated to target peer: {}, removed failover detectors for regions: {:?}",
+                to_peer_id, result.migrated,
+            )
+        }
+        if !result.migrating.is_empty() {
+            info!(
+                "Region is still migrating, skipping failover for regions: {:?}",
+                result.migrating
+            );
+        }
+        if !result.table_not_found.is_empty() {
+            let detecting_regions = result
+                .migrated
+                .iter()
+                .map(|region_id| (from_peer_id, *region_id))
+                .collect::<Vec<_>>();
+            self.deregister_failure_detectors(detecting_regions).await;
+            info!(
+                "Table is not found, removed failover detectors for regions: {:?}",
+                result.table_not_found
+            );
+        }
+        if !result.leader_changed.is_empty() {
+            let detecting_regions = result
+                .leader_changed
+                .iter()
+                .map(|region_id| (from_peer_id, *region_id))
+                .collect::<Vec<_>>();
+            self.deregister_failure_detectors(detecting_regions).await;
+            info!(
+                "Region's leader peer changed, removed failover detectors for regions: {:?}",
+                result.leader_changed
+            );
+        }
+        if !result.peer_conflict.is_empty() {
+            info!(
+                "Region has peer conflict, ignore failover for regions: {:?}",
+                result.peer_conflict
+            );
+        }
+        if !result.submitted.is_empty() {
+            info!(
+                "Failover for regions: {:?}, from_peer: {}, to_peer: {}, procedure_id: {:?}, timeout: {:?}, trigger_reason: {:?}",
+                result.submitted,
+                from_peer_id,
+                to_peer_id,
+                result.procedure_id,
+                timeout,
+                trigger_reason,
+            );
+        }
 
         Ok(())
     }

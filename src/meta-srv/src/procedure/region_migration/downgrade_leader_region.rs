@@ -390,8 +390,9 @@ mod tests {
 
     fn new_persistent_context() -> PersistentContext {
         PersistentContext {
-            catalog: "greptime".into(),
-            schema: "public".into(),
+            catalog: Some("greptime".to_string()),
+            schema: Some("public".to_string()),
+            catalog_and_schema: vec![],
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
             region_ids: vec![RegionId::new(1024, 1)],

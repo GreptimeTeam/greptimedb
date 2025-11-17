@@ -186,8 +186,9 @@ impl TestingEnv {
 /// Generates a [PersistentContext].
 pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> PersistentContext {
     PersistentContext {
-        catalog: "greptime".into(),
-        schema: "public".into(),
+        catalog: Some("greptime".into()),
+        schema: Some("public".into()),
+        catalog_and_schema: vec![],
         from_peer: Peer::empty(from),
         to_peer: Peer::empty(to),
         region_ids: vec![region_id],
