@@ -36,6 +36,7 @@ use crate::gc::Region2Peers;
 use crate::cluster::MetaPeerClientRef;
 use crate::error;
 use crate::error::{Result, TableMetadataManagerSnafu};
+use crate::gc::handler::Region2Peers;
 use crate::gc::procedure::GcRegionProcedure;
 use crate::handler::HeartbeatMailbox;
 use crate::service::mailbox::{Channel, MailboxRef};
