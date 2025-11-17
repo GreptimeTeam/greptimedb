@@ -351,13 +351,14 @@ pub fn maybe_watch_client_tls_config(
     })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ClientTlsOption {
     /// Whether to enable TLS for client.
     pub enabled: bool,
     pub server_ca_cert_path: Option<String>,
     pub client_cert_path: Option<String>,
     pub client_key_path: Option<String>,
+    #[serde(default)]
     pub watch: bool,
 }
 
