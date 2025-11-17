@@ -5,6 +5,7 @@ create database pg_catalog;
 -- SQLNESS PROTOCOL POSTGRES
 SELECT session_user is not null;
 
+-- SQLNESS REPLACE (\d+(?:\.\d+)*)-greptimedb-(\d+(?:\.\d+)*(?:-[a-zA-Z0-9-.]+)?) PG_VERSION-greptimedb-VERSION
 -- current_schema
 -- SQLNESS PROTOCOL POSTGRES
 select current_schema(), current_schemas(true), current_schemas(false), version(), current_database();
