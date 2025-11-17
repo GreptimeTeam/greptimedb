@@ -267,9 +267,12 @@ where
         encoder.write(&batch)?;
         rows += batch.num_rows();
 
-        while buffer.buffer.lock().unwrap().len() >= threshold {
+        loop {
             let chunk = {
                 let mut buffer_guard = buffer.buffer.lock().unwrap();
+                if buffer_guard.len() < threshold {
+                    break;
+                }
                 buffer_guard.split_to(threshold)
             };
             write_to_compressed_writer(&mut compressed_writer, &chunk).await?;
