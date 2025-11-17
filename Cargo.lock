@@ -8659,6 +8659,7 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-sql",
+ "common-stat",
  "common-telemetry",
  "common-test-util",
  "common-time",

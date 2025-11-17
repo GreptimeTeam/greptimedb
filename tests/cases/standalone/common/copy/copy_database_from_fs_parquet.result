@@ -64,3 +64,149 @@ DROP TABLE demo;
 
 Affected Rows: 0
 
+CREATE TABLE cpu_metrics (
+    host STRING,
+    `usage` DOUBLE,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+INSERT INTO cpu_metrics 
+VALUES
+    ('host1', 66.6, 1655276557000),
+    ('host2', 77.7, 1655276558000),
+    ('host3', 88.8, 1655276559000);
+
+Affected Rows: 3
+
+CREATE TABLE memory_stats (
+    host STRING,
+    used DOUBLE,
+    `free` DOUBLE,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+INSERT INTO memory_stats 
+VALUES
+    ('host1', 1024, 512, 1655276557000),
+    ('host2', 2048, 1024, 1655276558000),
+    ('host3', 4096, 2048, 1655276559000);
+
+Affected Rows: 3
+
+CREATE TABLE event_logs (
+    `id` INT,
+    `message` STRING,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+INSERT INTO event_logs 
+VALUES
+    (1, 'start', 1655276557000),
+    (2, 'processing', 1655276558000),
+    (3, 'finish', 1655276559000);
+
+Affected Rows: 3
+
+CREATE TABLE sensors (
+    sensor_id STRING,
+    temperature DOUBLE,
+    pressure INT,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+INSERT INTO sensors 
+VALUES
+    ('s1', 36.5, 1001, 1655276557000),
+    ('s2', 37.2, 1003, 1655276558000),
+    ('s3', 35.9, 998, 1655276559000);
+
+Affected Rows: 3
+
+COPY DATABASE public TO '${SQLNESS_HOME}/export_parallel/' WITH (format='parquet', parallelism=2);
+
+Affected Rows: 12
+
+DELETE FROM cpu_metrics;
+
+Affected Rows: 3
+
+DELETE FROM memory_stats;
+
+Affected Rows: 3
+
+DELETE FROM event_logs;
+
+Affected Rows: 3
+
+DELETE FROM sensors;
+
+Affected Rows: 3
+
+COPY DATABASE public FROM '${SQLNESS_HOME}/export_parallel/' WITH (parallelism=2);
+
+Affected Rows: 12
+
+SELECT * FROM cpu_metrics;
+
++-------+-------+---------------------+
+| host  | usage | ts                  |
++-------+-------+---------------------+
+| host1 | 66.6  | 2022-06-15T07:02:37 |
+| host2 | 77.7  | 2022-06-15T07:02:38 |
+| host3 | 88.8  | 2022-06-15T07:02:39 |
++-------+-------+---------------------+
+
+SELECT * FROM memory_stats;
+
++-------+--------+--------+---------------------+
+| host  | used   | free   | ts                  |
++-------+--------+--------+---------------------+
+| host1 | 1024.0 | 512.0  | 2022-06-15T07:02:37 |
+| host2 | 2048.0 | 1024.0 | 2022-06-15T07:02:38 |
+| host3 | 4096.0 | 2048.0 | 2022-06-15T07:02:39 |
++-------+--------+--------+---------------------+
+
+SELECT * FROM event_logs;
+
++----+------------+---------------------+
+| id | message    | ts                  |
++----+------------+---------------------+
+| 1  | start      | 2022-06-15T07:02:37 |
+| 2  | processing | 2022-06-15T07:02:38 |
+| 3  | finish     | 2022-06-15T07:02:39 |
++----+------------+---------------------+
+
+SELECT * FROM sensors;
+
++-----------+-------------+----------+---------------------+
+| sensor_id | temperature | pressure | ts                  |
++-----------+-------------+----------+---------------------+
+| s1        | 36.5        | 1001     | 2022-06-15T07:02:37 |
+| s2        | 37.2        | 1003     | 2022-06-15T07:02:38 |
+| s3        | 35.9        | 998      | 2022-06-15T07:02:39 |
++-----------+-------------+----------+---------------------+
+
+DROP TABLE cpu_metrics;
+
+Affected Rows: 0
+
+DROP TABLE memory_stats;
+
+Affected Rows: 0
+
+DROP TABLE event_logs;
+
+Affected Rows: 0
+
+DROP TABLE sensors;
+
+Affected Rows: 0
+
