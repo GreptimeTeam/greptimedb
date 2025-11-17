@@ -100,9 +100,8 @@ impl MockSchedulerCtx {
     }
 
     /// Set an error to be returned by `get_table_route`
-    pub fn with_get_table_route_error(self, error: crate::error::Error) -> Self {
+    pub fn set_table_route_error(&self, error: crate::error::Error) {
         *self.get_table_route_error.lock().unwrap() = Some(error);
-        self
     }
 
     /// Set an error to be returned by `get_file_references`
@@ -216,27 +215,29 @@ impl SchedulerCtx for MockSchedulerCtx {
     async fn gc_regions(
         &self,
         _peer: Peer,
-        region_id: RegionId,
+        region_ids: &[RegionId],
         _file_refs_manifest: &FileRefsManifest,
         _full_file_listing: bool,
         _timeout: Duration,
     ) -> Result<GcReport> {
         *self.gc_regions_calls.lock().unwrap() += 1;
 
-        // Track retry count for this region
-        {
+        // Track retry count for all regions (use the first region as representative)
+        if let Some(&first_region_id) = region_ids.first() {
             let mut retry_count = self.gc_regions_retry_count.lock().unwrap();
-            *retry_count.entry(region_id).or_insert(0) += 1;
+            *retry_count.entry(first_region_id).or_insert(0) += 1;
         }
 
-        // Check per-region error injection first
-        if let Some(error) = self
-            .gc_regions_per_region_errors
-            .lock()
-            .unwrap()
-            .remove(&region_id)
-        {
-            return Err(error);
+        // Check per-region error injection first (for any region)
+        for &region_id in region_ids {
+            if let Some(error) = self
+                .gc_regions_per_region_errors
+                .lock()
+                .unwrap()
+                .remove(&region_id)
+            {
+                return Err(error);
+            }
         }
 
         // Check if we should return an injected error
@@ -253,38 +254,46 @@ impl SchedulerCtx for MockSchedulerCtx {
             }
         }
 
-        // Handle success after specific number of retries
-        {
+        // Handle success after specific number of retries (use first region as representative)
+        if let Some(&first_region_id) = region_ids.first() {
             let retry_count = self
                 .gc_regions_retry_count
                 .lock()
                 .unwrap()
-                .get(&region_id)
+                .get(&first_region_id)
                 .copied()
                 .unwrap_or(0);
             let success_after_retries = self.gc_regions_success_after_retries.lock().unwrap();
-            if let Some(&required_retries) = success_after_retries.get(&region_id)
+            if let Some(&required_retries) = success_after_retries.get(&first_region_id)
                 && retry_count <= required_retries
             {
                 // Return retryable error until we reach the required retry count
                 return Err(crate::error::RetryLaterSnafu {
                     reason: format!(
                         "Mock retryable error for region {} (attempt {}/{})",
-                        region_id, retry_count, required_retries
+                        first_region_id, retry_count, required_retries
                     ),
                 }
                 .build());
             }
         }
 
-        self.gc_reports
-            .lock()
-            .unwrap()
-            .get(&region_id)
-            .cloned()
-            .with_context(|| UnexpectedSnafu {
-                violated: format!("No corresponding gc report for {}", region_id),
-            })
+        // Collect and merge reports for all requested regions
+        let mut combined_report = GcReport::default();
+        let gc_reports = self.gc_reports.lock().unwrap();
+
+        for &region_id in region_ids {
+            if let Some(report) = gc_reports.get(&region_id) {
+                combined_report.merge(report.clone());
+            } else {
+                return Err(UnexpectedSnafu {
+                    violated: format!("No corresponding gc report for {}", region_id),
+                }
+                .build());
+            }
+        }
+
+        Ok(combined_report)
     }
 }
 

@@ -25,20 +25,19 @@ use crate::gc::mock::{MockSchedulerCtx, TestEnv, mock_region_stat, new_candidate
 use crate::gc::{GcScheduler, GcSchedulerOptions};
 
 #[tokio::test]
-async fn test_process_tables_concurrently_empty() {
+async fn test_process_datanodes_concurrently_empty() {
     let env = TestEnv::new();
     let report = env
         .scheduler
-        .process_tables_concurrently(HashMap::new())
+        .process_datanodes_concurrently(HashMap::new())
         .await;
 
-    assert_eq!(report.processed_tables, 0);
-    assert_eq!(report.table_reports.len(), 0);
-    assert!(report.table_reports.is_empty());
+    assert_eq!(report.per_datanode_reports.len(), 0);
+    assert_eq!(report.failed_datanodes.len(), 0);
 }
 
 #[tokio::test]
-async fn test_process_tables_concurrently_with_candidates() {
+async fn test_process_datanodes_concurrently_with_candidates() {
     init_default_ut_logging();
 
     let table_id = 1;
@@ -66,31 +65,31 @@ async fn test_process_tables_concurrently_with_candidates() {
     }
     .with_table_routes(HashMap::from([(
         table_id,
-        (table_id, vec![(region_id, peer)]),
+        (table_id, vec![(region_id, peer.clone())]),
     )]));
 
-    let env = TestEnv::new().with_candidates(candidates);
+    let env = TestEnv::new();
     // We need to replace the ctx with the one with gc_reports
     let mut scheduler = env.scheduler;
     scheduler.ctx = Arc::new(ctx);
 
-    let candidates = env
-        .ctx
-        .candidates
-        .lock()
-        .unwrap()
-        .clone()
-        .unwrap_or_default();
+    let candidates = HashMap::from([(1, vec![new_candidate(region_id, 1.0)])]);
 
-    let report = scheduler.process_tables_concurrently(candidates).await;
+    // Convert table-based candidates to datanode-based candidates
+    let datanode_to_candidates = HashMap::from([(
+        peer,
+        candidates
+            .into_iter()
+            .flat_map(|(table_id, candidates)| candidates.into_iter().map(move |c| (table_id, c)))
+            .collect(),
+    )]);
 
-    assert_eq!(report.processed_tables, 1);
-    assert_eq!(report.table_reports.len(), 1);
-    assert_eq!(
-        report.table_reports[0].success_regions[0].deleted_files[&region_id],
-        deleted_files
-    );
-    assert!(report.table_reports[0].failed_regions.is_empty());
+    let report = scheduler
+        .process_datanodes_concurrently(datanode_to_candidates)
+        .await;
+
+    assert_eq!(report.per_datanode_reports.len(), 1);
+    assert_eq!(report.failed_datanodes.len(), 0);
 }
 
 #[tokio::test]
@@ -141,19 +140,15 @@ async fn test_handle_tick() {
     let report = scheduler.handle_tick().await.unwrap();
 
     // Validate the returned GcJobReport
-    assert_eq!(report.processed_tables, 1, "Should process 1 table");
-    assert_eq!(report.table_reports.len(), 1, "Should have 1 table report");
-
-    let table_report = &report.table_reports[0];
-    assert_eq!(table_report.table_id, table_id, "Table ID should match");
     assert_eq!(
-        table_report.success_regions.len(),
+        report.per_datanode_reports.len(),
         1,
-        "Should have 1 successful region"
+        "Should process 1 datanode"
     );
-    assert!(
-        table_report.failed_regions.is_empty(),
-        "Should have no failed regions"
+    assert_eq!(
+        report.failed_datanodes.len(),
+        0,
+        "Should have 0 failed datanodes"
     );
 
     assert_eq!(*ctx.get_table_to_region_stats_calls.lock().unwrap(), 1);

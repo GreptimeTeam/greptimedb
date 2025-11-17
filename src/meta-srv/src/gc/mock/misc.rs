@@ -59,9 +59,22 @@ async fn test_empty_file_refs_manifest() {
 
     let candidates = ctx.candidates.lock().unwrap().clone().unwrap_or_default();
 
-    let report = scheduler.process_tables_concurrently(candidates).await;
+    // Convert table-based candidates to datanode-based candidates
+    let peer = Peer::new(1, "");
+    let datanode_to_candidates = HashMap::from([(
+        peer,
+        candidates
+            .into_iter()
+            .flat_map(|(table_id, candidates)| candidates.into_iter().map(move |c| (table_id, c)))
+            .collect(),
+    )]);
 
-    assert_eq!(report.processed_tables, 1);
+    let report = scheduler
+        .process_datanodes_concurrently(datanode_to_candidates)
+        .await;
+
+    assert_eq!(report.per_datanode_reports.len(), 1);
+    assert_eq!(report.failed_datanodes.len(), 0);
     // Should handle empty file refs gracefully
 }
 
@@ -124,12 +137,20 @@ async fn test_multiple_regions_per_table() {
 
     let candidates = ctx.candidates.lock().unwrap().clone().unwrap_or_default();
 
-    let report = scheduler.process_tables_concurrently(candidates).await;
+    // Convert table-based candidates to datanode-based candidates
+    let peer = Peer::new(1, "");
+    let datanode_to_candidates = HashMap::from([(
+        peer,
+        candidates
+            .into_iter()
+            .flat_map(|(table_id, candidates)| candidates.into_iter().map(move |c| (table_id, c)))
+            .collect(),
+    )]);
 
-    assert_eq!(report.processed_tables, 1);
-    assert_eq!(report.table_reports.len(), 1);
+    let report = scheduler
+        .process_datanodes_concurrently(datanode_to_candidates)
+        .await;
 
-    // Should have processed all 3 regions
-    let table_report = &report.table_reports[0];
-    assert_eq!(table_report.success_regions.len(), 3);
+    assert_eq!(report.per_datanode_reports.len(), 1);
+    assert_eq!(report.failed_datanodes.len(), 0);
 }

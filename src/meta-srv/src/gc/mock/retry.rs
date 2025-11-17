@@ -55,7 +55,7 @@ async fn test_retry_logic_with_retryable_errors() {
         }
         .with_table_routes(HashMap::from([(
             table_id,
-            (table_id, vec![(region_id, peer)]),
+            (table_id, vec![(region_id, peer.clone())]),
         )])),
     );
 
@@ -79,12 +79,14 @@ async fn test_retry_logic_with_retryable_errors() {
     ctx.set_gc_regions_success_after_retries(region_id, 2);
 
     let start_time = Instant::now();
-    let report = scheduler
-        .process_table_gc(table_id, vec![mock_candidate(region_id)])
+    let reports = scheduler
+        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
         .await
         .unwrap();
     let duration = start_time.elapsed();
 
+    assert_eq!(reports.len(), 1);
+    let report = &reports[0];
     assert_eq!(report.success_regions.len(), 1);
     assert_eq!(report.failed_regions.len(), 0);
     assert_eq!(ctx.get_retry_count(region_id), 3); // 2 retries + 1 success
@@ -100,11 +102,13 @@ async fn test_retry_logic_with_retryable_errors() {
     ctx.reset_retry_tracking();
     ctx.set_gc_regions_success_after_retries(region_id, 5); // More than max_retries_per_region (3)
 
-    let report = scheduler
-        .process_table_gc(table_id, vec![mock_candidate(region_id)])
+    let reports = scheduler
+        .process_datanode_gc(peer, vec![(table_id, mock_candidate(region_id))])
         .await
         .unwrap();
 
+    assert_eq!(reports.len(), 1);
+    let report = &reports[0];
     assert_eq!(report.success_regions.len(), 0);
     assert_eq!(report.failed_regions.len(), 1);
     assert_eq!(ctx.get_retry_count(region_id), 3); // Should stop at max_retries_per_region
@@ -140,7 +144,7 @@ async fn test_retry_logic_with_error_sequence() {
         }
         .with_table_routes(HashMap::from([(
             table_id,
-            (table_id, vec![(region_id, peer)]),
+            (table_id, vec![(region_id, peer.clone())]),
         )])),
     );
 
@@ -169,11 +173,13 @@ async fn test_retry_logic_with_error_sequence() {
     ctx.reset_retry_tracking();
     ctx.set_gc_regions_error_sequence(vec![retryable_error1, retryable_error2]);
 
-    let report = scheduler
-        .process_table_gc(table_id, vec![mock_candidate(region_id)])
+    let reports = scheduler
+        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
         .await
         .unwrap();
 
+    assert_eq!(reports.len(), 1);
+    let report = &reports[0];
     assert_eq!(report.success_regions.len(), 1);
     assert_eq!(report.failed_regions.len(), 0);
     assert_eq!(ctx.get_retry_count(region_id), 3); // 2 errors + 1 success
@@ -203,7 +209,7 @@ async fn test_retry_logic_non_retryable_error() {
         }
         .with_table_routes(HashMap::from([(
             table_id,
-            (table_id, vec![(region_id, peer)]),
+            (table_id, vec![(region_id, peer.clone())]),
         )])),
     );
 
@@ -229,12 +235,356 @@ async fn test_retry_logic_non_retryable_error() {
         .unwrap()
         .replace(non_retryable_error);
 
-    let report = scheduler
-        .process_table_gc(table_id, vec![mock_candidate(region_id)])
+    let reports = scheduler
+        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
         .await
         .unwrap();
 
+    assert_eq!(reports.len(), 1);
+    let report = &reports[0];
     assert_eq!(report.success_regions.len(), 0);
     assert_eq!(report.failed_regions.len(), 1);
     assert_eq!(ctx.get_retry_count(region_id), 1); // Only 1 attempt, no retries
+}
+
+/// Test need_retry_regions functionality with multi-round retry
+#[tokio::test]
+async fn test_need_retry_regions_multi_round() {
+    init_default_ut_logging();
+
+    let table_id = 1;
+    let region_id1 = RegionId::new(table_id, 1);
+    let region_id2 = RegionId::new(table_id, 2);
+    let peer1 = Peer::new(1, "");
+    let peer2 = Peer::new(2, "");
+
+    let region_stat1 = mock_region_stat(region_id1, RegionRole::Leader, 200_000_000, 10);
+    let region_stat2 = mock_region_stat(region_id2, RegionRole::Leader, 150_000_000, 8);
+    let table_stats = HashMap::from([(table_id, vec![region_stat1, region_stat2])]);
+
+    // Create GC reports with need_retry_regions
+    let gc_report1 = GcReport {
+        deleted_files: HashMap::from([(region_id1, vec![FileId::random()])]),
+        need_retry_regions: std::collections::HashSet::from([region_id1]), // This region needs retry
+    };
+
+    let gc_report2 = GcReport {
+        deleted_files: HashMap::from([(region_id2, vec![FileId::random()])]),
+        need_retry_regions: std::collections::HashSet::new(), // This region succeeds
+    };
+
+    let file_refs = FileRefsManifest {
+        manifest_version: HashMap::from([(region_id1, 1), (region_id2, 1)]),
+        ..Default::default()
+    };
+
+    let ctx = Arc::new(
+        MockSchedulerCtx {
+            table_to_region_stats: Arc::new(Mutex::new(Some(table_stats))),
+            gc_reports: Arc::new(Mutex::new(HashMap::from([
+                (region_id1, gc_report1),
+                (region_id2, gc_report2),
+            ]))),
+            file_refs: Arc::new(Mutex::new(Some(file_refs))),
+            ..Default::default()
+        }
+        .with_table_routes(HashMap::from([(
+            table_id,
+            (
+                table_id,
+                vec![(region_id1, peer1.clone()), (region_id2, peer2.clone())],
+            ),
+        )])),
+    );
+
+    let config = GcSchedulerOptions {
+        max_retries_per_region: 3,
+        retry_backoff_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+
+    let scheduler = GcScheduler {
+        ctx: ctx.clone(),
+        receiver: GcScheduler::channel().1,
+        config,
+        region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
+    };
+
+    // Set up success after 1 retry for region1 (which needs retry)
+    ctx.reset_retry_tracking();
+    ctx.set_gc_regions_success_after_retries(region_id1, 1);
+
+    let start_time = Instant::now();
+    // Use peer1 since both regions belong to the same table and we're testing single datanode scenario
+    let reports = scheduler
+        .process_datanode_gc(peer1.clone(), vec![(table_id, mock_candidate(region_id1))])
+        .await
+        .unwrap();
+    let reports2 = scheduler
+        .process_datanode_gc(peer2.clone(), vec![(table_id, mock_candidate(region_id2))])
+        .await
+        .unwrap();
+    let duration = start_time.elapsed();
+
+    // Verify results
+    assert_eq!(reports.len(), 1);
+    let report = &reports[0];
+    assert_eq!(report.success_regions.len(), 2); // Both regions should succeed eventually
+    assert_eq!(report.failed_regions.len(), 0);
+
+    // Verify retry count for region1 (should be 2: 1 initial failure + 1 retry success)
+    assert_eq!(ctx.get_retry_count(region_id1), 2);
+    // region2 should only be processed once
+    assert_eq!(ctx.get_retry_count(region_id2), 1);
+
+    // Verify exponential backoff was applied (should take at least 100ms for 1 retry round)
+    assert!(
+        duration >= Duration::from_millis(100),
+        "Expected backoff duration not met: {:?}",
+        duration
+    );
+}
+
+/// Test need_retry_regions with exponential backoff across multiple rounds
+#[tokio::test]
+async fn test_need_retry_regions_exponential_backoff() {
+    init_default_ut_logging();
+
+    let table_id = 1;
+    let region_id = RegionId::new(table_id, 1);
+    let peer = Peer::new(1, "");
+
+    let region_stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10);
+    let table_stats = HashMap::from([(table_id, vec![region_stat])]);
+
+    // Create GC report that will need multiple retry rounds
+    let gc_report = GcReport {
+        deleted_files: HashMap::from([(region_id, vec![FileId::random()])]),
+        need_retry_regions: std::collections::HashSet::from([region_id]),
+    };
+
+    let file_refs = FileRefsManifest {
+        manifest_version: HashMap::from([(region_id, 1)]),
+        ..Default::default()
+    };
+
+    let ctx = Arc::new(
+        MockSchedulerCtx {
+            table_to_region_stats: Arc::new(Mutex::new(Some(table_stats))),
+            gc_reports: Arc::new(Mutex::new(HashMap::from([(region_id, gc_report)]))),
+            file_refs: Arc::new(Mutex::new(Some(file_refs))),
+            ..Default::default()
+        }
+        .with_table_routes(HashMap::from([(
+            table_id,
+            (table_id, vec![(region_id, peer.clone())]),
+        )])),
+    );
+
+    let config = GcSchedulerOptions {
+        max_retries_per_region: 4,
+        retry_backoff_duration: Duration::from_millis(50), // Short base duration for testing
+        ..Default::default()
+    };
+
+    let scheduler = GcScheduler {
+        ctx: ctx.clone(),
+        receiver: GcScheduler::channel().1,
+        config,
+        region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
+    };
+
+    // Set up success after 3 retries (so 4 total rounds: initial + 3 retries)
+    ctx.reset_retry_tracking();
+    ctx.set_gc_regions_success_after_retries(region_id, 3);
+
+    let start_time = Instant::now();
+    let reports = scheduler
+        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
+        .await
+        .unwrap();
+    let duration = start_time.elapsed();
+
+    // Verify results
+    assert_eq!(reports.len(), 1);
+    let report = &reports[0];
+    assert_eq!(report.success_regions.len(), 1);
+    assert_eq!(report.failed_regions.len(), 0);
+    assert_eq!(ctx.get_retry_count(region_id), 4); // 1 initial + 3 retries
+
+    // Verify exponential backoff was applied
+    // Expected backoff: 50ms + 100ms + 200ms = 350ms minimum
+    assert!(
+        duration >= Duration::from_millis(350),
+        "Expected exponential backoff duration not met: {:?}",
+        duration
+    );
+}
+
+/// Test need_retry_regions with table route rediscovery failure
+#[tokio::test]
+async fn test_need_retry_regions_table_route_failure() {
+    init_default_ut_logging();
+
+    let table_id = 1;
+    let region_id = RegionId::new(table_id, 1);
+    let peer = Peer::new(1, "");
+
+    let region_stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10);
+    let table_stats = HashMap::from([(table_id, vec![region_stat])]);
+
+    // Create GC report with need_retry_regions
+    let gc_report = GcReport {
+        deleted_files: HashMap::from([(region_id, vec![FileId::random()])]),
+        need_retry_regions: std::collections::HashSet::from([region_id]),
+    };
+
+    let file_refs = FileRefsManifest {
+        manifest_version: HashMap::from([(region_id, 1)]),
+        ..Default::default()
+    };
+
+    let ctx = Arc::new(
+        MockSchedulerCtx {
+            table_to_region_stats: Arc::new(Mutex::new(Some(table_stats))),
+            gc_reports: Arc::new(Mutex::new(HashMap::from([(region_id, gc_report)]))),
+            file_refs: Arc::new(Mutex::new(Some(file_refs))),
+            ..Default::default()
+        }
+        .with_table_routes(HashMap::from([(
+            table_id,
+            (table_id, vec![(region_id, peer.clone())]),
+        )])),
+    );
+
+    // Inject table route error to simulate rediscovery failure
+    let table_route_error = crate::error::RegionRouteNotFoundSnafu { region_id }.build();
+    ctx.set_table_route_error(table_route_error);
+
+    let config = GcSchedulerOptions {
+        max_retries_per_region: 3,
+        retry_backoff_duration: Duration::from_millis(50),
+        ..Default::default()
+    };
+
+    let scheduler = GcScheduler {
+        ctx: ctx.clone(),
+        receiver: GcScheduler::channel().1,
+        config,
+        region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
+    };
+
+    let reports = scheduler
+        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
+        .await
+        .unwrap();
+
+    // The region should fail since table route rediscovery failed
+    assert_eq!(reports.len(), 1);
+    let report = &reports[0];
+    assert_eq!(report.success_regions.len(), 0);
+    assert_eq!(report.failed_regions.len(), 1);
+}
+
+/// Test need_retry_regions with mixed success/failure scenarios
+#[tokio::test]
+async fn test_need_retry_regions_mixed_scenarios() {
+    init_default_ut_logging();
+
+    let table_id = 1;
+    let region_id1 = RegionId::new(table_id, 1); // Will succeed after retry
+    let region_id2 = RegionId::new(table_id, 2); // Will fail after max retries
+    let region_id3 = RegionId::new(table_id, 3); // Will succeed immediately
+    let peer = Peer::new(1, "");
+
+    let region_stat1 = mock_region_stat(region_id1, RegionRole::Leader, 200_000_000, 10);
+    let region_stat2 = mock_region_stat(region_id2, RegionRole::Leader, 150_000_000, 8);
+    let region_stat3 = mock_region_stat(region_id3, RegionRole::Leader, 100_000_000, 5);
+    let table_stats = HashMap::from([(table_id, vec![region_stat1, region_stat2, region_stat3])]);
+
+    // Create GC reports
+    let gc_report1 = GcReport {
+        deleted_files: HashMap::from([(region_id1, vec![FileId::random()])]),
+        need_retry_regions: std::collections::HashSet::from([region_id1]),
+    };
+
+    let gc_report2 = GcReport {
+        deleted_files: HashMap::from([(region_id2, vec![FileId::random()])]),
+        need_retry_regions: std::collections::HashSet::from([region_id2]),
+    };
+
+    let gc_report3 = GcReport {
+        deleted_files: HashMap::from([(region_id3, vec![FileId::random()])]),
+        need_retry_regions: std::collections::HashSet::new(),
+    };
+
+    let file_refs = FileRefsManifest {
+        manifest_version: HashMap::from([(region_id1, 1), (region_id2, 1), (region_id3, 1)]),
+        ..Default::default()
+    };
+
+    let routes = vec![
+        (region_id1, peer.clone()),
+        (region_id2, peer.clone()),
+        (region_id3, peer),
+    ];
+
+    let ctx = Arc::new(
+        MockSchedulerCtx {
+            table_to_region_stats: Arc::new(Mutex::new(Some(table_stats))),
+            gc_reports: Arc::new(Mutex::new(HashMap::from([
+                (region_id1, gc_report1),
+                (region_id2, gc_report2),
+                (region_id3, gc_report3),
+            ]))),
+            file_refs: Arc::new(Mutex::new(Some(file_refs))),
+            ..Default::default()
+        }
+        .with_table_routes(HashMap::from([(table_id, (table_id, routes.clone()))])),
+    );
+
+    let config = GcSchedulerOptions {
+        max_retries_per_region: 2, // Low limit to test failure case
+        retry_backoff_duration: Duration::from_millis(50),
+        ..Default::default()
+    };
+
+    let scheduler = GcScheduler {
+        ctx: ctx.clone(),
+        receiver: GcScheduler::channel().1,
+        config,
+        region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
+    };
+
+    // Set up different retry scenarios
+    ctx.reset_retry_tracking();
+    ctx.set_gc_regions_success_after_retries(region_id1, 1); // Succeed after 1 retry
+    ctx.set_gc_regions_success_after_retries(region_id2, 5); // Needs more retries than limit (2)
+    // region3 succeeds immediately (default behavior)
+
+    // Process each region separately with its corresponding peer
+    let mut all_reports = Vec::new();
+    for (region_id, peer) in routes {
+        let reports = scheduler
+            .process_datanode_gc(peer, vec![(table_id, mock_candidate(region_id))])
+            .await
+            .unwrap();
+        all_reports.extend(reports);
+    }
+
+    // Combine results from all regions
+    let combined_report = all_reports.into_iter().next().unwrap_or_default();
+
+    // Verify mixed results
+    assert_eq!(combined_report.success_regions.len(), 2); // region1 and region3 succeed
+    assert_eq!(combined_report.failed_regions.len(), 1); // region2 fails due to retry limit
+
+    // Verify retry counts
+    assert_eq!(ctx.get_retry_count(region_id1), 2); // 1 initial + 1 retry
+    assert_eq!(ctx.get_retry_count(region_id2), 2); // Stops at max_retries_per_region
+    assert_eq!(ctx.get_retry_count(region_id3), 1); // Succeeds immediately
 }

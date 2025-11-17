@@ -47,9 +47,40 @@ pub struct TableGcReport {
 /// Report for a GC job.
 #[derive(Debug, Default)]
 pub struct GcJobReport {
-    pub processed_tables: usize,
-    pub table_reports: Vec<TableGcReport>,
-    pub failed_tables: HashMap<TableId, String>,
+    pub per_datanode_reports: HashMap<u64, GcReport>,
+    pub failed_datanodes: HashMap<u64, Vec<crate::error::Error>>,
+}
+impl GcJobReport {
+    pub fn merge(&mut self, mut other: GcJobReport) {
+        // merge per_datanode_reports&failed_datanodes
+        let all_dn_ids = self
+            .per_datanode_reports
+            .keys()
+            .cloned()
+            .chain(other.per_datanode_reports.keys().cloned())
+            .collect::<std::collections::HashSet<_>>();
+        for dn_id in all_dn_ids {
+            let mut self_report = self.per_datanode_reports.entry(dn_id).or_default();
+            self_report.merge(
+                other
+                    .per_datanode_reports
+                    .remove(&dn_id)
+                    .unwrap_or_default(),
+            );
+        }
+        let all_failed_dn_ids = self
+            .failed_datanodes
+            .keys()
+            .cloned()
+            .chain(other.failed_datanodes.keys().cloned())
+            .collect::<std::collections::HashSet<_>>();
+        for dn_id in all_failed_dn_ids {
+            let entry = self.failed_datanodes.entry(dn_id).or_default();
+            if let Some(other_errors) = other.failed_datanodes.remove(&dn_id) {
+                entry.extend(other_errors);
+            }
+        }
+    }
 }
 
 /// [`Event`] represents various types of events that can be processed by the gc ticker.
@@ -157,41 +188,6 @@ impl GcScheduler {
         &self,
         per_table_candidates: HashMap<TableId, Vec<GcCandidate>>,
     ) -> GcJobReport {
-        let mut report = GcJobReport::default();
-
-        // Create a stream of table GC tasks with limited concurrency
-        let results: Vec<_> = futures::stream::iter(
-            per_table_candidates
-                .into_iter()
-                .filter(|(_, candidates)| !candidates.is_empty()),
-        )
-        .map(|(table_id, candidates)| {
-            let scheduler = self;
-            async move {
-                (
-                    table_id,
-                    scheduler.process_table_gc(table_id, candidates).await,
-                )
-            }
-        })
-        .buffer_unordered(self.config.max_concurrent_tables)
-        .collect()
-        .await;
-
-        // Process all table GC results
-        for (table_id, result) in results {
-            report.processed_tables += 1;
-            match result {
-                Ok(table) => {
-                    report.table_reports.push(table);
-                }
-                Err(e) => {
-                    error!("Failed to process table GC: {:#?}", e);
-                    report.failed_tables.insert(table_id, format!("{:#?}", e));
-                }
-            }
-        }
-
-        report
+        unimplemented!("TODO: remove this unused")
     }
 }

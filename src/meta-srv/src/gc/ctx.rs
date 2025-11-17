@@ -55,7 +55,7 @@ pub(crate) trait SchedulerCtx: Send + Sync {
     async fn gc_regions(
         &self,
         peer: Peer,
-        region_id: RegionId,
+        region_ids: &[RegionId],
         file_refs_manifest: &FileRefsManifest,
         full_file_listing: bool,
         timeout: Duration,
@@ -112,14 +112,14 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
     async fn gc_regions(
         &self,
         peer: Peer,
-        region_id: RegionId,
+        region_ids: &[RegionId],
         file_refs_manifest: &FileRefsManifest,
         full_file_listing: bool,
         timeout: Duration,
     ) -> Result<GcReport> {
         self.gc_regions_inner(
             peer,
-            region_id,
+            region_ids,
             file_refs_manifest,
             full_file_listing,
             timeout,
@@ -184,18 +184,20 @@ impl DefaultGcSchedulerCtx {
     async fn gc_regions_inner(
         &self,
         peer: Peer,
-        region_id: RegionId,
+        region_ids: &[RegionId],
         file_refs_manifest: &FileRefsManifest,
         full_file_listing: bool,
         timeout: Duration,
     ) -> Result<GcReport> {
         debug!(
-            "Sending GC instruction to datanode {} for region {} (full_file_listing: {})",
-            peer, region_id, full_file_listing
+            "Sending GC instruction to datanode {} for {} regions (full_file_listing: {})",
+            peer,
+            region_ids.len(),
+            full_file_listing
         );
 
         let gc_regions = GcRegions {
-            regions: vec![region_id],
+            regions: region_ids.to_vec(),
             file_refs_manifest: file_refs_manifest.clone(),
             full_file_listing,
         };
@@ -204,7 +206,7 @@ impl DefaultGcSchedulerCtx {
             self.server_addr.clone(),
             peer,
             gc_regions,
-            format!("GC for region {}", region_id),
+            format!("GC for {} regions", region_ids.len()),
             timeout,
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));

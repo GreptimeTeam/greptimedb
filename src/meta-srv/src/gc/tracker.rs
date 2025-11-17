@@ -103,4 +103,26 @@ impl GcScheduler {
             true
         }
     }
+
+    pub(crate) async fn update_full_listing_time(
+        &self,
+        region_id: RegionId,
+        did_full_listing: bool,
+    ) {
+        let mut gc_tracker = self.region_gc_tracker.lock().await;
+        let now = Instant::now();
+
+        gc_tracker
+            .entry(region_id)
+            .and_modify(|info| {
+                if did_full_listing {
+                    info.last_full_listing_time = Some(now);
+                }
+                info.last_gc_time = now;
+            })
+            .or_insert_with(|| RegionGcInfo {
+                last_gc_time: now,
+                last_full_listing_time: if did_full_listing { Some(now) } else { None },
+            });
+    }
 }
