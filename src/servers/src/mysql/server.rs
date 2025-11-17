@@ -99,7 +99,7 @@ impl MysqlSpawnConfig {
     }
 
     fn tls(&self) -> Option<Arc<ServerConfig>> {
-        self.tls.get_server_config()
+        self.tls.get_config()
     }
 }
 

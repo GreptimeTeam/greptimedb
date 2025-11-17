@@ -13,17 +13,15 @@
 // limitations under the License.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::channel;
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{error, info};
+use common_telemetry::info;
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use lazy_static::lazy_static;
-use notify::{EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tokio_util::sync::CancellationToken;
@@ -32,7 +30,8 @@ use tonic::transport::{
 };
 use tower::Service;
 
-use crate::error::{CreateChannelSnafu, FileWatchSnafu, InvalidConfigFilePathSnafu, Result};
+use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, Result};
+use crate::reloadable_tls::{ReloadableTlsConfig, TlsConfigLoader};
 
 const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_GRPC_REQUEST_TIMEOUT_SECS: u64 = 10;
@@ -191,7 +190,7 @@ impl ChannelManager {
             .inner
             .reloadable_client_tls_config
             .as_ref()
-            .and_then(|c| c.get_client_config());
+            .and_then(|c| c.get_config());
 
         let http_prefix = if tls_config.is_some() {
             "https"
@@ -296,6 +295,36 @@ fn load_tls_config(tls_option: Option<&ClientTlsOption>) -> Result<Option<Client
     Ok(Some(tls_config))
 }
 
+impl TlsConfigLoader<ClientTlsConfig> for ClientTlsOption {
+    type Config = ClientTlsConfig;
+    type Error = crate::error::Error;
+
+    fn load(&self) -> Result<Option<ClientTlsConfig>> {
+        load_tls_config(Some(self))
+    }
+
+    fn watch_paths(&self) -> Vec<&Path> {
+        let mut paths = Vec::new();
+        if let Some(cert_path) = &self.client_cert_path {
+            paths.push(Path::new(cert_path.as_str()));
+        }
+        if let Some(key_path) = &self.client_key_path {
+            paths.push(Path::new(key_path.as_str()));
+        }
+        if let Some(ca_path) = &self.server_ca_cert_path {
+            paths.push(Path::new(ca_path.as_str()));
+        }
+        paths
+    }
+
+    fn watch_enabled(&self) -> bool {
+        self.enabled && self.watch
+    }
+}
+
+/// Type alias for client-side reloadable TLS config
+pub type ReloadableClientTlsConfig = ReloadableTlsConfig<ClientTlsConfig, ClientTlsOption>;
+
 /// Load client TLS configuration from `ClientTlsOption` and return a `ReloadableClientTlsConfig`.
 /// This is the primary way to create TLS configuration for the ChannelManager.
 pub fn load_client_tls_config(
@@ -310,142 +339,17 @@ pub fn load_client_tls_config(
     }
 }
 
-/// A mutable container for TLS client config
-///
-/// This struct allows dynamic reloading of client certificates and keys
-#[derive(Debug)]
-pub struct ReloadableClientTlsConfig {
-    tls_option: ClientTlsOption,
-    config: RwLock<Option<ClientTlsConfig>>,
-    version: AtomicUsize,
-}
-
-impl ReloadableClientTlsConfig {
-    /// Create client config by loading configuration from `ClientTlsOption`
-    fn try_new(tls_option: ClientTlsOption) -> Result<ReloadableClientTlsConfig> {
-        let client_config = load_tls_config(Some(&tls_option))?;
-        Ok(Self {
-            tls_option,
-            config: RwLock::new(client_config),
-            version: AtomicUsize::new(0),
-        })
-    }
-
-    /// Reread client certificates and keys from file system.
-    fn reload(&self) -> Result<()> {
-        let client_config = load_tls_config(Some(&self.tls_option))?;
-        *self.config.write().unwrap() = client_config;
-        self.version.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    }
-
-    /// Get the client config held by this container
-    pub fn get_client_config(&self) -> Option<ClientTlsConfig> {
-        self.config.read().unwrap().clone()
-    }
-
-    /// Get associated `ClientTlsOption`
-    pub fn get_tls_option(&self) -> &ClientTlsOption {
-        &self.tls_option
-    }
-
-    /// Get version of current config
-    ///
-    /// this version will auto increase when client config get reloaded.
-    pub fn get_version(&self) -> usize {
-        self.version.load(Ordering::Relaxed)
-    }
-
-    fn cert_path(&self) -> Option<&Path> {
-        self.tls_option
-            .client_cert_path
-            .as_ref()
-            .map(|p| Path::new(p.as_str()))
-    }
-
-    fn key_path(&self) -> Option<&Path> {
-        self.tls_option
-            .client_key_path
-            .as_ref()
-            .map(|p| Path::new(p.as_str()))
-    }
-
-    fn server_ca_cert_path(&self) -> Option<&Path> {
-        self.tls_option
-            .server_ca_cert_path
-            .as_ref()
-            .map(|p| Path::new(p.as_str()))
-    }
-
-    fn watch_enabled(&self) -> bool {
-        self.tls_option.enabled && self.tls_option.watch
-    }
-}
-
 pub fn maybe_watch_client_tls_config(
     client_tls_config: Arc<ReloadableClientTlsConfig>,
     channel_manager: &ChannelManager,
 ) -> Result<()> {
-    if !client_tls_config.watch_enabled() {
-        return Ok(());
-    }
-
-    let client_tls_config_for_watcher = client_tls_config.clone();
     let channel_manager_for_watcher = channel_manager.clone();
 
-    let (tx, rx) = channel::<notify::Result<notify::Event>>();
-    let mut watcher = notify::recommended_watcher(tx).context(FileWatchSnafu { path: "<none>" })?;
-
-    // Watch client cert if present
-    if let Some(cert_path) = client_tls_config.cert_path() {
-        watcher
-            .watch(cert_path, RecursiveMode::NonRecursive)
-            .with_context(|_| FileWatchSnafu {
-                path: cert_path.display().to_string(),
-            })?;
-    }
-
-    // Watch client key if present
-    if let Some(key_path) = client_tls_config.key_path() {
-        watcher
-            .watch(key_path, RecursiveMode::NonRecursive)
-            .with_context(|_| FileWatchSnafu {
-                path: key_path.display().to_string(),
-            })?;
-    }
-
-    // Watch server CA cert if present
-    if let Some(ca_path) = client_tls_config.server_ca_cert_path() {
-        watcher
-            .watch(ca_path, RecursiveMode::NonRecursive)
-            .with_context(|_| FileWatchSnafu {
-                path: ca_path.display().to_string(),
-            })?;
-    }
-
-    std::thread::spawn(move || {
-        let _watcher = watcher;
-        while let Ok(res) = rx.recv() {
-            if let Ok(event) = res {
-                match event.kind {
-                    EventKind::Modify(_) | EventKind::Create(_) => {
-                        info!("Detected TLS cert/key file change: {:?}", event);
-                        if let Err(err) = client_tls_config_for_watcher.reload() {
-                            error!(err; "Failed to reload TLS client config");
-                        } else {
-                            info!("Reloaded TLS cert/key file successfully.");
-                            // Clear all existing channels to force reconnection with new certificates
-                            channel_manager_for_watcher.clear_all_channels();
-                            info!("Cleared all existing channels to use new TLS certificates.");
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    });
-
-    Ok(())
+    crate::reloadable_tls::maybe_watch_tls_config(client_tls_config, move || {
+        // Clear all existing channels to force reconnection with new certificates
+        channel_manager_for_watcher.clear_all_channels();
+        info!("Cleared all existing channels to use new TLS certificates.");
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

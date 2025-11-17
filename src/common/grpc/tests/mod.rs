@@ -112,7 +112,7 @@ async fn test_reloadable_client_tls_config() {
         .expect("failed to watch client config");
 
     assert_eq!(0, reloadable_config.get_version());
-    assert!(reloadable_config.get_client_config().is_some());
+    assert!(reloadable_config.get_config().is_some());
 
     // Create a channel to verify it gets cleared on reload
     let _ = manager.get("127.0.0.1:0").expect("failed to get channel");
@@ -137,7 +137,7 @@ async fn test_reloadable_client_tls_config() {
 
     assert!(version_updated, "TLS config did not reload in time");
     assert!(reloadable_config.get_version() > 0);
-    assert!(reloadable_config.get_client_config().is_some());
+    assert!(reloadable_config.get_config().is_some());
 }
 
 #[tokio::test]
@@ -165,5 +165,5 @@ async fn test_channel_manager_with_reloadable_tls() {
 
     // Test that config is properly set
     assert_eq!(0, reloadable_config.get_version());
-    assert!(reloadable_config.get_client_config().is_some());
+    assert!(reloadable_config.get_config().is_some());
 }
