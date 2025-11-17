@@ -65,7 +65,13 @@ type TraceReloadHandle = tracing_subscriber::reload::Handle<
 /// Handle for reloading trace level
 pub static TRACE_RELOAD_HANDLE: OnceCell<TraceReloadHandle> = OnceCell::new();
 
-pub static TRACER: OnceCell<Tracer> = OnceCell::new();
+static TRACER: OnceCell<Mutex<TraceState>> = OnceCell::new();
+
+#[derive(Debug)]
+enum TraceState {
+    Ready(Tracer),
+    Deferred(TraceContext),
+}
 
 /// The logging options that used to initialize the logger.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -181,6 +187,13 @@ impl PartialEq for LoggingOptions {
 }
 
 impl Eq for LoggingOptions {}
+
+#[derive(Clone, Debug)]
+struct TraceContext {
+    app_name: String,
+    node_id: String,
+    logging_opts: LoggingOptions,
+}
 
 impl Default for LoggingOptions {
     fn default() -> Self {
@@ -377,38 +390,30 @@ pub fn init_global_logging(
             .set(reload_handle)
             .expect("reload handle already set, maybe init_global_logging get called twice?");
 
-        let sampler = opts
-            .tracing_sample_ratio
-            .as_ref()
-            .map(create_sampler)
-            .map(Sampler::ParentBased)
-            .unwrap_or(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
-
-        let resource = opentelemetry_sdk::Resource::builder_empty()
-            .with_attributes([
-                KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
-                KeyValue::new(resource::SERVICE_INSTANCE_ID, node_id.clone()),
-                KeyValue::new(resource::SERVICE_VERSION, common_version::version()),
-                KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
-            ])
-            .build();
-
-        let tracer = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-            .with_batch_exporter(build_otlp_exporter(opts))
-            .with_sampler(sampler)
-            .with_resource(resource)
-            .build()
-            .tracer("greptimedb");
+        let mut initial_tracer = None;
+        let trace_state = if opts.enable_otlp_tracing {
+            let tracer = create_tracer(app_name, &node_id, opts);
+            initial_tracer = Some(tracer.clone());
+            TraceState::Ready(tracer)
+        } else {
+            TraceState::Deferred(TraceContext {
+                app_name: app_name.to_string(),
+                node_id: node_id.clone(),
+                logging_opts: opts.clone(),
+            })
+        };
 
         TRACER
-            .set(tracer.clone())
-            .expect("failed to store otlp tracer");
-        let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer.clone());
-        let (dyn_trace_layer, trace_reload_handle) = if opts.enable_otlp_tracing {
-            tracing_subscriber::reload::Layer::new(vec![trace_layer])
-        } else {
-            tracing_subscriber::reload::Layer::new(vec![])
-        };
+            .set(Mutex::new(trace_state))
+            .expect("trace state already initialized");
+
+        let initial_trace_layers = initial_tracer
+            .as_ref()
+            .map(|tracer| vec![tracing_opentelemetry::layer().with_tracer(tracer.clone())])
+            .unwrap_or_else(Vec::new);
+
+        let (dyn_trace_layer, trace_reload_handle) =
+            tracing_subscriber::reload::Layer::new(initial_trace_layers);
 
         TRACE_RELOAD_HANDLE
             .set(trace_reload_handle)
@@ -458,13 +463,51 @@ pub fn init_global_logging(
 
         global::set_text_map_propagator(TraceContextPropagator::new());
 
-        tracing::subscriber::set_global_default(
-            subscriber.with(tracing_opentelemetry::layer().with_tracer(tracer)),
-        )
-        .expect("error setting global tracing subscriber");
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("error setting global tracing subscriber");
     });
 
     guards
+}
+
+fn create_tracer(app_name: &str, node_id: &str, opts: &LoggingOptions) -> Tracer {
+    let sampler = opts
+        .tracing_sample_ratio
+        .as_ref()
+        .map(create_sampler)
+        .map(Sampler::ParentBased)
+        .unwrap_or(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
+
+    let resource = opentelemetry_sdk::Resource::builder_empty()
+        .with_attributes([
+            KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
+            KeyValue::new(resource::SERVICE_INSTANCE_ID, node_id.to_string()),
+            KeyValue::new(resource::SERVICE_VERSION, common_version::version()),
+            KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
+        ])
+        .build();
+
+    opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(build_otlp_exporter(opts))
+        .with_sampler(sampler)
+        .with_resource(resource)
+        .build()
+        .tracer("greptimedb")
+}
+
+/// Ensure that the OTLP tracer has been constructed, building it lazily if needed.
+pub fn get_or_init_tracer() -> Result<Tracer, &'static str> {
+    let state = TRACER.get().ok_or("trace state is not initialized")?;
+    let mut guard = state.lock().expect("trace state lock poisoned");
+
+    match &mut *guard {
+        TraceState::Ready(tracer) => Ok(tracer.clone()),
+        TraceState::Deferred(context) => {
+            let tracer = create_tracer(&context.app_name, &context.node_id, &context.logging_opts);
+            *guard = TraceState::Ready(tracer.clone());
+            Ok(tracer)
+        }
+    }
 }
 
 fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporter {

@@ -14,7 +14,7 @@
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use common_telemetry::{TRACE_RELOAD_HANDLE, TRACER, error};
+use common_telemetry::{TRACE_RELOAD_HANDLE, error, get_or_init_tracer, info};
 
 use crate::error::{InvalidParameterSnafu, Result};
 
@@ -35,16 +35,19 @@ pub async fn dyn_trace_handler(enable_str: String) -> Result<impl IntoResponse> 
     };
 
     if enable {
-        let Some(tracer) = TRACER.get() else {
-            return Ok((
-                StatusCode::SERVICE_UNAVAILABLE,
-                "trace exporter is not initialized".to_string(),
-            ));
+        let tracer = match get_or_init_tracer() {
+            Ok(tracer) => tracer,
+            Err(reason) => {
+                return Ok((StatusCode::SERVICE_UNAVAILABLE, reason.to_string()));
+            }
         };
 
-        let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer.clone());
+        let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
         match trace_reload_handle.reload(vec![trace_layer]) {
-            Ok(_) => Ok((StatusCode::OK, "trace enabled".to_string())),
+            Ok(_) => {
+                info!("trace enabled");
+                Ok((StatusCode::OK, "trace enabled".to_string()))
+            }
             Err(e) => {
                 error!(e; "Failed to enable trace");
                 Ok((
@@ -55,7 +58,10 @@ pub async fn dyn_trace_handler(enable_str: String) -> Result<impl IntoResponse> 
         }
     } else {
         match trace_reload_handle.reload(vec![]) {
-            Ok(_) => Ok((StatusCode::OK, "trace disabled".to_string())),
+            Ok(_) => {
+                info!("trace disabled");
+                Ok((StatusCode::OK, "trace disabled".to_string()))
+            }
             Err(e) => {
                 error!(e; "Failed to disable trace");
                 Ok((
