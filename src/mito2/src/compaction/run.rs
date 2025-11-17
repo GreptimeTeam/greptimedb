@@ -179,10 +179,6 @@ impl FileGroup {
     pub(crate) fn into_files(self) -> impl Iterator<Item = FileHandle> {
         self.files.into_iter()
     }
-
-    pub(crate) fn is_all_level_0(&self) -> bool {
-        self.files.iter().all(|f| f.level() == 0)
-    }
 }
 
 impl Ranged for FileGroup {
