@@ -107,8 +107,8 @@ impl Event for SlowQueryEvent {
         ]
     }
 
-    fn extra_row(&self) -> Result<Row> {
-        Ok(Row {
+    fn extra_rows(&self) -> Result<Vec<Row>> {
+        Ok(vec![Row {
             values: vec![
                 ValueData::U64Value(self.cost).into(),
                 ValueData::U64Value(self.threshold).into(),
@@ -119,7 +119,7 @@ impl Event for SlowQueryEvent {
                 ValueData::TimestampMillisecondValue(self.promql_start.unwrap_or(0)).into(),
                 ValueData::TimestampMillisecondValue(self.promql_end.unwrap_or(0)).into(),
             ],
-        })
+        }])
     }
 
     fn json_payload(&self) -> Result<String> {

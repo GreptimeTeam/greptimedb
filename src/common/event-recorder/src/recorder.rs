@@ -97,9 +97,9 @@ pub trait Event: Send + Sync + Debug {
         vec![]
     }
 
-    /// Add the extra row to the event with the default row.
-    fn extra_row(&self) -> Result<Row> {
-        Ok(Row { values: vec![] })
+    /// Add the extra rows to the event with the default row.
+    fn extra_rows(&self) -> Result<Vec<Row>> {
+        Ok(vec![Row { values: vec![] }])
     }
 
     /// Returns the event as any type.
@@ -159,15 +159,17 @@ pub fn build_row_inserts_request(events: &[&Box<dyn Event>]) -> Result<RowInsert
 
     let mut rows: Vec<Row> = Vec::with_capacity(events.len());
     for event in events {
-        let extra_row = event.extra_row()?;
-        let mut values = Vec::with_capacity(3 + extra_row.values.len());
-        values.extend([
-            ValueData::StringValue(event.event_type().to_string()).into(),
-            ValueData::BinaryValue(event.json_payload()?.into_bytes()).into(),
-            ValueData::TimestampNanosecondValue(event.timestamp().value()).into(),
-        ]);
-        values.extend(extra_row.values);
-        rows.push(Row { values });
+        let extra_rows = event.extra_rows()?;
+        for extra_row in extra_rows {
+            let mut values = Vec::with_capacity(3 + extra_row.values.len());
+            values.extend([
+                ValueData::StringValue(event.event_type().to_string()).into(),
+                ValueData::BinaryValue(event.json_payload()?.into_bytes()).into(),
+                ValueData::TimestampNanosecondValue(event.timestamp().value()).into(),
+            ]);
+            values.extend(extra_row.values);
+            rows.push(Row { values });
+        }
     }
 
     Ok(RowInsertRequests {
