@@ -53,13 +53,13 @@ pub static LOG_RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Target
     OnceCell::new();
 
 type TraceReloadHandle = tracing_subscriber::reload::Handle<
-        Vec<
-            tracing_opentelemetry::OpenTelemetryLayer<
-                Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>,
-                Tracer,
-            >,
+    Vec<
+        tracing_opentelemetry::OpenTelemetryLayer<
+            Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>,
+            Tracer,
         >,
-        Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>,
+    >,
+    Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>,
 >;
 
 /// Handle for reloading trace level
@@ -404,8 +404,11 @@ pub fn init_global_logging(
             .set(tracer.clone())
             .expect("failed to store otlp tracer");
         let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer.clone());
-        let (dyn_trace_layer, trace_reload_handle) =
-            tracing_subscriber::reload::Layer::new(vec![trace_layer]);
+        let (dyn_trace_layer, trace_reload_handle) = if opts.enable_otlp_tracing {
+            tracing_subscriber::reload::Layer::new(vec![trace_layer])
+        } else {
+            tracing_subscriber::reload::Layer::new(vec![])
+        };
 
         TRACE_RELOAD_HANDLE
             .set(trace_reload_handle)
@@ -459,21 +462,6 @@ pub fn init_global_logging(
             subscriber.with(tracing_opentelemetry::layer().with_tracer(tracer)),
         )
         .expect("error setting global tracing subscriber");
-
-        if opts.enable_otlp_tracing {
-            if let Some(tracer) = TRACER.get()
-                && let Some(trace_reload_handle) = TRACE_RELOAD_HANDLE.get()
-            {
-                let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer.clone());
-                if let Err(e) = trace_reload_handle.reload(vec![trace_layer]) {
-                    tracing::error!("Failed to reload trace layer during init: {e}");
-                }
-            }
-        } else if let Some(trace_reload_handle) = TRACE_RELOAD_HANDLE.get() {
-            if let Err(e) = trace_reload_handle.reload(vec![]) {
-                tracing::error!("Failed to reload trace layer during init: {e}");
-            }
-        }
     });
 
     guards
