@@ -52,10 +52,7 @@ pub const DEFAULT_LOGGING_DIR: &str = "logs";
 pub static LOG_RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Targets, Registry>> =
     OnceCell::new();
 
-/// Handle for reloading trace level
-#[allow(clippy::type_complexity)]
-pub static TRACE_RELOAD_HANDLE: OnceCell<
-    tracing_subscriber::reload::Handle<
+type TraceReloadHandle = tracing_subscriber::reload::Handle<
         Vec<
             tracing_opentelemetry::OpenTelemetryLayer<
                 Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>,
@@ -63,8 +60,10 @@ pub static TRACE_RELOAD_HANDLE: OnceCell<
             >,
         >,
         Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>,
-    >,
-> = OnceCell::new();
+>;
+
+/// Handle for reloading trace level
+pub static TRACE_RELOAD_HANDLE: OnceCell<TraceReloadHandle> = OnceCell::new();
 
 pub static TRACER: OnceCell<Tracer> = OnceCell::new();
 
@@ -410,8 +409,7 @@ pub fn init_global_logging(
 
         TRACE_RELOAD_HANDLE
             .set(trace_reload_handle)
-            .ok()
-            .expect("failed to set trace reload handle");
+            .unwrap_or_else(|_| panic!("failed to set trace reload handle"));
 
         // Must enable 'tokio_unstable' cfg to use this feature.
         // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`
