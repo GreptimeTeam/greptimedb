@@ -1547,10 +1547,6 @@ max_concurrent_gc_job = 4
 
 [region_engine.file]
 
-[export_metrics]
-enable = false
-write_interval = "30s"
-
 [tracing]
 
 [slow_query]

@@ -287,7 +287,6 @@ impl GreptimeDbStandaloneBuilder {
             instance,
             servers: ServerHandlers::default(),
             heartbeat_task: None,
-            export_metrics_task: None,
         };
 
         frontend.start().await.unwrap();
