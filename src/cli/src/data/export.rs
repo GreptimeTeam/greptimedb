@@ -67,9 +67,17 @@ pub struct ExportCommand {
     #[clap(long, default_value_t = default_database())]
     database: String,
 
-    /// Parallelism of the export.
-    #[clap(long, short = 'j', default_value = "1")]
-    export_jobs: usize,
+    /// The number of databases exported in parallel.
+    /// For example, if there are 20 databases and `db_parallelism` is 4,
+    /// 4 databases will be exported concurrently.
+    #[clap(long, short = 'j', default_value = "1", alias = "export-jobs")]
+    db_parallelism: usize,
+
+    /// The number of tables exported in parallel within a single database.
+    /// For example, if a database has 30 tables and `parallelism` is 8,
+    /// 8 tables will be exported concurrently.
+    #[clap(long, default_value = "4")]
+    table_parallelism: usize,
 
     /// Max retry times for each job.
     #[clap(long, default_value = "3")]
@@ -88,10 +96,6 @@ pub struct ExportCommand {
     /// The end of the time range (time-index column) for data export.
     #[clap(long)]
     end_time: Option<String>,
-
-    /// The parallelism of the export.
-    #[clap(long, default_value = "4")]
-    parallelism: usize,
 
     /// The basic authentication for connecting to the server
     #[clap(long)]
@@ -214,11 +218,11 @@ impl ExportCommand {
             schema,
             database_client,
             output_dir: self.output_dir.clone(),
-            export_jobs: self.export_jobs,
+            export_jobs: self.db_parallelism,
             target: self.target.clone(),
             start_time: self.start_time.clone(),
             end_time: self.end_time.clone(),
-            parallelism: self.parallelism,
+            parallelism: self.table_parallelism,
             s3: self.s3,
             ddl_local_dir: self.ddl_local_dir.clone(),
             s3_bucket: self.s3_bucket.clone(),
