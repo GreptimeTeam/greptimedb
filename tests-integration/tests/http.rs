@@ -101,6 +101,7 @@ macro_rules! http_tests {
                 test_health_api,
                 test_status_api,
                 test_config_api,
+                test_dynamic_tracer_toggle,
                 test_dashboard_path,
                 test_prometheus_remote_write,
                 test_prometheus_remote_special_labels,
@@ -1625,6 +1626,35 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
             "
 ",
         )
+}
+
+pub async fn test_dynamic_tracer_toggle(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let (app, mut guard) = setup_test_http_app(store_type, "test_dynamic_tracer_toggle").await;
+    let client = TestClient::new(app).await;
+
+    let disable_resp = client
+        .post("/debug/enable_trace")
+        .body("false")
+        .send()
+        .await;
+    assert_eq!(disable_resp.status(), StatusCode::OK);
+    assert_eq!(disable_resp.text().await, "trace disabled");
+
+    let enable_resp = client.post("/debug/enable_trace").body("true").send().await;
+    assert_eq!(enable_resp.status(), StatusCode::OK);
+    assert_eq!(enable_resp.text().await, "trace enabled");
+
+    let cleanup_resp = client
+        .post("/debug/enable_trace")
+        .body("false")
+        .send()
+        .await;
+    assert_eq!(cleanup_resp.status(), StatusCode::OK);
+    assert_eq!(cleanup_resp.text().await, "trace disabled");
+
+    guard.remove_all().await;
 }
 
 #[cfg(feature = "dashboard")]
