@@ -19,7 +19,7 @@ mod json_path_match;
 mod json_to_string;
 mod parse_json;
 
-use json_get::{JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetString};
+use json_get::{JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetObject, JsonGetString};
 use json_is::{
     JsonIsArray, JsonIsBool, JsonIsFloat, JsonIsInt, JsonIsNull, JsonIsObject, JsonIsString,
 };
@@ -39,6 +39,7 @@ impl JsonFunction {
         registry.register_scalar(JsonGetFloat::default());
         registry.register_scalar(JsonGetString::default());
         registry.register_scalar(JsonGetBool::default());
+        registry.register_scalar(JsonGetObject::default());
 
         registry.register_scalar(JsonIsNull::default());
         registry.register_scalar(JsonIsInt::default());
