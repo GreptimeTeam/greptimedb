@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::path::Path;
+use std::result::Result as StdResult;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, RwLock};
@@ -28,7 +29,7 @@ pub trait TlsConfigLoader<T> {
     type Error;
 
     /// Load the TLS configuration
-    fn load(&self) -> std::result::Result<Option<T>, Self::Error>;
+    fn load(&self) -> StdResult<Option<T>, Self::Error>;
 
     /// Get paths to certificate files for watching
     fn watch_paths(&self) -> Vec<&Path>;
@@ -57,7 +58,7 @@ where
     O: TlsConfigLoader<T>,
 {
     /// Create config by loading configuration from the option type
-    pub fn try_new(tls_option: O) -> std::result::Result<Self, O::Error> {
+    pub fn try_new(tls_option: O) -> StdResult<Self, O::Error> {
         let config = tls_option.load()?;
         Ok(Self {
             tls_option,
@@ -67,7 +68,7 @@ where
     }
 
     /// Reread certificates and keys from file system.
-    pub fn reload(&self) -> std::result::Result<(), O::Error> {
+    pub fn reload(&self) -> StdResult<(), O::Error> {
         let config = self.tls_option.load()?;
         *self.config.write().unwrap() = config;
         self.version.fetch_add(1, Ordering::Relaxed);

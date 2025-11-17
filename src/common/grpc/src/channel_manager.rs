@@ -31,7 +31,7 @@ use tonic::transport::{
 use tower::Service;
 
 use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, Result};
-use crate::reloadable_tls::{ReloadableTlsConfig, TlsConfigLoader};
+use crate::reloadable_tls::{ReloadableTlsConfig, TlsConfigLoader, maybe_watch_tls_config};
 
 const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_GRPC_REQUEST_TIMEOUT_SECS: u64 = 10;
@@ -340,13 +340,11 @@ pub fn load_client_tls_config(
 
 pub fn maybe_watch_client_tls_config(
     client_tls_config: Arc<ReloadableClientTlsConfig>,
-    channel_manager: &ChannelManager,
+    channel_manager: ChannelManager,
 ) -> Result<()> {
-    let channel_manager_for_watcher = channel_manager.clone();
-
-    crate::reloadable_tls::maybe_watch_tls_config(client_tls_config, move || {
+    maybe_watch_tls_config(client_tls_config, move || {
         // Clear all existing channels to force reconnection with new certificates
-        channel_manager_for_watcher.clear_all_channels();
+        channel_manager.clear_all_channels();
         info!("Cleared all existing channels to use new TLS certificates.");
     })
 }

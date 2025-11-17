@@ -108,7 +108,7 @@ async fn test_reloadable_client_tls_config() {
     let config = ChannelConfig::new();
     let manager = ChannelManager::with_config(config, Some(reloadable_config.clone()));
 
-    maybe_watch_client_tls_config(reloadable_config.clone(), &manager)
+    maybe_watch_client_tls_config(reloadable_config.clone(), manager.clone())
         .expect("failed to watch client config");
 
     assert_eq!(0, reloadable_config.get_version());
