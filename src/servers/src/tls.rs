@@ -148,7 +148,6 @@ impl TlsOption {
 }
 
 impl TlsConfigLoader<Arc<ServerConfig>> for TlsOption {
-    type Config = Arc<ServerConfig>;
     type Error = crate::error::Error;
 
     fn load(&self) -> Result<Option<Arc<ServerConfig>>> {

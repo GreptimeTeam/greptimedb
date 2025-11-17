@@ -296,7 +296,6 @@ fn load_tls_config(tls_option: Option<&ClientTlsOption>) -> Result<Option<Client
 }
 
 impl TlsConfigLoader<ClientTlsConfig> for ClientTlsOption {
-    type Config = ClientTlsConfig;
     type Error = crate::error::Error;
 
     fn load(&self) -> Result<Option<ClientTlsConfig>> {

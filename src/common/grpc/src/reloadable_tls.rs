@@ -25,7 +25,6 @@ use crate::error::{FileWatchSnafu, Result};
 
 /// A trait for loading TLS configuration from an option type
 pub trait TlsConfigLoader<T> {
-    type Config;
     type Error;
 
     /// Load the TLS configuration
@@ -100,6 +99,11 @@ where
 ///
 /// This is a generic function that works with any ReloadableTlsConfig.
 /// When changes are detected, it calls the provided callback after reloading.
+///
+/// T: the original TLS config
+/// O: the compiled TLS option
+/// F: the hook function to be called after reloading
+/// E: the error type for the loading operation
 pub fn maybe_watch_tls_config<T, O, F, E>(
     tls_config: Arc<ReloadableTlsConfig<T, O>>,
     on_reload: F,
