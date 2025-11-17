@@ -80,56 +80,30 @@ impl FileReferenceManager {
         Some(ref_file_set)
     }
 
-    /// Gets all ref files for the given table id, excluding those already in region manifest.
-    ///
-    /// It's safe if manifest version became outdated when gc worker is called, as gc worker will check the changes between those two versions and act accordingly to make sure to get the real truly tmp ref file sets at the time of old manifest version.
-    ///
-    /// TODO(discord9): Since query will only possible refer to files in latest manifest when it's started, the only true risks is files removed from manifest between old version(when reading refs) and new version(at gc worker), so in case of having outdated manifest version, gc worker should make sure not to delete those files(Until next gc round which will use the latest manifest version and handle those files normally).
-    /// or perhaps using a two-phase commit style process where it proposes a set of files for deletion and then verifies no new references have appeared before committing the delete.
-    ///
-    /// gc worker could do this:
-    /// 1. if can get the files that got removed from old manifest to new manifest, then shouldn't delete those files even if they are not in tmp ref file, other files can be normally handled(deleted if not in use, otherwise keep)
-    ///    and report back allow next gc round to handle those files with newer tmp ref file sets.
-    /// 2. if can't get the files that got removed from old manifest to new manifest(possible if just did a checkpoint),
-    ///    then can do nothing as can't sure whether a file is truly unused or just tmp ref file sets haven't report it, so need to report back and try next gc round to handle those files with newer tmp ref file sets.
-    ///
+    /// Gets all ref files for the given regions, meaning all open FileHandles for those regions
     #[allow(unused)]
-    pub(crate) async fn get_snapshot_of_unmanifested_refs(
+    pub(crate) async fn get_snapshot_of_file_refs(
         &self,
         regions: Vec<MitoRegionRef>,
     ) -> Result<FileRefsManifest> {
         let mut ref_files = HashMap::new();
         for region_id in regions.iter().map(|r| r.region_id()) {
             if let Some(files) = self.ref_file_set(region_id) {
-                ref_files.insert(region_id, files);
+                ref_files.insert(region_id, files.into_iter().map(|f| f.file_id).collect());
             }
         }
 
-        let mut in_manifest_files = HashSet::new();
         let mut manifest_version = HashMap::new();
 
         for r in &regions {
             let manifest = r.manifest_ctx.manifest().await;
             let files = manifest.files.keys().cloned().collect::<Vec<_>>();
-            in_manifest_files.extend(files);
             manifest_version.insert(r.region_id(), manifest.manifest_version);
         }
 
-        let ref_files_excluding_in_manifest = ref_files
-            .iter()
-            .map(|(r, f)| {
-                (
-                    *r,
-                    f.iter()
-                        .filter_map(|f| {
-                            (!in_manifest_files.contains(&f.file_id)).then_some(f.file_id)
-                        })
-                        .collect::<HashSet<_>>(),
-                )
-            })
-            .collect();
+        // simply return all ref files, no manifest version filtering for now.
         Ok(FileRefsManifest {
-            file_refs: ref_files_excluding_in_manifest,
+            file_refs: ref_files,
             manifest_version,
         })
     }

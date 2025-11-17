@@ -31,15 +31,15 @@ use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use ordered_float::OrderedFloat;
-use snafu::OptionExt;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 use tokio::sync::mpsc::Sender;
 
-use crate::error::{Result, UnexpectedSnafu};
+use crate::error::Result;
 use crate::gc::candidate::GcCandidate;
 use crate::gc::ctx::SchedulerCtx;
+use crate::gc::handler::Region2Peers;
 use crate::gc::options::GcSchedulerOptions;
 use crate::gc::scheduler::{Event, GcScheduler};
 
@@ -199,7 +199,7 @@ impl SchedulerCtx for MockSchedulerCtx {
     async fn get_file_references(
         &self,
         _region_ids: &[RegionId],
-        _region_to_peer: &HashMap<RegionId, Peer>,
+        _region_to_peer: &Region2Peers,
         _timeout: Duration,
     ) -> Result<FileRefsManifest> {
         *self.get_file_references_calls.lock().unwrap() += 1;
@@ -221,12 +221,6 @@ impl SchedulerCtx for MockSchedulerCtx {
         _timeout: Duration,
     ) -> Result<GcReport> {
         *self.gc_regions_calls.lock().unwrap() += 1;
-
-        // Track retry count for all regions (use the first region as representative)
-        if let Some(&first_region_id) = region_ids.first() {
-            let mut retry_count = self.gc_regions_retry_count.lock().unwrap();
-            *retry_count.entry(first_region_id).or_insert(0) += 1;
-        }
 
         // Check per-region error injection first (for any region)
         for &region_id in region_ids {
@@ -254,46 +248,60 @@ impl SchedulerCtx for MockSchedulerCtx {
             }
         }
 
-        // Handle success after specific number of retries (use first region as representative)
-        if let Some(&first_region_id) = region_ids.first() {
+        // Build the final report by processing each region individually
+        let mut final_report = GcReport::default();
+        let gc_reports = self.gc_reports.lock().unwrap();
+        let success_after_retries = self.gc_regions_success_after_retries.lock().unwrap();
+
+        for &region_id in region_ids {
+            // Get current retry count for this region
             let retry_count = self
                 .gc_regions_retry_count
                 .lock()
                 .unwrap()
-                .get(&first_region_id)
+                .get(&region_id)
                 .copied()
                 .unwrap_or(0);
-            let success_after_retries = self.gc_regions_success_after_retries.lock().unwrap();
-            if let Some(&required_retries) = success_after_retries.get(&first_region_id)
-                && retry_count <= required_retries
-            {
-                // Return retryable error until we reach the required retry count
-                return Err(crate::error::RetryLaterSnafu {
-                    reason: format!(
-                        "Mock retryable error for region {} (attempt {}/{})",
-                        first_region_id, retry_count, required_retries
-                    ),
+
+            // Check if this region should succeed or need retry
+            if let Some(&required_retries) = success_after_retries.get(&region_id) {
+                if retry_count < required_retries {
+                    // This region needs more retries - add to need_retry_regions
+                    final_report.need_retry_regions.insert(region_id);
+                    // Track the retry attempt
+                    let mut retry_count_map = self.gc_regions_retry_count.lock().unwrap();
+                    *retry_count_map.entry(region_id).or_insert(0) += 1;
+                } else {
+                    // This region has completed all required retries - succeed
+                    if let Some(report) = gc_reports.get(&region_id) {
+                        final_report.merge(report.clone());
+                    }
+                    // Track the success attempt
+                    let mut retry_count_map = self.gc_regions_retry_count.lock().unwrap();
+                    *retry_count_map.entry(region_id).or_insert(0) += 1;
                 }
-                .build());
-            }
-        }
-
-        // Collect and merge reports for all requested regions
-        let mut combined_report = GcReport::default();
-        let gc_reports = self.gc_reports.lock().unwrap();
-
-        for &region_id in region_ids {
-            if let Some(report) = gc_reports.get(&region_id) {
-                combined_report.merge(report.clone());
             } else {
-                return Err(UnexpectedSnafu {
-                    violated: format!("No corresponding gc report for {}", region_id),
+                // No retry requirement - succeed immediately
+                if let Some(report) = gc_reports.get(&region_id) {
+                    final_report.merge(report.clone());
                 }
-                .build());
+                // Track the success attempt
+                let mut retry_count_map = self.gc_regions_retry_count.lock().unwrap();
+                *retry_count_map.entry(region_id).or_insert(0) += 1;
             }
         }
 
-        Ok(combined_report)
+        // Handle error sequence for retry testing (this should override the retry logic)
+        {
+            let mut error_sequence = self.gc_regions_error_sequence.lock().unwrap();
+            if !error_sequence.is_empty() {
+                let error = error_sequence.remove(0);
+                return Err(error);
+            }
+        }
+
+        // Return the report with need_retry_regions populated - let the caller handle retry logic
+        Ok(final_report)
     }
 }
 

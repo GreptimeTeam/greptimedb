@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
@@ -26,12 +26,13 @@ use common_meta::peer::Peer;
 use common_procedure::{ProcedureManagerRef, ProcedureWithId, watcher};
 use common_telemetry::{debug, error, warn};
 use snafu::{OptionExt as _, ResultExt as _};
-use store_api::storage::{FileRefsManifest, GcReport, RegionId};
+use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error;
 use crate::error::{Result, TableMetadataManagerSnafu};
+use crate::gc::handler::Region2Peers;
 use crate::gc::procedure::GcRegionProcedure;
 use crate::handler::HeartbeatMailbox;
 use crate::service::mailbox::{Channel, MailboxRef};
@@ -48,7 +49,7 @@ pub(crate) trait SchedulerCtx: Send + Sync {
     async fn get_file_references(
         &self,
         region_ids: &[RegionId],
-        region_to_peer: &HashMap<RegionId, Peer>,
+        region_routes: &Region2Peers,
         timeout: Duration,
     ) -> Result<FileRefsManifest>;
 
@@ -130,7 +131,7 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
     async fn get_file_references(
         &self,
         region_ids: &[RegionId],
-        region_to_peer: &HashMap<RegionId, Peer>,
+        region_routes: &Region2Peers,
         timeout: Duration,
     ) -> Result<FileRefsManifest> {
         debug!("Getting file references for {} regions", region_ids.len());
@@ -139,16 +140,23 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         let mut datanode_regions: HashMap<Peer, Vec<RegionId>> = HashMap::new();
 
         for region_id in region_ids {
-            if let Some(peer) = region_to_peer.get(region_id) {
+            if let Some((leader, followers)) = region_routes.get(region_id) {
                 datanode_regions
-                    .entry(peer.clone())
+                    .entry(leader.clone())
                     .or_default()
                     .push(*region_id);
+                // also need to send for follower regions for file refs in case query is running on follower
+                for follower in followers {
+                    datanode_regions
+                        .entry(follower.clone())
+                        .or_default()
+                        .push(*region_id);
+                }
             }
         }
 
         // Send GetFileRefs instructions to each datanode
-        let mut all_file_refs = HashMap::new();
+        let mut all_file_refs: HashMap<RegionId, HashSet<FileId>> = HashMap::new();
         let mut all_manifest_versions = HashMap::new();
 
         for (peer, regions) in datanode_regions {
@@ -159,8 +167,19 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
                 Ok(manifest) => {
                     // TODO(discord9): if other regions provide file refs for one region on other datanode, and no version,
                     // is it correct to merge manifest_version directly?
-                    all_file_refs.extend(manifest.file_refs);
-                    all_manifest_versions.extend(manifest.manifest_version);
+                    // FIXME: follower region how to merge version???
+
+                    for (region_id, file_refs) in manifest.file_refs {
+                        all_file_refs
+                            .entry(region_id)
+                            .or_default()
+                            .extend(file_refs);
+                    }
+                    // region manifest version should be the smallest one among all peers, so outdated region can be detected
+                    for (region_id, version) in manifest.manifest_version {
+                        let entry = all_manifest_versions.entry(region_id).or_insert(version);
+                        *entry = (*entry).min(version);
+                    }
                 }
                 Err(e) => {
                     warn!(
