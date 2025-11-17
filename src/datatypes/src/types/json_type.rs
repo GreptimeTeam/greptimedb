@@ -57,6 +57,19 @@ impl JsonType {
         Self { format }
     }
 
+    pub(crate) fn new_native(native: ConcreteDataType) -> Self {
+        Self {
+            format: JsonFormat::Native(Box::new(native)),
+        }
+    }
+
+    pub(crate) fn native_type(&self) -> ConcreteDataType {
+        match &self.format {
+            JsonFormat::Jsonb => ConcreteDataType::binary_datatype(),
+            JsonFormat::Native(x) => x.as_ref().clone(),
+        }
+    }
+
     pub(crate) fn empty() -> Self {
         Self {
             format: JsonFormat::Native(Box::new(ConcreteDataType::null_datatype())),
@@ -65,26 +78,21 @@ impl JsonType {
 
     /// Make json type a struct type, by:
     /// - if the json is an object, its entries are mapped to struct fields, obviously;
-    /// - if not, the json is one of bool, number, string or array, make it a special field called
-    ///   [JSON_PLAIN_FIELD_NAME] with metadata [JSON_PLAIN_FIELD_METADATA_KEY] = `"true"` in a
-    ///   struct with only that field.
+    /// - if not, the json is one of bool, number, string or array, make it a special field
+    ///   (see [plain_json_struct_type]).
     pub(crate) fn as_struct_type(&self) -> StructType {
         match &self.format {
             JsonFormat::Jsonb => StructType::default(),
             JsonFormat::Native(inner) => match inner.as_ref() {
                 ConcreteDataType::Struct(t) => t.clone(),
-                x => {
-                    let mut field =
-                        StructField::new(JSON_PLAIN_FIELD_NAME.to_string(), x.clone(), true);
-                    field.insert_metadata(JSON_PLAIN_FIELD_METADATA_KEY, true);
-                    StructType::new(Arc::new(vec![field]))
-                }
+                x => plain_json_struct_type(x.clone()),
             },
         }
     }
 
     /// Check if this json type is the special "plain" one.
     /// See [JsonType::as_struct_type].
+    #[expect(unused)]
     pub(crate) fn is_plain_json(&self) -> bool {
         let JsonFormat::Native(box ConcreteDataType::Struct(t)) = &self.format else {
             return true;
@@ -122,6 +130,14 @@ impl JsonType {
             _ => false,
         }
     }
+}
+
+/// A special struct type for denoting "plain"(not object) json value. It has only one field, with
+/// fixed name [JSON_PLAIN_FIELD_NAME] and with metadata [JSON_PLAIN_FIELD_METADATA_KEY] = `"true"`.
+pub(crate) fn plain_json_struct_type(item_type: ConcreteDataType) -> StructType {
+    let mut field = StructField::new(JSON_PLAIN_FIELD_NAME.to_string(), item_type, true);
+    field.insert_metadata(JSON_PLAIN_FIELD_METADATA_KEY, true);
+    StructType::new(Arc::new(vec![field]))
 }
 
 fn is_mergeable(this: &ConcreteDataType, that: &ConcreteDataType) -> bool {
