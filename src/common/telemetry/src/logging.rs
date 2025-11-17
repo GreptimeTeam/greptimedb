@@ -465,10 +465,14 @@ pub fn init_global_logging(
                 && let Some(trace_reload_handle) = TRACE_RELOAD_HANDLE.get()
             {
                 let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer.clone());
-                let _ = trace_reload_handle.reload(vec![trace_layer]);
+                if let Err(e) = trace_reload_handle.reload(vec![trace_layer]) {
+                    tracing::error!("Failed to reload trace layer during init: {e}");
+                }
             }
         } else if let Some(trace_reload_handle) = TRACE_RELOAD_HANDLE.get() {
-            let _ = trace_reload_handle.reload(vec![]);
+            if let Err(e) = trace_reload_handle.reload(vec![]) {
+                tracing::error!("Failed to reload trace layer during init: {e}");
+            }
         }
     });
 

@@ -14,7 +14,7 @@
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use common_telemetry::{TRACE_RELOAD_HANDLE, TRACER};
+use common_telemetry::{TRACE_RELOAD_HANDLE, TRACER, error};
 
 use crate::error::{InvalidParameterSnafu, Result};
 
@@ -27,19 +27,42 @@ pub async fn dyn_trace_handler(enable_str: String) -> Result<impl IntoResponse> 
         .build()
     })?;
 
-    let mut change_note = String::new();
-    if enable {
-        if let Some(tracer) = TRACER.get()
-            && let Some(trace_reload_handle) = TRACE_RELOAD_HANDLE.get()
-        {
-            let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer.clone());
-            let _ = trace_reload_handle.reload(vec![trace_layer]);
-            change_note.push_str("trace enabled");
-        }
-    } else if let Some(trace_reload_handle) = TRACE_RELOAD_HANDLE.get() {
-        let _ = trace_reload_handle.reload(vec![]);
-        change_note.push_str("trace disabled");
-    }
+    let Some(trace_reload_handle) = TRACE_RELOAD_HANDLE.get() else {
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace reload handle is not initialized".to_string(),
+        ));
+    };
 
-    Ok((StatusCode::OK, change_note))
+    if enable {
+        let Some(tracer) = TRACER.get() else {
+            return Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "trace exporter is not initialized".to_string(),
+            ));
+        };
+
+        let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer.clone());
+        match trace_reload_handle.reload(vec![trace_layer]) {
+            Ok(_) => Ok((StatusCode::OK, "trace enabled".to_string())),
+            Err(e) => {
+                error!(e; "Failed to enable trace");
+                Ok((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to enable trace: {e}"),
+                ))
+            }
+        }
+    } else {
+        match trace_reload_handle.reload(vec![]) {
+            Ok(_) => Ok((StatusCode::OK, "trace disabled".to_string())),
+            Err(e) => {
+                error!(e; "Failed to disable trace");
+                Ok((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to disable trace: {e}"),
+                ))
+            }
+        }
+    }
 }
