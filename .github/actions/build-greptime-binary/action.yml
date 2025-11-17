@@ -32,9 +32,23 @@ inputs:
     description: Image Registry
     required: false
     default: 'docker.io'
+  large-page-size:
+    description: Build GreptimeDB with large page size (65536).
+    required: false
+    default: 'false'
+
 runs:
   using: composite
   steps:
+    - name: Set extra build environment variables
+      shell: bash
+      run: |
+        if [[ '${{ inputs.large-page-size }}' == 'true' ]]; then
+          echo 'EXTRA_BUILD_ENVS="JEMALLOC_SYS_WITH_LG_PAGE=16"' >> $GITHUB_ENV
+        else
+          echo 'EXTRA_BUILD_ENVS=' >> $GITHUB_ENV
+        fi
+
     - name: Build greptime binary
       shell: bash
       if: ${{ inputs.build-android-artifacts == 'false' }}
@@ -45,7 +59,8 @@ runs:
           FEATURES=${{ inputs.features }} \
           BASE_IMAGE=${{ inputs.base-image }} \
           IMAGE_NAMESPACE=${{ inputs.image-namespace }} \
-          IMAGE_REGISTRY=${{ inputs.image-registry }}
+          IMAGE_REGISTRY=${{ inputs.image-registry }} \
+          EXTRA_BUILD_ENVS=$EXTRA_BUILD_ENVS
 
     - name: Upload artifacts
       uses: ./.github/actions/upload-artifacts

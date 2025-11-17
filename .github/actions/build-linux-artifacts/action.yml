@@ -27,6 +27,10 @@ inputs:
     description: Working directory to build the artifacts
     required: false
     default: .
+  large-page-size:
+    description: Build GreptimeDB with large page size (65536).
+    required: false
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -59,6 +63,7 @@ runs:
         working-dir: ${{ inputs.working-dir }}
         image-registry: ${{ inputs.image-registry }}
         image-namespace: ${{ inputs.image-namespace }}
+        large-page-size: ${{ inputs.large-page-size }}
 
     - name: Clean up the target directory # Clean up the target directory for the centos7 base image, or it will still use the objects of last build.
       shell: bash
@@ -77,6 +82,7 @@ runs:
         working-dir: ${{ inputs.working-dir }}
         image-registry: ${{ inputs.image-registry }}
         image-namespace: ${{ inputs.image-namespace }}
+        large-page-size: ${{ inputs.large-page-size }}
 
     - name: Build greptime on android base image
       uses: ./.github/actions/build-greptime-binary
@@ -89,3 +95,4 @@ runs:
         build-android-artifacts: true
         image-registry: ${{ inputs.image-registry }}
         image-namespace: ${{ inputs.image-namespace }}
+        large-page-size: ${{ inputs.large-page-size }}
