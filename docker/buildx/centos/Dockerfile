@@ -1,10 +1,10 @@
-FROM centos:7 as builder
+FROM centos:7 AS builder
 
 ARG CARGO_PROFILE
 ARG FEATURES
 ARG OUTPUT_DIR
 
-ENV LANG en_US.utf8
+ENV LANG=en_US.utf8
 WORKDIR /greptimedb
 
 # Install dependencies
@@ -22,7 +22,7 @@ RUN unzip protoc-3.15.8-linux-x86_64.zip -d /usr/local/
 # Install Rust
 SHELL ["/bin/bash", "-c"]
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path --default-toolchain none -y
-ENV PATH /usr/local/bin:/root/.cargo/bin/:$PATH
+ENV PATH=/usr/local/bin:/root/.cargo/bin/:$PATH
 
 # Build the project in release mode.
 RUN --mount=target=.,rw \
@@ -33,7 +33,7 @@ RUN --mount=target=.,rw \
     TARGET_DIR=/out/target
 
 # Export the binary to the clean image.
-FROM centos:7 as base
+FROM centos:7 AS base
 
 ARG OUTPUT_DIR
 
@@ -45,7 +45,7 @@ RUN yum install -y epel-release \
 
 WORKDIR /greptime
 COPY --from=builder /out/target/${OUTPUT_DIR}/greptime /greptime/bin/
-ENV PATH /greptime/bin/:$PATH
+ENV PATH=/greptime/bin/:$PATH
 
 ENV MALLOC_CONF="prof:true,prof_active:false"
 

@@ -33,18 +33,31 @@ RUN --mount=target=. \
     FEATURES=${FEATURES} \
     TARGET_DIR=/out/target
 
-# Export the binary to the clean image.
-# TODO(zyy17): Maybe should use the more secure container image.
-FROM ubuntu:22.04 AS base
+FROM ubuntu:22.04 AS libs
+
+ARG TARGETARCH
+
+# Copy required library dependencies based on architecture
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+        cp /lib/x86_64-linux-gnu/libz.so.1.2.11 /lib/x86_64-linux-gnu/libz.so.1; \
+    elif [ "$TARGETARCH" = "arm64" ]; then \
+        cp /lib/aarch64-linux-gnu/libz.so.1.2.11 /lib/aarch64-linux-gnu/libz.so.1; \
+    else \
+        echo "Unsupported architecture: $TARGETARCH" && exit 1; \
+    fi
+
+# Export the binary to the clean distroless image.
+FROM gcr.io/distroless/cc-debian12:latest AS base
 
 ARG OUTPUT_DIR
+ARG TARGETARCH
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get \
-    -y install ca-certificates \
-    curl
+# Copy required library dependencies
+COPY --from=libs /lib /lib
+COPY --from=busybox:stable /bin/busybox /bin/busybox
 
 WORKDIR /greptime
-COPY --from=builder /out/target/${OUTPUT_DIR}/greptime /greptime/bin/
+COPY --from=builder /out/target/${OUTPUT_DIR}/greptime /greptime/bin/greptime
 ENV PATH=/greptime/bin/:$PATH
 
 ENV MALLOC_CONF="prof:true,prof_active:false"
