@@ -83,6 +83,7 @@ once_cell.workspace = true
 openmetrics-parser = "0.4"
 simd-json.workspace = true
 socket2 = "0.5"
+tracing-opentelemetry.workspace = true
 # use crates.io version once the following PRs is merged into the nextest release
 # 1. fix: Use After Free in PacketReader in https://github.com/databendlabs/opensrv/pull/67
 # 2. Use ring, instead of aws-lc-rs in https://github.com/databendlabs/opensrv/pull/72
