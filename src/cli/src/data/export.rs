@@ -90,7 +90,7 @@ pub struct ExportCommand {
     end_time: Option<String>,
 
     /// The parallelism of the export.
-    #[clap(long, default_value = "8")]
+    #[clap(long, default_value = "4")]
     parallelism: usize,
 
     /// The basic authentication for connecting to the server
