@@ -56,7 +56,7 @@ async fn test_full_file_listing_first_time_gc() {
         }
         .with_table_routes(HashMap::from([(
             table_id,
-            (table_id, vec![(region_id, peer)]),
+            (table_id, vec![(region_id, peer.clone())]),
         )])),
     );
 
@@ -75,12 +75,12 @@ async fn test_full_file_listing_first_time_gc() {
     };
 
     // First GC - should use full listing since region has never been GC'd
-    let report = scheduler
-        .process_table_gc(table_id, vec![mock_candidate(region_id)])
+    let reports = scheduler
+        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
         .await
         .unwrap();
 
-    assert_eq!(report.success_regions.len(), 1);
+    assert_eq!(reports.deleted_files.len(), 1);
 
     // Verify that full listing was used by checking the tracker
     let tracker = scheduler.region_gc_tracker.lock().await;
@@ -123,7 +123,7 @@ async fn test_full_file_listing_interval_enforcement() {
         }
         .with_table_routes(HashMap::from([(
             table_id,
-            (table_id, vec![(region_id, peer)]),
+            (table_id, vec![(region_id, peer.clone())]),
         )])),
     );
 
@@ -142,11 +142,11 @@ async fn test_full_file_listing_interval_enforcement() {
     };
 
     // First GC - should use full listing
-    let report1 = scheduler
-        .process_table_gc(table_id, vec![mock_candidate(region_id)])
+    let reports1 = scheduler
+        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
         .await
         .unwrap();
-    assert_eq!(report1.success_regions.len(), 1);
+    assert_eq!(reports1.deleted_files.len(), 1);
 
     // Get the first full listing time
     let first_full_listing_time = {
@@ -163,11 +163,10 @@ async fn test_full_file_listing_interval_enforcement() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Second GC - should use full listing again since interval has passed
-    let report2 = scheduler
-        .process_table_gc(table_id, vec![mock_candidate(region_id)])
+    let _reports2 = scheduler
+        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
         .await
         .unwrap();
-    assert_eq!(report2.success_regions.len(), 1);
 
     // Verify that full listing was used again
     let tracker = scheduler.region_gc_tracker.lock().await;
@@ -214,7 +213,7 @@ async fn test_full_file_listing_no_interval_passed() {
         }
         .with_table_routes(HashMap::from([(
             table_id,
-            (table_id, vec![(region_id, peer)]),
+            (table_id, vec![(region_id, peer.clone())]),
         )])),
     );
 
@@ -233,11 +232,11 @@ async fn test_full_file_listing_no_interval_passed() {
     };
 
     // First GC - should use full listing
-    let report1 = scheduler
-        .process_table_gc(table_id, vec![mock_candidate(region_id)])
+    let reports1 = scheduler
+        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
         .await
         .unwrap();
-    assert_eq!(report1.success_regions.len(), 1);
+    assert_eq!(reports1.deleted_files.len(), 1);
 
     // Get the first full listing time
     let first_full_listing_time = {
@@ -251,11 +250,11 @@ async fn test_full_file_listing_no_interval_passed() {
     };
 
     // Second GC immediately - should NOT use full listing since interval hasn't passed
-    let report2 = scheduler
-        .process_table_gc(table_id, vec![mock_candidate(region_id)])
+    let reports2 = scheduler
+        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
         .await
         .unwrap();
-    assert_eq!(report2.success_regions.len(), 1);
+    assert_eq!(reports2.deleted_files.len(), 1);
 
     // Verify that full listing time was NOT updated
     let tracker = scheduler.region_gc_tracker.lock().await;

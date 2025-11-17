@@ -81,10 +81,24 @@ async fn test_concurrent_table_processing_limits() {
     };
 
     let candidates = ctx.candidates.lock().unwrap().clone().unwrap_or_default();
-    let report = scheduler.process_tables_concurrently(candidates).await;
 
-    // Should process all tables but respect concurrency limits
-    assert_eq!(report.processed_tables, 10);
+    // Convert table-based candidates to datanode-based candidates
+    let peer = Peer::new(1, "");
+    let datanode_to_candidates = HashMap::from([(
+        peer,
+        candidates
+            .into_iter()
+            .flat_map(|(table_id, candidates)| candidates.into_iter().map(move |c| (table_id, c)))
+            .collect(),
+    )]);
+
+    let report = scheduler
+        .process_datanodes_concurrently(datanode_to_candidates)
+        .await;
+
+    // Should process all datanodes
+    assert_eq!(report.per_datanode_reports.len(), 1);
+    assert_eq!(report.failed_datanodes.len(), 0);
 }
 
 #[tokio::test]
@@ -140,28 +154,35 @@ async fn test_mixed_success_failure_tables() {
 
     let candidates = ctx.candidates.lock().unwrap().clone().unwrap_or_default();
 
-    let report = scheduler.process_tables_concurrently(candidates).await;
+    // Convert table-based candidates to datanode-based candidates
+    let peer = Peer::new(1, "");
+    let datanode_to_candidates = HashMap::from([(
+        peer,
+        candidates
+            .into_iter()
+            .flat_map(|(table_id, candidates)| candidates.into_iter().map(move |c| (table_id, c)))
+            .collect(),
+    )]);
 
-    // Should have one success and one failure
-    assert_eq!(report.processed_tables, 2);
-    assert_eq!(report.table_reports.len(), 2);
-    assert_eq!(report.failed_tables.len(), 0);
+    let report = scheduler
+        .process_datanodes_concurrently(datanode_to_candidates)
+        .await;
+
+    // Should have one datanode with mixed results
+    assert_eq!(report.per_datanode_reports.len(), 1);
+    // also check one failed region
     assert_eq!(
         report
-            .table_reports
+            .per_datanode_reports
             .iter()
-            .map(|r| r.success_regions.len())
-            .sum::<usize>(),
+            .next()
+            .unwrap()
+            .1
+            .need_retry_regions
+            .len(),
         1
     );
-    assert_eq!(
-        report
-            .table_reports
-            .iter()
-            .map(|r| r.failed_regions.len())
-            .sum::<usize>(),
-        1
-    );
+    assert_eq!(report.failed_datanodes.len(), 0);
 }
 
 // Region Concurrency Tests
@@ -239,15 +260,20 @@ async fn test_region_gc_concurrency_limit() {
     };
 
     let start_time = Instant::now();
-    let report = scheduler
-        .process_table_gc(table_id, candidates)
+    let reports = scheduler
+        .process_datanode_gc(
+            peer,
+            candidates.into_iter().map(|c| (table_id, c)).collect(),
+        )
         .await
         .unwrap();
     let duration = start_time.elapsed();
 
     // All regions should be processed successfully
-    assert_eq!(report.success_regions.len(), 10);
-    assert_eq!(report.failed_regions.len(), 0);
+    assert_eq!(reports.len(), 1);
+    let table_report = &reports[0];
+    assert_eq!(table_report.success_regions.len(), 10);
+    assert_eq!(table_report.failed_regions.len(), 0);
 
     // Verify that concurrency limit was respected (this is hard to test directly,
     // but we can verify that the processing completed successfully)
@@ -340,18 +366,23 @@ async fn test_region_gc_concurrency_with_mixed_results() {
         last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
     };
 
-    let report = scheduler
-        .process_table_gc(table_id, candidates)
+    let reports = scheduler
+        .process_datanode_gc(
+            peer,
+            candidates.into_iter().map(|c| (table_id, c)).collect(),
+        )
         .await
         .unwrap();
 
     // Should have 3 successful and 3 failed regions
+    assert_eq!(reports.len(), 1);
+    let report = &reports[0];
     assert_eq!(report.success_regions.len(), 3);
     assert_eq!(report.failed_regions.len(), 3);
 
     // Verify that successful regions are the even-numbered ones
-    for report in &report.success_regions {
-        for region in report.deleted_files.keys() {
+    for success_report in &report.success_regions {
+        for region in success_report.deleted_files.keys() {
             let region_num = region.region_number();
             assert_eq!(
                 region_num % 2,
@@ -439,12 +470,17 @@ async fn test_region_gc_concurrency_with_retryable_errors() {
         ctx.set_gc_regions_success_after_retries(region_id, 1);
     }
 
-    let report = scheduler
-        .process_table_gc(table_id, candidates)
+    let reports = scheduler
+        .process_datanode_gc(
+            peer,
+            candidates.into_iter().map(|c| (table_id, c)).collect(),
+        )
         .await
         .unwrap();
 
     // All regions should eventually succeed after retries
+    assert_eq!(reports.len(), 1);
+    let report = &reports[0];
     assert_eq!(report.success_regions.len(), 5);
     assert_eq!(report.failed_regions.len(), 0);
 

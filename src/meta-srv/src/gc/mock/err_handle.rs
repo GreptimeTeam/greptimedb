@@ -87,22 +87,14 @@ async fn test_gc_regions_failure_handling() {
 
     // Validate the report shows the failure handling
     assert_eq!(
-        report.processed_tables, 1,
-        "Should process 1 table despite failure"
-    );
-    assert_eq!(report.table_reports.len(), 1, "Should have 1 table report");
-
-    let table_report = &report.table_reports[0];
-    assert_eq!(table_report.table_id, table_id, "Table ID should match");
-    assert_eq!(
-        table_report.success_regions.len(),
-        0,
-        "Should have 0 successful regions due to GC failure"
-    );
-    assert_eq!(
-        table_report.failed_regions.len(),
+        report.per_datanode_reports.len(),
         1,
-        "Should have 1 failed region"
+        "Should process 1 datanode despite failure"
+    );
+    assert_eq!(
+        report.failed_datanodes.len(),
+        1,
+        "Should have 1 failed datanode"
     );
 
     // Verify that calls were made despite potential failures
@@ -166,9 +158,17 @@ async fn test_get_file_references_failure() {
     let report = scheduler.handle_tick().await.unwrap();
 
     // Validate the report shows the expected results
-    assert_eq!(report.processed_tables, 1, "Should process 1 table");
-    assert_eq!(report.table_reports.len(), 0, "Should have 0 table report");
-    assert_eq!(report.failed_tables.len(), 1, "Should have 1 failed table");
+    // In the new implementation, even if get_file_references fails, we still create a datanode report
+    assert_eq!(
+        report.per_datanode_reports.len(),
+        1,
+        "Should process 1 datanode"
+    );
+    assert_eq!(
+        report.failed_datanodes.len(),
+        1,
+        "Should have 1 failed datanode"
+    );
 
     // Should still attempt to get file references
     assert_eq!(
@@ -203,13 +203,11 @@ async fn test_get_table_route_failure() {
     .build();
 
     // Create context with table route error injection
-    let ctx = Arc::new(
-        MockSchedulerCtx {
-            table_to_region_stats: Arc::new(Mutex::new(Some(table_stats))),
-            ..Default::default()
-        }
-        .with_get_table_route_error(route_error),
-    );
+    let ctx = Arc::new(MockSchedulerCtx {
+        table_to_region_stats: Arc::new(Mutex::new(Some(table_stats))),
+        ..Default::default()
+    });
+    ctx.set_table_route_error(route_error);
 
     let scheduler = GcScheduler {
         ctx: ctx.clone(),
@@ -228,14 +226,29 @@ async fn test_get_table_route_failure() {
         .unwrap_or_default();
     let candidates = scheduler.select_gc_candidates(stats).await.unwrap();
 
-    // This should handle table route failure gracefully
-    let report = scheduler.process_tables_concurrently(candidates).await;
+    // Convert table-based candidates to datanode-based candidates
+    let datanode_to_candidates = HashMap::from([(
+        Peer::new(1, ""),
+        candidates
+            .into_iter()
+            .flat_map(|(table_id, candidates)| candidates.into_iter().map(move |c| (table_id, c)))
+            .collect(),
+    )]);
 
-    // Should process the table but fail due to route error
-    assert_eq!(report.processed_tables, 1, "Expected 1 processed table");
+    // This should handle table route failure gracefully
+    let report = scheduler
+        .process_datanodes_concurrently(datanode_to_candidates)
+        .await;
+
+    // Should process the datanode but fail due to route error
     assert_eq!(
-        report.table_reports.len(),
-        0,
-        "Expected 0 successful tables due to route error"
+        report.per_datanode_reports.len(),
+        1,
+        "Expected 1 datanode report"
+    );
+    assert_eq!(
+        report.failed_datanodes.len(),
+        1,
+        "Expected 1 failed datanode due to route error"
     );
 }
