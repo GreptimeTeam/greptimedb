@@ -22,7 +22,7 @@ use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 
-use crate::gc::mock::{MockSchedulerCtx, mock_region_stat};
+use crate::gc::mock::{MockSchedulerCtx, mock_region_stat, new_empty_report_with};
 use crate::gc::{GcScheduler, GcSchedulerOptions};
 
 // Integration Flow Tests
@@ -84,20 +84,34 @@ async fn test_full_gc_workflow() {
     // Run the full workflow
     let report = scheduler.handle_tick().await.unwrap();
 
-    // Validate the returned GcJobReport
-    assert_eq!(report.processed_tables, 1, "Should process 1 table");
-    assert_eq!(report.table_reports.len(), 1, "Should have 1 table report");
-
-    let table_report = &report.table_reports[0];
-    assert_eq!(table_report.table_id, table_id, "Table ID should match");
+    // Validate the returned GcJobReport - should have 1 datanode report
     assert_eq!(
-        table_report.success_regions.len(),
+        report.per_datanode_reports.len(),
         1,
-        "Should have 1 successful region"
+        "Should process 1 datanode"
+    );
+    assert_eq!(
+        report.failed_datanodes.len(),
+        0,
+        "Should have no failed datanodes"
+    );
+
+    // Get the datanode report
+    let datanode_report = report.per_datanode_reports.values().next().unwrap();
+
+    // Check that the region was processed successfully
+    assert!(
+        datanode_report.deleted_files.contains_key(&region_id),
+        "Should have deleted files for region"
+    );
+    assert_eq!(
+        datanode_report.deleted_files[&region_id].len(),
+        2,
+        "Should have 2 deleted files"
     );
     assert!(
-        table_report.failed_regions.is_empty(),
-        "Should have no failed regions"
+        datanode_report.need_retry_regions.is_empty(),
+        "Should have no retry regions"
     );
 
     // Verify all steps were executed
@@ -138,7 +152,7 @@ async fn test_tracker_cleanup() {
     let table_stats = HashMap::from([(table_id, vec![region_stat])]);
 
     let mut gc_reports = HashMap::new();
-    gc_reports.insert(region_id, GcReport::default());
+    gc_reports.insert(region_id, new_empty_report_with([region_id]));
 
     let file_refs = FileRefsManifest {
         manifest_version: HashMap::from([(region_id, 1)]),
@@ -197,20 +211,29 @@ async fn test_tracker_cleanup() {
 
     let report = scheduler.handle_tick().await.unwrap();
 
-    // Validate the returned GcJobReport
-    assert_eq!(report.processed_tables, 1, "Should process 1 table");
-    assert_eq!(report.table_reports.len(), 1, "Should have 1 table report");
-
-    let table_report = &report.table_reports[0];
-    assert_eq!(table_report.table_id, table_id, "Table ID should match");
+    // Validate the returned GcJobReport - should have 1 datanode report
     assert_eq!(
-        table_report.success_regions.len(),
+        report.per_datanode_reports.len(),
         1,
-        "Should have 1 successful region"
+        "Should process 1 datanode"
+    );
+    assert_eq!(
+        report.failed_datanodes.len(),
+        0,
+        "Should have no failed datanodes"
+    );
+
+    // Get the datanode report
+    let datanode_report = report.per_datanode_reports.values().next().unwrap();
+
+    // Check that the region was processed successfully
+    assert!(
+        datanode_report.deleted_files.contains_key(&region_id),
+        "Should have deleted files for region"
     );
     assert!(
-        table_report.failed_regions.is_empty(),
-        "Should have no failed regions"
+        datanode_report.need_retry_regions.is_empty(),
+        "Should have no retry regions"
     );
 
     // Verify tracker was updated

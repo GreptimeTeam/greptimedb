@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use common_meta::datanode::RegionManifestInfo;
 use common_meta::peer::Peer;
@@ -22,7 +22,7 @@ use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 
-use crate::gc::mock::{MockSchedulerCtx, mock_region_stat};
+use crate::gc::mock::{MockSchedulerCtx, mock_region_stat, new_empty_report_with};
 use crate::gc::{GcScheduler, GcSchedulerOptions};
 
 /// Error Handling Tests
@@ -93,8 +93,20 @@ async fn test_gc_regions_failure_handling() {
     );
     assert_eq!(
         report.failed_datanodes.len(),
+        0,
+        "Should have 0 failed datanodes (failure handled via need_retry_regions)"
+    );
+
+    // Check that the region is in need_retry_regions due to the failure
+    let datanode_report = report.per_datanode_reports.values().next().unwrap();
+    assert_eq!(
+        datanode_report.need_retry_regions.len(),
         1,
-        "Should have 1 failed datanode"
+        "Should have 1 region in need_retry_regions due to failure"
+    );
+    assert!(
+        datanode_report.need_retry_regions.contains(&region_id),
+        "Region should be in need_retry_regions"
     );
 
     // Verify that calls were made despite potential failures
@@ -103,15 +115,13 @@ async fn test_gc_regions_failure_handling() {
         1,
         "Expected 1 call to get_table_to_region_stats"
     );
-    assert_eq!(
-        *ctx.get_file_references_calls.lock().unwrap(),
-        1,
-        "Expected 1 call to get_file_references"
+    assert!(
+        *ctx.get_file_references_calls.lock().unwrap() >= 1,
+        "Expected at least 1 call to get_file_references"
     );
-    assert_eq!(
-        *ctx.gc_regions_calls.lock().unwrap(),
-        1,
-        "Expected 1 call to gc_regions"
+    assert!(
+        *ctx.gc_regions_calls.lock().unwrap() >= 1,
+        "Expected at least 1 call to gc_regions"
     );
 }
 
@@ -139,6 +149,10 @@ async fn test_get_file_references_failure() {
         MockSchedulerCtx {
             table_to_region_stats: Arc::new(Mutex::new(Some(table_stats))),
             file_refs: Arc::new(Mutex::new(Some(FileRefsManifest::default()))),
+            gc_reports: Arc::new(Mutex::new(HashMap::from([(
+                region_id,
+                new_empty_report_with([region_id]),
+            )]))),
             ..Default::default()
         }
         .with_table_routes(HashMap::from([(
@@ -150,7 +164,10 @@ async fn test_get_file_references_failure() {
     let scheduler = GcScheduler {
         ctx: ctx.clone(),
         receiver: GcScheduler::channel().1,
-        config: GcSchedulerOptions::default(),
+        config: GcSchedulerOptions {
+            retry_backoff_duration: Duration::from_millis(10), // shorten for test
+            ..Default::default()
+        },
         region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
     };
@@ -166,15 +183,28 @@ async fn test_get_file_references_failure() {
     );
     assert_eq!(
         report.failed_datanodes.len(),
-        1,
-        "Should have 1 failed datanode"
+        0,
+        "Should have 0 failed datanodes (failure handled gracefully)"
     );
 
-    // Should still attempt to get file references
-    assert_eq!(
-        *ctx.get_file_references_calls.lock().unwrap(),
-        1,
-        "Expected 1 call to get_file_references"
+    // The region should be processed but may have empty results due to file refs failure
+    let datanode_report = report.per_datanode_reports.values().next().unwrap();
+    // The current implementation still processes the region even with file refs failure
+    // and creates an empty entry in deleted_files
+    assert!(
+        datanode_report.deleted_files.contains_key(&region_id),
+        "Should have region in deleted_files (even if empty)"
+    );
+    assert!(
+        datanode_report.deleted_files[&region_id].is_empty(),
+        "Should have empty deleted files due to file refs failure"
+    );
+
+    // Should still attempt to get file references (may be called multiple times due to retry logic)
+    assert!(
+        *ctx.get_file_references_calls.lock().unwrap() >= 1,
+        "Expected at least 1 call to get_file_references, got {}",
+        *ctx.get_file_references_calls.lock().unwrap()
     );
 }
 
@@ -237,18 +267,22 @@ async fn test_get_table_route_failure() {
 
     // This should handle table route failure gracefully
     let report = scheduler
-        .process_datanodes_concurrently(datanode_to_candidates)
+        .process_datanodes_with_retry(datanode_to_candidates)
         .await;
-
-    // Should process the datanode but fail due to route error
+    dbg!(&report);
+    // Should process the datanode but handle route error gracefully
     assert_eq!(
         report.per_datanode_reports.len(),
-        1,
-        "Expected 1 datanode report"
+        0,
+        "Expected 0 datanode report"
     );
     assert_eq!(
         report.failed_datanodes.len(),
         1,
-        "Expected 1 failed datanode due to route error"
+        "Expected 1 failed datanodes (route error handled gracefully)"
+    );
+    assert!(
+        report.failed_datanodes.contains_key(&1),
+        "Failed datanodes should contain the datanode with route error"
     );
 }

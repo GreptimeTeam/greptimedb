@@ -738,6 +738,12 @@ impl GcScheduler {
         // Continue retrying until all regions succeed or reach max retry limit
         while !current_retry_regions.is_empty() && retry_round < self.config.max_retries_per_region
         {
+            // Apply exponential backoff if there are still regions to retry
+            if !current_retry_regions.is_empty() && retry_round < self.config.max_retries_per_region
+            {
+                self.apply_retry_backoff(current_retry_regions.len(), retry_round)
+                    .await;
+            }
             retry_round += 1;
 
             info!(
@@ -780,13 +786,6 @@ impl GcScheduler {
                 .values()
                 .flat_map(|r| r.need_retry_regions.iter().copied())
                 .collect();
-
-            // Apply exponential backoff if there are still regions to retry
-            if !current_retry_regions.is_empty() && retry_round < self.config.max_retries_per_region
-            {
-                self.apply_retry_backoff(current_retry_regions.len(), retry_round)
-                    .await;
-            }
         }
 
         info!(
@@ -1031,7 +1030,7 @@ impl GcScheduler {
             "{} regions still need retry after round {}, waiting {} seconds before next round (exponential backoff)",
             remaining_regions,
             retry_round,
-            backoff_duration.as_secs()
+            backoff_duration.as_secs_f32()
         );
 
         // Wait for backoff period before next retry round

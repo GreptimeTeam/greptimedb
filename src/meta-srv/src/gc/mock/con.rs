@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -68,7 +68,8 @@ async fn test_concurrent_table_processing_limits() {
     let ctx = Arc::new(ctx);
 
     let config = GcSchedulerOptions {
-        max_concurrent_tables: 3, // Set a low limit
+        max_concurrent_tables: 3,                          // Set a low limit
+        retry_backoff_duration: Duration::from_millis(50), // for faster test
         ..Default::default()
     };
 
@@ -93,7 +94,7 @@ async fn test_concurrent_table_processing_limits() {
     )]);
 
     let report = scheduler
-        .process_datanodes_concurrently(datanode_to_candidates)
+        .process_datanodes_with_retry(datanode_to_candidates)
         .await;
 
     // Should process all datanodes
@@ -165,23 +166,14 @@ async fn test_mixed_success_failure_tables() {
     )]);
 
     let report = scheduler
-        .process_datanodes_concurrently(datanode_to_candidates)
+        .process_datanodes_with_retry(datanode_to_candidates)
         .await;
 
     // Should have one datanode with mixed results
     assert_eq!(report.per_datanode_reports.len(), 1);
-    // also check one failed region
-    assert_eq!(
-        report
-            .per_datanode_reports
-            .iter()
-            .next()
-            .unwrap()
-            .1
-            .need_retry_regions
-            .len(),
-        1
-    );
+    // also check one failed region (region2 has no GC report, so it should be in need_retry_regions)
+    let datanode_report = report.per_datanode_reports.values().next().unwrap();
+    assert_eq!(datanode_report.need_retry_regions.len(), 1);
     assert_eq!(report.failed_datanodes.len(), 0);
 }
 
@@ -248,6 +240,7 @@ async fn test_region_gc_concurrency_limit() {
     // Configure low concurrency limit
     let config = GcSchedulerOptions {
         region_gc_concurrency: 3, // Only 3 regions can be processed concurrently
+        retry_backoff_duration: Duration::from_millis(50), // for faster test
         ..Default::default()
     };
 
@@ -260,7 +253,7 @@ async fn test_region_gc_concurrency_limit() {
     };
 
     let start_time = Instant::now();
-    let reports = scheduler
+    let report = scheduler
         .process_datanode_gc(
             peer,
             candidates.into_iter().map(|c| (table_id, c)).collect(),
@@ -270,10 +263,14 @@ async fn test_region_gc_concurrency_limit() {
     let duration = start_time.elapsed();
 
     // All regions should be processed successfully
-    assert_eq!(reports.len(), 1);
-    let table_report = &reports[0];
-    assert_eq!(table_report.success_regions.len(), 10);
-    assert_eq!(table_report.failed_regions.len(), 0);
+    // Check that all 10 regions have deleted files
+    assert_eq!(report.deleted_files.len(), 10);
+    for i in 1..=10 {
+        let region_id = RegionId::new(table_id, i as u32);
+        assert!(report.deleted_files.contains_key(&region_id));
+        assert_eq!(report.deleted_files[&region_id].len(), 2); // Each region has 2 deleted files
+    }
+    assert!(report.need_retry_regions.is_empty());
 
     // Verify that concurrency limit was respected (this is hard to test directly,
     // but we can verify that the processing completed successfully)
@@ -355,6 +352,7 @@ async fn test_region_gc_concurrency_with_mixed_results() {
     // Configure concurrency limit
     let config = GcSchedulerOptions {
         region_gc_concurrency: 2, // Process 2 regions concurrently
+        retry_backoff_duration: Duration::from_millis(50), // for faster test
         ..Default::default()
     };
 
@@ -366,37 +364,43 @@ async fn test_region_gc_concurrency_with_mixed_results() {
         last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
     };
 
-    let reports = scheduler
-        .process_datanode_gc(
-            peer,
-            candidates.into_iter().map(|c| (table_id, c)).collect(),
-        )
-        .await
-        .unwrap();
+    let dn2candidates = HashMap::from([(
+        peer.clone(),
+        candidates.into_iter().map(|c| (table_id, c)).collect(),
+    )]);
+
+    let report = scheduler.process_datanodes_with_retry(dn2candidates).await;
+
+    let report = report.per_datanode_reports.get(&peer.id).unwrap();
 
     // Should have 3 successful and 3 failed regions
-    assert_eq!(reports.len(), 1);
-    let report = &reports[0];
-    assert_eq!(report.success_regions.len(), 3);
-    assert_eq!(report.failed_regions.len(), 3);
+    // Even regions (2, 4, 6) should succeed, odd regions (1, 3, 5) should fail
+    let mut successful_regions = 0;
+    let mut failed_regions = 0;
 
-    // Verify that successful regions are the even-numbered ones
-    for success_report in &report.success_regions {
-        for region in success_report.deleted_files.keys() {
-            let region_num = region.region_number();
-            assert_eq!(
-                region_num % 2,
-                0,
-                "Successful regions should be even-numbered"
+    for i in 1..=6 {
+        let region_id = RegionId::new(table_id, i as u32);
+        if i % 2 == 0 {
+            // Even regions should succeed
+            assert!(
+                report.deleted_files.contains_key(&region_id),
+                "Even region {} should succeed",
+                i
             );
+            successful_regions += 1;
+        } else {
+            // Odd regions should fail
+            assert!(
+                report.need_retry_regions.contains(&region_id),
+                "Odd region {} should fail",
+                i
+            );
+            failed_regions += 1;
         }
     }
 
-    // Verify that failed regions are the odd-numbered ones
-    for region_id in report.failed_regions.keys() {
-        let region_num = region_id.region_number();
-        assert_eq!(region_num % 2, 1, "Failed regions should be odd-numbered");
-    }
+    assert_eq!(successful_regions, 3, "Should have 3 successful regions");
+    assert_eq!(failed_regions, 3, "Should have 3 failed regions");
 }
 
 #[tokio::test]
@@ -427,7 +431,14 @@ async fn test_region_gc_concurrency_with_retryable_errors() {
     };
 
     let gc_report = (1..=5)
-        .map(|i| (RegionId::new(table_id, i as u32), GcReport::default()))
+        .map(|i| {
+            let region_id = RegionId::new(table_id, i as u32);
+            (
+                region_id,
+                // mock the actual gc report with deleted files when succeeded(even no files to delete)
+                GcReport::new(HashMap::from([(region_id, vec![])]), HashSet::new()),
+            )
+        })
         .collect();
 
     let ctx = Arc::new(
@@ -470,19 +481,25 @@ async fn test_region_gc_concurrency_with_retryable_errors() {
         ctx.set_gc_regions_success_after_retries(region_id, 1);
     }
 
-    let reports = scheduler
-        .process_datanode_gc(
-            peer,
-            candidates.into_iter().map(|c| (table_id, c)).collect(),
-        )
-        .await
-        .unwrap();
+    let dn2candidates = HashMap::from([(
+        peer.clone(),
+        candidates.into_iter().map(|c| (table_id, c)).collect(),
+    )]);
+    let report = scheduler.process_datanodes_with_retry(dn2candidates).await;
+
+    let report = report.per_datanode_reports.get(&peer.id).unwrap();
 
     // All regions should eventually succeed after retries
-    assert_eq!(reports.len(), 1);
-    let report = &reports[0];
-    assert_eq!(report.success_regions.len(), 5);
-    assert_eq!(report.failed_regions.len(), 0);
+    assert_eq!(report.deleted_files.len(), 5);
+    for i in 1..=5 {
+        let region_id = RegionId::new(table_id, i as u32);
+        assert!(
+            report.deleted_files.contains_key(&region_id),
+            "Region {} should succeed",
+            i
+        );
+    }
+    assert!(report.need_retry_regions.is_empty());
 
     // Verify that retries were attempted for all regions
     for i in 1..=5 {

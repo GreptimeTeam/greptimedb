@@ -22,7 +22,7 @@ mod integration;
 mod misc;
 mod retry;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,18 +30,30 @@ use common_meta::datanode::{RegionManifestInfo, RegionStat};
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
+use common_telemetry::debug;
 use ordered_float::OrderedFloat;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 use tokio::sync::mpsc::Sender;
 
-use crate::error::Result;
+use crate::error::{Result, UnexpectedSnafu};
 use crate::gc::candidate::GcCandidate;
 use crate::gc::ctx::SchedulerCtx;
 use crate::gc::handler::Region2Peers;
 use crate::gc::options::GcSchedulerOptions;
 use crate::gc::scheduler::{Event, GcScheduler};
+
+pub fn new_empty_report_with(region_ids: impl IntoIterator<Item = RegionId>) -> GcReport {
+    let mut deleted_files = HashMap::new();
+    for region_id in region_ids {
+        deleted_files.insert(region_id, vec![]);
+    }
+    GcReport {
+        deleted_files,
+        need_retry_regions: HashSet::new(),
+    }
+}
 
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Default)]
@@ -124,8 +136,10 @@ impl MockSchedulerCtx {
 
     /// Set success after a specific number of retries for a region
     pub fn set_gc_regions_success_after_retries(&self, region_id: RegionId, retries: usize) {
-        *self.gc_regions_success_after_retries.lock().unwrap() =
-            HashMap::from([(region_id, retries)]);
+        self.gc_regions_success_after_retries
+            .lock()
+            .unwrap()
+            .insert(region_id, retries);
     }
 
     /// Get the retry count for a specific region
@@ -198,8 +212,8 @@ impl SchedulerCtx for MockSchedulerCtx {
 
     async fn get_file_references(
         &self,
-        _region_ids: &[RegionId],
-        _region_to_peer: &Region2Peers,
+        region_ids: &[RegionId],
+        region_to_peer: &Region2Peers,
         _timeout: Duration,
     ) -> Result<FileRefsManifest> {
         *self.get_file_references_calls.lock().unwrap() += 1;
@@ -207,6 +221,17 @@ impl SchedulerCtx for MockSchedulerCtx {
         // Check if we should return an injected error
         if let Some(error) = self.get_file_references_error.lock().unwrap().take() {
             return Err(error);
+        }
+        if region_ids
+            .iter()
+            .any(|region_id| !region_to_peer.contains_key(region_id))
+        {
+            UnexpectedSnafu {
+                violated: format!(
+                    "region_to_peer{region_to_peer:?} does not contain all region_ids requested: {:?}",
+                    region_ids
+                ),
+            }.fail()?;
         }
 
         Ok(self.file_refs.lock().unwrap().clone().unwrap_or_default())
@@ -230,12 +255,26 @@ impl SchedulerCtx for MockSchedulerCtx {
                 .unwrap()
                 .remove(&region_id)
             {
+                *self
+                    .gc_regions_retry_count
+                    .lock()
+                    .unwrap()
+                    .entry(region_id)
+                    .or_insert(0) += 1;
                 return Err(error);
             }
         }
 
         // Check if we should return an injected error
         if let Some(error) = self.gc_regions_error.lock().unwrap().take() {
+            for region_id in region_ids {
+                *self
+                    .gc_regions_retry_count
+                    .lock()
+                    .unwrap()
+                    .entry(*region_id)
+                    .or_insert(0) += 1;
+            }
             return Err(error);
         }
 
@@ -244,6 +283,14 @@ impl SchedulerCtx for MockSchedulerCtx {
             let mut error_sequence = self.gc_regions_error_sequence.lock().unwrap();
             if !error_sequence.is_empty() {
                 let error = error_sequence.remove(0);
+                for region_id in region_ids {
+                    *self
+                        .gc_regions_retry_count
+                        .lock()
+                        .unwrap()
+                        .entry(*region_id)
+                        .or_insert(0) += 1;
+                }
                 return Err(error);
             }
         }
@@ -266,12 +313,22 @@ impl SchedulerCtx for MockSchedulerCtx {
             // Check if this region should succeed or need retry
             if let Some(&required_retries) = success_after_retries.get(&region_id) {
                 if retry_count < required_retries {
+                    debug!(
+                        "Region {} needs retry (attempt {}/{})",
+                        region_id,
+                        retry_count + 1,
+                        required_retries
+                    );
                     // This region needs more retries - add to need_retry_regions
                     final_report.need_retry_regions.insert(region_id);
                     // Track the retry attempt
                     let mut retry_count_map = self.gc_regions_retry_count.lock().unwrap();
                     *retry_count_map.entry(region_id).or_insert(0) += 1;
                 } else {
+                    debug!(
+                        "Region {} has completed retries - succeeding now",
+                        region_id
+                    );
                     // This region has completed all required retries - succeed
                     if let Some(report) = gc_reports.get(&region_id) {
                         final_report.merge(report.clone());
@@ -281,13 +338,20 @@ impl SchedulerCtx for MockSchedulerCtx {
                     *retry_count_map.entry(region_id).or_insert(0) += 1;
                 }
             } else {
-                // No retry requirement - succeed immediately
+                // No retry requirement - check if we have a GC report for this region
                 if let Some(report) = gc_reports.get(&region_id) {
+                    // We have a GC report - succeed immediately
                     final_report.merge(report.clone());
+                    // Track the success attempt
+                    let mut retry_count_map = self.gc_regions_retry_count.lock().unwrap();
+                    *retry_count_map.entry(region_id).or_insert(0) += 1;
+                } else {
+                    // No GC report available - this region should be marked for retry
+                    final_report.need_retry_regions.insert(region_id);
+                    // Track the attempt
+                    let mut retry_count_map = self.gc_regions_retry_count.lock().unwrap();
+                    *retry_count_map.entry(region_id).or_insert(0) += 1;
                 }
-                // Track the success attempt
-                let mut retry_count_map = self.gc_regions_retry_count.lock().unwrap();
-                *retry_count_map.entry(region_id).or_insert(0) += 1;
             }
         }
 
