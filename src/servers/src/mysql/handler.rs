@@ -355,7 +355,7 @@ impl MysqlInstanceShim {
         let _ = guard.remove(&stmt_key);
     }
 
-    fn auth_plugin(&self) -> &str {
+    fn auth_plugin(&self) -> &'static str {
         if self
             .user_provider
             .as_ref()
@@ -385,7 +385,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         self.auth_plugin()
     }
 
-    async fn auth_plugin_for_username<'a, 'user>(&'a self, _user: &'user [u8]) -> &'a str {
+    async fn auth_plugin_for_username(&self, _user: &[u8]) -> &'static str {
         self.auth_plugin()
     }
 
