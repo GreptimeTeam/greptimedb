@@ -24,6 +24,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::FileId;
 use store_api::{MAX_VERSION, MIN_VERSION, ManifestVersion};
 
+use crate::config::MitoConfig;
 use crate::error::{
     self, InstallManifestToSnafu, NoCheckpointSnafu, NoManifestsSnafu, RegionStoppedSnafu, Result,
 };
@@ -33,7 +34,8 @@ use crate::manifest::action::{
 };
 use crate::manifest::checkpointer::Checkpointer;
 use crate::manifest::storage::{
-    ManifestObjectStore, file_version, is_checkpoint_file, is_delta_file,
+    ManifestObjectStore, file_version, is_checkpoint_file, is_delta_file, manifest_compress_type,
+    manifest_dir,
 };
 use crate::metrics::MANIFEST_OP_ELAPSED;
 use crate::region::{ManifestStats, RegionLeaderState, RegionRoleState};
@@ -50,6 +52,23 @@ pub struct RegionManifestOptions {
     /// Set to 0 to disable checkpoint.
     pub checkpoint_distance: u64,
     pub remove_file_options: RemoveFileOptions,
+}
+
+impl RegionManifestOptions {
+    /// Creates a new [RegionManifestOptions] with the given region directory, object store, and configuration.
+    pub fn new(config: &MitoConfig, region_dir: &str, object_store: &ObjectStore) -> Self {
+        RegionManifestOptions {
+            manifest_dir: manifest_dir(region_dir),
+            object_store: object_store.clone(),
+            // We don't allow users to set the compression algorithm as we use it as a file suffix.
+            // Currently, the manifest storage doesn't have good support for changing compression algorithms.
+            compress_type: manifest_compress_type(config.compress_manifest),
+            checkpoint_distance: config.manifest_checkpoint_distance,
+            remove_file_options: RemoveFileOptions {
+                enable_gc: config.gc.enable,
+            },
+        }
+    }
 }
 
 /// Options for updating `removed_files` field in [RegionManifest].
