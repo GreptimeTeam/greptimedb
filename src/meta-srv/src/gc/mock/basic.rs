@@ -73,8 +73,6 @@ async fn test_process_datanodes_concurrently_with_candidates() {
     let mut scheduler = env.scheduler;
     scheduler.ctx = Arc::new(ctx);
 
-    let candidates = HashMap::from([(1, vec![new_candidate(region_id, 1.0)])]);
-
     // Convert table-based candidates to datanode-based candidates
     let datanode_to_candidates = HashMap::from([(
         peer,

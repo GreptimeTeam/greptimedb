@@ -376,6 +376,7 @@ pub struct TestEnv {
     tx: Sender<Event>,
 }
 
+#[allow(unused)]
 impl TestEnv {
     pub fn new() -> Self {
         let ctx = Arc::new(MockSchedulerCtx::default());
