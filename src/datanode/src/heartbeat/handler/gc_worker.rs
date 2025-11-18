@@ -101,20 +101,6 @@ impl GcRegionsHandler {
         // always use the smallest region id on datanode as the target region id
         region_ids.sort_by_key(|r| r.region_number());
 
-        ensure!(
-            region_ids.windows(2).all(|w| {
-                let t1 = w[0].table_id();
-                let t2 = w[1].table_id();
-                t1 == t2
-            }),
-            InvalidGcArgsSnafu {
-                msg: format!(
-                    "Regions to GC should belong to the same table, found: {:?}",
-                    region_ids
-                ),
-            }
-        );
-
         let mito_engine = ctx
             .region_server
             .mito_engine()

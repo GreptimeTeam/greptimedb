@@ -316,6 +316,8 @@ impl LocalGcWorker {
         let region_id = manifest.metadata.region_id;
         let current_files = &manifest.files;
 
+        let in_manifest_file_cnt = current_files.len();
+
         let recently_removed_files = self.get_removed_files_expel_times(&manifest).await?;
 
         if recently_removed_files.is_empty() {
@@ -323,31 +325,33 @@ impl LocalGcWorker {
             debug!("No recently removed files to gc for region {}", region_id);
         }
 
-        debug!(
-            "Found {} recently removed files sets for region {}",
-            recently_removed_files.len(),
-            region_id
-        );
+        let removed_file_cnt = recently_removed_files
+            .values()
+            .map(|s| s.len())
+            .sum::<usize>();
 
         let concurrency = (current_files.len() / Self::CONCURRENCY_LIST_PER_FILES)
             .max(1)
             .min(self.opt.max_concurrent_lister_per_gc_job);
 
-        let in_used = current_files
+        let tmp_ref_file_cnt = tmp_ref_files.len();
+
+        let in_used: HashSet<FileId> = current_files
             .keys()
             .cloned()
             .chain(tmp_ref_files.clone().into_iter())
             .collect();
 
+        let in_used_file_cnt = in_used.len();
+
         let unused_files = self
             .list_to_be_deleted_files(region_id, in_used, recently_removed_files, concurrency)
             .await?;
 
-        let unused_len = unused_files.len();
+        let unused_file_cnt = unused_files.len();
 
         debug!(
-            "Found {} unused files to delete for region {}",
-            unused_len, region_id
+            "gc: for region {region_id}: In manifest files: {in_manifest_file_cnt}, Tmp ref file cnt: {tmp_ref_file_cnt}, In-used files: {in_used_file_cnt}, recently removed files: {removed_file_cnt}, Unused files to delete: {unused_file_cnt} ",
         );
 
         // TODO(discord9): for now, ignore async index file as it's design is not stable, need to be improved once
@@ -357,7 +361,7 @@ impl LocalGcWorker {
             .map(|file_id| (*file_id, *file_id))
             .collect();
 
-        info!(
+        debug!(
             "Found {} unused index files to delete for region {}",
             file_pairs.len(),
             region_id
@@ -367,7 +371,7 @@ impl LocalGcWorker {
 
         debug!(
             "Successfully deleted {} unused files for region {}",
-            unused_len, region_id
+            unused_file_cnt, region_id
         );
         // TODO(discord9): update region manifest about deleted files
         self.update_manifest_removed_files(&region, unused_files.clone())
@@ -398,8 +402,9 @@ impl LocalGcWorker {
         region: &MitoRegionRef,
         deleted_files: Vec<FileId>,
     ) -> Result<()> {
+        let deleted_file_cnt = deleted_files.len();
         debug!(
-            "Trying to update manifest removed files for region {}",
+            "Trying to update manifest for {deleted_file_cnt} removed files for region {}",
             region.region_id()
         );
 

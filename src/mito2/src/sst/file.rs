@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error};
 use common_time::Timestamp;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
@@ -436,7 +436,7 @@ pub async fn delete_files(
         }
     }
 
-    info!(
+    debug!(
         "Deleted {} files for region {}: {:?}",
         deleted_files.len(),
         region_id,
