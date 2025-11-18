@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::io::IsTerminal;
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::Duration;
 
 use common_base::serde::empty_string_as_default;
@@ -29,6 +29,7 @@ use opentelemetry_sdk::trace::{Sampler, Tracer};
 use opentelemetry_semantic_conventions::resource;
 use serde::{Deserialize, Serialize};
 use tracing::metadata::LevelFilter;
+use tracing::callsite;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_log::LogTracer;
@@ -56,188 +57,131 @@ pub static LOG_RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Target
 type DynSubscriber = Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>;
 type OtelTraceLayer = tracing_opentelemetry::OpenTelemetryLayer<DynSubscriber, Tracer>;
 
-pub struct TraceLayer(Option<OtelTraceLayer>);
+#[derive(Clone)]
+pub struct TraceReloadHandle {
+    inner: Arc<RwLock<Option<OtelTraceLayer>>>,
+}
+
+impl TraceReloadHandle {
+    fn new(inner: Arc<RwLock<Option<OtelTraceLayer>>>) -> Self {
+        Self { inner }
+    }
+
+    pub fn reload(&self, new_layer: Option<OtelTraceLayer>) -> Result<(), TraceReloadError> {
+        let mut guard = self.inner.write().map_err(|_| TraceReloadError)?;
+        *guard = new_layer;
+        drop(guard);
+
+        callsite::rebuild_interest_cache();
+
+        #[cfg(feature = "tracing-log")]
+        tracing_log::log::set_max_level(tracing_log::AsLog::as_log(
+            &tracing_subscriber::filter::LevelFilter::current(),
+        ));
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct TraceReloadError;
+
+impl std::fmt::Display for TraceReloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "trace reload handle is poisoned")
+    }
+}
+
+impl std::error::Error for TraceReloadError {}
+
+struct TraceLayer {
+    inner: Arc<RwLock<Option<OtelTraceLayer>>>,
+}
 
 impl TraceLayer {
-    fn enabled(tracer: Tracer) -> Self {
-        Self(Some(tracing_opentelemetry::layer().with_tracer(tracer)))
+    fn new(initial: Option<OtelTraceLayer>) -> (Self, TraceReloadHandle) {
+        let inner = Arc::new(RwLock::new(initial));
+        (Self { inner: inner.clone() }, TraceReloadHandle::new(inner))
     }
 
-    fn disabled() -> Self {
-        Self(None)
+    fn with_layer<R>(&self, f: impl FnOnce(&OtelTraceLayer) -> R) -> Option<R> {
+        self.inner.read().ok().and_then(|guard| guard.as_ref().map(f))
     }
-}
 
-impl Default for TraceLayer {
-    fn default() -> Self {
-        Self::disabled()
-    }
-}
-
-impl From<Option<OtelTraceLayer>> for TraceLayer {
-    fn from(layer: Option<OtelTraceLayer>) -> Self {
-        Self(layer)
+    fn with_layer_mut<R>(&self, f: impl FnOnce(&mut OtelTraceLayer) -> R) -> Option<R> {
+        self.inner
+            .write()
+            .ok()
+            .and_then(|mut guard| guard.as_mut().map(f))
     }
 }
 
 impl tracing_subscriber::Layer<DynSubscriber> for TraceLayer {
     fn on_register_dispatch(&self, subscriber: &tracing::Dispatch) {
-        if let Some(layer) = &self.0 {
-            layer.on_register_dispatch(subscriber);
-        }
+        let _ = self.with_layer(|layer| layer.on_register_dispatch(subscriber));
     }
 
     fn on_layer(&mut self, subscriber: &mut DynSubscriber) {
-        if let Some(layer) = &mut self.0 {
-            layer.on_layer(subscriber);
-        }
+        let _ = self.with_layer_mut(|layer| layer.on_layer(subscriber));
     }
 
-    fn register_callsite(
-        &self,
-        metadata: &'static tracing::Metadata<'static>,
-    ) -> tracing::subscriber::Interest {
-        self.0
-            .as_ref()
-            .map(|layer| layer.register_callsite(metadata))
+    fn register_callsite(&self, metadata: &'static tracing::Metadata<'static>) -> tracing::subscriber::Interest {
+        self.with_layer(|layer| layer.register_callsite(metadata))
             .unwrap_or_else(tracing::subscriber::Interest::always)
     }
 
-    fn enabled(
-        &self,
-        metadata: &tracing::Metadata<'_>,
-        ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
-    ) -> bool {
-        self.0
-            .as_ref()
-            .map(|layer| layer.enabled(metadata, ctx))
-            .unwrap_or(true)
+    fn enabled(&self, metadata: &tracing::Metadata<'_>, ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>) -> bool {
+        self.with_layer(|layer| layer.enabled(metadata, ctx)).unwrap_or(true)
     }
 
-    fn on_new_span(
-        &self,
-        attrs: &tracing::span::Attributes<'_>,
-        id: &tracing::span::Id,
-        ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
-    ) {
-        if let Some(layer) = &self.0 {
-            layer.on_new_span(attrs, id, ctx);
-        }
+    fn on_new_span(&self, attrs: &tracing::span::Attributes<'_>, id: &tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>) {
+        let _ = self.with_layer(|layer| layer.on_new_span(attrs, id, ctx));
     }
 
     fn max_level_hint(&self) -> Option<LevelFilter> {
-        self.0.as_ref().and_then(|layer| layer.max_level_hint())
+        self.with_layer(|layer| layer.max_level_hint()).flatten()
     }
 
-    fn on_record(
-        &self,
-        span: &tracing::span::Id,
-        values: &tracing::span::Record<'_>,
-        ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
-    ) {
-        if let Some(layer) = &self.0 {
-            layer.on_record(span, values, ctx);
-        }
+    fn on_record(&self, span: &tracing::span::Id, values: &tracing::span::Record<'_>, ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>) {
+        let _ = self.with_layer(|layer| layer.on_record(span, values, ctx));
     }
 
-    fn on_follows_from(
-        &self,
-        span: &tracing::span::Id,
-        follows: &tracing::span::Id,
-        ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
-    ) {
-        if let Some(layer) = &self.0 {
-            layer.on_follows_from(span, follows, ctx);
-        }
+    fn on_follows_from(&self, span: &tracing::span::Id, follows: &tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>) {
+        let _ = self.with_layer(|layer| layer.on_follows_from(span, follows, ctx));
     }
 
-    fn event_enabled(
-        &self,
-        event: &tracing::Event<'_>,
-        ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
-    ) -> bool {
-        self.0
-            .as_ref()
-            .map(|layer| layer.event_enabled(event, ctx))
-            .unwrap_or(true)
+    fn event_enabled(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>) -> bool {
+        self.with_layer(|layer| layer.event_enabled(event, ctx)).unwrap_or(true)
     }
 
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
-    ) {
-        if let Some(layer) = &self.0 {
-            layer.on_event(event, ctx);
-        }
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>) {
+        let _ = self.with_layer(|layer| layer.on_event(event, ctx));
     }
 
-    fn on_enter(
-        &self,
-        id: &tracing::span::Id,
-        ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
-    ) {
-        if let Some(layer) = &self.0 {
-            layer.on_enter(id, ctx);
-        }
+    fn on_enter(&self, id: &tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>) {
+        let _ = self.with_layer(|layer| layer.on_enter(id, ctx));
     }
 
-    fn on_exit(
-        &self,
-        id: &tracing::span::Id,
-        ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
-    ) {
-        if let Some(layer) = &self.0 {
-            layer.on_exit(id, ctx);
-        }
+    fn on_exit(&self, id: &tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>) {
+        let _ = self.with_layer(|layer| layer.on_exit(id, ctx));
     }
 
-    fn on_close(
-        &self,
-        id: tracing::span::Id,
-        ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
-    ) {
-        if let Some(layer) = &self.0 {
-            layer.on_close(id, ctx);
-        }
+    fn on_close(&self, id: tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>) {
+        let _ = self.with_layer(|layer| layer.on_close(id, ctx));
     }
 
-    fn on_id_change(
-        &self,
-        old: &tracing::span::Id,
-        new: &tracing::span::Id,
-        ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
-    ) {
-        if let Some(layer) = &self.0 {
-            layer.on_id_change(old, new, ctx);
-        }
+    fn on_id_change(&self, old: &tracing::span::Id, new: &tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>) {
+        let _ = self.with_layer(|layer| layer.on_id_change(old, new, ctx));
     }
 
     unsafe fn downcast_raw(&self, id: std::any::TypeId) -> Option<*const ()> {
-        self.0
-            .as_ref()
-            .and_then(|layer| unsafe { layer.downcast_raw(id) })
+        self.inner
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().and_then(|layer| layer.downcast_raw(id)))
     }
 }
 
-type TraceReloadHandle = tracing_subscriber::reload::Handle<TraceLayer, DynSubscriber>;
-
-fn reload_trace_layer(layer: TraceLayer) -> Result<(), &'static str> {
-    let handle = TRACE_RELOAD_HANDLE
-        .get()
-        .ok_or("trace reload handle is not initialized")?;
-    handle
-        .reload(layer)
-        .map_err(|_| "failed to reload trace layer")
-}
-
-pub fn enable_trace_layer_with(tracer: Tracer) -> Result<(), &'static str> {
-    reload_trace_layer(TraceLayer::enabled(tracer))
-}
-
-pub fn disable_trace_layer() -> Result<(), &'static str> {
-    reload_trace_layer(TraceLayer::disabled())
-}
 
 /// Handle for reloading trace level
 pub static TRACE_RELOAD_HANDLE: OnceCell<TraceReloadHandle> = OnceCell::new();
@@ -584,14 +528,11 @@ pub fn init_global_logging(
             .set(Mutex::new(trace_state))
             .expect("trace state already initialized");
 
-        let initial_trace_layer = TraceLayer::from(
-            initial_tracer
-                .as_ref()
-                .map(|tracer| tracing_opentelemetry::layer().with_tracer(tracer.clone())),
-        );
+        let initial_trace_layer = initial_tracer
+            .as_ref()
+            .map(|tracer| tracing_opentelemetry::layer().with_tracer(tracer.clone()));
 
-        let (dyn_trace_layer, trace_reload_handle) =
-            tracing_subscriber::reload::Layer::new(initial_trace_layer);
+        let (dyn_trace_layer, trace_reload_handle) = TraceLayer::new(initial_trace_layer);
 
         TRACE_RELOAD_HANDLE
             .set(trace_reload_handle)

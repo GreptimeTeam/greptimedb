@@ -22,8 +22,8 @@ pub mod tracing_context;
 mod tracing_sampler;
 
 pub use logging::{
-    LOG_RELOAD_HANDLE, TRACE_RELOAD_HANDLE, disable_trace_layer, enable_trace_layer_with,
-    get_or_init_tracer, init_default_ut_logging, init_global_logging,
+    LOG_RELOAD_HANDLE, TRACE_RELOAD_HANDLE, get_or_init_tracer, init_default_ut_logging,
+    init_global_logging,
 };
 pub use metric::dump_metrics;
 pub use panic_hook::set_panic_hook;
