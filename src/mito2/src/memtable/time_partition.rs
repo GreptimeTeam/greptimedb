@@ -292,6 +292,24 @@ impl TimePartitions {
     }
 
     pub fn write_bulk(&self, part: BulkPart) -> Result<()> {
+        // Convert the bulk part if bulk_schema is Some
+        let part = if let Some(bulk_schema) = &self.bulk_schema {
+            let converted = crate::memtable::bulk::part::convert_bulk_part(
+                part,
+                &self.metadata,
+                self.primary_key_codec.clone(),
+                bulk_schema.clone(),
+                // Always store primary keys for bulk mode.
+                true,
+            )?;
+            match converted {
+                Some(p) => p,
+                None => return Ok(()),
+            }
+        } else {
+            part
+        };
+
         let time_type = self
             .metadata
             .time_index_column()
