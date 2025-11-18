@@ -498,10 +498,10 @@ pub(crate) fn create_mysql_column(
     column_type.map(|column_type| Column {
         column: column_name.to_string(),
         coltype: column_type,
-
         // TODO(LFC): Currently "table" and "colflags" are not relevant in MySQL server
         //   implementation, will revisit them again in the future.
         table: String::default(),
+        collen: 0, // 0 means "use default".
         colflags,
     })
 }
