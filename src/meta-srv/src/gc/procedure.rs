@@ -166,6 +166,9 @@ impl Procedure for GcRegionProcedure {
 
     /// Write lock all regions involved in this GC procedure.
     /// So i.e. region migration won't happen during GC and cause race conditions.
+    ///
+    /// only write lock the regions not catatlog/schema because it can run concurrently with other procedures(i.e. drop database/table)
+    /// TODO:(discord9): integration test to verify this
     fn lock_key(&self) -> LockKey {
         let lock_key: Vec<_> = self
             .data
