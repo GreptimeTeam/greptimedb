@@ -47,6 +47,9 @@ fn build_new_schema_value(
                     SetDatabaseOption::Ttl(ttl) => {
                         value.ttl = Some(*ttl);
                     }
+                    SetDatabaseOption::Other(key, val) => {
+                        value.extra_options.insert(key.clone(), val.clone());
+                    }
                 }
             }
         }
@@ -54,6 +57,9 @@ fn build_new_schema_value(
             for key in keys.0.iter() {
                 match key {
                     UnsetDatabaseOption::Ttl => value.ttl = None,
+                    UnsetDatabaseOption::Other(key) => {
+                        value.extra_options.remove(key);
+                    }
                 }
             }
         }
@@ -233,5 +239,42 @@ mod tests {
         let new_schema_value =
             build_new_schema_value(current_schema_value, &unset_ttl_alter_kind).unwrap();
         assert_eq!(new_schema_value.ttl, None);
+    }
+
+    #[test]
+    fn test_build_new_schema_value_with_compaction_options() {
+        let set_compaction = AlterDatabaseKind::SetDatabaseOptions(SetDatabaseOptions(vec![
+            SetDatabaseOption::Other("compaction.type".to_string(), "twcs".to_string()),
+            SetDatabaseOption::Other("compaction.twcs.time_window".to_string(), "1d".to_string()),
+        ]));
+
+        let current_schema_value = SchemaNameValue::default();
+        let new_schema_value =
+            build_new_schema_value(current_schema_value.clone(), &set_compaction).unwrap();
+
+        assert_eq!(
+            new_schema_value.extra_options.get("compaction.type"),
+            Some(&"twcs".to_string())
+        );
+        assert_eq!(
+            new_schema_value
+                .extra_options
+                .get("compaction.twcs.time_window"),
+            Some(&"1d".to_string())
+        );
+
+        let unset_compaction = AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions(vec![
+            UnsetDatabaseOption::Other("compaction.type".to_string()),
+        ]));
+
+        let new_schema_value = build_new_schema_value(new_schema_value, &unset_compaction).unwrap();
+
+        assert_eq!(new_schema_value.extra_options.get("compaction.type"), None);
+        assert_eq!(
+            new_schema_value
+                .extra_options
+                .get("compaction.twcs.time_window"),
+            Some(&"1d".to_string())
+        );
     }
 }
