@@ -29,7 +29,7 @@ async fn test_process_datanodes_concurrently_empty() {
     let env = TestEnv::new();
     let report = env
         .scheduler
-        .process_datanodes_concurrently(HashMap::new())
+        .process_datanodes_with_retry(HashMap::new())
         .await;
 
     assert_eq!(report.per_datanode_reports.len(), 0);
@@ -85,7 +85,7 @@ async fn test_process_datanodes_concurrently_with_candidates() {
     )]);
 
     let report = scheduler
-        .process_datanodes_concurrently(datanode_to_candidates)
+        .process_datanodes_with_retry(datanode_to_candidates)
         .await;
 
     assert_eq!(report.per_datanode_reports.len(), 1);
