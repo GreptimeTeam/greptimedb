@@ -598,9 +598,9 @@ async fn test_need_retry_regions_mixed_scenarios() {
 
     // Process each region separately with its corresponding peer and check results directly
     for (region_id, peer) in routes {
-        let dn2candiate =
+        let dn2candidate =
             HashMap::from([(peer.clone(), vec![(table_id, mock_candidate(region_id))])]);
-        let report = scheduler.process_datanodes_with_retry(dn2candiate).await;
+        let report = scheduler.process_datanodes_with_retry(dn2candidate).await;
 
         let report = report.per_datanode_reports.get(&peer.id).unwrap();
 

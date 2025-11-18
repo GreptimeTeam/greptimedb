@@ -619,7 +619,7 @@ impl GcScheduler {
 
         // Step 2: Create a single GcRegionProcedure for all regions on this datanode
 
-        let (gc_report, fullly_listed_regions) = {
+        let (gc_report, fully_listed_regions) = {
             // Partition regions into full listing and fast listing in a single pass
             let mut need_full_list_regions = Vec::new();
             let mut fast_list_regions = Vec::new();
@@ -688,12 +688,12 @@ impl GcScheduler {
                     }
                 }
             }
-            let fullly_listed_regions = need_full_list_regions
+            let fully_listed_regions = need_full_list_regions
                 .into_iter()
                 .filter(|r| !combined_report.need_retry_regions.contains(r))
                 .collect::<HashSet<_>>();
 
-            (combined_report, fullly_listed_regions)
+            (combined_report, fully_listed_regions)
         };
 
         // Step 3: Process the combined GC report and update table reports
@@ -706,7 +706,7 @@ impl GcScheduler {
                 .or_insert_with(|| RegionGcInfo::new(now));
             gc_info.last_gc_time = now;
             // notice need to set last_full_listing_time if full listing was used
-            if fullly_listed_regions.contains(region_id) {
+            if fully_listed_regions.contains(region_id) {
                 gc_info.last_full_listing_time = Some(now);
             }
         }
