@@ -30,12 +30,22 @@ use arrow::record_batch::RecordBatch;
 use arrow_schema::{ArrowError, Schema as ArrowSchema};
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
-use datafusion::datasource::physical_plan::FileOpenFuture;
+use common_recordbatch::DfSendableRecordBatchStream;
+use datafusion::datasource::file_format::file_compression_type::FileCompressionType as DfCompressionType;
+use datafusion::datasource::listing::PartitionedFile;
+use datafusion::datasource::object_store::ObjectStoreUrl;
+use datafusion::datasource::physical_plan::{
+    FileGroup, FileOpenFuture, FileScanConfigBuilder, FileSource, FileStream,
+};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datatypes::arrow::datatypes::SchemaRef;
 use futures::{StreamExt, TryStreamExt};
 use object_store::ObjectStore;
+use object_store_opendal::OpendalStore;
 use snafu::ResultExt;
+use tokio::io::AsyncWriteExt;
 use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
 use self::csv::CsvFormat;
@@ -43,7 +53,8 @@ use self::json::JsonFormat;
 use self::orc::OrcFormat;
 use self::parquet::ParquetFormat;
 use crate::DEFAULT_WRITE_BUFFER_SIZE;
-use crate::buffered_writer::{DfRecordBatchEncoder, LazyBufferedWriter};
+use crate::buffered_writer::DfRecordBatchEncoder;
+use crate::compressed_writer::{CompressedWriter, IntoCompressedWriter};
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::share_buffer::SharedBuffer;
@@ -195,33 +206,128 @@ pub async fn infer_schemas(
     ArrowSchema::try_merge(schemas).context(error::MergeSchemaSnafu)
 }
 
-pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
+/// Writes data to a compressed writer if the data is not empty.
+///
+/// Does nothing if `data` is empty; otherwise writes all data and returns any error.
+async fn write_to_compressed_writer(
+    compressed_writer: &mut CompressedWriter,
+    data: &[u8],
+) -> Result<()> {
+    if !data.is_empty() {
+        compressed_writer
+            .write_all(data)
+            .await
+            .context(error::AsyncWriteSnafu)?;
+    }
+    Ok(())
+}
+
+/// Streams [SendableRecordBatchStream] to a file with optional compression support.
+/// Data is buffered and flushed according to the given `threshold`.
+/// Ensures that writer resources are cleanly released and that an empty file is not
+/// created if no rows are written.
+///
+/// Returns the total number of rows successfully written.
+pub async fn stream_to_file<E>(
     mut stream: SendableRecordBatchStream,
     store: ObjectStore,
     path: &str,
     threshold: usize,
     concurrency: usize,
-    encoder_factory: U,
-) -> Result<usize> {
+    compression_type: CompressionType,
+    encoder_factory: impl Fn(SharedBuffer) -> E,
+) -> Result<usize>
+where
+    E: DfRecordBatchEncoder,
+{
+    // Create the file writer with OpenDAL's built-in buffering
+    let writer = store
+        .writer_with(path)
+        .concurrent(concurrency)
+        .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+        .await
+        .with_context(|_| error::WriteObjectSnafu { path })?
+        .into_futures_async_write()
+        .compat_write();
+
+    // Apply compression if needed
+    let mut compressed_writer = writer.into_compressed_writer(compression_type);
+
+    // Create a buffer for the encoder
     let buffer = SharedBuffer::with_capacity(threshold);
-    let encoder = encoder_factory(buffer.clone());
-    let mut writer = LazyBufferedWriter::new(threshold, buffer, encoder, path, |path| async {
-        store
-            .writer_with(&path)
-            .concurrent(concurrency)
-            .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
-            .await
-            .map(|v| v.into_futures_async_write().compat_write())
-            .context(error::WriteObjectSnafu { path })
-    });
+    let mut encoder = encoder_factory(buffer.clone());
 
     let mut rows = 0;
 
+    // Process each record batch
     while let Some(batch) = stream.next().await {
         let batch = batch.context(error::ReadRecordBatchSnafu)?;
-        writer.write(&batch).await?;
+
+        // Write batch using the encoder
+        encoder.write(&batch)?;
         rows += batch.num_rows();
+
+        loop {
+            let chunk = {
+                let mut buffer_guard = buffer.buffer.lock().unwrap();
+                if buffer_guard.len() < threshold {
+                    break;
+                }
+                buffer_guard.split_to(threshold)
+            };
+            write_to_compressed_writer(&mut compressed_writer, &chunk).await?;
+        }
     }
-    writer.close_inner_writer().await?;
+
+    // If no row's been written, just simply close the underlying writer
+    // without flush so that no file will be actually created.
+    if rows != 0 {
+        // Final flush of any remaining data
+        let final_data = {
+            let mut buffer_guard = buffer.buffer.lock().unwrap();
+            buffer_guard.split()
+        };
+        write_to_compressed_writer(&mut compressed_writer, &final_data).await?;
+    }
+
+    // Shutdown compression and close writer
+    compressed_writer.shutdown().await?;
+
     Ok(rows)
+}
+
+/// Creates a [FileStream] for reading data from a file with optional column projection
+/// and compression support.
+///
+/// Returns [SendableRecordBatchStream].
+pub async fn file_to_stream(
+    store: &ObjectStore,
+    filename: &str,
+    file_schema: SchemaRef,
+    file_source: Arc<dyn FileSource>,
+    projection: Option<Vec<usize>>,
+    compression_type: CompressionType,
+) -> Result<DfSendableRecordBatchStream> {
+    let df_compression: DfCompressionType = compression_type.into();
+    let config = FileScanConfigBuilder::new(
+        ObjectStoreUrl::local_filesystem(),
+        file_schema,
+        file_source.clone(),
+    )
+    .with_file_group(FileGroup::new(vec![PartitionedFile::new(
+        filename.to_string(),
+        0,
+    )]))
+    .with_projection(projection)
+    .with_file_compression_type(df_compression)
+    .build();
+
+    let store = Arc::new(OpendalStore::new(store.clone()));
+    let file_opener = file_source
+        .with_projection(&config)
+        .create_file_opener(store, &config, 0);
+    let stream = FileStream::new(&config, 0, file_opener, &ExecutionPlanMetricsSet::new())
+        .context(error::BuildFileStreamSnafu)?;
+
+    Ok(Box::pin(stream))
 }
