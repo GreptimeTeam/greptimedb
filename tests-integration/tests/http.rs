@@ -1539,8 +1539,8 @@ type = "time_series"
 
 [region_engine.mito.gc]
 enable = false
-lingering_time = "5m"
-unknown_file_lingering_time = "6h"
+lingering_time = "1m"
+unknown_file_lingering_time = "1h"
 max_concurrent_lister_per_gc_job = 32
 max_concurrent_gc_job = 4
 

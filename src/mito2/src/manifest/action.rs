@@ -25,10 +25,9 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use strum::Display;
 
-use crate::error::{
-    DurationOutOfRangeSnafu, RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
-};
+use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu};
 use crate::manifest::manager::RemoveFileOptions;
+use crate::region::ManifestStats;
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::wal::EntryId;
@@ -236,13 +235,13 @@ impl RegionManifestBuilder {
                 self.flushed_entry_id = truncated_entry_id;
                 self.flushed_sequence = truncated_sequence;
                 self.truncated_entry_id = Some(truncated_entry_id);
-                self.files.clear();
                 self.removed_files.add_removed_files(
                     self.files.values().map(|meta| meta.file_id).collect(),
                     truncate
                         .timestamp_ms
                         .unwrap_or_else(|| Utc::now().timestamp_millis()),
                 );
+                self.files.clear();
             }
             TruncateKind::Partial { files_to_remove } => {
                 self.removed_files.add_removed_files(
@@ -294,6 +293,29 @@ pub struct RemovedFilesRecord {
     pub removed_files: Vec<RemovedFiles>,
 }
 
+impl RemovedFilesRecord {
+    /// Clear the actually deleted files from the list of removed files
+    pub fn clear_deleted_files(&mut self, deleted_files: Vec<FileId>) {
+        let deleted_file_set: HashSet<_> = HashSet::from_iter(deleted_files);
+        for files in self.removed_files.iter_mut() {
+            files.file_ids.retain(|fid| !deleted_file_set.contains(fid));
+        }
+
+        self.removed_files.retain(|fs| !fs.file_ids.is_empty());
+    }
+
+    pub fn update_file_removed_cnt_to_stats(&self, stats: &ManifestStats) {
+        let cnt = self
+            .removed_files
+            .iter()
+            .map(|r| r.file_ids.len() as u64)
+            .sum();
+        stats
+            .file_removed_cnt
+            .store(cnt, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct RemovedFiles {
     /// The timestamp is the time when
@@ -306,6 +328,9 @@ pub struct RemovedFiles {
 impl RemovedFilesRecord {
     /// Add a record of removed files with the current timestamp.
     pub fn add_removed_files(&mut self, file_ids: HashSet<FileId>, at: i64) {
+        if file_ids.is_empty() {
+            return;
+        }
         self.removed_files.push(RemovedFiles {
             removed_at: at,
             file_ids,
@@ -313,35 +338,13 @@ impl RemovedFilesRecord {
     }
 
     pub fn evict_old_removed_files(&mut self, opt: &RemoveFileOptions) -> Result<()> {
-        let total_removed_files: usize = self.removed_files.iter().map(|s| s.file_ids.len()).sum();
-        if opt.keep_count > 0 && total_removed_files <= opt.keep_count {
+        if !opt.enable_gc {
+            // If GC is not enabled, always keep removed files empty.
+            self.removed_files.clear();
             return Ok(());
         }
 
-        let mut cur_file_cnt = total_removed_files;
-
-        let can_evict_until = chrono::Utc::now()
-            - chrono::Duration::from_std(opt.keep_ttl).context(DurationOutOfRangeSnafu {
-                input: opt.keep_ttl,
-            })?;
-
-        self.removed_files.sort_unstable_by_key(|f| f.removed_at);
-        let updated = std::mem::take(&mut self.removed_files)
-            .into_iter()
-            .filter_map(|f| {
-                if f.removed_at < can_evict_until.timestamp_millis()
-                    && (opt.keep_count == 0 || cur_file_cnt >= opt.keep_count)
-                {
-                    // can evict all files
-                    // TODO(discord9): maybe only evict to below keep_count? Maybe not, or the update might be too frequent.
-                    cur_file_cnt -= f.file_ids.len();
-                    None
-                } else {
-                    Some(f)
-                }
-            })
-            .collect();
-        self.removed_files = updated;
+        // if GC is enabled, rely on gc worker to delete files, and evict removed files based on options.
 
         Ok(())
     }

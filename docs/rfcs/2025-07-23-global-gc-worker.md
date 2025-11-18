@@ -106,6 +106,37 @@ This mechanism may be too complex to implement at once. We can consider a two-ph
 Also the read replica shouldn't be later in manifest version for more than the lingering time of obsolete files, otherwise it might ref to files that are already deleted by the GC worker.
 - need to upload tmp manifest to object storage, which may introduce additional complexity and potential performance overhead. But since long-running queries are typically not frequent, the performance impact is expected to be minimal.
 
+one potential race condition with region-migration is illustrated below:
+
+```mermaid
+sequenceDiagram
+    participant gc_worker as GC Worker(same dn as region 1)
+    participant region1 as Region 1 (Leader → Follower)
+    participant region2 as Region 2 (Follower → Leader)
+    participant region_dir as Region Directory
+
+    gc_worker->>region1: Start GC, get region manifest
+    activate region1
+    region1-->>gc_worker: Region 1 manifest
+    deactivate region1
+    gc_worker->>region_dir: Scan region directory
+
+    Note over region1,region2: Region Migration Occurs
+    region1-->>region2: Downgrade to Follower
+    region2-->>region1: Becomes Leader
+
+    region2->>region_dir: Add new file
+
+    gc_worker->>region_dir: Continue scanning
+    gc_worker-->>region_dir: Discovers new file
+    Note over gc_worker: New file not in Region 1's manifest
+    gc_worker->>gc_worker: Mark file as orphan(incorrectly)
+```
+which could cause gc worker to incorrectly mark the new file as orphan and delete it, if config the lingering time for orphan files(files not mentioned anywhere(in used or unused)) is not long enough.
+
+A good enough solution could be to use lock to prevent gc worker to happen on the region if region migration is happening on the region, and vise versa.
+
+The race condition between gc worker and repartition also needs to be considered carefully. For now, acquiring lock for both region-migration and repartition during gc worker process could be a simple solution.
 
 ## Conclusion and Rationale
 
