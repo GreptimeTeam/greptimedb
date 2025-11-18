@@ -57,7 +57,6 @@ use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
-use servers::export_metrics::ExportMetricsTask;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
 use standalone::StandaloneInformationExtension;
@@ -228,6 +227,8 @@ pub struct StartCommand {
     #[clap(long)]
     tls_key_path: Option<String>,
     #[clap(long)]
+    tls_watch: bool,
+    #[clap(long)]
     user_provider: Option<String>,
     #[clap(long, default_value = "GREPTIMEDB_STANDALONE")]
     pub env_prefix: String,
@@ -277,6 +278,7 @@ impl StartCommand {
             self.tls_mode.clone(),
             self.tls_cert_path.clone(),
             self.tls_key_path.clone(),
+            self.tls_watch,
         );
 
         if let Some(addr) = &self.http_addr {
@@ -562,9 +564,6 @@ impl StartCommand {
         .context(StartFlownodeSnafu)?;
         flow_streaming_engine.set_frontend_invoker(invoker).await;
 
-        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
-            .context(error::ServersSnafu)?;
-
         let servers = Services::new(opts, fe_instance.clone(), plugins.clone())
             .build()
             .context(error::StartFrontendSnafu)?;
@@ -573,7 +572,6 @@ impl StartCommand {
             instance: fe_instance,
             servers,
             heartbeat_task: None,
-            export_metrics_task,
         };
 
         #[cfg(feature = "enterprise")]
@@ -769,6 +767,9 @@ mod tests {
     fn test_load_log_options_from_cli() {
         let cmd = StartCommand {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+            mysql_addr: Some("127.0.0.1:4002".to_string()),
+            postgres_addr: Some("127.0.0.1:4003".to_string()),
+            tls_watch: true,
             ..Default::default()
         };
 
@@ -785,6 +786,8 @@ mod tests {
 
         assert_eq!("./greptimedb_data/test/logs", opts.logging.dir);
         assert_eq!("debug", opts.logging.level.unwrap());
+        assert!(opts.mysql.tls.watch);
+        assert!(opts.postgres.tls.watch);
     }
 
     #[test]

@@ -65,7 +65,7 @@ use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::FormatType;
 use crate::sst::file::RegionFileId;
-use crate::sst::file_purger::{FilePurgerRef, create_local_file_purger};
+use crate::sst::file_purger::{FilePurgerRef, create_file_purger};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -279,9 +279,8 @@ impl RegionOpener {
             metadata.clone(),
             flushed_entry_id,
             region_manifest_options,
-            self.stats.total_manifest_size.clone(),
-            self.stats.manifest_version.clone(),
             sst_format,
+            &self.stats,
         )
         .await?;
 
@@ -322,7 +321,8 @@ impl RegionOpener {
                 manifest_manager,
                 RegionRoleState::Leader(RegionLeaderState::Writable),
             )),
-            file_purger: create_local_file_purger(
+            file_purger: create_file_purger(
+                config.gc.enable,
                 self.purge_scheduler,
                 access_layer,
                 self.cache_manager,
@@ -351,7 +351,7 @@ impl RegionOpener {
         let region = self
             .maybe_open(config, wal)
             .await?
-            .context(EmptyRegionDirSnafu {
+            .with_context(|| EmptyRegionDirSnafu {
                 region_id,
                 region_dir: &region_dir,
             })?;
@@ -413,12 +413,8 @@ impl RegionOpener {
             &self.region_dir(),
             &self.object_store_manager,
         )?;
-        let Some(manifest_manager) = RegionManifestManager::open(
-            region_manifest_options,
-            self.stats.total_manifest_size.clone(),
-            self.stats.manifest_version.clone(),
-        )
-        .await?
+        let Some(manifest_manager) =
+            RegionManifestManager::open(region_manifest_options, &self.stats).await?
         else {
             return Ok(None);
         };
@@ -459,7 +455,8 @@ impl RegionOpener {
             self.puffin_manager_factory.clone(),
             self.intermediate_manager.clone(),
         ));
-        let file_purger = create_local_file_purger(
+        let file_purger = create_file_purger(
+            config.gc.enable,
             self.purge_scheduler.clone(),
             access_layer.clone(),
             self.cache_manager.clone(),
@@ -596,8 +593,7 @@ impl RegionOpener {
             compress_type: manifest_compress_type(config.compress_manifest),
             checkpoint_distance: config.manifest_checkpoint_distance,
             remove_file_options: RemoveFileOptions {
-                keep_count: config.experimental_manifest_keep_removed_file_count,
-                keep_ttl: config.experimental_manifest_keep_removed_file_ttl,
+                enable_gc: config.gc.enable,
             },
         })
     }
@@ -688,12 +684,8 @@ impl RegionMetadataLoader {
             region_dir,
             &self.object_store_manager,
         )?;
-        let Some(manifest_manager) = RegionManifestManager::open(
-            region_manifest_options,
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-        )
-        .await?
+        let Some(manifest_manager) =
+            RegionManifestManager::open(region_manifest_options, &Default::default()).await?
         else {
             return Ok(None);
         };
@@ -879,7 +871,7 @@ impl RegionLoadCacheTask {
         let object_store = self.region.access_layer.object_store();
         let version_control = &self.region.version_control;
 
-        // Collects IndexKeys and file sizes for files that need to be downloaded
+        // Collects IndexKeys, file sizes, and max timestamps for files that need to be downloaded
         let mut files_to_download = Vec::new();
         let mut files_already_cached = 0;
 
@@ -896,7 +888,11 @@ impl RegionLoadCacheTask {
                         );
 
                         if !file_cache.contains_key(&puffin_key) {
-                            files_to_download.push((puffin_key, file_meta.index_file_size));
+                            files_to_download.push((
+                                puffin_key,
+                                file_meta.index_file_size,
+                                file_meta.time_range.1, // max timestamp
+                            ));
                         } else {
                             files_already_cached += 1;
                         }
@@ -906,6 +902,10 @@ impl RegionLoadCacheTask {
             // Releases the Version after the scope to avoid holding the memtables and file handles
             // for a long time.
         }
+
+        // Sorts files by max timestamp in descending order to loads latest files first
+        files_to_download.sort_by(|a, b| b.2.cmp(&a.2));
+
         let total_files = files_to_download.len() as i64;
 
         info!(
@@ -918,7 +918,7 @@ impl RegionLoadCacheTask {
         let mut files_downloaded = 0;
         let mut files_skipped = 0;
 
-        for (puffin_key, file_size) in files_to_download {
+        for (puffin_key, file_size, max_timestamp) in files_to_download {
             let current_size = file_cache.puffin_cache_size();
             let capacity = file_cache.puffin_cache_capacity();
             let region_state = self.region.state();
@@ -933,8 +933,8 @@ impl RegionLoadCacheTask {
             // Checks if adding this file would exceed capacity
             if current_size + file_size > capacity {
                 info!(
-                    "Stopping index cache preload due to capacity limit, region: {}, file_id: {}, current_size: {}, file_size: {}, capacity: {}",
-                    region_id, puffin_key.file_id, current_size, file_size, capacity
+                    "Stopping index cache preload due to capacity limit, region: {}, file_id: {}, current_size: {}, file_size: {}, capacity: {}, file_timestamp: {:?}",
+                    region_id, puffin_key.file_id, current_size, file_size, capacity, max_timestamp
                 );
                 files_skipped = (total_files - files_downloaded) as usize;
                 CACHE_FILL_PENDING_FILES.sub(total_files - files_downloaded);

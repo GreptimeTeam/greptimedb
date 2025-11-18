@@ -49,9 +49,9 @@ use common_procedure::options::ProcedureConfig;
 use common_stat::ResourceStatRef;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{error, info, warn};
+use common_time::util::DefaultSystemTimer;
 use common_wal::config::MetasrvWalConfig;
 use serde::{Deserialize, Serialize};
-use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use servers::tls::TlsOption;
@@ -168,8 +168,6 @@ pub struct MetasrvOptions {
     pub data_home: String,
     /// The WAL options.
     pub wal: MetasrvWalConfig,
-    /// The metrics export options.
-    pub export_metrics: ExportMetricsOption,
     /// The store key prefix. If it is not empty, all keys in the store will be prefixed with it.
     /// This is useful when multiple metasrv clusters share the same store.
     pub store_key_prefix: String,
@@ -233,7 +231,6 @@ impl fmt::Debug for MetasrvOptions {
             .field("enable_telemetry", &self.enable_telemetry)
             .field("data_home", &self.data_home)
             .field("wal", &self.wal)
-            .field("export_metrics", &self.export_metrics)
             .field("store_key_prefix", &self.store_key_prefix)
             .field("max_txn_ops", &self.max_txn_ops)
             .field("flush_stats_factor", &self.flush_stats_factor)
@@ -291,7 +288,6 @@ impl Default for MetasrvOptions {
             enable_telemetry: true,
             data_home: DEFAULT_DATA_HOME.to_string(),
             wal: MetasrvWalConfig::default(),
-            export_metrics: ExportMetricsOption::default(),
             store_key_prefix: String::new(),
             max_txn_ops: 128,
             flush_stats_factor: 3,
@@ -735,6 +731,7 @@ impl Metasrv {
     /// A datanode is considered alive when it's still within the lease period.
     pub(crate) async fn lookup_datanode_peer(&self, peer_id: u64) -> Result<Option<Peer>> {
         discovery::utils::alive_datanode(
+            &DefaultSystemTimer,
             self.meta_peer_client.as_ref(),
             peer_id,
             Duration::from_secs(distributed_time_constants::DATANODE_LEASE_SECS),

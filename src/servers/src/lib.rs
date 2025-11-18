@@ -28,7 +28,6 @@ pub mod addrs;
 pub mod configurator;
 pub(crate) mod elasticsearch;
 pub mod error;
-pub mod export_metrics;
 pub mod grpc;
 pub mod heartbeat_options;
 mod hint_headers;

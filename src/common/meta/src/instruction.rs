@@ -433,7 +433,7 @@ impl Display for GetFileRefs {
 /// Instruction to trigger garbage collection for a region.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GcRegions {
-    /// The region ID to perform GC on.
+    /// The region ID to perform GC on, only regions that are currently on the given datanode can be garbage collected, regions not on the datanode will report errors.
     pub regions: Vec<RegionId>,
     /// The file references manifest containing temporary file references.
     pub file_refs_manifest: FileRefsManifest,

@@ -23,9 +23,10 @@ use datafusion::arrow::array::{ArrayRef, StringArray, as_boolean_array};
 use datafusion::catalog::TableFunction;
 use datafusion::common::ScalarValue;
 use datafusion::common::utils::SingleRowListArrayBuilder;
-use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use datafusion_pg_catalog::pg_catalog::{self, PgCatalogStaticTables};
 use datatypes::arrow::datatypes::{DataType, Field};
+use derive_more::derive::Display;
 use version::PGVersionFunction;
 
 use crate::function::{Function, find_function_context};
@@ -38,7 +39,6 @@ const SESSION_USER_FUNCTION_NAME: &str = "session_user";
 const CURRENT_DATABASE_FUNCTION_NAME: &str = "current_database";
 
 define_nullary_udf!(CurrentSchemaFunction);
-define_nullary_udf!(CurrentSchemasFunction);
 define_nullary_udf!(SessionUserFunction);
 define_nullary_udf!(CurrentDatabaseFunction);
 
@@ -118,6 +118,23 @@ impl Function for SessionUserFunction {
     }
 }
 
+#[derive(Display, Debug)]
+#[display("{}", self.name())]
+pub(super) struct CurrentSchemasFunction {
+    signature: Signature,
+}
+
+impl CurrentSchemasFunction {
+    pub fn new() -> Self {
+        Self {
+            signature: Signature::new(
+                TypeSignature::Exact(vec![DataType::Boolean]),
+                Volatility::Stable,
+            ),
+        }
+    }
+}
+
 impl Function for CurrentSchemasFunction {
     fn name(&self) -> &str {
         CURRENT_SCHEMAS_FUNCTION_NAME
@@ -125,9 +142,9 @@ impl Function for CurrentSchemasFunction {
 
     fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::List(Arc::new(Field::new(
-            "x",
-            DataType::Utf8View,
-            false,
+            "item",
+            DataType::Utf8,
+            true,
         ))))
     }
 
@@ -168,7 +185,7 @@ impl PGCatalogFunction {
 
         registry.register_scalar(PGVersionFunction::default());
         registry.register_scalar(CurrentSchemaFunction::default());
-        registry.register_scalar(CurrentSchemasFunction::default());
+        registry.register_scalar(CurrentSchemasFunction::new());
         registry.register_scalar(SessionUserFunction::default());
         registry.register_scalar(CurrentDatabaseFunction::default());
         registry.register(pg_catalog::format_type::create_format_type_udf());

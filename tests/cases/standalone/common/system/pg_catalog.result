@@ -13,15 +13,16 @@ SELECT session_user is not null;
 | t                          |
 +----------------------------+
 
--- session_user and current_schema
+-- SQLNESS REPLACE (\d+(?:\.\d+)*)-greptimedb-(\d+(?:\.\d+)*(?:-[a-zA-Z0-9-.]+)?) PG_VERSION-greptimedb-VERSION
+-- current_schema
 -- SQLNESS PROTOCOL POSTGRES
-select current_schema();
+select current_schema(), current_schemas(true), current_schemas(false), version(), current_database();
 
-+------------------+
-| current_schema() |
-+------------------+
-| public           |
-+------------------+
++------------------+---------------------------------------------------------+---------------------------------+------------------------------+--------------------+
+| current_schema() | current_schemas(Boolean(true))                          | current_schemas(Boolean(false)) | version                      | current_database() |
++------------------+---------------------------------------------------------+---------------------------------+------------------------------+--------------------+
+| public           | {public,information_schema,pg_catalog,greptime_private} | {public}                        | PG_VERSION-greptimedb-VERSION | greptime           |
++------------------+---------------------------------------------------------+---------------------------------+------------------------------+--------------------+
 
 -- search_path for pg using schema for now FIXME when support real search_path
 -- SQLNESS PROTOCOL POSTGRES

@@ -22,7 +22,6 @@ mod procedure_info;
 pub mod process_list;
 pub mod region_peers;
 mod region_statistics;
-mod runtime_metrics;
 pub mod schemata;
 mod ssts;
 mod table_constraints;
@@ -65,7 +64,6 @@ use crate::system_schema::information_schema::information_memory_table::get_sche
 use crate::system_schema::information_schema::key_column_usage::InformationSchemaKeyColumnUsage;
 use crate::system_schema::information_schema::partitions::InformationSchemaPartitions;
 use crate::system_schema::information_schema::region_peers::InformationSchemaRegionPeers;
-use crate::system_schema::information_schema::runtime_metrics::InformationSchemaMetrics;
 use crate::system_schema::information_schema::schemata::InformationSchemaSchemata;
 use crate::system_schema::information_schema::ssts::{
     InformationSchemaSstsIndexMeta, InformationSchemaSstsManifest, InformationSchemaSstsStorage,
@@ -216,7 +214,6 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),
-            RUNTIME_METRICS => Some(Arc::new(InformationSchemaMetrics::new())),
             PARTITIONS => Some(Arc::new(InformationSchemaPartitions::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
@@ -311,10 +308,6 @@ impl InformationSchemaProvider {
         // authentication details, and other critical information.
         // Only put these tables under `greptime` catalog to prevent info leak.
         if self.catalog_name == DEFAULT_CATALOG_NAME {
-            tables.insert(
-                RUNTIME_METRICS.to_string(),
-                self.build_table(RUNTIME_METRICS).unwrap(),
-            );
             tables.insert(
                 BUILD_INFO.to_string(),
                 self.build_table(BUILD_INFO).unwrap(),

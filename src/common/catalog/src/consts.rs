@@ -86,8 +86,6 @@ pub const INFORMATION_SCHEMA_TRIGGERS_TABLE_ID: u32 = 24;
 pub const INFORMATION_SCHEMA_GLOBAL_STATUS_TABLE_ID: u32 = 25;
 /// id for information_schema.SESSION_STATUS
 pub const INFORMATION_SCHEMA_SESSION_STATUS_TABLE_ID: u32 = 26;
-/// id for information_schema.RUNTIME_METRICS
-pub const INFORMATION_SCHEMA_RUNTIME_METRICS_TABLE_ID: u32 = 27;
 /// id for information_schema.PARTITIONS
 pub const INFORMATION_SCHEMA_PARTITIONS_TABLE_ID: u32 = 28;
 /// id for information_schema.REGION_PEERS

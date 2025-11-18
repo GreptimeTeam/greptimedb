@@ -43,7 +43,6 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
 use servers::addrs;
-use servers::export_metrics::ExportMetricsTask;
 use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
@@ -177,6 +176,8 @@ pub struct StartCommand {
     #[clap(long)]
     tls_key_path: Option<String>,
     #[clap(long)]
+    tls_watch: bool,
+    #[clap(long)]
     user_provider: Option<String>,
     #[clap(long)]
     disable_dashboard: Option<bool>,
@@ -230,6 +231,7 @@ impl StartCommand {
             self.tls_mode.clone(),
             self.tls_cert_path.clone(),
             self.tls_key_path.clone(),
+            self.tls_watch,
         );
 
         if let Some(addr) = &self.http_addr {
@@ -455,9 +457,6 @@ impl StartCommand {
         .context(error::StartFrontendSnafu)?;
         let instance = Arc::new(instance);
 
-        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
-            .context(error::ServersSnafu)?;
-
         let servers = Services::new(opts, instance.clone(), plugins)
             .build()
             .context(error::StartFrontendSnafu)?;
@@ -466,7 +465,6 @@ impl StartCommand {
             instance,
             servers,
             heartbeat_task,
-            export_metrics_task,
         };
 
         Ok(Instance::new(frontend, guard))

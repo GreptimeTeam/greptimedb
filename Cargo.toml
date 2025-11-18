@@ -74,7 +74,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -148,7 +148,7 @@ etcd-client = { git = "https://github.com/GreptimeTeam/etcd-client", rev = "f62d
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "14b9dc40bdc8288742b0cefc7bb024303b7429ef" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "fd699b21991e358201ee81ead4d319545c5df2ad" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -234,6 +234,7 @@ tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
 tracing-appender = "0.2"
+tracing-opentelemetry = "0.31.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
 uuid = { version = "1.17", features = ["serde", "v4", "fast-rng"] }

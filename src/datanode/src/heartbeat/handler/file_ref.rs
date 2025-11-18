@@ -39,7 +39,6 @@ impl InstructionHandler for GetFileRefsHandler {
                 error: Some("MitoEngine not found".to_string()),
             }));
         };
-
         match mito_engine
             .get_snapshot_of_unmanifested_refs(get_file_refs.region_ids)
             .await

@@ -199,7 +199,7 @@ async fn test_alter_region_with_format(flat_format: bool) {
     assert_eq!(manifests.len(), 1);
     let (return_region_id, manifest) = manifests.remove(0);
     assert_eq!(return_region_id, region_id);
-    assert_eq!(manifest, RegionManifestInfo::mito(2, 1));
+    assert_eq!(manifest, RegionManifestInfo::mito(2, 1, 0));
     let column_metadatas =
         parse_column_metadatas(&response.extensions, TABLE_COLUMN_METADATA_EXTENSION_KEY).unwrap();
     assert_column_metadatas(

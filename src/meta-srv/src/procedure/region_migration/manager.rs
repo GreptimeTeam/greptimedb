@@ -387,14 +387,14 @@ impl RegionMigrationManager {
             PersistentContext {
                 catalog: catalog_name,
                 schema: schema_name,
-                region_id,
+                region_ids: vec![region_id],
                 from_peer,
                 to_peer,
                 timeout,
                 trigger_reason,
             },
             self.context_factory.clone(),
-            Some(guard),
+            vec![guard],
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;

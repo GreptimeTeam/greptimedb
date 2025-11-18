@@ -25,7 +25,7 @@ use opentelemetry::trace::TracerProvider;
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
-use opentelemetry_sdk::trace::Sampler;
+use opentelemetry_sdk::trace::{Sampler, Tracer};
 use opentelemetry_semantic_conventions::resource;
 use serde::{Deserialize, Serialize};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -33,7 +33,7 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_log::LogTracer;
 use tracing_subscriber::filter::{FilterFn, Targets};
 use tracing_subscriber::fmt::Layer;
-use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::layer::{Layered, SubscriberExt};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Registry, filter};
 
@@ -48,9 +48,30 @@ pub const DEFAULT_OTLP_HTTP_ENDPOINT: &str = "http://localhost:4318/v1/traces";
 /// The default logs directory.
 pub const DEFAULT_LOGGING_DIR: &str = "logs";
 
-// Handle for reloading log level
-pub static RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Targets, Registry>> =
+/// Handle for reloading log level
+pub static LOG_RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Targets, Registry>> =
     OnceCell::new();
+
+type TraceReloadHandle = tracing_subscriber::reload::Handle<
+    Vec<
+        tracing_opentelemetry::OpenTelemetryLayer<
+            Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>,
+            Tracer,
+        >,
+    >,
+    Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>,
+>;
+
+/// Handle for reloading trace level
+pub static TRACE_RELOAD_HANDLE: OnceCell<TraceReloadHandle> = OnceCell::new();
+
+static TRACER: OnceCell<Mutex<TraceState>> = OnceCell::new();
+
+#[derive(Debug)]
+enum TraceState {
+    Ready(Tracer),
+    Deferred(TraceContext),
+}
 
 /// The logging options that used to initialize the logger.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -167,6 +188,13 @@ impl PartialEq for LoggingOptions {
 
 impl Eq for LoggingOptions {}
 
+#[derive(Clone, Debug)]
+struct TraceContext {
+    app_name: String,
+    node_id: String,
+    logging_opts: LoggingOptions,
+}
+
 impl Default for LoggingOptions {
     fn default() -> Self {
         Self {
@@ -242,6 +270,7 @@ pub fn init_global_logging(
 ) -> Vec<WorkerGuard> {
     static START: Once = Once::new();
     let mut guards = vec![];
+    let node_id = node_id.unwrap_or_else(|| "none".to_string());
 
     START.call_once(|| {
         // Enable log compatible layer to convert log record to tracing span.
@@ -357,9 +386,38 @@ pub fn init_global_logging(
 
         let (dyn_filter, reload_handle) = tracing_subscriber::reload::Layer::new(filter.clone());
 
-        RELOAD_HANDLE
+        LOG_RELOAD_HANDLE
             .set(reload_handle)
             .expect("reload handle already set, maybe init_global_logging get called twice?");
+
+        let mut initial_tracer = None;
+        let trace_state = if opts.enable_otlp_tracing {
+            let tracer = create_tracer(app_name, &node_id, opts);
+            initial_tracer = Some(tracer.clone());
+            TraceState::Ready(tracer)
+        } else {
+            TraceState::Deferred(TraceContext {
+                app_name: app_name.to_string(),
+                node_id: node_id.clone(),
+                logging_opts: opts.clone(),
+            })
+        };
+
+        TRACER
+            .set(Mutex::new(trace_state))
+            .expect("trace state already initialized");
+
+        let initial_trace_layers = initial_tracer
+            .as_ref()
+            .map(|tracer| vec![tracing_opentelemetry::layer().with_tracer(tracer.clone())])
+            .unwrap_or_else(Vec::new);
+
+        let (dyn_trace_layer, trace_reload_handle) =
+            tracing_subscriber::reload::Layer::new(initial_trace_layers);
+
+        TRACE_RELOAD_HANDLE
+            .set(trace_reload_handle)
+            .unwrap_or_else(|_| panic!("failed to set trace reload handle"));
 
         // Must enable 'tokio_unstable' cfg to use this feature.
         // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`
@@ -383,6 +441,7 @@ pub fn init_global_logging(
 
             Registry::default()
                 .with(dyn_filter)
+                .with(dyn_trace_layer)
                 .with(tokio_console_layer)
                 .with(stdout_logging_layer)
                 .with(file_logging_layer)
@@ -396,51 +455,59 @@ pub fn init_global_logging(
         #[cfg(not(feature = "tokio-console"))]
         let subscriber = Registry::default()
             .with(dyn_filter)
+            .with(dyn_trace_layer)
             .with(stdout_logging_layer)
             .with(file_logging_layer)
             .with(err_file_logging_layer)
             .with(slow_query_logging_layer);
 
-        if opts.enable_otlp_tracing {
-            global::set_text_map_propagator(TraceContextPropagator::new());
+        global::set_text_map_propagator(TraceContextPropagator::new());
 
-            let sampler = opts
-                .tracing_sample_ratio
-                .as_ref()
-                .map(create_sampler)
-                .map(Sampler::ParentBased)
-                .unwrap_or(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
-
-            let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-                .with_batch_exporter(build_otlp_exporter(opts))
-                .with_sampler(sampler)
-                .with_resource(
-                    opentelemetry_sdk::Resource::builder_empty()
-                        .with_attributes([
-                            KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
-                            KeyValue::new(
-                                resource::SERVICE_INSTANCE_ID,
-                                node_id.unwrap_or("none".to_string()),
-                            ),
-                            KeyValue::new(resource::SERVICE_VERSION, common_version::version()),
-                            KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
-                        ])
-                        .build(),
-                )
-                .build();
-            let tracer = provider.tracer("greptimedb");
-
-            tracing::subscriber::set_global_default(
-                subscriber.with(tracing_opentelemetry::layer().with_tracer(tracer)),
-            )
+        tracing::subscriber::set_global_default(subscriber)
             .expect("error setting global tracing subscriber");
-        } else {
-            tracing::subscriber::set_global_default(subscriber)
-                .expect("error setting global tracing subscriber");
-        }
     });
 
     guards
+}
+
+fn create_tracer(app_name: &str, node_id: &str, opts: &LoggingOptions) -> Tracer {
+    let sampler = opts
+        .tracing_sample_ratio
+        .as_ref()
+        .map(create_sampler)
+        .map(Sampler::ParentBased)
+        .unwrap_or(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
+
+    let resource = opentelemetry_sdk::Resource::builder_empty()
+        .with_attributes([
+            KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
+            KeyValue::new(resource::SERVICE_INSTANCE_ID, node_id.to_string()),
+            KeyValue::new(resource::SERVICE_VERSION, common_version::version()),
+            KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
+        ])
+        .build();
+
+    opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(build_otlp_exporter(opts))
+        .with_sampler(sampler)
+        .with_resource(resource)
+        .build()
+        .tracer("greptimedb")
+}
+
+/// Ensure that the OTLP tracer has been constructed, building it lazily if needed.
+pub fn get_or_init_tracer() -> Result<Tracer, &'static str> {
+    let state = TRACER.get().ok_or("trace state is not initialized")?;
+    let mut guard = state.lock().expect("trace state lock poisoned");
+
+    match &mut *guard {
+        TraceState::Ready(tracer) => Ok(tracer.clone()),
+        TraceState::Deferred(context) => {
+            let tracer = create_tracer(&context.app_name, &context.node_id, &context.logging_opts);
+            *guard = TraceState::Ready(tracer.clone());
+            Ok(tracer)
+        }
+    }
 }
 
 fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporter {

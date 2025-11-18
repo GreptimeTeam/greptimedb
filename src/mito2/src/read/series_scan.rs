@@ -465,6 +465,7 @@ impl SeriesDistributor {
                     &part_metrics,
                     range_builder_list.clone(),
                     &mut sources,
+                    self.semaphore.clone(),
                 )
                 .await?;
             }
@@ -553,6 +554,7 @@ impl SeriesDistributor {
                     &part_metrics,
                     range_builder_list.clone(),
                     &mut sources,
+                    self.semaphore.clone(),
                 )
                 .await?;
             }

@@ -172,21 +172,16 @@ pub async fn open_compaction_region(
             compress_type: manifest_compress_type(mito_config.compress_manifest),
             checkpoint_distance: mito_config.manifest_checkpoint_distance,
             remove_file_options: RemoveFileOptions {
-                keep_count: mito_config.experimental_manifest_keep_removed_file_count,
-                keep_ttl: mito_config.experimental_manifest_keep_removed_file_ttl,
+                enable_gc: mito_config.gc.enable,
             },
         };
 
-        RegionManifestManager::open(
-            region_manifest_options,
-            Default::default(),
-            Default::default(),
-        )
-        .await?
-        .context(EmptyRegionDirSnafu {
-            region_id: req.region_id,
-            region_dir: &region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type),
-        })?
+        RegionManifestManager::open(region_manifest_options, &Default::default())
+            .await?
+            .with_context(|| EmptyRegionDirSnafu {
+                region_id: req.region_id,
+                region_dir: region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type),
+            })?
     };
 
     let manifest = manifest_manager.manifest();

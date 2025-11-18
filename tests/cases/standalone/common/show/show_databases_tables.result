@@ -52,7 +52,6 @@ SHOW TABLES;
 | region_peers                          |
 | region_statistics                     |
 | routines                              |
-| runtime_metrics                       |
 | schema_privileges                     |
 | schemata                              |
 | session_status                        |
@@ -103,7 +102,6 @@ SHOW FULL TABLES;
 | region_peers                          | LOCAL TEMPORARY |
 | region_statistics                     | LOCAL TEMPORARY |
 | routines                              | LOCAL TEMPORARY |
-| runtime_metrics                       | LOCAL TEMPORARY |
 | schema_privileges                     | LOCAL TEMPORARY |
 | schemata                              | LOCAL TEMPORARY |
 | session_status                        | LOCAL TEMPORARY |
@@ -148,7 +146,6 @@ SHOW TABLE STATUS;
 |region_peers||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |region_statistics||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |routines||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
-|runtime_metrics||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |schema_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |schemata||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |session_status||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||

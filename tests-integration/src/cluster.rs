@@ -46,6 +46,7 @@ use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
 use common_stat::ResourceStatImpl;
 use common_test_util::temp_dir::create_temp_dir;
+use common_time::util::DefaultSystemTimer;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
@@ -319,6 +320,7 @@ impl GreptimeDbClusterBuilder {
     ) {
         for _ in 0..100 {
             let alive_datanodes = discovery::utils::alive_datanodes(
+                &DefaultSystemTimer,
                 meta_peer_client.as_ref(),
                 Duration::from_secs(u64::MAX),
                 None,
@@ -452,7 +454,6 @@ impl GreptimeDbClusterBuilder {
             instance,
             servers,
             heartbeat_task: Some(heartbeat_task),
-            export_metrics_task: None,
         }
     }
 
