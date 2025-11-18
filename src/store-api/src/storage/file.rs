@@ -121,6 +121,9 @@ impl GcReport {
             *self_files = dedup.into_iter().collect();
         }
         self.need_retry_regions.extend(other.need_retry_regions);
+        // Remove regions that have succeeded from need_retry_regions
+        self.need_retry_regions
+            .retain(|region| !self.deleted_files.contains_key(region));
     }
 }
 

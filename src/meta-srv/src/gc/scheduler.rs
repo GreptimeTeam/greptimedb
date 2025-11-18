@@ -53,20 +53,9 @@ pub struct GcJobReport {
 impl GcJobReport {
     pub fn merge(&mut self, mut other: GcJobReport) {
         // merge per_datanode_reports&failed_datanodes
-        let all_dn_ids = self
-            .per_datanode_reports
-            .keys()
-            .cloned()
-            .chain(other.per_datanode_reports.keys().cloned())
-            .collect::<std::collections::HashSet<_>>();
-        for dn_id in all_dn_ids {
+        for (dn_id, report) in other.per_datanode_reports {
             let mut self_report = self.per_datanode_reports.entry(dn_id).or_default();
-            self_report.merge(
-                other
-                    .per_datanode_reports
-                    .remove(&dn_id)
-                    .unwrap_or_default(),
-            );
+            self_report.merge(report);
         }
         let all_failed_dn_ids = self
             .failed_datanodes
@@ -80,6 +69,8 @@ impl GcJobReport {
                 entry.extend(other_errors);
             }
         }
+        self.failed_datanodes
+            .retain(|dn_id, _| !self.per_datanode_reports.contains_key(dn_id));
     }
 }
 

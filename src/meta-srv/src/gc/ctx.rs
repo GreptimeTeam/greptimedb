@@ -152,6 +152,13 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
                         .or_default()
                         .push(*region_id);
                 }
+            } else {
+                return error::UnexpectedSnafu {
+                    violated: format!(
+                        "region_routes{region_routes:?} does not contain region_id: {region_id}",
+                    ),
+                }
+                .fail();
             }
         }
 
