@@ -80,7 +80,6 @@ runs:
         else
           echo "Cluster is not ready yet: Current phase: $PHASE"
           kubectl get pods -n my-greptimedb
-          kubectl get pods -n my-greptimedb -o name | xargs -I {} kubectl -n my-greptimedb logs {}
           sleep 5 # wait for 5 seconds before check again.
         fi
       done
