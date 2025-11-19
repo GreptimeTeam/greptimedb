@@ -316,8 +316,6 @@ impl LocalGcWorker {
         let region_id = manifest.metadata.region_id;
         let current_files = &manifest.files;
 
-        let in_manifest_file_cnt = current_files.len();
-
         let recently_removed_files = self.get_removed_files_expel_times(&manifest).await?;
 
         if recently_removed_files.is_empty() {
@@ -334,24 +332,25 @@ impl LocalGcWorker {
             .max(1)
             .min(self.opt.max_concurrent_lister_per_gc_job);
 
-        let tmp_ref_file_cnt = tmp_ref_files.len();
-
         let in_used: HashSet<FileId> = current_files
             .keys()
             .cloned()
             .chain(tmp_ref_files.clone().into_iter())
             .collect();
 
-        let in_used_file_cnt = in_used.len();
-
         let unused_files = self
-            .list_to_be_deleted_files(region_id, in_used, recently_removed_files, concurrency)
+            .list_to_be_deleted_files(region_id, &in_used, recently_removed_files, concurrency)
             .await?;
 
         let unused_file_cnt = unused_files.len();
 
         debug!(
-            "gc: for region {region_id}: In manifest files: {in_manifest_file_cnt}, Tmp ref file cnt: {tmp_ref_file_cnt}, In-used files: {in_used_file_cnt}, recently removed files: {removed_file_cnt}, Unused files to delete: {unused_file_cnt} ",
+            "gc: for region {region_id}: In manifest files: {}, Tmp ref file cnt: {}, In-used files: {}, recently removed files: {}, Unused files to delete: {} ",
+            current_files.len(),
+            tmp_ref_files.len(),
+            in_used.len(),
+            removed_file_cnt,
+            unused_files.len()
         );
 
         // TODO(discord9): for now, ignore async index file as it's design is not stable, need to be improved once
@@ -597,7 +596,7 @@ impl LocalGcWorker {
     pub async fn list_to_be_deleted_files(
         &self,
         region_id: RegionId,
-        in_used: HashSet<FileId>,
+        in_used: &HashSet<FileId>,
         recently_removed_files: BTreeMap<Timestamp, HashSet<FileId>>,
         concurrency: usize,
     ) -> Result<Vec<FileId>> {

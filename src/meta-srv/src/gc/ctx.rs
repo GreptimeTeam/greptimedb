@@ -86,9 +86,8 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         let mut table_to_region_stats: HashMap<TableId, Vec<RegionStat>> = HashMap::new();
         for (_dn_id, stats) in dn_stats {
             let mut stats = stats.stats;
-            stats.sort_by_key(|s| s.timestamp_millis);
 
-            let Some(latest_stat) = stats.last().cloned() else {
+            let Some(latest_stat) = stats.iter().max_by_key(|s| s.timestamp_millis).cloned() else {
                 continue;
             };
 
@@ -158,7 +157,7 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
             } else {
                 return error::UnexpectedSnafu {
                     violated: format!(
-                        "region_routes{region_routes:?} does not contain region_id: {region_id}",
+                        "region_routes: {region_routes:?} does not contain region_id: {region_id}",
                     ),
                 }
                 .fail();
