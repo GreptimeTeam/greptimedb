@@ -133,6 +133,7 @@ where
             })?;
     }
 
+    info!("Spawning background task for watching TLS cert/key file changes");
     std::thread::spawn(move || {
         let _watcher = watcher;
         while let Ok(res) = rx.recv() {
