@@ -263,6 +263,7 @@ impl LocalGcWorker {
         let mut deleted_files = HashMap::new();
         let tmp_ref_files = self.read_tmp_ref_files(&mut outdated_regions).await?;
         for (region_id, region) in &self.regions {
+            let per_region_time = std::time::Instant::now();
             if region.manifest_ctx.current_state() == RegionRoleState::Follower {
                 return UnexpectedSnafu {
                     reason: format!(
@@ -278,10 +279,15 @@ impl LocalGcWorker {
                 .unwrap_or_else(HashSet::new);
             let files = self.do_region_gc(region.clone(), &tmp_ref_files).await?;
             deleted_files.insert(*region_id, files);
+            debug!(
+                "GC for region {} took {} secs.",
+                region_id,
+                per_region_time.elapsed().as_secs_f32()
+            );
         }
         info!(
             "LocalGcWorker finished after {} secs.",
-            now.elapsed().as_secs()
+            now.elapsed().as_secs_f32()
         );
         let report = GcReport {
             deleted_files,
