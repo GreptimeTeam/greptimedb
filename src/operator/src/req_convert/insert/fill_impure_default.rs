@@ -36,6 +36,7 @@ pub fn find_all_impure_columns(table_info: &TableInfo) -> Vec<ColumnSchema> {
         .collect()
 }
 
+// TODO(yingwen): Support Bulk insert request.
 /// Fill impure default values in the request
 pub struct ImpureDefaultFiller {
     impure_columns: HashMap<String, (api::v1::ColumnSchema, api::v1::Value)>,

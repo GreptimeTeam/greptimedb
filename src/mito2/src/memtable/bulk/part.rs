@@ -14,7 +14,7 @@
 
 //! Bulk part encoder/decoder.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,7 +35,7 @@ use datatypes::arrow::array::{
 };
 use datatypes::arrow::compute::{SortColumn, SortOptions, TakeOptions};
 use datatypes::arrow::datatypes::{
-    DataType as ArrowDataType, Field as ArrowField, SchemaRef, UInt32Type,
+    DataType as ArrowDataType, Field, Schema, SchemaRef, UInt32Type,
 };
 use datatypes::arrow_array::BinaryArray;
 use datatypes::data_type::DataType;
@@ -53,14 +53,15 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
 use snafu::{OptionExt, ResultExt, Snafu};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
-use store_api::storage::{FileId, SequenceNumber, SequenceRange};
+use store_api::storage::{FileId, RegionId, SequenceNumber, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{
-    self, ColumnNotFoundSnafu, ComputeArrowSnafu, DataTypeMismatchSnafu, EncodeMemtableSnafu,
-    EncodeSnafu, InvalidMetadataSnafu, NewRecordBatchSnafu, Result,
+    self, ColumnNotFoundSnafu, ComputeArrowSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu,
+    DataTypeMismatchSnafu, EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu,
+    InvalidRequestSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu,
 };
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
@@ -167,6 +168,84 @@ impl BulkPart {
         } else {
             0
         }
+    }
+
+    /// Fills missing columns in the BulkPart batch with default values.
+    ///
+    /// This function checks if the batch schema matches the region metadata schema,
+    /// and if there are missing columns, it fills them with default values (or null
+    /// for nullable columns).
+    ///
+    /// # Arguments
+    ///
+    /// * `region_metadata` - The region metadata containing the expected schema
+    pub fn fill_missing_columns(&mut self, region_metadata: &RegionMetadata) -> Result<()> {
+        // Builds a map of existing columns in the batch
+        let batch_schema = self.batch.schema();
+        let batch_columns: HashSet<_> = batch_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+
+        // Finds columns that need to be filled
+        let mut columns_to_fill = Vec::new();
+        for column_meta in &region_metadata.column_metadatas {
+            if !batch_columns.contains(column_meta.column_schema.name.as_str()) {
+                columns_to_fill.push(column_meta);
+            }
+        }
+
+        if columns_to_fill.is_empty() {
+            return Ok(());
+        }
+
+        let num_rows = self.batch.num_rows();
+
+        let mut new_columns = Vec::new();
+        let mut new_fields = Vec::new();
+
+        // First, adds all existing columns
+        new_fields.extend(batch_schema.fields().iter().cloned());
+        new_columns.extend_from_slice(self.batch.columns());
+
+        let region_id = region_metadata.region_id;
+        // Then adds the missing columns with default values
+        for column_meta in columns_to_fill {
+            let default_vector = column_meta
+                .column_schema
+                .create_default_vector(num_rows)
+                .context(CreateDefaultSnafu {
+                    region_id,
+                    column: &column_meta.column_schema.name,
+                })?
+                .with_context(|| InvalidRequestSnafu {
+                    region_id,
+                    reason: format!(
+                        "column {} does not have default value",
+                        column_meta.column_schema.name
+                    ),
+                })?;
+            let arrow_array = default_vector.to_arrow_array();
+            column_meta.column_schema.data_type.as_arrow_type();
+
+            new_fields.push(Arc::new(Field::new(
+                column_meta.column_schema.name.clone(),
+                column_meta.column_schema.data_type.as_arrow_type(),
+                column_meta.column_schema.is_nullable(),
+            )));
+            new_columns.push(arrow_array);
+        }
+
+        // Create a new schema and batch with the filled columns
+        let new_schema = Arc::new(Schema::new(new_fields));
+        let new_batch =
+            RecordBatch::try_new(new_schema, new_columns).context(NewRecordBatchSnafu)?;
+
+        // Update the batch
+        self.batch = new_batch;
+
+        Ok(())
     }
 
     /// Converts [BulkPart] to [Mutation] for fallback `write_bulk` implementation.
@@ -381,6 +460,32 @@ impl UnorderedPart {
         self.max_sequence = 0;
     }
 }
+
+// /// Gets the default value for a column.
+// /// Similar to WriteRequest::column_default_value but always returns Put operation defaults.
+// fn get_column_default_value(
+//     region_id: RegionId,
+//     column: &ColumnMetadata,
+// ) -> Result<datatypes::value::Value> {
+//     // TODO(yingwen): Check column.column_schema.is_default_impure() and return error.
+//     // We should add this check after the frontend can fill defaults for bulk requests.
+//     let default_value = column
+//         .column_schema
+//         .create_default()
+//         .context(CreateDefaultSnafu {
+//             region_id,
+//             column: &column.column_schema.name,
+//         })?
+//         .with_context(|| InvalidRequestSnafu {
+//             region_id,
+//             reason: format!(
+//                 "column {} does not have default value",
+//                 column.column_schema.name
+//             ),
+//         })?;
+
+//     Ok(default_value)
+// }
 
 /// More accurate estimation of the size of a record batch.
 pub(crate) fn record_batch_estimated_size(batch: &RecordBatch) -> usize {
