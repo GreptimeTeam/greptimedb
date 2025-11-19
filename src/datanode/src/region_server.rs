@@ -1200,7 +1200,8 @@ impl RegionServerInner {
             | RegionRequest::Flush(_)
             | RegionRequest::Compact(_)
             | RegionRequest::Truncate(_)
-            | RegionRequest::BuildIndex(_) => RegionChange::None,
+            | RegionRequest::BuildIndex(_)
+            | RegionRequest::EnterStaging(_) => RegionChange::None,
             RegionRequest::Catchup(_) => RegionChange::Catchup,
         };
 

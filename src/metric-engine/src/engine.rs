@@ -211,6 +211,18 @@ impl RegionEngine for MetricEngine {
         let mut extension_return_value = HashMap::new();
 
         let result = match request {
+            RegionRequest::EnterStaging(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    self.inner
+                        .mito
+                        .handle_request(region_id, request)
+                        .await
+                        .context(error::MitoEnterStagingOperationSnafu)
+                        .map(|response| response.affected_rows)
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
+            }
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
             RegionRequest::Create(create) => {
                 self.inner

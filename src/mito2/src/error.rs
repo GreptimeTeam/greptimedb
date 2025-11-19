@@ -1150,6 +1150,18 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Staging partition expr mismatch, manifest: {:?}, request: {}",
+        manifest_expr,
+        request_expr
+    ))]
+    StagingPartitionExprMismatch {
+        manifest_expr: Option<String>,
+        request_expr: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1196,7 +1208,8 @@ impl ErrorExt for Error {
             | InstallManifestTo { .. }
             | Unexpected { .. }
             | SerializeColumnMetadata { .. }
-            | SerializeManifest { .. } => StatusCode::Unexpected,
+            | SerializeManifest { .. }
+            | StagingPartitionExprMismatch { .. } => StatusCode::Unexpected,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }

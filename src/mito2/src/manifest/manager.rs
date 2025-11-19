@@ -151,6 +151,7 @@ pub struct RegionManifestManager {
     last_version: Arc<AtomicU64>,
     checkpointer: Checkpointer,
     manifest: Arc<RegionManifest>,
+    staging_manifest: Option<Arc<RegionManifest>>,
     stats: ManifestStats,
     stopped: bool,
 }
@@ -229,6 +230,7 @@ impl RegionManifestManager {
             last_version: manifest_version,
             checkpointer,
             manifest: Arc::new(manifest),
+            staging_manifest: None,
             stats: stats.clone(),
             stopped: false,
         })
@@ -334,6 +336,8 @@ impl RegionManifestManager {
             last_version: manifest_version,
             checkpointer,
             manifest: Arc::new(manifest),
+            // TODO(weny): open the staging manifest if exists.
+            staging_manifest: None,
             stats: stats.clone(),
             stopped: false,
         }))
@@ -504,7 +508,7 @@ impl RegionManifestManager {
     pub async fn update(
         &mut self,
         action_list: RegionMetaActionList,
-        region_state: RegionRoleState,
+        is_staging: bool,
     ) -> Result<ManifestVersion> {
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["update"])
@@ -518,13 +522,19 @@ impl RegionManifestManager {
         );
 
         let version = self.increase_version();
-        let is_staging = region_state == RegionRoleState::Leader(RegionLeaderState::Staging);
         self.store
             .save(version, &action_list.encode()?, is_staging)
             .await?;
 
+        // For a staging region, the manifest is initially inherited from the previous manifest(i.e., `self.manifest`).
+        // When the staging manifest becomes available, it will be used to construct the new manifest.
         let mut manifest_builder =
-            RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()));
+            if is_staging && let Some(staging_manifest) = self.staging_manifest.as_ref() {
+                RegionManifestBuilder::with_checkpoint(Some(staging_manifest.as_ref().clone()))
+            } else {
+                RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()))
+            };
+
         for action in action_list.actions {
             match action {
                 RegionMetaAction::Change(action) => {
@@ -544,17 +554,28 @@ impl RegionManifestManager {
                 }
             }
         }
-        let new_manifest = manifest_builder.try_build()?;
-        new_manifest
-            .removed_files
-            .update_file_removed_cnt_to_stats(&self.stats);
-        let updated_manifest = self
-            .checkpointer
-            .update_manifest_removed_files(new_manifest)?;
-        self.manifest = Arc::new(updated_manifest);
 
-        self.checkpointer
-            .maybe_do_checkpoint(self.manifest.as_ref(), region_state);
+        if is_staging {
+            let new_manifest = manifest_builder.try_build()?;
+            debug!("Built staging manifest: {:?}", new_manifest);
+            self.staging_manifest = Some(Arc::new(new_manifest));
+
+            info!(
+                "Skipping checkpoint for region {} in staging mode, manifest version: {}",
+                self.manifest.metadata.region_id, self.manifest.manifest_version
+            );
+        } else {
+            let new_manifest = manifest_builder.try_build()?;
+            new_manifest
+                .removed_files
+                .update_file_removed_cnt_to_stats(&self.stats);
+            let updated_manifest = self
+                .checkpointer
+                .update_manifest_removed_files(new_manifest)?;
+            self.manifest = Arc::new(updated_manifest);
+            self.checkpointer
+                .maybe_do_checkpoint(self.manifest.as_ref());
+        }
 
         Ok(version)
     }
@@ -573,6 +594,11 @@ impl RegionManifestManager {
     /// Retrieves the current [RegionManifest].
     pub fn manifest(&self) -> Arc<RegionManifest> {
         self.manifest.clone()
+    }
+
+    /// Retrieves the current [RegionManifest].
+    pub fn staging_manifest(&self) -> Option<Arc<RegionManifest>> {
+        self.staging_manifest.clone()
     }
 
     /// Returns total manifest size.
@@ -711,6 +737,17 @@ impl RegionManifestManager {
 
         Ok(Some(RegionMetaActionList::new(merged_actions)))
     }
+
+    /// Clear all staging manifests.
+    pub(crate) async fn clear_staging_manifests(&mut self) -> Result<()> {
+        self.staging_manifest = None;
+        self.store.clear_staging_manifests().await?;
+        info!(
+            "Cleared all staging manifests for region {}",
+            self.manifest.metadata.region_id
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -837,13 +874,7 @@ mod test {
                 sst_format: FormatType::PrimaryKey,
             }));
 
-        let current_version = manager
-            .update(
-                action_list,
-                RegionRoleState::Leader(RegionLeaderState::Writable),
-            )
-            .await
-            .unwrap();
+        let current_version = manager.update(action_list, false).await.unwrap();
         assert_eq!(current_version, 1);
         manager.validate_manifest(&new_metadata, 1);
 
@@ -906,13 +937,7 @@ mod test {
                 sst_format: FormatType::PrimaryKey,
             }));
 
-        let current_version = manager
-            .update(
-                action_list,
-                RegionRoleState::Leader(RegionLeaderState::Writable),
-            )
-            .await
-            .unwrap();
+        let current_version = manager.update(action_list, false).await.unwrap();
         assert_eq!(current_version, 1);
         manager.validate_manifest(&new_metadata, 1);
 
@@ -933,7 +958,7 @@ mod test {
                         flushed_sequence: None,
                         committed_sequence: None,
                     })]),
-                    RegionRoleState::Leader(RegionLeaderState::Writable),
+                    false,
                 )
                 .await
                 .unwrap();

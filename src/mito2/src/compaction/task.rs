@@ -117,7 +117,7 @@ impl CompactionTaskImpl {
         };
         if let Err(e) = compaction_region
             .manifest_ctx
-            .update_manifest(current_region_state, action_list)
+            .update_manifest(current_region_state, action_list, false)
             .await
         {
             warn!(

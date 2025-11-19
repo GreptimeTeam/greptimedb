@@ -346,6 +346,7 @@ impl<S> RegionWorkerLoop<S> {
 
         let request_sender = self.sender.clone();
         let manifest_ctx = region.manifest_ctx.clone();
+        let is_staging = region.is_staging();
 
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
@@ -354,7 +355,7 @@ impl<S> RegionWorkerLoop<S> {
                 RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
 
             let result = manifest_ctx
-                .update_manifest(RegionLeaderState::Truncating, action_list)
+                .update_manifest(RegionLeaderState::Truncating, action_list, is_staging)
                 .await
                 .map(|_| ());
 
@@ -391,6 +392,9 @@ impl<S> RegionWorkerLoop<S> {
         }
         let listener = self.listener.clone();
         let request_sender = self.sender.clone();
+        let is_staging = region.is_staging();
+        // It's not expected to alter a staging region.
+        debug_assert!(!is_staging);
         // Now the region is in altering state.
         common_runtime::spawn_global(async move {
             let new_meta = change.metadata.clone();
@@ -398,7 +402,7 @@ impl<S> RegionWorkerLoop<S> {
 
             let result = region
                 .manifest_ctx
-                .update_manifest(RegionLeaderState::Altering, action_list)
+                .update_manifest(RegionLeaderState::Altering, action_list, is_staging)
                 .await
                 .map(|_| ());
             let notify = WorkerRequest::Background {
@@ -463,6 +467,7 @@ async fn edit_region(
     listener: WorkerListener,
 ) -> Result<()> {
     let region_id = region.region_id;
+    let is_staging = region.is_staging();
     if let Some(write_cache) = cache_manager.write_cache() {
         for file_meta in &edit.files_to_add {
             let write_cache = write_cache.clone();
@@ -532,7 +537,7 @@ async fn edit_region(
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
     region
         .manifest_ctx
-        .update_manifest(RegionLeaderState::Editing, action_list)
+        .update_manifest(RegionLeaderState::Editing, action_list, is_staging)
         .await
         .map(|_| ())
 }

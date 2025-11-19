@@ -151,6 +151,7 @@ pub enum RegionRequest {
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
     BulkInserts(RegionBulkInsertsRequest),
+    EnterStaging(EnterStagingRequest),
 }
 
 impl RegionRequest {
@@ -1416,6 +1417,17 @@ impl RegionBulkInsertsRequest {
     }
 }
 
+/// Request to stage a region with a new region rule(partition expression).
+///
+/// This request transitions a region into the staging mode.
+/// It first flushes the memtable for the old region rule,
+/// then enters the staging mode with the new region rule.
+#[derive(Debug, Clone)]
+pub struct EnterStagingRequest {
+    /// The partition expression of the staging region.
+    pub partition_expr: String,
+}
+
 impl fmt::Display for RegionRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1432,6 +1444,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
             RegionRequest::BulkInserts(_) => write!(f, "BulkInserts"),
+            RegionRequest::EnterStaging(_) => write!(f, "EnterStaging"),
         }
     }
 }

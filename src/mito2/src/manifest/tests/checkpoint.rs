@@ -27,7 +27,6 @@ use crate::manifest::action::{
 use crate::manifest::manager::RegionManifestManager;
 use crate::manifest::storage::CheckpointMetadata;
 use crate::manifest::tests::utils::basic_region_metadata;
-use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::sst::file::FileMeta;
 use crate::test_util::TestEnv;
 
@@ -87,13 +86,7 @@ async fn manager_without_checkpoint() {
 
     // apply 10 actions
     for _ in 0..10 {
-        manager
-            .update(
-                nop_action(),
-                RegionRoleState::Leader(RegionLeaderState::Writable),
-            )
-            .await
-            .unwrap();
+        manager.update(nop_action(), false).await.unwrap();
     }
 
     // no checkpoint
@@ -138,13 +131,7 @@ async fn manager_with_checkpoint_distance_1() {
 
     // apply 10 actions
     for _ in 0..10 {
-        manager
-            .update(
-                nop_action(),
-                RegionRoleState::Leader(RegionLeaderState::Writable),
-            )
-            .await
-            .unwrap();
+        manager.update(nop_action(), false).await.unwrap();
 
         while manager.checkpointer().is_doing_checkpoint() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -205,13 +192,7 @@ async fn test_corrupted_data_causing_checksum_error() {
 
     // Apply actions
     for _ in 0..10 {
-        manager
-            .update(
-                nop_action(),
-                RegionRoleState::Leader(RegionLeaderState::Writable),
-            )
-            .await
-            .unwrap();
+        manager.update(nop_action(), false).await.unwrap();
     }
 
     // Wait for the checkpoint to finish.
@@ -302,10 +283,7 @@ async fn generate_checkpoint_with_compression_types(
     let (_env, mut manager) = build_manager(1, compress_type).await;
 
     for action in actions {
-        manager
-            .update(action, RegionRoleState::Leader(RegionLeaderState::Writable))
-            .await
-            .unwrap();
+        manager.update(action, false).await.unwrap();
 
         while manager.checkpointer().is_doing_checkpoint() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -361,10 +339,7 @@ async fn manifest_install_manifest_to() {
     let (env, mut manager) = build_manager(0, CompressionType::Uncompressed).await;
     let (files, actions) = generate_action_lists(10);
     for action in actions {
-        manager
-            .update(action, RegionRoleState::Leader(RegionLeaderState::Writable))
-            .await
-            .unwrap();
+        manager.update(action, false).await.unwrap();
     }
 
     // Nothing to install
@@ -402,10 +377,7 @@ async fn manifest_install_manifest_to_with_checkpoint() {
     let (env, mut manager) = build_manager(3, CompressionType::Uncompressed).await;
     let (files, actions) = generate_action_lists(10);
     for action in actions {
-        manager
-            .update(action, RegionRoleState::Leader(RegionLeaderState::Writable))
-            .await
-            .unwrap();
+        manager.update(action, false).await.unwrap();
 
         while manager.checkpointer().is_doing_checkpoint() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -477,13 +449,7 @@ async fn test_checkpoint_bypass_in_staging_mode() {
 
     // Apply actions in staging mode - checkpoint should be bypassed
     for _ in 0..15 {
-        manager
-            .update(
-                nop_action(),
-                RegionRoleState::Leader(RegionLeaderState::Staging),
-            )
-            .await
-            .unwrap();
+        manager.update(nop_action(), true).await.unwrap();
     }
     assert!(!manager.checkpointer().is_doing_checkpoint());
 
@@ -498,13 +464,7 @@ async fn test_checkpoint_bypass_in_staging_mode() {
     );
 
     // Now switch to normal mode and apply one more action
-    manager
-        .update(
-            nop_action(),
-            RegionRoleState::Leader(RegionLeaderState::Writable),
-        )
-        .await
-        .unwrap();
+    manager.update(nop_action(), false).await.unwrap();
 
     // Wait for potential checkpoint
     while manager.checkpointer().is_doing_checkpoint() {

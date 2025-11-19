@@ -14,17 +14,23 @@
 
 //! Integration tests for staging state functionality.
 
+use std::assert_matches::assert_matches;
 use std::fs;
+use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
 use store_api::region_engine::{RegionEngine, SettableRegionRoleState};
 use store_api::region_request::{
-    RegionAlterRequest, RegionFlushRequest, RegionRequest, RegionTruncateRequest,
+    EnterStagingRequest, RegionAlterRequest, RegionFlushRequest, RegionRequest,
+    RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
+use crate::engine::listener::NotifyEnterStagingResultListener;
+use crate::error::Error;
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::request::WorkerRequest;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
@@ -214,6 +220,8 @@ async fn test_staging_state_validation_patterns() {
     );
 }
 
+const PARTITION_EXPR: &str = "partition_expr";
+
 #[tokio::test]
 async fn test_staging_manifest_directory() {
     test_staging_manifest_directory_with_format(false).await;
@@ -221,6 +229,7 @@ async fn test_staging_manifest_directory() {
 }
 
 async fn test_staging_manifest_directory_with_format(flat_format: bool) {
+    common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
@@ -255,9 +264,57 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
     // Now test staging mode manifest creation
     // Set region to staging mode using the engine API
     engine
-        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_expr: PARTITION_EXPR.to_string(),
+            }),
+        )
         .await
         .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let staging_partition_expr = region.staging_partition_expr.lock().unwrap().clone();
+    assert_eq!(staging_partition_expr.unwrap(), PARTITION_EXPR);
+    {
+        let manager = region.manifest_ctx.manifest_manager.read().await;
+        assert_eq!(
+            manager
+                .staging_manifest()
+                .unwrap()
+                .metadata
+                .partition_expr
+                .as_deref()
+                .unwrap(),
+            PARTITION_EXPR
+        );
+        assert!(manager.manifest().metadata.partition_expr.is_none());
+    }
+
+    // Should be ok to enter staging mode again with the same partition expr
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_expr: PARTITION_EXPR.to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Should throw error if try to enter staging mode again with a different partition expr
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_expr: "".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_matches!(
+        err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
+        Error::StagingPartitionExprMismatch { .. }
+    );
 
     // Put some data and flush in staging mode
     let rows_data = Rows {
@@ -312,6 +369,7 @@ async fn test_staging_exit_success_with_manifests() {
 }
 
 async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool) {
+    common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
@@ -330,16 +388,28 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         .await
         .unwrap();
 
+    // Add some data and flush in staging mode to generate staging manifests
+    let rows_data = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows_data).await;
+
     // Enter staging mode
     engine
-        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_expr: PARTITION_EXPR.to_string(),
+            }),
+        )
         .await
         .unwrap();
 
     // Add some data and flush in staging mode to generate staging manifests
     let rows_data = Rows {
         schema: column_schemas.clone(),
-        rows: build_rows(0, 5),
+        rows: build_rows(3, 8),
     };
     put_rows(&engine, region_id, rows_data).await;
 
@@ -357,7 +427,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     // Add more data and flush again to generate multiple staging manifests
     let rows_data2 = Rows {
         schema: column_schemas.clone(),
-        rows: build_rows(5, 10),
+        rows: build_rows(8, 10),
     };
     put_rows(&engine, region_id, rows_data2).await;
 
@@ -382,8 +452,11 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         .unwrap();
     assert_eq!(
         staging_files_before.len(),
-        2,
-        "Staging manifest directory should contain two files before exit"
+        // Two files for flush operation
+        // One file for entering staging mode
+        3,
+        "Staging manifest directory should contain 3 files before exit, got: {:?}",
+        staging_files_before
     );
 
     // Count normal manifest files before exit
@@ -394,8 +467,11 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         .unwrap();
     let normal_count_before = normal_files_before.len();
     assert_eq!(
-        normal_count_before, 1,
-        "Normal manifest directory should initially contain one file"
+        // One file for table creation
+        // One files for flush operation
+        normal_count_before,
+        2,
+        "Normal manifest directory should initially contain 2 file"
     );
 
     // Try read data before exiting staging, SST files should be invisible
@@ -403,8 +479,8 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     let scanner = engine.scanner(region_id, request).await.unwrap();
     assert_eq!(
         scanner.num_files(),
-        0,
-        "No SST files should be scanned before exit"
+        1,
+        "1 SST files should be scanned before exit"
     );
     assert_eq!(
         scanner.num_memtables(),
@@ -415,14 +491,20 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let total_rows: usize = batches.iter().map(|rb| rb.num_rows()).sum();
     assert_eq!(
-        total_rows, 0,
-        "No data should be readable before exit staging mode"
+        total_rows, 3,
+        "3 rows should be readable before exit staging mode"
     );
 
     // Inspect SSTs from manifest
     let sst_entries = engine.all_ssts_from_manifest().await;
-    assert_eq!(sst_entries.len(), 2);
-    assert!(sst_entries.iter().all(|e| !e.visible));
+    assert_eq!(
+        sst_entries.len(),
+        3,
+        "sst entries should be 3, got: {:?}",
+        sst_entries
+    );
+    assert_eq!(sst_entries.iter().filter(|e| e.visible).count(), 1);
+    assert_eq!(sst_entries.iter().filter(|e| !e.visible).count(), 2);
 
     // Exit staging mode successfully
     engine
@@ -470,7 +552,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     let scanner = engine.scanner(region_id, request).await.unwrap();
     assert_eq!(
         scanner.num_files(),
-        2,
+        3,
         "SST files should be scanned after exit"
     );
 
@@ -482,6 +564,93 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
 
     // Inspect SSTs from manifest
     let sst_entries = engine.all_ssts_from_manifest().await;
-    assert_eq!(sst_entries.len(), 2);
+    assert_eq!(sst_entries.len(), 3);
     assert!(sst_entries.iter().all(|e| e.visible));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_write_stall_on_enter_staging() {
+    test_write_stall_on_enter_staging_with_format(false).await;
+    test_write_stall_on_enter_staging_with_format(true).await;
+}
+
+async fn test_write_stall_on_enter_staging_with_format(flat_format: bool) {
+    let mut env = TestEnv::new().await;
+    let listener = Arc::new(NotifyEnterStagingResultListener::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let engine_cloned = engine.clone();
+    let alter_job = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(
+                region_id,
+                RegionRequest::EnterStaging(EnterStagingRequest {
+                    partition_expr: PARTITION_EXPR.to_string(),
+                }),
+            )
+            .await
+            .unwrap();
+    });
+    // Make sure the loop is handling the alter request.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let column_schemas_cloned = column_schemas.clone();
+    let engine_cloned = engine.clone();
+    let put_job = tokio::spawn(async move {
+        let rows = Rows {
+            schema: column_schemas_cloned,
+            rows: build_rows(0, 3),
+        };
+        put_rows(&engine_cloned, region_id, rows).await;
+    });
+    // Make sure the loop is handling the put request.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    listener.wake_notify();
+    alter_job.await.unwrap();
+    put_job.await.unwrap();
+
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+";
+    let request = ScanRequest::default();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected, batches.pretty_print().unwrap());
 }
