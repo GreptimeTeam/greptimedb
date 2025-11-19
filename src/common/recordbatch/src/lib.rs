@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use adapter::RecordBatchMetrics;
 use arc_swap::ArcSwapOption;
 use common_base::readable_size::ReadableSize;
+use common_telemetry::tracing::Span;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::arrow::compute::SortOptions;
 pub use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
@@ -367,6 +368,7 @@ pub struct RecordBatchStreamWrapper<S> {
     pub stream: S,
     pub output_ordering: Option<Vec<OrderOption>>,
     pub metrics: Arc<ArcSwapOption<RecordBatchMetrics>>,
+    pub span: Span,
 }
 
 impl<S> RecordBatchStreamWrapper<S> {
@@ -377,6 +379,7 @@ impl<S> RecordBatchStreamWrapper<S> {
             stream,
             output_ordering: None,
             metrics: Default::default(),
+            span: Span::current(),
         }
     }
 }
@@ -405,6 +408,7 @@ impl<S: Stream<Item = Result<RecordBatch>> + Unpin> Stream for RecordBatchStream
     type Item = Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let _entered = self.span.clone().entered();
         Pin::new(&mut self.stream).poll_next(ctx)
     }
 }

@@ -51,6 +51,7 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 use table::table_name::TableName;
 use tokio::time::Instant;
+use tracing::{Instrument, Span};
 
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::error::ConvertSchemaSnafu;
@@ -293,6 +294,12 @@ impl MergeScanExec {
                 .step_by(target_partition)
                 .copied()
             {
+                let region_span = tracing_context.attach(tracing::info_span!(
+                    parent: &Span::current(),
+                    "merge_scan_region",
+                    region_id = %region_id,
+                    partition = partition
+                ));
                 let request = QueryRequest {
                     header: Some(RegionRequestHeader {
                         tracing_context: tracing_context.to_w3c(),
@@ -315,6 +322,7 @@ impl MergeScanExec {
 
                 let mut stream = region_query_handler
                     .do_get(read_preference, request)
+                    .instrument(region_span.clone())
                     .await
                     .map_err(|e| {
                         MERGE_SCAN_ERRORS_TOTAL.inc();
@@ -327,7 +335,7 @@ impl MergeScanExec {
 
                 let mut poll_duration = Duration::ZERO;
                 let mut poll_timer = Instant::now();
-                while let Some(batch) = stream.next().await {
+                while let Some(batch) = stream.next().instrument(region_span.clone()).await {
                     let poll_elapsed = poll_timer.elapsed();
                     poll_duration += poll_elapsed;
 
@@ -415,6 +423,7 @@ impl MergeScanExec {
             stream,
             output_ordering: None,
             metrics: Default::default(),
+            span: Span::current(),
         }))
     }
 

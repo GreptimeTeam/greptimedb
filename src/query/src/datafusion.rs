@@ -47,6 +47,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
 use table::TableRef;
 use table::requests::{DeleteRequest, InsertRequest};
+use tracing::Span;
 
 use crate::analyze::DistAnalyzeExec;
 use crate::dataframe::DataFrame;
@@ -608,6 +609,7 @@ impl QueryExecutor for DatafusionQueryEngine {
 
         let exec_timer = metrics::EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
+        let span = Span::current();
 
         match plan.properties().output_partitioning().partition_count() {
             0 => {
@@ -624,7 +626,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .context(error::DatafusionSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
-                let mut stream = RecordBatchStreamAdapter::try_new(df_stream)
+                let mut stream = RecordBatchStreamAdapter::try_new_with_span(df_stream, span)
                     .context(error::ConvertDfRecordBatchStreamSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
@@ -657,7 +659,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .context(error::DatafusionSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
-                let mut stream = RecordBatchStreamAdapter::try_new(df_stream)
+                let mut stream = RecordBatchStreamAdapter::try_new_with_span(df_stream, span)
                     .context(error::ConvertDfRecordBatchStreamSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
