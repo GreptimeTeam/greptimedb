@@ -420,13 +420,18 @@ where
 /// Instruction to get file references for specified regions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GetFileRefs {
-    /// List of region IDs to get file references for.
-    pub region_ids: Vec<RegionId>,
+    /// List of region IDs to get file references from active FileHandles (in-memory).
+    pub query_regions: Vec<RegionId>,
+    /// Mapping from the source region ID (where to read the manifest) to
+    /// the target region IDs (whose file references to look for).
+    /// Key: The region ID of the manifest.
+    /// Value: The list of region IDs to find references for in that manifest.
+    pub related_regions: HashMap<RegionId, Vec<RegionId>>,
 }
 
 impl Display for GetFileRefs {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "GetFileRefs(region_ids={:?})", self.region_ids)
+        write!(f, "GetFileRefs(region_ids={:?})", self.query_regions)
     }
 }
 

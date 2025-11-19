@@ -292,19 +292,29 @@ impl MitoEngine {
     /// Get all tmp ref files for given region ids, excluding files that's already in manifest.
     pub async fn get_snapshot_of_file_refs(
         &self,
-        region_ids: impl IntoIterator<Item = RegionId>,
+        file_handle_regions: impl IntoIterator<Item = RegionId>,
+        manifest_regions: HashMap<RegionId, Vec<RegionId>>,
     ) -> Result<FileRefsManifest> {
         let file_ref_mgr = self.file_ref_manager();
 
-        let region_ids = region_ids.into_iter().collect::<Vec<_>>();
+        let file_handle_regions = file_handle_regions.into_iter().collect::<Vec<_>>();
         // Convert region IDs to MitoRegionRef objects, ignore regions that do not exist on current datanode
         // as regions on other datanodes are not managed by this engine.
-        let regions: Vec<MitoRegionRef> = region_ids
+        let query_regions: Vec<MitoRegionRef> = file_handle_regions
             .into_iter()
             .filter_map(|region_id| self.find_region(region_id))
             .collect();
 
-        file_ref_mgr.get_snapshot_of_file_refs(regions).await
+        let related_regions: Vec<(MitoRegionRef, Vec<RegionId>)> = manifest_regions
+            .into_iter()
+            .filter_map(|(related_region, queries)| {
+                self.find_region(related_region).map(|r| (r, queries))
+            })
+            .collect();
+
+        file_ref_mgr
+            .get_snapshot_of_file_refs(query_regions, related_regions)
+            .await
     }
 
     /// Returns true if the specific region exists.

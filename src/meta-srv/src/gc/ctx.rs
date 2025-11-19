@@ -50,7 +50,8 @@ pub(crate) trait SchedulerCtx: Send + Sync {
 
     async fn get_file_references(
         &self,
-        region_ids: &[RegionId],
+        query_regions: &[RegionId],
+        related_regions: HashMap<RegionId, Vec<RegionId>>,
         region_routes: &Region2Peers,
         timeout: Duration,
     ) -> Result<FileRefsManifest>;
@@ -168,24 +169,28 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
 
     async fn get_file_references(
         &self,
-        region_ids: &[RegionId],
+        query_regions: &[RegionId],
+        related_regions: HashMap<RegionId, Vec<RegionId>>,
         region_routes: &Region2Peers,
         timeout: Duration,
     ) -> Result<FileRefsManifest> {
-        debug!("Getting file references for {} regions", region_ids.len());
+        debug!(
+            "Getting file references for {} regions",
+            query_regions.len()
+        );
 
         // Group regions by datanode to minimize RPC calls
-        let mut datanode_regions: HashMap<Peer, Vec<RegionId>> = HashMap::new();
+        let mut datanode2query_regions: HashMap<Peer, Vec<RegionId>> = HashMap::new();
 
-        for region_id in region_ids {
+        for region_id in query_regions {
             if let Some((leader, followers)) = region_routes.get(region_id) {
-                datanode_regions
+                datanode2query_regions
                     .entry(leader.clone())
                     .or_default()
                     .push(*region_id);
                 // also need to send for follower regions for file refs in case query is running on follower
                 for follower in followers {
-                    datanode_regions
+                    datanode2query_regions
                         .entry(follower.clone())
                         .or_default()
                         .push(*region_id);
@@ -199,14 +204,25 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
                 .fail();
             }
         }
+        let mut datanode2related_regions: HashMap<Peer, HashMap<RegionId, Vec<RegionId>>> =
+            HashMap::new();
+        for (related_region, queries) in related_regions {
+            if let Some((leader, followers)) = region_routes.get(&related_region) {
+                datanode2related_regions
+                    .entry(leader.clone())
+                    .or_default()
+                    .insert(related_region, queries.clone());
+            } // since read from manifest, no need to send to followers
+        }
 
         // Send GetFileRefs instructions to each datanode
         let mut all_file_refs: HashMap<RegionId, HashSet<FileId>> = HashMap::new();
         let mut all_manifest_versions = HashMap::new();
 
-        for (peer, regions) in datanode_regions {
+        for (peer, regions) in datanode2query_regions {
+            let related_regions = datanode2related_regions.remove(&peer).unwrap_or_default();
             match self
-                .send_get_file_refs_instruction(&peer, &regions, timeout)
+                .send_get_file_refs_instruction(&peer, &regions, related_regions, timeout)
                 .await
             {
                 Ok(manifest) => {
@@ -301,17 +317,19 @@ impl DefaultGcSchedulerCtx {
     async fn send_get_file_refs_instruction(
         &self,
         peer: &Peer,
-        region_ids: &[RegionId],
+        query_regions: &[RegionId],
+        related_regions: HashMap<RegionId, Vec<RegionId>>,
         timeout: Duration,
     ) -> Result<FileRefsManifest> {
         debug!(
             "Sending GetFileRefs instruction to datanode {} for {} regions",
             peer,
-            region_ids.len()
+            query_regions.len()
         );
 
         let instruction = Instruction::GetFileRefs(GetFileRefs {
-            region_ids: region_ids.to_vec(),
+            query_regions: query_regions.to_vec(),
+            related_regions,
         });
 
         let reply = self
