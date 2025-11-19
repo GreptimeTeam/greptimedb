@@ -808,14 +808,13 @@ impl GcScheduler {
         retry_round: usize,
     ) -> Result<(Region2Peers, Peer2Regions)> {
         let all_related_regions = self
-            .find_related_regions(&regions)
+            .find_related_regions(regions)
             .await?
             .into_iter()
-            .map(|(k, mut v)| {
+            .flat_map(|(k, mut v)| {
                 v.push(k);
                 v
             })
-            .flatten()
             .collect_vec();
         let mut region_to_peer = HashMap::new();
         let mut peer_to_regions = HashMap::new();
@@ -870,19 +869,19 @@ impl GcScheduler {
 
             // Find the region in the table route
             for region_route in &table_route.region_routes {
-                if region_route.region.id == region_id {
-                    if let Some(leader_peer) = &region_route.leader_peer {
-                        region_to_peer.insert(
-                            region_id,
-                            (leader_peer.clone(), region_route.follower_peers.clone()),
-                        );
-                        peer_to_regions
-                            .entry(leader_peer.clone())
-                            .or_default()
-                            .insert(region_id);
-                        found = true;
-                        break;
-                    }
+                if region_route.region.id == region_id
+                    && let Some(leader_peer) = &region_route.leader_peer
+                {
+                    region_to_peer.insert(
+                        region_id,
+                        (leader_peer.clone(), region_route.follower_peers.clone()),
+                    );
+                    peer_to_regions
+                        .entry(leader_peer.clone())
+                        .or_default()
+                        .insert(region_id);
+                    found = true;
+                    break;
                 }
             }
 

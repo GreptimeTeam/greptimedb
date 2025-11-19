@@ -440,7 +440,6 @@ async fn test_need_retry_regions_exponential_backoff() {
     // Extract the datanode report from the job report
     let report = job_report.per_datanode_reports.get(&peer.id).unwrap();
 
-    dbg!(&report);
     // Verify results
     assert!(report.deleted_files.contains_key(&region_id));
     assert!(report.need_retry_regions.is_empty());
