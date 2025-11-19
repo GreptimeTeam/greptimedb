@@ -212,7 +212,8 @@ impl SchedulerCtx for MockSchedulerCtx {
 
     async fn get_file_references(
         &self,
-        region_ids: &[RegionId],
+        query_regions: &[RegionId],
+        related_regions: HashMap<RegionId, Vec<RegionId>>,
         region_to_peer: &Region2Peers,
         _timeout: Duration,
     ) -> Result<FileRefsManifest> {
@@ -222,14 +223,14 @@ impl SchedulerCtx for MockSchedulerCtx {
         if let Some(error) = self.get_file_references_error.lock().unwrap().take() {
             return Err(error);
         }
-        if region_ids
+        if query_regions
             .iter()
             .any(|region_id| !region_to_peer.contains_key(region_id))
         {
             UnexpectedSnafu {
                 violated: format!(
                     "region_to_peer{region_to_peer:?} does not contain all region_ids requested: {:?}",
-                    region_ids
+                    query_regions
                 ),
             }.fail()?;
         }

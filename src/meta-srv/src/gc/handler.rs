@@ -603,8 +603,10 @@ impl GcScheduler {
 
         let all_region_ids: Vec<RegionId> = candidates.iter().map(|(_, c)| c.region_id).collect();
 
+        let all_related_regions = self.find_related_regions(&all_region_ids).await?;
+
         let (region_to_peer, _) = self
-            .discover_datanodes_for_regions(&all_region_ids, 0)
+            .discover_datanodes_for_regions(&all_related_regions.keys().cloned().collect_vec(), 0)
             .await?;
 
         // Step 1: Get file references for all regions on this datanode
@@ -612,6 +614,7 @@ impl GcScheduler {
             .ctx
             .get_file_references(
                 &all_region_ids,
+                all_related_regions,
                 &region_to_peer,
                 self.config.mailbox_timeout,
             )
@@ -775,7 +778,7 @@ impl GcScheduler {
             // Step 2: Process retry regions by calling gc_regions on rediscovered datanodes (batched)
             let retry_result = self
                 .process_retry_regions_by_peers(region_to_peer, peer_to_regions, retry_round)
-                .await;
+                .await?;
 
             // Merge the retry results into the final report
             final_report.merge(retry_result);
@@ -797,19 +800,29 @@ impl GcScheduler {
         Ok(final_report)
     }
 
-    /// Discover datanodes for the given regions by fetching table routes in batches.
+    /// Discover datanodes for the given regions(and it's related regions) by fetching table routes in batches.
     /// Returns mappings from region to peer(leader, Vec<followers>) and peer to regions.
     async fn discover_datanodes_for_regions(
         &self,
         regions: &[RegionId],
         retry_round: usize,
     ) -> Result<(Region2Peers, Peer2Regions)> {
+        let all_related_regions = self
+            .find_related_regions(&regions)
+            .await?
+            .into_iter()
+            .map(|(k, mut v)| {
+                v.push(k);
+                v
+            })
+            .flatten()
+            .collect_vec();
         let mut region_to_peer = HashMap::new();
         let mut peer_to_regions = HashMap::new();
 
         // Group regions by table ID for batch processing
         let mut table_to_regions: HashMap<TableId, Vec<RegionId>> = HashMap::new();
-        for &region_id in regions {
+        for region_id in all_related_regions {
             let table_id = region_id.table_id();
             table_to_regions
                 .entry(table_id)
@@ -888,7 +901,7 @@ impl GcScheduler {
         region_to_peer: Region2Peers,
         peer_to_regions: Peer2Regions,
         retry_round: usize,
-    ) -> GcJobReport {
+    ) -> Result<GcJobReport> {
         let mut round_report = GcJobReport::default();
 
         for (peer, regions) in peer_to_regions {
@@ -899,17 +912,17 @@ impl GcScheduler {
                 retry_round
             );
 
-            let all_related_regions = self
-                .find_related_regions(&regions.iter().cloned().collect::<Vec<_>>())
-                .await
-                .unwrap_or_default();
+            let query_regions = regions.clone().into_iter().collect::<Vec<_>>();
+
+            let all_related_regions = self.find_related_regions(&query_regions).await?;
 
             // Get fresh file references for these regions
             let file_refs_manifest = match self
                 .ctx
                 .get_file_references(
-                    &all_related_regions,
-                    &region_to_peer,
+                    &query_regions,
+                    all_related_regions,
+                    &region_to_peer, // FIXME: update region_to_peer?
                     self.config.mailbox_timeout,
                 )
                 .await
@@ -944,7 +957,7 @@ impl GcScheduler {
             }
         }
 
-        round_report
+        Ok(round_report)
     }
 
     /// Process a batch of regions on a single peer.
