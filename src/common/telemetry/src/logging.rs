@@ -67,27 +67,18 @@ impl TraceReloadHandle {
         Self { inner }
     }
 
-    pub fn reload(&self, new_layer: Option<OtelTraceLayer>) -> Result<(), TraceReloadError> {
-        let mut guard = self.inner.write().map_err(|_| TraceReloadError)?;
+    pub fn reload(&self, new_layer: Option<OtelTraceLayer>) {
+        let mut guard = self.inner.write().unwrap();
         *guard = new_layer;
         drop(guard);
 
         callsite::rebuild_interest_cache();
-        Ok(())
     }
 }
 
-#[derive(Debug)]
-pub struct TraceReloadError;
-
-impl std::fmt::Display for TraceReloadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "trace reload handle is poisoned")
-    }
-}
-
-impl std::error::Error for TraceReloadError {}
-
+/// A tracing layer that can be dynamically reloaded.
+///
+/// Mostly copied from [`tracing_subscriber::reload::Layer`].
 struct TraceLayer {
     inner: Arc<RwLock<Option<OtelTraceLayer>>>,
 }
