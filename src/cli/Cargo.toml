@@ -67,6 +67,7 @@ tracing-appender.workspace = true
 
 [dev-dependencies]
 common-meta = { workspace = true, features = ["testing"] }
+common-test-util.workspace = true
 common-version.workspace = true
 serde.workspace = true
 tempfile.workspace = true

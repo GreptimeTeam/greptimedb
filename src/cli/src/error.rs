@@ -253,12 +253,6 @@ pub enum Error {
         error: ObjectStoreError,
     },
 
-    #[snafu(display("S3 config need be set"))]
-    S3ConfigNotSet {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Output directory not set"))]
     OutputDirNotSet {
         #[snafu(implicit)]
@@ -364,9 +358,9 @@ impl ErrorExt for Error {
 
             Error::Other { source, .. } => source.status_code(),
             Error::OpenDal { .. } | Error::InitBackend { .. } => StatusCode::Internal,
-            Error::S3ConfigNotSet { .. }
-            | Error::OutputDirNotSet { .. }
-            | Error::EmptyStoreAddrs { .. } => StatusCode::InvalidArguments,
+            Error::OutputDirNotSet { .. } | Error::EmptyStoreAddrs { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             Error::BuildRuntime { source, .. } => source.status_code(),
 
