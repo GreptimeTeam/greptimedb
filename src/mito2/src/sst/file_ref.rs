@@ -81,13 +81,15 @@ impl FileReferenceManager {
     }
 
     /// Gets all ref files for the given regions, meaning all open FileHandles for those regions
-    #[allow(unused)]
+    /// and from related regions' manifests.
     pub(crate) async fn get_snapshot_of_file_refs(
         &self,
-        regions: Vec<MitoRegionRef>,
+        query_regions: Vec<MitoRegionRef>,
+        related_regions: Vec<(MitoRegionRef, Vec<RegionId>)>,
     ) -> Result<FileRefsManifest> {
         let mut ref_files = HashMap::new();
-        for region_id in regions.iter().map(|r| r.region_id()) {
+        // get from in memory file handles
+        for region_id in query_regions.iter().map(|r| r.region_id()) {
             if let Some(files) = self.ref_file_set(region_id) {
                 ref_files.insert(region_id, files.into_iter().map(|f| f.file_id).collect());
             }
@@ -95,10 +97,25 @@ impl FileReferenceManager {
 
         let mut manifest_version = HashMap::new();
 
-        for r in &regions {
+        for r in &query_regions {
             let manifest = r.manifest_ctx.manifest().await;
-            let files = manifest.files.keys().cloned().collect::<Vec<_>>();
             manifest_version.insert(r.region_id(), manifest.manifest_version);
+        }
+
+        // get file refs from related regions' manifests
+        for (related_region, queries) in &related_regions {
+            let queries = queries.iter().cloned().collect::<HashSet<_>>();
+            let manifest = related_region.manifest_ctx.manifest().await;
+            for meta in manifest.files.values() {
+                if queries.contains(&meta.region_id) {
+                    ref_files
+                        .entry(meta.region_id)
+                        .or_insert_with(HashSet::new)
+                        .insert(meta.file_id);
+                }
+            }
+            // not sure if related region's manifest version is needed, but record it for now.
+            manifest_version.insert(related_region.region_id(), manifest.manifest_version);
         }
 
         // simply return all ref files, no manifest version filtering for now.
