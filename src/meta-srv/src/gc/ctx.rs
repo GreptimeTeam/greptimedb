@@ -33,8 +33,7 @@ use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 
 use crate::cluster::MetaPeerClientRef;
-use crate::error;
-use crate::error::{Result, TableMetadataManagerSnafu};
+use crate::error::{self, Result, TableMetadataManagerSnafu, UnexpectedSnafu};
 use crate::gc::Region2Peers;
 use crate::gc::procedure::GcRegionProcedure;
 use crate::handler::HeartbeatMailbox;
@@ -77,6 +76,43 @@ pub(crate) struct DefaultGcSchedulerCtx {
     pub(crate) mailbox: MailboxRef,
     /// The server address.
     pub(crate) server_addr: String,
+}
+
+impl DefaultGcSchedulerCtx {
+    pub fn try_new(
+        table_metadata_manager: TableMetadataManagerRef,
+        procedure_manager: ProcedureManagerRef,
+        meta_peer_client: MetaPeerClientRef,
+        mailbox: MailboxRef,
+        server_addr: String,
+    ) -> Result<Self> {
+        // register a noop loader for `GcRegionProcedure` to avoid error when deserializing procedure when rebooting
+
+        procedure_manager
+            .register_loader(
+                GcRegionProcedure::TYPE_NAME,
+                Box::new(move |json| {
+                    common_procedure::error::ProcedureLoaderNotImplementedSnafu {
+                        type_name: GcRegionProcedure::TYPE_NAME.to_string(),
+                        reason:
+                            "GC procedure should be retried by scheduler, not reloaded from storage"
+                                .to_string(),
+                    }
+                    .fail()
+                }),
+            )
+            .context(error::RegisterProcedureLoaderSnafu {
+                type_name: GcRegionProcedure::TYPE_NAME,
+            });
+
+        Ok(Self {
+            table_metadata_manager,
+            procedure_manager,
+            meta_peer_client,
+            mailbox,
+            server_addr,
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -260,6 +296,8 @@ impl DefaultGcSchedulerCtx {
         Ok(gc_report)
     }
 
+    /// TODO(discord9): add support to read manifest of related regions for file refs too
+    /// (now it's only reading  active FileHandles)
     async fn send_get_file_refs_instruction(
         &self,
         peer: &Peer,

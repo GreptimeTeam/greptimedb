@@ -51,7 +51,7 @@ pub struct GcRegionData {
 }
 
 impl GcRegionProcedure {
-    const TYPE_NAME: &'static str = "metasrv-procedure::GcRegionProcedure";
+    pub const TYPE_NAME: &'static str = "metasrv-procedure::GcRegionProcedure";
 
     pub fn new(
         mailbox: MailboxRef,
@@ -176,7 +176,7 @@ impl Procedure for GcRegionProcedure {
             .regions
             .iter()
             .sorted() // sort to have a deterministic lock order
-            .map(|id| RegionLock::Write(*id).into())
+            .map(|id| RegionLock::Read(*id).into())
             .collect();
 
         LockKey::new(lock_key)
