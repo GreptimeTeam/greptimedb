@@ -5,23 +5,23 @@
 * @GreptimeTeam/db-approver
 
 ## [Module] Database Engine
-/src/index @zhongzc
+/src/index @evenyag @discord9 @WenyXu 
 /src/mito2 @evenyag @v0y4g3r @waynexia
-/src/query @evenyag
+/src/query @evenyag @waynexia @discord9
 
 ## [Module] Distributed
-/src/common/meta @MichaelScofield
-/src/common/procedure @MichaelScofield
-/src/meta-client @MichaelScofield
-/src/meta-srv @MichaelScofield
+/src/common/meta @MichaelScofield @WenyXu
+/src/common/procedure @MichaelScofield @WenyXu
+/src/meta-client @MichaelScofield @WenyXu
+/src/meta-srv @MichaelScofield @WenyXu
 
 ## [Module] Write Ahead Log
-/src/log-store @v0y4g3r
-/src/store-api @v0y4g3r
+/src/log-store @v0y4g3r @WenyXu
+/src/store-api @v0y4g3r @evenyag
 
 ## [Module] Metrics Engine
-/src/metric-engine @waynexia
-/src/promql @waynexia
+/src/metric-engine @waynexia @WenyXu
+/src/promql @waynexia @evenyag @discord9
 
 ## [Module] Flow
-/src/flow @zhongzc @waynexia
+/src/flow @discord9 @waynexia

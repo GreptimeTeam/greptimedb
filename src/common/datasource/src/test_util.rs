@@ -28,7 +28,7 @@ use object_store::ObjectStore;
 use object_store::services::Fs;
 
 use crate::file_format::csv::{CsvFormat, stream_to_csv};
-use crate::file_format::json::stream_to_json;
+use crate::file_format::json::{JsonFormat, stream_to_json};
 use crate::test_util;
 
 pub const TEST_BATCH_SIZE: usize = 100;
@@ -122,13 +122,16 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
 
     let output_path = format!("{}/{}", dir.path().display(), "output");
 
+    let json_format = JsonFormat::default();
+
     assert!(
         stream_to_json(
             Box::pin(stream),
             tmp_store.clone(),
             &output_path,
             threshold(size),
-            8
+            8,
+            &json_format,
         )
         .await
         .is_ok()
