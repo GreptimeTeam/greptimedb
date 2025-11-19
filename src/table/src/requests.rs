@@ -19,6 +19,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use common_base::readable_size::ReadableSize;
+use common_datasource::object_store::gcs::is_supported_in_gcs;
 use common_datasource::object_store::oss::is_supported_in_oss;
 use common_datasource::object_store::s3::is_supported_in_s3;
 use common_query::AddColumnLocation;
@@ -104,6 +105,10 @@ pub fn validate_table_option(key: &str) -> bool {
     }
 
     if is_supported_in_oss(key) {
+        return true;
+    }
+
+    if is_supported_in_gcs(key) {
         return true;
     }
 
