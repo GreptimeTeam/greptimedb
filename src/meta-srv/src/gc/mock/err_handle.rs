@@ -269,7 +269,7 @@ async fn test_get_table_route_failure() {
     let report = scheduler
         .process_datanodes_with_retry(datanode_to_candidates)
         .await;
-    dbg!(&report);
+
     // Should process the datanode but handle route error gracefully
     assert_eq!(
         report.per_datanode_reports.len(),
