@@ -290,7 +290,7 @@ impl MitoEngine {
     }
 
     /// Get all tmp ref files for given region ids, excluding files that's already in manifest.
-    pub async fn get_snapshot_of_unmanifested_refs(
+    pub async fn get_snapshot_of_file_refs(
         &self,
         region_ids: impl IntoIterator<Item = RegionId>,
     ) -> Result<FileRefsManifest> {
@@ -304,9 +304,7 @@ impl MitoEngine {
             .filter_map(|region_id| self.find_region(region_id))
             .collect();
 
-        file_ref_mgr
-            .get_snapshot_of_unmanifested_refs(regions)
-            .await
+        file_ref_mgr.get_snapshot_of_file_refs(regions).await
     }
 
     /// Returns true if the specific region exists.

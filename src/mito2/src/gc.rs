@@ -263,6 +263,7 @@ impl LocalGcWorker {
         let mut deleted_files = HashMap::new();
         let tmp_ref_files = self.read_tmp_ref_files(&mut outdated_regions).await?;
         for (region_id, region) in &self.regions {
+            let per_region_time = std::time::Instant::now();
             if region.manifest_ctx.current_state() == RegionRoleState::Follower {
                 return UnexpectedSnafu {
                     reason: format!(
@@ -278,10 +279,15 @@ impl LocalGcWorker {
                 .unwrap_or_else(HashSet::new);
             let files = self.do_region_gc(region.clone(), &tmp_ref_files).await?;
             deleted_files.insert(*region_id, files);
+            debug!(
+                "GC for region {} took {} secs.",
+                region_id,
+                per_region_time.elapsed().as_secs_f32()
+            );
         }
         info!(
             "LocalGcWorker finished after {} secs.",
-            now.elapsed().as_secs()
+            now.elapsed().as_secs_f32()
         );
         let report = GcReport {
             deleted_files,
@@ -323,31 +329,34 @@ impl LocalGcWorker {
             debug!("No recently removed files to gc for region {}", region_id);
         }
 
-        debug!(
-            "Found {} recently removed files sets for region {}",
-            recently_removed_files.len(),
-            region_id
-        );
+        let removed_file_cnt = recently_removed_files
+            .values()
+            .map(|s| s.len())
+            .sum::<usize>();
 
         let concurrency = (current_files.len() / Self::CONCURRENCY_LIST_PER_FILES)
             .max(1)
             .min(self.opt.max_concurrent_lister_per_gc_job);
 
-        let in_used = current_files
+        let in_used: HashSet<FileId> = current_files
             .keys()
             .cloned()
             .chain(tmp_ref_files.clone().into_iter())
             .collect();
 
         let unused_files = self
-            .list_to_be_deleted_files(region_id, in_used, recently_removed_files, concurrency)
+            .list_to_be_deleted_files(region_id, &in_used, recently_removed_files, concurrency)
             .await?;
 
-        let unused_len = unused_files.len();
+        let unused_file_cnt = unused_files.len();
 
         debug!(
-            "Found {} unused files to delete for region {}",
-            unused_len, region_id
+            "gc: for region {region_id}: In manifest files: {}, Tmp ref file cnt: {}, In-used files: {}, recently removed files: {}, Unused files to delete: {} ",
+            current_files.len(),
+            tmp_ref_files.len(),
+            in_used.len(),
+            removed_file_cnt,
+            unused_files.len()
         );
 
         // TODO(discord9): for now, ignore async index file as it's design is not stable, need to be improved once
@@ -357,7 +366,7 @@ impl LocalGcWorker {
             .map(|file_id| (*file_id, *file_id))
             .collect();
 
-        info!(
+        debug!(
             "Found {} unused index files to delete for region {}",
             file_pairs.len(),
             region_id
@@ -367,7 +376,7 @@ impl LocalGcWorker {
 
         debug!(
             "Successfully deleted {} unused files for region {}",
-            unused_len, region_id
+            unused_file_cnt, region_id
         );
         // TODO(discord9): update region manifest about deleted files
         self.update_manifest_removed_files(&region, unused_files.clone())
@@ -398,8 +407,9 @@ impl LocalGcWorker {
         region: &MitoRegionRef,
         deleted_files: Vec<FileId>,
     ) -> Result<()> {
+        let deleted_file_cnt = deleted_files.len();
         debug!(
-            "Trying to update manifest removed files for region {}",
+            "Trying to update manifest for {deleted_file_cnt} removed files for region {}",
             region.region_id()
         );
 
@@ -592,7 +602,7 @@ impl LocalGcWorker {
     pub async fn list_to_be_deleted_files(
         &self,
         region_id: RegionId,
-        in_used: HashSet<FileId>,
+        in_used: &HashSet<FileId>,
         recently_removed_files: BTreeMap<Timestamp, HashSet<FileId>>,
         concurrency: usize,
     ) -> Result<Vec<FileId>> {

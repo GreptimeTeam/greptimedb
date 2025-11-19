@@ -246,6 +246,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Loader for {type_name} is not implemented: {reason}"))]
+    ProcedureLoaderNotImplemented {
+        #[snafu(implicit)]
+        location: Location,
+        type_name: String,
+        reason: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -266,7 +274,8 @@ impl ErrorExt for Error {
             Error::ToJson { .. }
             | Error::DeleteState { .. }
             | Error::FromJson { .. }
-            | Error::WaitWatcher { .. } => StatusCode::Internal,
+            | Error::WaitWatcher { .. }
+            | Error::ProcedureLoaderNotImplemented { .. } => StatusCode::Internal,
 
             Error::RetryTimesExceeded { .. }
             | Error::RollbackTimesExceeded { .. }
