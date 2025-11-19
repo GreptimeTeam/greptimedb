@@ -70,6 +70,38 @@ wrap_with_clap_prefix! {
     }
 }
 
+impl PrefixedAzblobConnection {
+    /// Get the container name.
+    pub fn container(&self) -> &str {
+        &self.azblob_container
+    }
+
+    /// Get the root path.
+    pub fn root(&self) -> &str {
+        &self.azblob_root
+    }
+
+    /// Get the account name.
+    pub fn account_name(&self) -> &SecretString {
+        &self.azblob_account_name
+    }
+
+    /// Get the account key.
+    pub fn account_key(&self) -> &SecretString {
+        &self.azblob_account_key
+    }
+
+    /// Get the endpoint.
+    pub fn endpoint(&self) -> &str {
+        &self.azblob_endpoint
+    }
+
+    /// Get the SAS token.
+    pub fn sas_token(&self) -> Option<&String> {
+        self.azblob_sas_token.as_ref()
+    }
+}
+
 wrap_with_clap_prefix! {
     PrefixedS3Connection,
     "s3-",
@@ -92,6 +124,43 @@ wrap_with_clap_prefix! {
     }
 }
 
+impl PrefixedS3Connection {
+    /// Get the bucket name.
+    pub fn bucket(&self) -> &str {
+        &self.s3_bucket
+    }
+
+    /// Get the root path.
+    pub fn root(&self) -> &str {
+        &self.s3_root
+    }
+
+    /// Get the access key ID.
+    pub fn access_key_id(&self) -> &SecretString {
+        &self.s3_access_key_id
+    }
+
+    /// Get the secret access key.
+    pub fn secret_access_key(&self) -> &SecretString {
+        &self.s3_secret_access_key
+    }
+
+    /// Get the endpoint.
+    pub fn endpoint(&self) -> Option<&String> {
+        self.s3_endpoint.as_ref()
+    }
+
+    /// Get the region.
+    pub fn region(&self) -> Option<&String> {
+        self.s3_region.as_ref()
+    }
+
+    /// Check if virtual host style is enabled.
+    pub fn enable_virtual_host_style(&self) -> bool {
+        self.s3_enable_virtual_host_style
+    }
+}
+
 wrap_with_clap_prefix! {
     PrefixedOssConnection,
     "oss-",
@@ -107,6 +176,33 @@ wrap_with_clap_prefix! {
         access_key_secret: SecretString = Default::default(),
         #[doc = "The endpoint of the object store."]
         endpoint: String = Default::default(),
+    }
+}
+
+impl PrefixedOssConnection {
+    /// Get the bucket name.
+    pub fn bucket(&self) -> &str {
+        &self.oss_bucket
+    }
+
+    /// Get the root path.
+    pub fn root(&self) -> &str {
+        &self.oss_root
+    }
+
+    /// Get the access key ID.
+    pub fn access_key_id(&self) -> &SecretString {
+        &self.oss_access_key_id
+    }
+
+    /// Get the access key secret.
+    pub fn access_key_secret(&self) -> &SecretString {
+        &self.oss_access_key_secret
+    }
+
+    /// Get the endpoint.
+    pub fn endpoint(&self) -> &str {
+        &self.oss_endpoint
     }
 }
 
@@ -127,6 +223,38 @@ wrap_with_clap_prefix! {
         credential: SecretString = Default::default(),
         #[doc = "The endpoint of the object store."]
         endpoint: String = Default::default(),
+    }
+}
+
+impl PrefixedGcsConnection {
+    /// Get the bucket name.
+    pub fn bucket(&self) -> &str {
+        &self.gcs_bucket
+    }
+
+    /// Get the root path.
+    pub fn root(&self) -> &str {
+        &self.gcs_root
+    }
+
+    /// Get the scope.
+    pub fn scope(&self) -> &str {
+        &self.gcs_scope
+    }
+
+    /// Get the credential path.
+    pub fn credential_path(&self) -> &SecretString {
+        &self.gcs_credential_path
+    }
+
+    /// Get the credential.
+    pub fn credential(&self) -> &SecretString {
+        &self.gcs_credential
+    }
+
+    /// Get the endpoint.
+    pub fn endpoint(&self) -> &str {
+        &self.gcs_endpoint
     }
 }
 
@@ -174,51 +302,74 @@ pub fn new_fs_object_store(root: &str) -> std::result::Result<ObjectStore, Boxed
 }
 
 impl ObjectStoreConfig {
+    /// Builds the object store with S3.
+    pub fn build_s3(&self) -> Result<ObjectStore, BoxedError> {
+        let s3 = S3Connection::from(self.s3.clone());
+        common_telemetry::info!("Building object store with s3: {:?}", s3);
+        let object_store = ObjectStore::new(S3::from(&s3))
+            .context(error::InitBackendSnafu)
+            .map_err(BoxedError::new)?
+            .finish();
+        Ok(with_instrument_layers(
+            with_retry_layers(object_store),
+            false,
+        ))
+    }
+
+    /// Builds the object store with OSS.
+    pub fn build_oss(&self) -> Result<ObjectStore, BoxedError> {
+        let oss = OssConnection::from(self.oss.clone());
+        common_telemetry::info!("Building object store with oss: {:?}", oss);
+        let object_store = ObjectStore::new(Oss::from(&oss))
+            .context(error::InitBackendSnafu)
+            .map_err(BoxedError::new)?
+            .finish();
+        Ok(with_instrument_layers(
+            with_retry_layers(object_store),
+            false,
+        ))
+    }
+
+    /// Builds the object store with GCS.
+    pub fn build_gcs(&self) -> Result<ObjectStore, BoxedError> {
+        let gcs = GcsConnection::from(self.gcs.clone());
+        common_telemetry::info!("Building object store with gcs: {:?}", gcs);
+        let object_store = ObjectStore::new(Gcs::from(&gcs))
+            .context(error::InitBackendSnafu)
+            .map_err(BoxedError::new)?
+            .finish();
+        Ok(with_instrument_layers(
+            with_retry_layers(object_store),
+            false,
+        ))
+    }
+
+    /// Builds the object store with Azure Blob.
+    pub fn build_azblob(&self) -> Result<ObjectStore, BoxedError> {
+        let azblob = AzblobConnection::from(self.azblob.clone());
+        common_telemetry::info!("Building object store with azblob: {:?}", azblob);
+        let object_store = ObjectStore::new(Azblob::from(&azblob))
+            .context(error::InitBackendSnafu)
+            .map_err(BoxedError::new)?
+            .finish();
+        Ok(with_instrument_layers(
+            with_retry_layers(object_store),
+            false,
+        ))
+    }
+
     /// Builds the object store from the config.
     pub fn build(&self) -> Result<Option<ObjectStore>, BoxedError> {
-        let object_store = if self.enable_s3 {
-            let s3 = S3Connection::from(self.s3.clone());
-            common_telemetry::info!("Building object store with s3: {:?}", s3);
-            Some(
-                ObjectStore::new(S3::from(&s3))
-                    .context(error::InitBackendSnafu)
-                    .map_err(BoxedError::new)?
-                    .finish(),
-            )
+        if self.enable_s3 {
+            self.build_s3().map(Some)
         } else if self.enable_oss {
-            let oss = OssConnection::from(self.oss.clone());
-            common_telemetry::info!("Building object store with oss: {:?}", oss);
-            Some(
-                ObjectStore::new(Oss::from(&oss))
-                    .context(error::InitBackendSnafu)
-                    .map_err(BoxedError::new)?
-                    .finish(),
-            )
+            self.build_oss().map(Some)
         } else if self.enable_gcs {
-            let gcs = GcsConnection::from(self.gcs.clone());
-            common_telemetry::info!("Building object store with gcs: {:?}", gcs);
-            Some(
-                ObjectStore::new(Gcs::from(&gcs))
-                    .context(error::InitBackendSnafu)
-                    .map_err(BoxedError::new)?
-                    .finish(),
-            )
+            self.build_gcs().map(Some)
         } else if self.enable_azblob {
-            let azblob = AzblobConnection::from(self.azblob.clone());
-            common_telemetry::info!("Building object store with azblob: {:?}", azblob);
-            Some(
-                ObjectStore::new(Azblob::from(&azblob))
-                    .context(error::InitBackendSnafu)
-                    .map_err(BoxedError::new)?
-                    .finish(),
-            )
+            self.build_azblob().map(Some)
         } else {
-            None
-        };
-
-        let object_store = object_store
-            .map(|object_store| with_instrument_layers(with_retry_layers(object_store), false));
-
-        Ok(object_store)
+            Ok(None)
+        }
     }
 }

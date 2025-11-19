@@ -48,7 +48,11 @@ impl From<String> for SecretString {
 
 impl Display for SecretString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SecretString([REDACTED])")
+        if self.expose_secret().is_empty() {
+            write!(f, "")
+        } else {
+            write!(f, "SecretString([REDACTED])")
+        }
     }
 }
 
