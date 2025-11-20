@@ -122,7 +122,8 @@ impl GcScheduler {
             })
             .or_insert_with(|| RegionGcInfo {
                 last_gc_time: now,
-                last_full_listing_time: if did_full_listing { Some(now) } else { None },
+                // prevent need to full listing on the first GC
+                last_full_listing_time: Some(now),
             });
     }
 }

@@ -334,17 +334,8 @@ impl GcScheduler {
 
         // Step 3: Process the combined GC report and update table reports
         for region_id in &all_region_ids {
-            // Update GC tracker for successful regions
-            let mut gc_tracker = self.region_gc_tracker.lock().await;
-            let now = Instant::now();
-            let gc_info = gc_tracker
-                .entry(*region_id)
-                .or_insert_with(|| RegionGcInfo::new(now));
-            gc_info.last_gc_time = now;
-            // notice need to set last_full_listing_time if full listing was used
-            if fully_listed_regions.contains(region_id) {
-                gc_info.last_full_listing_time = Some(now);
-            }
+            self.update_full_listing_time(*region_id, fully_listed_regions.contains(region_id))
+                .await;
         }
 
         info!(
