@@ -67,7 +67,7 @@ impl GcScheduler {
 
         // Step 4: Process datanodes concurrently with limited parallelism
         let report = self
-            .process_datanodes_with_retry(datanode_to_candidates)
+            .parallel_process_datanodes(datanode_to_candidates)
             .await;
 
         let duration = start_time.elapsed();
@@ -146,7 +146,7 @@ impl GcScheduler {
     }
 
     /// Process multiple datanodes concurrently with limited parallelism.
-    pub(crate) async fn process_datanodes_with_retry(
+    pub(crate) async fn parallel_process_datanodes(
         &self,
         datanode_to_candidates: HashMap<Peer, Vec<(TableId, GcCandidate)>>,
     ) -> GcJobReport {
@@ -183,33 +183,6 @@ impl GcScheduler {
                     // Note: We don't have a direct way to map peer to table_id here,
                     // so we just log the error. The table_reports will contain individual region failures.
                     report.failed_datanodes.entry(peer.id).or_default().push(e);
-                }
-            }
-        }
-
-        // Collect all regions that need retry from the table reports
-        let all_need_retry_regions: Vec<RegionId> = report
-            .per_datanode_reports
-            .iter()
-            .flat_map(|(_, report)| report.need_retry_regions.iter().copied())
-            .collect();
-
-        // Handle regions that need retry due to migration
-        // These regions should be rediscovered and retried in the current GC cycle
-        if !all_need_retry_regions.is_empty() {
-            info!(
-                "Found {} regions that need retry due to migration or outdated file references",
-                all_need_retry_regions.len()
-            );
-
-            // Retry these regions by rediscovering their current datanodes
-            match self
-                .retry_regions_with_rediscovery(&all_need_retry_regions)
-                .await
-            {
-                Ok(retry_report) => report.merge(retry_report),
-                Err(e) => {
-                    error!("Failed to retry regions: {}", e);
                 }
             }
         }
@@ -270,34 +243,7 @@ impl GcScheduler {
 
             let mut combined_report = GcReport::default();
 
-            // First process regions that need full listing
-            if !need_full_list_regions.is_empty() {
-                match self
-                    .ctx
-                    .gc_regions(
-                        peer.clone(),
-                        &need_full_list_regions,
-                        &file_refs_manifest,
-                        true,
-                        self.config.mailbox_timeout,
-                    )
-                    .await
-                {
-                    Ok(report) => combined_report.merge(report),
-                    Err(e) => {
-                        error!(
-                            "Failed to GC regions {:?} on datanode {}: {}",
-                            need_full_list_regions, peer, e
-                        );
-
-                        // Add to need_retry_regions since it failed
-                        combined_report
-                            .need_retry_regions
-                            .extend(need_full_list_regions.clone());
-                    }
-                }
-            }
-
+            // First process regions that can fast list
             if !fast_list_regions.is_empty() {
                 match self
                     .ctx
@@ -324,6 +270,33 @@ impl GcScheduler {
                     }
                 }
             }
+
+            if !need_full_list_regions.is_empty() {
+                match self
+                    .ctx
+                    .gc_regions(
+                        peer.clone(),
+                        &need_full_list_regions,
+                        &file_refs_manifest,
+                        true,
+                        self.config.mailbox_timeout,
+                    )
+                    .await
+                {
+                    Ok(report) => combined_report.merge(report),
+                    Err(e) => {
+                        error!(
+                            "Failed to GC regions {:?} on datanode {}: {}",
+                            need_full_list_regions, peer, e
+                        );
+
+                        // Add to need_retry_regions since it failed
+                        combined_report
+                            .need_retry_regions
+                            .extend(need_full_list_regions.clone());
+                    }
+                }
+            }
             let fully_listed_regions = need_full_list_regions
                 .into_iter()
                 .filter(|r| !combined_report.need_retry_regions.contains(r))
@@ -345,83 +318,6 @@ impl GcScheduler {
         );
 
         Ok(gc_report)
-    }
-
-    /// Retry regions that need retry by rediscovering their current datanodes.
-    /// This handles cases where regions have migrated to different datanodes.
-    async fn retry_regions_with_rediscovery(
-        &self,
-        retry_regions: &[RegionId],
-    ) -> Result<GcJobReport> {
-        info!(
-            "Rediscovering datanodes for {} regions that need retry",
-            retry_regions.len()
-        );
-
-        let mut current_retry_regions: Vec<RegionId> = retry_regions.to_vec();
-        let mut final_report = GcJobReport::default();
-        let mut retry_round = 0;
-
-        // Continue retrying until all regions succeed or reach max retry limit
-        while !current_retry_regions.is_empty() && retry_round < self.config.max_retries_per_region
-        {
-            // Apply exponential backoff if there are still regions to retry
-            if !current_retry_regions.is_empty() && retry_round < self.config.max_retries_per_region
-            {
-                self.apply_retry_backoff(current_retry_regions.len(), retry_round)
-                    .await;
-            }
-            retry_round += 1;
-
-            info!(
-                "Starting retry round {}/{} for {} regions",
-                retry_round,
-                self.config.max_retries_per_region,
-                current_retry_regions.len()
-            );
-
-            // Step 1: Rediscover current datanodes for retry regions (batched for efficiency)
-            let (region_to_peer, peer_to_regions) = self
-                .discover_datanodes_for_regions(&current_retry_regions, retry_round)
-                .await?;
-
-            if peer_to_regions.is_empty() {
-                warn!(
-                    "No valid datanodes found for retry regions in round {}",
-                    retry_round
-                );
-                break;
-            }
-
-            info!(
-                "Rediscovered {} datanodes for retry regions in round {}",
-                peer_to_regions.len(),
-                retry_round
-            );
-
-            // Step 2: Process retry regions by calling gc_regions on rediscovered datanodes (batched)
-            let retry_result = self
-                .process_retry_regions_by_peers(region_to_peer, peer_to_regions, retry_round)
-                .await?;
-
-            // Merge the retry results into the final report
-            final_report.merge(retry_result);
-
-            // Update the list of regions that still need retry
-            current_retry_regions = final_report
-                .per_datanode_reports
-                .values()
-                .flat_map(|r| r.need_retry_regions.iter().copied())
-                .collect();
-        }
-
-        info!(
-            "Completed retry processing: {} rounds, {} regions processed",
-            retry_round,
-            retry_regions.len() - current_retry_regions.len()
-        );
-
-        Ok(final_report)
     }
 
     /// Discover datanodes for the given regions(and it's related regions) by fetching table routes in batches.
@@ -518,73 +414,6 @@ impl GcScheduler {
         }
     }
 
-    /// Process retry regions by sending batched GC requests to their respective datanodes.
-    ///
-    /// TODO(discord9): retry only happens when i.e. follower manifest haven't updated, maybe consider just not retrying those regions here and do it all in next gc run, could be simpler.
-    async fn process_retry_regions_by_peers(
-        &self,
-        region_to_peer: Region2Peers,
-        peer_to_regions: Peer2Regions,
-        retry_round: usize,
-    ) -> Result<GcJobReport> {
-        let mut round_report = GcJobReport::default();
-
-        for (peer, regions) in peer_to_regions {
-            info!(
-                "Retrying GC for {} regions on datanode {} in round {}",
-                regions.len(),
-                peer,
-                retry_round
-            );
-
-            let query_regions = regions.clone().into_iter().collect::<Vec<_>>();
-
-            let all_related_regions = self.find_related_regions(&query_regions).await?;
-
-            // Get fresh file references for these regions
-            let file_refs_manifest = match self
-                .ctx
-                .get_file_references(
-                    &query_regions,
-                    all_related_regions,
-                    &region_to_peer, // FIXME: update region_to_peer?
-                    self.config.mailbox_timeout,
-                )
-                .await
-            {
-                Ok(manifest) => manifest,
-                Err(e) => {
-                    error!(
-                        "Failed to get file references for retry regions on datanode {} in round {}: {}",
-                        peer, retry_round, e
-                    );
-                    continue;
-                }
-            };
-
-            // Process all regions on this datanode in a single batch
-            let peer_report = self
-                .process_regions_batch_on_peer(
-                    peer.clone(),
-                    regions,
-                    file_refs_manifest,
-                    retry_round,
-                )
-                .await;
-
-            // Merge the peer's report into the round report
-            if let Some(report) = peer_report {
-                round_report
-                    .per_datanode_reports
-                    .entry(peer.id)
-                    .or_default()
-                    .merge(report);
-            }
-        }
-
-        Ok(round_report)
-    }
-
     /// Process a batch of regions on a single peer.
     async fn process_regions_batch_on_peer(
         &self,
@@ -656,22 +485,5 @@ impl GcScheduler {
             }
         }
         false
-    }
-
-    /// Apply exponential backoff before the next retry round.
-    async fn apply_retry_backoff(&self, remaining_regions: usize, retry_round: usize) {
-        // Calculate exponential backoff: base_duration * 2^(retry_round - 1)
-        let backoff_multiplier = 2_u32.pow(retry_round.saturating_sub(1) as u32);
-        let backoff_duration = self.config.retry_backoff_duration * backoff_multiplier;
-
-        info!(
-            "{} regions still need retry after round {}, waiting {} seconds before next round (exponential backoff)",
-            remaining_regions,
-            retry_round,
-            backoff_duration.as_secs_f32()
-        );
-
-        // Wait for backoff period before next retry round
-        sleep(backoff_duration).await;
     }
 }
