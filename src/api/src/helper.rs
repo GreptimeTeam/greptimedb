@@ -345,7 +345,16 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
     type Error = error::Error;
 
     fn try_from(datatype: ConcreteDataType) -> Result<Self> {
-        let column_datatype = match datatype {
+        // Dictionary encoding is a physical detail, so use its value type as the logical column type.
+        let datatype_ref = match &datatype {
+            ConcreteDataType::Dictionary(dict_type) => dict_type.value_type(),
+            _ => &datatype,
+        };
+
+        let column_datatype = match datatype_ref {
+            ConcreteDataType::Dictionary(dict_type) => {
+                return ColumnDataTypeWrapper::try_from(dict_type.value_type().clone());
+            }
             ConcreteDataType::Boolean(_) => ColumnDataType::Boolean,
             ConcreteDataType::Int8(_) => ColumnDataType::Int8,
             ConcreteDataType::Int16(_) => ColumnDataType::Int16,
@@ -382,15 +391,16 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::Vector(_) => ColumnDataType::Vector,
             ConcreteDataType::List(_) => ColumnDataType::List,
             ConcreteDataType::Struct(_) => ColumnDataType::Struct,
-            ConcreteDataType::Null(_)
-            | ConcreteDataType::Dictionary(_)
-            | ConcreteDataType::Duration(_) => {
-                return error::IntoColumnDataTypeSnafu { from: datatype }.fail();
+            ConcreteDataType::Null(_) | ConcreteDataType::Duration(_) => {
+                return error::IntoColumnDataTypeSnafu {
+                    from: datatype_ref.clone(),
+                }
+                .fail();
             }
         };
         let datatype_extension = match column_datatype {
             ColumnDataType::Decimal128 => {
-                datatype
+                datatype_ref
                     .as_decimal128()
                     .map(|decimal_type| ColumnDataTypeExtension {
                         type_ext: Some(TypeExt::DecimalType(DecimalTypeExtension {
@@ -400,7 +410,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                     })
             }
             ColumnDataType::Json => {
-                if let Some(json_type) = datatype.as_json() {
+                if let Some(json_type) = datatype_ref.as_json() {
                     match &json_type.format {
                         JsonFormat::Jsonb => Some(ColumnDataTypeExtension {
                             type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
@@ -422,7 +432,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 }
             }
             ColumnDataType::Vector => {
-                datatype
+                datatype_ref
                     .as_vector()
                     .map(|vector_type| ColumnDataTypeExtension {
                         type_ext: Some(TypeExt::VectorType(VectorTypeExtension {
@@ -431,7 +441,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                     })
             }
             ColumnDataType::List => {
-                if let Some(list_type) = datatype.as_list() {
+                if let Some(list_type) = datatype_ref.as_list() {
                     let list_item_type =
                         ColumnDataTypeWrapper::try_from(list_type.item_type().clone())?;
                     Some(ColumnDataTypeExtension {
@@ -445,7 +455,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 }
             }
             ColumnDataType::Struct => {
-                if let Some(struct_type) = datatype.as_struct() {
+                if let Some(struct_type) = datatype_ref.as_struct() {
                     let mut fields = Vec::with_capacity(struct_type.fields().len());
                     for field in struct_type.fields().iter() {
                         let field_type =
@@ -1665,6 +1675,26 @@ mod tests {
             ))
             .try_into()
             .expect("failed to convert json type")
+        );
+
+        assert_eq!(
+            ColumnDataTypeWrapper::binary_datatype(),
+            ConcreteDataType::dictionary_datatype(
+                ConcreteDataType::uint32_datatype(),
+                ConcreteDataType::binary_datatype()
+            )
+            .try_into()
+            .unwrap()
+        );
+
+        assert_eq!(
+            ColumnDataTypeWrapper::decimal128_datatype(10, 2),
+            ConcreteDataType::dictionary_datatype(
+                ConcreteDataType::uint8_datatype(),
+                ConcreteDataType::decimal128_datatype(10, 2)
+            )
+            .try_into()
+            .unwrap()
         );
     }
 
