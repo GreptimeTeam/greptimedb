@@ -14,12 +14,13 @@
 
 use core::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use api::v1::index::InvertedIndexMetas;
 use async_trait::async_trait;
 use bytes::Bytes;
 use index::inverted_index::error::Result;
-use index::inverted_index::format::reader::InvertedIndexReader;
+use index::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
 use prost::Message;
 use store_api::storage::FileId;
 
@@ -83,20 +84,42 @@ impl<R> CachedInvertedIndexBlobReader<R> {
 
 #[async_trait]
 impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobReader<R> {
-    async fn range_read(&self, offset: u64, size: u32) -> Result<Vec<u8>> {
+    async fn range_read<'a>(
+        &self,
+        offset: u64,
+        size: u32,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Vec<u8>> {
+        let start = metrics.as_ref().map(|_| Instant::now());
+
         let inner = &self.inner;
-        self.cache
+        let result = self
+            .cache
             .get_or_load(
                 self.file_id,
                 self.blob_size,
                 offset,
                 size,
-                move |ranges| async move { inner.read_vec(&ranges).await },
+                move |ranges| async move { inner.read_vec(&ranges, None).await },
             )
-            .await
+            .await?;
+
+        if let Some(m) = metrics {
+            m.total_bytes += size as u64;
+            m.total_ranges += 1;
+            m.elapsed += start.unwrap().elapsed();
+        }
+
+        Ok(result)
     }
 
-    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn read_vec<'a>(
+        &self,
+        ranges: &[Range<u64>],
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Vec<Bytes>> {
+        let start = metrics.as_ref().map(|_| Instant::now());
+
         let mut pages = Vec::with_capacity(ranges.len());
         for range in ranges {
             let inner = &self.inner;
@@ -107,11 +130,17 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
                     self.blob_size,
                     range.start,
                     (range.end - range.start) as u32,
-                    move |ranges| async move { inner.read_vec(&ranges).await },
+                    move |ranges| async move { inner.read_vec(&ranges, None).await },
                 )
                 .await?;
 
             pages.push(Bytes::from(page));
+        }
+
+        if let Some(m) = metrics {
+            m.total_bytes += ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+            m.total_ranges += ranges.len();
+            m.elapsed += start.unwrap().elapsed();
         }
 
         Ok(pages)
@@ -292,13 +321,19 @@ mod test {
             .fst(
                 tag0.base_offset + tag0.relative_fst_offset as u64,
                 tag0.fst_size,
+                None,
             )
             .await
             .unwrap();
         assert_eq!(fst0.len(), 3);
         let [offset, size] = unpack(fst0.get(b"a").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag0.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -307,7 +342,12 @@ mod test {
         );
         let [offset, size] = unpack(fst0.get(b"b").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag0.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -316,7 +356,12 @@ mod test {
         );
         let [offset, size] = unpack(fst0.get(b"c").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag0.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -335,13 +380,19 @@ mod test {
             .fst(
                 tag1.base_offset + tag1.relative_fst_offset as u64,
                 tag1.fst_size,
+                None,
             )
             .await
             .unwrap();
         assert_eq!(fst1.len(), 3);
         let [offset, size] = unpack(fst1.get(b"x").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag1.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -350,7 +401,12 @@ mod test {
         );
         let [offset, size] = unpack(fst1.get(b"y").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag1.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -359,7 +415,12 @@ mod test {
         );
         let [offset, size] = unpack(fst1.get(b"z").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag1.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -372,7 +433,7 @@ mod test {
         for _ in 0..FUZZ_REPEAT_TIMES {
             let offset = rng.random_range(0..file_size);
             let size = rng.random_range(0..file_size as u32 - offset as u32);
-            let expected = cached_reader.range_read(offset, size).await.unwrap();
+            let expected = cached_reader.range_read(offset, size, None).await.unwrap();
             let inner = &cached_reader.inner;
             let read = cached_reader
                 .cache
@@ -381,7 +442,7 @@ mod test {
                     file_size,
                     offset,
                     size,
-                    |ranges| async move { inner.read_vec(&ranges).await },
+                    |ranges| async move { inner.read_vec(&ranges, None).await },
                 )
                 .await
                 .unwrap();

@@ -154,7 +154,13 @@ impl FulltextIndexApplier {
             }
 
             let Some(result) = self
-                .apply_fine_one_column(file_size_hint, file_id, *column_id, request, metrics.as_deref_mut())
+                .apply_fine_one_column(
+                    file_size_hint,
+                    file_id,
+                    *column_id,
+                    request,
+                    metrics.as_deref_mut(),
+                )
                 .await?
             else {
                 continue;
@@ -374,6 +380,7 @@ impl FulltextIndexApplier {
                 continue;
             }
 
+            // TODO(yingwen): Update reader metrics.
             *row_group_output = applier
                 .search(&predicates, row_group_output, None)
                 .await

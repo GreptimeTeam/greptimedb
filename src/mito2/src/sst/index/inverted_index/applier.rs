@@ -177,13 +177,13 @@ impl InvertedIndexApplier {
                 index_cache.clone(),
             );
             self.index_applier
-                .apply(context, &mut index_reader)
+                .apply(context, &mut index_reader, None)
                 .await
                 .context(ApplyInvertedIndexSnafu)
         } else {
             let mut index_reader = InvertedIndexBlobReader::new(blob);
             self.index_applier
-                .apply(context, &mut index_reader)
+                .apply(context, &mut index_reader, None)
                 .await
                 .context(ApplyInvertedIndexSnafu)
         };
@@ -314,7 +314,7 @@ mod tests {
 
         let mut mock_index_applier = MockIndexApplier::new();
         mock_index_applier.expect_memory_usage().returning(|| 100);
-        mock_index_applier.expect_apply().returning(|_, _| {
+        mock_index_applier.expect_apply().returning(|_, _, _| {
             Ok(ApplyOutput {
                 matched_segment_ids: Bitmap::new_bitvec(),
                 total_row_count: 100,

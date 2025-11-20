@@ -110,7 +110,10 @@ impl BloomFilterApplier {
             .map(|i| self.meta.bloom_filter_locs[i as usize])
             .collect::<Vec<_>>();
 
-        let bloom_filters = self.reader.bloom_filter_vec(&bloom_filter_locs, metrics).await?;
+        let bloom_filters = self
+            .reader
+            .bloom_filter_vec(&bloom_filter_locs, metrics)
+            .await?;
 
         Ok((segment_locations, bloom_filters))
     }
@@ -424,7 +427,10 @@ mod tests {
         ];
 
         for (predicates, search_range, expected) in cases {
-            let result = applier.search(&predicates, &[search_range], None).await.unwrap();
+            let result = applier
+                .search(&predicates, &[search_range], None)
+                .await
+                .unwrap();
             assert_eq!(
                 result, expected,
                 "Expected {:?}, got {:?}",
