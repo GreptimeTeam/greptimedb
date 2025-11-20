@@ -615,7 +615,7 @@ mod tests {
             .unwrap();
             Box::pin(async move {
                 applier
-                    .apply(sst_file_id, None)
+                    .apply(sst_file_id, None, None)
                     .await
                     .unwrap()
                     .matched_segment_ids
