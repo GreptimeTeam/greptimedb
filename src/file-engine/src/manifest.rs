@@ -167,9 +167,11 @@ mod tests {
         };
 
         let metadata = manifest.metadata().unwrap();
-        assert!(metadata
-            .column_metadatas
-            .iter()
-            .any(|c| c.column_schema.name == "__primary_key"));
+        assert!(
+            metadata
+                .column_metadatas
+                .iter()
+                .any(|c| c.column_schema.name == "__primary_key")
+        );
     }
 }
