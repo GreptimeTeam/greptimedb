@@ -43,8 +43,8 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
     BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
-    RegionStatistic, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
-    SettableRegionRoleState, SyncManifestResponse,
+    RegionStatistic, RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    SetRegionRoleStateSuccess, SettableRegionRoleState, SyncManifestResponse,
 };
 use store_api::region_request::{
     BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
@@ -53,7 +53,10 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
-use crate::error::{self, Error, Result, StartRepeatedTaskSnafu, UnsupportedRegionRequestSnafu};
+use crate::error::{
+    self, Error, Result, StartRepeatedTaskSnafu, UnsupportedRegionRequestSnafu,
+    UnsupportedRemapManifestsRequestSnafu,
+};
 use crate::metadata_region::MetadataRegion;
 use crate::repeated_task::FlushMetadataRegionTask;
 use crate::row_modifier::RowModifier;
@@ -348,6 +351,20 @@ impl RegionEngine for MetricEngine {
             .sync_region(region_id, manifest_info)
             .await
             .map_err(BoxedError::new)
+    }
+
+    async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse, BoxedError> {
+        let region_id = request.region_id;
+        if self.inner.is_physical_region(region_id) {
+            self.inner.mito.remap_manifests(request).await
+        } else {
+            Err(BoxedError::new(
+                UnsupportedRemapManifestsRequestSnafu { region_id }.build(),
+            ))
+        }
     }
 
     async fn set_region_role_state_gracefully(

@@ -622,6 +622,7 @@ pub fn get_object_store(
 }
 
 /// A loader for loading metadata from a region dir.
+#[derive(Debug, Clone)]
 pub struct RegionMetadataLoader {
     config: Arc<MitoConfig>,
     object_store_manager: ObjectStoreManagerRef,
@@ -642,7 +643,9 @@ impl RegionMetadataLoader {
         region_dir: &str,
         region_options: &RegionOptions,
     ) -> Result<Option<RegionMetadataRef>> {
-        let manifest = self.load_manifest(region_dir, region_options).await?;
+        let manifest = self
+            .load_manifest(region_dir, &region_options.storage)
+            .await?;
         Ok(manifest.map(|m| m.metadata.clone()))
     }
 
@@ -650,9 +653,9 @@ impl RegionMetadataLoader {
     pub async fn load_manifest(
         &self,
         region_dir: &str,
-        region_options: &RegionOptions,
+        storage: &Option<String>,
     ) -> Result<Option<Arc<RegionManifest>>> {
-        let object_store = get_object_store(&region_options.storage, &self.object_store_manager)?;
+        let object_store = get_object_store(storage, &self.object_store_manager)?;
         let region_manifest_options =
             RegionManifestOptions::new(&self.config, region_dir, &object_store);
         let Some(manifest_manager) =

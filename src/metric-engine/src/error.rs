@@ -242,6 +242,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unsupported remap manifests request for region {}", region_id))]
+    UnsupportedRemapManifestsRequest {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported alter kind: {}", kind))]
     UnsupportedAlterKind {
         kind: String,
@@ -324,7 +331,8 @@ impl ErrorExt for Error {
             | AddingFieldColumn { .. }
             | ParseRegionOptions { .. }
             | UnexpectedRequest { .. }
-            | UnsupportedAlterKind { .. } => StatusCode::InvalidArguments,
+            | UnsupportedAlterKind { .. }
+            | UnsupportedRemapManifestsRequest { .. } => StatusCode::InvalidArguments,
 
             ForbiddenPhysicalAlter { .. } | UnsupportedRegionRequest { .. } => {
                 StatusCode::Unsupported

@@ -27,8 +27,9 @@ use snafu::{OptionExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
-    SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
-    SinglePartitionScanner, SyncManifestResponse,
+    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    SetRegionRoleStateSuccess, SettableRegionRoleState, SinglePartitionScanner,
+    SyncManifestResponse,
 };
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
@@ -148,6 +149,18 @@ impl RegionEngine for FileRegionEngine {
     ) -> Result<SyncManifestResponse, BoxedError> {
         // File engine doesn't need to sync region manifest.
         Ok(SyncManifestResponse::NotSupported)
+    }
+
+    async fn remap_manifests(
+        &self,
+        _request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse, BoxedError> {
+        Err(BoxedError::new(
+            UnsupportedSnafu {
+                operation: "remap_manifests",
+            }
+            .build(),
+        ))
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
