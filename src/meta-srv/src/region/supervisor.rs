@@ -131,7 +131,7 @@ pub struct RegionSupervisorTicker {
     tick_handle: Mutex<Option<JoinHandle<()>>>,
 
     /// The [`Option`] wrapper allows us to abort the job while dropping the [`RegionSupervisor`].
-    initialization_handler: Mutex<Option<JoinHandle<()>>>,
+    initialization_handle: Mutex<Option<JoinHandle<()>>>,
 
     /// The interval of tick.
     tick_interval: Duration,
@@ -176,7 +176,7 @@ impl RegionSupervisorTicker {
         );
         Self {
             tick_handle: Mutex::new(None),
-            initialization_handler: Mutex::new(None),
+            initialization_handle: Mutex::new(None),
             tick_interval,
             initialization_delay,
             initialization_retry_period,
@@ -213,7 +213,7 @@ impl RegionSupervisorTicker {
                     }
                 }
             });
-            *self.initialization_handler.lock().unwrap() = Some(initialization_handler);
+            *self.initialization_handle.lock().unwrap() = Some(initialization_handler);
 
             let sender = self.sender.clone();
             let ticker_loop = tokio::spawn(async move {
@@ -243,7 +243,7 @@ impl RegionSupervisorTicker {
             handle.abort();
             info!("The tick loop is stopped.");
         }
-        let initialization_handler = self.initialization_handler.lock().unwrap().take();
+        let initialization_handler = self.initialization_handle.lock().unwrap().take();
         if let Some(initialization_handler) = initialization_handler {
             initialization_handler.abort();
             info!("The initialization loop is stopped.");
@@ -929,7 +929,7 @@ pub(crate) mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(128);
         let ticker = RegionSupervisorTicker {
             tick_handle: Mutex::new(None),
-            initialization_handler: Mutex::new(None),
+            initialization_handle: Mutex::new(None),
             tick_interval: Duration::from_millis(10),
             initialization_delay: Duration::from_millis(100),
             initialization_retry_period: Duration::from_millis(100),
@@ -947,6 +947,8 @@ pub(crate) mod tests {
                     Event::Tick | Event::Clear | Event::InitializeAllRegions(_)
                 );
             }
+            assert!(ticker.initialization_handle.lock().unwrap().is_none());
+            assert!(ticker.tick_handle.lock().unwrap().is_none());
         }
     }
 
@@ -956,7 +958,7 @@ pub(crate) mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(128);
         let ticker = RegionSupervisorTicker {
             tick_handle: Mutex::new(None),
-            initialization_handler: Mutex::new(None),
+            initialization_handle: Mutex::new(None),
             tick_interval: Duration::from_millis(1000),
             initialization_delay: Duration::from_millis(50),
             initialization_retry_period: Duration::from_millis(50),
