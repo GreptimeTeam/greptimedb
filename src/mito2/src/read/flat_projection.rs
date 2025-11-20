@@ -323,7 +323,7 @@ fn compute_input_arrow_schema(
         };
         new_fields.push(field);
     }
-    new_fields.extend_from_slice(&internal_fields());
+    new_fields.extend_from_slice(&internal_fields(metadata));
 
     Arc::new(datatypes::arrow::datatypes::Schema::new(new_fields))
 }

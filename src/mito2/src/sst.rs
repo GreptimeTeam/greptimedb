@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_base::readable_size::ReadableSize;
+use common_telemetry::warn;
 use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, FieldRef, Fields, Schema, SchemaRef,
 };
@@ -25,11 +26,14 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::timestamp::timestamp_array_to_primitive;
 use serde::{Deserialize, Serialize};
+use serde_json;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::consts::{
-    OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
+    OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, PRIMARY_KEY_METADATA_KEY,
+    SEQUENCE_COLUMN_NAME,
 };
+use store_api::primary_key_metadata::PrimaryKeyMetadata;
 
 use crate::read::Batch;
 use crate::sst::parquet::flat_format::time_index_column_index;
@@ -78,7 +82,7 @@ pub fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
                 }
             })
             .chain([metadata.time_index_field()])
-            .chain(internal_fields()),
+            .chain(internal_fields(metadata)),
     );
 
     Arc::new(Schema::new(fields))
@@ -158,7 +162,7 @@ pub fn to_flat_sst_arrow_schema(
             }
         })
         .chain([metadata.time_index_field()])
-        .chain(internal_fields());
+        .chain(internal_fields(metadata));
     for field in remaining_fields {
         fields.push(field);
     }
@@ -201,15 +205,10 @@ pub(crate) fn tag_maybe_to_dictionary_field(
 }
 
 /// Fields for internal columns.
-pub(crate) fn internal_fields() -> [FieldRef; 3] {
+pub(crate) fn internal_fields(metadata: &RegionMetadata) -> [FieldRef; 3] {
     // Internal columns are always not null.
     [
-        Arc::new(Field::new_dictionary(
-            PRIMARY_KEY_COLUMN_NAME,
-            ArrowDataType::UInt32,
-            ArrowDataType::Binary,
-            false,
-        )),
+        primary_key_field(metadata),
         Arc::new(Field::new(
             SEQUENCE_COLUMN_NAME,
             ArrowDataType::UInt64,
@@ -217,6 +216,27 @@ pub(crate) fn internal_fields() -> [FieldRef; 3] {
         )),
         Arc::new(Field::new(OP_TYPE_COLUMN_NAME, ArrowDataType::UInt8, false)),
     ]
+}
+
+fn primary_key_field(metadata: &RegionMetadata) -> FieldRef {
+    let base_field = Field::new_dictionary(
+        PRIMARY_KEY_COLUMN_NAME,
+        ArrowDataType::UInt32,
+        ArrowDataType::Binary,
+        false,
+    );
+
+    let mut metadata_map = base_field.metadata().clone();
+    match serde_json::to_string(&PrimaryKeyMetadata::from_region_metadata(metadata)) {
+        Ok(value) => {
+            metadata_map.insert(PRIMARY_KEY_METADATA_KEY.to_string(), value);
+            Arc::new(base_field.with_metadata(metadata_map))
+        }
+        Err(e) => {
+            warn!("failed to serialize primary key metadata for field: {e}");
+            Arc::new(base_field)
+        }
+    }
 }
 
 /// Gets the arrow schema to store in parquet.

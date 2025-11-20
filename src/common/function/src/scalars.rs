@@ -20,6 +20,7 @@ pub mod json;
 pub mod matches;
 pub mod matches_term;
 pub mod math;
+pub mod primary_key;
 pub(crate) mod string;
 pub mod vector;
 

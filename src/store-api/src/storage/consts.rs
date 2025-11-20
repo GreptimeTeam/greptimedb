@@ -87,6 +87,9 @@ pub const SEQUENCE_COLUMN_NAME: &str = "__sequence";
 /// Name for reserved column: op_type
 pub const OP_TYPE_COLUMN_NAME: &str = "__op_type";
 
+/// Metadata key used to store primary key column descriptions on the `__primary_key` field.
+pub const PRIMARY_KEY_METADATA_KEY: &str = "greptime:primary_key";
+
 /// Name for reserved column: primary_key
 pub const PRIMARY_KEY_COLUMN_NAME: &str = "__primary_key";
 
