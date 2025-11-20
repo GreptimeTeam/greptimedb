@@ -296,7 +296,7 @@ impl FlatCompatBatch {
                 });
             };
         }
-        fields.extend_from_slice(&internal_fields(expect_metadata));
+        fields.extend_from_slice(&internal_fields());
 
         Ok((index_or_defaults, fields))
     }

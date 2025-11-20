@@ -23,7 +23,6 @@ pub mod metadata;
 pub mod metric_engine_consts;
 mod metrics;
 pub mod mito_engine_options;
-pub mod primary_key_metadata;
 pub mod path_utils;
 pub mod region_engine;
 pub mod region_request;

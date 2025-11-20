@@ -23,18 +23,15 @@ use datafusion_common::arrow::array::{
 use datafusion_common::arrow::datatypes::{DataType, Field};
 use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
+use datatypes::arrow::datatypes::UInt32Type;
 use datatypes::value::Value;
 use mito_codec::row_converter::{
     CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec_with_fields,
 };
-use serde_json;
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::primary_key_metadata::PrimaryKeyMetadata;
-use store_api::storage::consts::{
-    PRIMARY_KEY_METADATA_KEY, PRIMARY_KEY_COLUMN_NAME, ReservedColumnId,
-};
+use store_api::metadata::RegionMetadata;
 use store_api::storage::ColumnId;
-use datatypes::arrow::datatypes::UInt32Type;
+use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
 
 use crate::function::{Function, extract_args};
 use crate::function_registry::FunctionRegistry;
@@ -50,7 +47,7 @@ const MAP_VALUE_NULLABLE: bool = true;
 impl Default for DecodePrimaryKeyFunction {
     fn default() -> Self {
         Self {
-            signature: Signature::any(2, Volatility::Immutable),
+            signature: Signature::any(3, Volatility::Immutable),
         }
     }
 }
@@ -93,20 +90,19 @@ impl Function for DecodePrimaryKeyFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let [encoded, _] = extract_args(self.name(), &args)?;
+        let [encoded, _, _] = extract_args(self.name(), &args)?;
         let number_rows = args.number_rows;
-        let metadata = primary_key_metadata(&args.arg_fields)?;
 
         let encoding = parse_encoding(&args.args[1])?;
+        let metadata = parse_region_metadata(&args.args[2])?;
         let codec = build_codec(&metadata, encoding);
         let name_lookup: HashMap<_, _> = metadata
-            .columns
+            .column_metadatas
             .iter()
-            .map(|c| (c.column_id, c.name.clone()))
+            .map(|c| (c.column_id, c.column_schema.name.clone()))
             .collect();
 
-        let decoded_rows =
-            decode_primary_keys(encoded, number_rows, codec.as_ref(), &name_lookup)?;
+        let decoded_rows = decode_primary_keys(encoded, number_rows, codec.as_ref(), &name_lookup)?;
         let array = build_map_array(&decoded_rows)?;
 
         Ok(ColumnarValue::Array(array))
@@ -126,12 +122,12 @@ fn parse_encoding(arg: &ColumnarValue) -> datafusion_common::Result<PrimaryKeyEn
         ColumnarValue::Scalar(value) => {
             return Err(DataFusionError::Execution(format!(
                 "encoding must be a string literal, got {value:?}"
-            )))
+            )));
         }
         ColumnarValue::Array(_) => {
             return Err(DataFusionError::Execution(
                 "encoding must be a scalar string".to_string(),
-            ))
+            ));
         }
     };
 
@@ -144,33 +140,37 @@ fn parse_encoding(arg: &ColumnarValue) -> datafusion_common::Result<PrimaryKeyEn
     }
 }
 
-fn build_codec(metadata: &PrimaryKeyMetadata, encoding: PrimaryKeyEncoding) -> Arc<dyn PrimaryKeyCodec> {
-    let fields = metadata
-        .columns
-        .iter()
-        .map(|c| (c.column_id, SortField::new(c.data_type.clone())));
+fn build_codec(
+    metadata: &RegionMetadata,
+    encoding: PrimaryKeyEncoding,
+) -> Arc<dyn PrimaryKeyCodec> {
+    let fields = metadata.primary_key_columns().map(|c| {
+        (
+            c.column_id,
+            SortField::new(c.column_schema.data_type.clone()),
+        )
+    });
     build_primary_key_codec_with_fields(encoding, fields)
 }
 
-fn primary_key_metadata(arg_fields: &[Arc<Field>]) -> datafusion_common::Result<PrimaryKeyMetadata> {
-    let Some(field) = arg_fields.first() else {
-        return Err(DataFusionError::Execution(
-            "primary key field metadata is missing".to_string(),
-        ));
+fn parse_region_metadata(arg: &ColumnarValue) -> datafusion_common::Result<RegionMetadata> {
+    let json = match arg {
+        ColumnarValue::Scalar(ScalarValue::Utf8(Some(v)))
+        | ColumnarValue::Scalar(ScalarValue::LargeUtf8(Some(v))) => v.as_str(),
+        ColumnarValue::Scalar(value) => {
+            return Err(DataFusionError::Execution(format!(
+                "region metadata must be a string literal, got {value:?}"
+            )));
+        }
+        ColumnarValue::Array(_) => {
+            return Err(DataFusionError::Execution(
+                "region metadata must be a scalar string".to_string(),
+            ));
+        }
     };
 
-    let Some(value) = field.metadata().get(PRIMARY_KEY_METADATA_KEY) else {
-        return Err(DataFusionError::Execution(format!(
-            "field {} does not contain required `{PRIMARY_KEY_METADATA_KEY}` metadata",
-            field.name()
-        )));
-    };
-
-    serde_json::from_str(value).map_err(|e| {
-        DataFusionError::Execution(format!(
-            "failed to parse {PRIMARY_KEY_METADATA_KEY} metadata: {e}"
-        ))
-    })
+    RegionMetadata::from_json(json)
+        .map_err(|e| DataFusionError::Execution(format!("failed to parse region metadata: {e}")))
 }
 
 fn decode_primary_keys(
@@ -258,12 +258,7 @@ fn decode_one(
     Ok(match decoded {
         CompositeValues::Dense(values) => values
             .into_iter()
-            .map(|(column_id, value)| {
-                (
-                    column_name(column_id, name_lookup),
-                    value_to_string(value),
-                )
-            })
+            .map(|(column_id, value)| (column_name(column_id, name_lookup), value_to_string(value)))
             .collect(),
         CompositeValues::Sparse(values) => values
             .iter()
@@ -305,8 +300,11 @@ fn build_map_array(rows: &[Vec<(String, Option<String>)>]) -> datafusion_common:
         key: "key".to_string(),
         value: "value".to_string(),
     };
-    let mut builder =
-        MapBuilder::new(Some(field_names), StringBuilder::new(), StringBuilder::new());
+    let mut builder = MapBuilder::new(
+        Some(field_names),
+        StringBuilder::new(),
+        StringBuilder::new(),
+    );
 
     for row in rows {
         for (key, value) in row {
@@ -326,46 +324,58 @@ fn build_map_array(rows: &[Vec<(String, Option<String>)>]) -> datafusion_common:
 mod tests {
     use std::collections::HashMap;
 
+    use api::v1::SemanticType;
     use datafusion_common::ScalarValue;
     use datatypes::arrow::array::builder::BinaryDictionaryBuilder;
-    use datatypes::arrow::array::{BinaryArray, MapArray, StructArray, StringArray};
+    use datatypes::arrow::array::{BinaryArray, MapArray, StringArray, StructArray};
     use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
     use datatypes::value::Value;
     use mito_codec::row_converter::{
         DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField, SparsePrimaryKeyCodec,
     };
+    use store_api::codec::PrimaryKeyEncoding;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::consts::ReservedColumnId;
-    use store_api::storage::ColumnId;
-    use store_api::primary_key_metadata::PrimaryKeyColumnMetadata;
+    use store_api::storage::{ColumnId, RegionId};
 
     use super::*;
 
-    fn make_pk_metadata(columns: &[(ColumnId, &str, ConcreteDataType)]) -> PrimaryKeyMetadata {
-        PrimaryKeyMetadata {
-            columns: columns
-                .iter()
-                .map(|(id, name, ty)| PrimaryKeyColumnMetadata {
-                    name: (*name).to_string(),
-                    column_id: *id,
-                    data_type: ty.clone(),
-                })
-                .collect(),
-        }
+    fn pk_field() -> Arc<Field> {
+        Arc::new(Field::new_dictionary(
+            PRIMARY_KEY_COLUMN_NAME,
+            DataType::UInt32,
+            DataType::Binary,
+            false,
+        ))
     }
 
-    fn pk_field_with_metadata(metadata: &PrimaryKeyMetadata) -> Arc<Field> {
-        let mut meta = HashMap::new();
-        meta.insert(
-            PRIMARY_KEY_METADATA_KEY.to_string(),
-            serde_json::to_string(metadata).unwrap(),
-        );
-        Arc::new(Field::new(
-            PRIMARY_KEY_COLUMN_NAME,
-            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
-            false,
-        )
-        .with_metadata(meta))
+    fn region_metadata_json(
+        columns: &[(ColumnId, &str, ConcreteDataType)],
+        encoding: PrimaryKeyEncoding,
+    ) -> String {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 100,
+        });
+        builder.primary_key_encoding(encoding);
+        for (id, name, ty) in columns {
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new((*name).to_string(), ty.clone(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: *id,
+            });
+        }
+        builder.primary_key(columns.iter().map(|(id, _, _)| *id).collect());
+
+        builder.build().unwrap().to_json().unwrap()
     }
 
     fn map_row(map: &MapArray, row_idx: usize) -> HashMap<String, Option<String>> {
@@ -405,7 +415,7 @@ mod tests {
             (0, "host", ConcreteDataType::string_datatype()),
             (1, "core", ConcreteDataType::int64_datatype()),
         ];
-        let metadata = make_pk_metadata(&columns);
+        let metadata_json = region_metadata_json(&columns, PrimaryKeyEncoding::Dense);
         let codec = DensePrimaryKeyCodec::with_fields(
             columns
                 .iter()
@@ -421,9 +431,7 @@ mod tests {
 
         let mut builder = BinaryDictionaryBuilder::<UInt32Type>::new();
         for row in &rows {
-            let encoded = codec
-                .encode(row.iter().map(|v| v.as_value_ref()))
-                .unwrap();
+            let encoded = codec.encode(row.iter().map(|v| v.as_value_ref())).unwrap();
             builder.append(encoded.as_slice()).unwrap();
         }
         let dict_array: ArrayRef = Arc::new(builder.finish());
@@ -432,10 +440,12 @@ mod tests {
             args: vec![
                 ColumnarValue::Array(dict_array),
                 ColumnarValue::Scalar(ScalarValue::Utf8(Some("dense".to_string()))),
+                ColumnarValue::Scalar(ScalarValue::Utf8(Some(metadata_json))),
             ],
             arg_fields: vec![
-                pk_field_with_metadata(&metadata),
+                pk_field(),
                 Arc::new(Field::new("encoding", DataType::Utf8, false)),
+                Arc::new(Field::new("region_metadata", DataType::Utf8, false)),
             ],
             number_rows: 3,
             return_field: Arc::new(Field::new(
@@ -479,7 +489,7 @@ mod tests {
             (10, "k0", ConcreteDataType::string_datatype()),
             (11, "k1", ConcreteDataType::string_datatype()),
         ];
-        let metadata = make_pk_metadata(&columns);
+        let metadata_json = region_metadata_json(&columns, PrimaryKeyEncoding::Sparse);
         let codec = SparsePrimaryKeyCodec::schemaless();
 
         let rows = vec![
@@ -504,17 +514,20 @@ mod tests {
             encoded_values.push(buf);
         }
 
-        let pk_array: ArrayRef =
-            Arc::new(BinaryArray::from_iter_values(encoded_values.iter().cloned()));
+        let pk_array: ArrayRef = Arc::new(BinaryArray::from_iter_values(
+            encoded_values.iter().cloned(),
+        ));
 
         let args = ScalarFunctionArgs {
             args: vec![
                 ColumnarValue::Array(pk_array),
                 ColumnarValue::Scalar(ScalarValue::Utf8(Some("sparse".to_string()))),
+                ColumnarValue::Scalar(ScalarValue::Utf8(Some(metadata_json))),
             ],
             arg_fields: vec![
-                pk_field_with_metadata(&metadata),
+                pk_field(),
                 Arc::new(Field::new("encoding", DataType::Utf8, false)),
+                Arc::new(Field::new("region_metadata", DataType::Utf8, false)),
             ],
             number_rows: rows.len(),
             return_field: Arc::new(Field::new(
