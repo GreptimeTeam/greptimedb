@@ -457,7 +457,7 @@ impl GcScheduler {
         for (table_id, table_regions) in table_to_regions {
             match self.ctx.get_table_route(table_id).await {
                 Ok((_phy_table_id, table_route)) => {
-                    self.process_table_regions_for_rediscovery(
+                    self.get_table_regions_peer(
                         &table_route,
                         &table_regions,
                         &mut region_to_peer,
@@ -480,7 +480,7 @@ impl GcScheduler {
     }
 
     /// Process regions for a single table to find their current leader peers.
-    fn process_table_regions_for_rediscovery(
+    fn get_table_regions_peer(
         &self,
         table_route: &PhysicalTableRouteValue,
         table_regions: &[RegionId],
