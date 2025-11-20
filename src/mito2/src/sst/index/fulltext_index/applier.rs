@@ -375,7 +375,7 @@ impl FulltextIndexApplier {
             }
 
             *row_group_output = applier
-                .search(&predicates, row_group_output)
+                .search(&predicates, row_group_output, None)
                 .await
                 .context(ApplyBloomFilterIndexSnafu)?;
         }

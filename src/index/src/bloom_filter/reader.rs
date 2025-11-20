@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::ops::{Range, Rem};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytemuck::try_cast_slice;
@@ -33,6 +34,17 @@ const BLOOM_META_LEN_SIZE: u64 = 4;
 
 /// Default prefetch size of bloom filter meta.
 pub const DEFAULT_PREFETCH_SIZE: u64 = 8192; // 8KiB
+
+/// Metrics for bloom filter read operations.
+#[derive(Debug, Default)]
+pub struct BloomFilterReadMetrics {
+    /// Total byte size to read.
+    pub total_bytes: u64,
+    /// Total number of ranges to read.
+    pub total_ranges: usize,
+    /// Elapsed time of the read_vec operation.
+    pub elapsed: Duration,
+}
 
 /// Safely converts bytes to Vec<u64> using bytemuck for optimal performance.
 /// Faster than chunking and converting each piece individually.
@@ -82,13 +94,28 @@ pub trait BloomFilterReader: Sync {
     async fn range_read(&self, offset: u64, size: u32) -> Result<Bytes>;
 
     /// Reads bunch of ranges from the file.
-    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn read_vec(
+        &self,
+        ranges: &[Range<u64>],
+        metrics: Option<&mut BloomFilterReadMetrics>,
+    ) -> Result<Vec<Bytes>> {
+        let start = metrics.as_ref().map(|_| Instant::now());
+
         let mut results = Vec::with_capacity(ranges.len());
         for range in ranges {
             let size = (range.end - range.start) as u32;
             let data = self.range_read(range.start, size).await?;
             results.push(data);
         }
+
+        if let Some(m) = metrics {
+            m.total_ranges += ranges.len();
+            m.total_bytes += ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+            if let Some(start) = start {
+                m.elapsed += start.elapsed();
+            }
+        }
+
         Ok(results)
     }
 
@@ -105,12 +132,16 @@ pub trait BloomFilterReader: Sync {
         Ok(bm)
     }
 
-    async fn bloom_filter_vec(&self, locs: &[BloomFilterLoc]) -> Result<Vec<BloomFilter>> {
+    async fn bloom_filter_vec(
+        &self,
+        locs: &[BloomFilterLoc],
+        metrics: Option<&mut BloomFilterReadMetrics>,
+    ) -> Result<Vec<BloomFilter>> {
         let ranges = locs
             .iter()
             .map(|l| l.offset..l.offset + l.size)
             .collect::<Vec<_>>();
-        let bss = self.read_vec(&ranges).await?;
+        let bss = self.read_vec(&ranges, metrics).await?;
 
         let mut result = Vec::with_capacity(bss.len());
         for (bs, loc) in bss.into_iter().zip(locs.iter()) {
@@ -147,8 +178,23 @@ impl<R: RangeReader> BloomFilterReader for BloomFilterReaderImpl<R> {
             .context(IoSnafu)
     }
 
-    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        self.reader.read_vec(ranges).await.context(IoSnafu)
+    async fn read_vec(
+        &self,
+        ranges: &[Range<u64>],
+        metrics: Option<&mut BloomFilterReadMetrics>,
+    ) -> Result<Vec<Bytes>> {
+        let start = metrics.as_ref().map(|_| Instant::now());
+        let result = self.reader.read_vec(ranges).await.context(IoSnafu)?;
+
+        if let Some(m) = metrics {
+            m.total_ranges += ranges.len();
+            m.total_bytes += ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+            if let Some(start) = start {
+                m.elapsed += start.elapsed();
+            }
+        }
+
+        Ok(result)
     }
 
     async fn metadata(&self) -> Result<BloomFilterMeta> {
