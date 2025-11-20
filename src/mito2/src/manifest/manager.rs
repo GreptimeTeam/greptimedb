@@ -234,6 +234,8 @@ impl RegionManifestManager {
         })
     }
 
+    /// Opens an existing manifest.
+    ///
     /// Returns `Ok(None)` if no such manifest.
     pub async fn open(
         options: RegionManifestOptions,
