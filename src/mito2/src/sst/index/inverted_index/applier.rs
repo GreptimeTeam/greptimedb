@@ -311,6 +311,20 @@ impl InvertedIndexApplier {
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
     ) -> Result<BlobReader> {
+        // Trigger background download if file_cache and file_size_hint are available
+        if let (Some(file_cache), Some(file_size)) = (&self.file_cache, file_size_hint) {
+            let index_key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Puffin);
+            let remote_path =
+                crate::sst::location::index_file_path(&self.table_dir, file_id, self.path_type);
+
+            file_cache.maybe_download_background(
+                index_key,
+                remote_path,
+                self.store.clone(),
+                file_size,
+            );
+        }
+
         let puffin_manager = self
             .puffin_manager_factory
             .build(

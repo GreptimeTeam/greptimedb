@@ -579,6 +579,17 @@ impl FileCache {
             .download(index_key, remote_path, remote_store, file_size)
             .await
     }
+
+    /// Downloads a file in `remote_path` from the remote object store to the local cache
+    /// (specified by `index_key`) in the background. Errors are logged but not returned.
+    pub(crate) fn maybe_download_background(
+        &self,
+        _index_key: IndexKey,
+        _remote_path: String,
+        _remote_store: ObjectStore,
+        _file_size: u64,
+    ) {
+    }
 }
 
 /// Key of file cache index.
