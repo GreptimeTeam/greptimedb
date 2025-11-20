@@ -519,6 +519,8 @@ impl GcScheduler {
     }
 
     /// Process retry regions by sending batched GC requests to their respective datanodes.
+    ///
+    /// TODO(discord9): retry only happens when i.e. follower manifest haven't updated, maybe consider just not retrying those regions here and do it all in next gc run, could be simpler.
     async fn process_retry_regions_by_peers(
         &self,
         region_to_peer: Region2Peers,
