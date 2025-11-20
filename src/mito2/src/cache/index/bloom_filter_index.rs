@@ -14,12 +14,13 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use api::v1::index::{BloomFilterLoc, BloomFilterMeta};
 use async_trait::async_trait;
 use bytes::Bytes;
 use index::bloom_filter::error::Result;
-use index::bloom_filter::reader::BloomFilterReader;
+use index::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReader};
 use store_api::storage::{ColumnId, FileId};
 
 use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache, PageKey};
@@ -122,13 +123,19 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
                 self.blob_size,
                 offset,
                 size,
-                move |ranges| async move { inner.read_vec(&ranges).await },
+                move |ranges| async move { inner.read_vec(&ranges, None).await },
             )
             .await
             .map(|b| b.into())
     }
 
-    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn read_vec(
+        &self,
+        ranges: &[Range<u64>],
+        metrics: Option<&mut BloomFilterReadMetrics>,
+    ) -> Result<Vec<Bytes>> {
+        let start = metrics.as_ref().map(|_| Instant::now());
+
         let mut pages = Vec::with_capacity(ranges.len());
         for range in ranges {
             let inner = &self.inner;
@@ -139,11 +146,19 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
                     self.blob_size,
                     range.start,
                     (range.end - range.start) as u32,
-                    move |ranges| async move { inner.read_vec(&ranges).await },
+                    move |ranges| async move { inner.read_vec(&ranges, None).await },
                 )
                 .await?;
 
             pages.push(Bytes::from(page));
+        }
+
+        if let Some(m) = metrics {
+            m.total_ranges += ranges.len();
+            m.total_bytes += ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+            if let Some(start) = start {
+                m.elapsed += start.elapsed();
+            }
         }
 
         Ok(pages)

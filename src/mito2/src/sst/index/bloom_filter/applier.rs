@@ -363,7 +363,7 @@ impl BloomFilterIndexApplier {
                 continue;
             }
 
-            *row_group_output = applier.search(predicates, row_group_output).await?;
+            *row_group_output = applier.search(predicates, row_group_output, None).await?;
         }
 
         Ok(())
