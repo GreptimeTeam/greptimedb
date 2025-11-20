@@ -149,8 +149,13 @@ impl Categorizer {
                 // commutativity is needed under this situation.
                 Commutativity::ConditionalCommutative(None)
             }
-            LogicalPlan::Sort(_) => {
+            LogicalPlan::Sort(sort) => {
                 if partition_cols.is_empty() {
+                    return Ok(Commutativity::Commutative);
+                }
+
+                let sort_exprs = sort.expr.iter().map(|e| e.expr.clone()).collect::<Vec<_>>();
+                if Self::check_partition(&sort_exprs, &partition_cols) {
                     return Ok(Commutativity::Commutative);
                 }
 
