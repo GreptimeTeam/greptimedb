@@ -772,6 +772,7 @@ pub(crate) mod tests {
             while let Ok(event) = rx.try_recv() {
                 assert_matches!(event, Event::Tick | Event::Clear);
             }
+            assert!(ticker.tick_handle.lock().unwrap().is_none());
         }
     }
 
