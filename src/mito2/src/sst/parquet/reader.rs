@@ -670,8 +670,9 @@ impl ParquetReaderBuilder {
                             .unwrap_or(true),
                 )
             });
+            // TODO(yingwen): Collect metrics for applier
             let apply_res = index_applier
-                .apply(self.file_handle.file_id(), Some(file_size_hint), rgs)
+                .apply(self.file_handle.file_id(), Some(file_size_hint), rgs, None)
                 .await;
             let mut selection = match apply_res {
                 Ok(apply_output) => {
