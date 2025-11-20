@@ -26,7 +26,7 @@ SHOW CREATE TABLE data_types;
 +------------+------------------------------------------------------------+
 | data_types | CREATE TABLE IF NOT EXISTS "data_types" (                  |
 |            |   "s" STRING NULL,                                         |
-|            |   "tint" TINYINT NULL,                                     |
+|            |   "tint" BIGINT NULL,                                      |
 |            |   "sint" SMALLINT NULL,                                    |
 |            |   "i" INT NULL,                                            |
 |            |   "bint" BIGINT NULL,                                      |
@@ -55,7 +55,7 @@ DESC TABLE data_types;
 | Column | Type                 | Key | Null | Default             | Semantic Type |
 +--------+----------------------+-----+------+---------------------+---------------+
 | s      | String               | PRI | YES  |                     | TAG           |
-| tint   | Int8                 |     | YES  |                     | FIELD         |
+| tint   | Int64                |     | YES  |                     | FIELD         |
 | sint   | Int16                |     | YES  |                     | FIELD         |
 | i      | Int32                |     | YES  |                     | FIELD         |
 | bint   | Int64                |     | YES  |                     | FIELD         |
