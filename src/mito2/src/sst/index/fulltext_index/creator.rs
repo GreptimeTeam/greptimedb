@@ -723,9 +723,10 @@ mod tests {
             let backend = backend.clone();
             async move {
                 match backend {
-                    FulltextBackend::Tantivy => {
-                        applier.apply_fine(region_file_id, None, None).await.unwrap()
-                    }
+                    FulltextBackend::Tantivy => applier
+                        .apply_fine(region_file_id, None, None)
+                        .await
+                        .unwrap(),
                     FulltextBackend::Bloom => {
                         let coarse_mask = coarse_mask.unwrap_or_default();
                         let row_groups = (0..coarse_mask.len()).map(|i| (1, coarse_mask[i]));

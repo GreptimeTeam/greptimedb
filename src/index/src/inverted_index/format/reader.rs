@@ -15,6 +15,7 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -29,19 +30,44 @@ pub use crate::inverted_index::format::reader::blob::InvertedIndexBlobReader;
 mod blob;
 mod footer;
 
+/// Metrics for inverted index read operations.
+#[derive(Debug, Default)]
+pub struct InvertedIndexReadMetrics {
+    /// Total byte size to read.
+    pub total_bytes: u64,
+    /// Total number of ranges to read.
+    pub total_ranges: usize,
+    /// Elapsed time of the read_vec operation.
+    pub elapsed: Duration,
+}
+
 /// InvertedIndexReader defines an asynchronous reader of inverted index data
 #[mockall::automock]
 #[async_trait]
 pub trait InvertedIndexReader: Send + Sync {
     /// Seeks to given offset and reads data with exact size as provided.
-    async fn range_read(&self, offset: u64, size: u32) -> Result<Vec<u8>>;
+    async fn range_read<'a>(
+        &self,
+        offset: u64,
+        size: u32,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Vec<u8>>;
 
     /// Reads the bytes in the given ranges.
-    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn read_vec<'a>(
+        &self,
+        ranges: &[Range<u64>],
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Vec<Bytes>> {
+        let mut metrics = metrics;
         let mut result = Vec::with_capacity(ranges.len());
         for range in ranges {
             let data = self
-                .range_read(range.start, (range.end - range.start) as u32)
+                .range_read(
+                    range.start,
+                    (range.end - range.start) as u32,
+                    metrics.as_deref_mut(),
+                )
                 .await?;
             result.push(Bytes::from(data));
         }
@@ -52,14 +78,24 @@ pub trait InvertedIndexReader: Send + Sync {
     async fn metadata(&self) -> Result<Arc<InvertedIndexMetas>>;
 
     /// Retrieves the finite state transducer (FST) map from the given offset and size.
-    async fn fst(&self, offset: u64, size: u32) -> Result<FstMap> {
-        let fst_data = self.range_read(offset, size).await?;
+    async fn fst<'a>(
+        &self,
+        offset: u64,
+        size: u32,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<FstMap> {
+        let fst_data = self.range_read(offset, size, metrics).await?;
         FstMap::new(fst_data).context(DecodeFstSnafu)
     }
 
     /// Retrieves the multiple finite state transducer (FST) maps from the given ranges.
-    async fn fst_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<FstMap>> {
-        self.read_vec(ranges)
+    async fn fst_vec<'a>(
+        &mut self,
+        ranges: &[Range<u64>],
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Vec<FstMap>> {
+        let mut metrics = metrics;
+        self.read_vec(ranges, metrics.as_deref_mut())
             .await?
             .into_iter()
             .map(|bytes| FstMap::new(bytes.to_vec()).context(DecodeFstSnafu))
@@ -67,19 +103,29 @@ pub trait InvertedIndexReader: Send + Sync {
     }
 
     /// Retrieves the bitmap from the given offset and size.
-    async fn bitmap(&self, offset: u64, size: u32, bitmap_type: BitmapType) -> Result<Bitmap> {
-        self.range_read(offset, size).await.and_then(|bytes| {
-            Bitmap::deserialize_from(&bytes, bitmap_type).context(DecodeBitmapSnafu)
-        })
+    async fn bitmap<'a>(
+        &self,
+        offset: u64,
+        size: u32,
+        bitmap_type: BitmapType,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Bitmap> {
+        self.range_read(offset, size, metrics)
+            .await
+            .and_then(|bytes| {
+                Bitmap::deserialize_from(&bytes, bitmap_type).context(DecodeBitmapSnafu)
+            })
     }
 
     /// Retrieves the multiple bitmaps from the given ranges.
-    async fn bitmap_deque(
+    async fn bitmap_deque<'a>(
         &mut self,
         ranges: &[(Range<u64>, BitmapType)],
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
     ) -> Result<VecDeque<Bitmap>> {
+        let mut metrics = metrics;
         let (ranges, types): (Vec<_>, Vec<_>) = ranges.iter().cloned().unzip();
-        let bytes = self.read_vec(&ranges).await?;
+        let bytes = self.read_vec(&ranges, metrics.as_deref_mut()).await?;
         bytes
             .into_iter()
             .zip(types)

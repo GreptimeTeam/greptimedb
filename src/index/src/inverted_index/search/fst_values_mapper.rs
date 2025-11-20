@@ -16,7 +16,7 @@ use greptime_proto::v1::index::{BitmapType, InvertedIndexMeta};
 
 use crate::bitmap::Bitmap;
 use crate::inverted_index::error::Result;
-use crate::inverted_index::format::reader::InvertedIndexReader;
+use crate::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
 
 /// `ParallelFstValuesMapper` enables parallel mapping of multiple FST value groups to their
 /// corresponding bitmaps within an inverted index.
@@ -33,10 +33,12 @@ impl<'a> ParallelFstValuesMapper<'a> {
         Self { reader }
     }
 
-    pub async fn map_values_vec(
+    pub async fn map_values_vec<'b>(
         &mut self,
-        value_and_meta_vec: &[(Vec<u64>, &'a InvertedIndexMeta)],
+        value_and_meta_vec: &[(Vec<u64>, &'b InvertedIndexMeta)],
+        metrics: Option<&mut InvertedIndexReadMetrics>,
     ) -> Result<Vec<Bitmap>> {
+        let mut metrics = metrics;
         let groups = value_and_meta_vec
             .iter()
             .map(|(values, _)| values.len())
@@ -64,7 +66,10 @@ impl<'a> ParallelFstValuesMapper<'a> {
         }
 
         common_telemetry::debug!("fetch ranges: {:?}", fetch_ranges);
-        let mut bitmaps = self.reader.bitmap_deque(&fetch_ranges).await?;
+        let mut bitmaps = self
+            .reader
+            .bitmap_deque(&fetch_ranges, metrics.as_deref_mut())
+            .await?;
         let mut output = Vec::with_capacity(groups.len());
 
         for counter in groups {
@@ -95,23 +100,25 @@ mod tests {
     #[tokio::test]
     async fn test_map_values_vec() {
         let mut mock_reader = MockInvertedIndexReader::new();
-        mock_reader.expect_bitmap_deque().returning(|ranges| {
-            let mut output = VecDeque::new();
-            for (range, bitmap_type) in ranges {
-                let offset = range.start;
-                let size = range.end - range.start;
-                match (offset, size, bitmap_type) {
-                    (1, 1, BitmapType::Roaring) => {
-                        output.push_back(Bitmap::from_lsb0_bytes(&[0b10101010], *bitmap_type))
+        mock_reader
+            .expect_bitmap_deque()
+            .returning(|ranges, _metrics| {
+                let mut output = VecDeque::new();
+                for (range, bitmap_type) in ranges {
+                    let offset = range.start;
+                    let size = range.end - range.start;
+                    match (offset, size, bitmap_type) {
+                        (1, 1, BitmapType::Roaring) => {
+                            output.push_back(Bitmap::from_lsb0_bytes(&[0b10101010], *bitmap_type))
+                        }
+                        (2, 1, BitmapType::Roaring) => {
+                            output.push_back(Bitmap::from_lsb0_bytes(&[0b01010101], *bitmap_type))
+                        }
+                        _ => unreachable!(),
                     }
-                    (2, 1, BitmapType::Roaring) => {
-                        output.push_back(Bitmap::from_lsb0_bytes(&[0b01010101], *bitmap_type))
-                    }
-                    _ => unreachable!(),
                 }
-            }
-            Ok(output)
-        });
+                Ok(output)
+            });
 
         let meta = InvertedIndexMeta {
             bitmap_type: BitmapType::Roaring.into(),
@@ -120,13 +127,13 @@ mod tests {
         let mut values_mapper = ParallelFstValuesMapper::new(&mut mock_reader);
 
         let result = values_mapper
-            .map_values_vec(&[(vec![], &meta)])
+            .map_values_vec(&[(vec![], &meta)], None)
             .await
             .unwrap();
         assert_eq!(result[0].count_ones(), 0);
 
         let result = values_mapper
-            .map_values_vec(&[(vec![value(1, 1)], &meta)])
+            .map_values_vec(&[(vec![value(1, 1)], &meta)], None)
             .await
             .unwrap();
         assert_eq!(
@@ -135,7 +142,7 @@ mod tests {
         );
 
         let result = values_mapper
-            .map_values_vec(&[(vec![value(2, 1)], &meta)])
+            .map_values_vec(&[(vec![value(2, 1)], &meta)], None)
             .await
             .unwrap();
         assert_eq!(
@@ -144,7 +151,7 @@ mod tests {
         );
 
         let result = values_mapper
-            .map_values_vec(&[(vec![value(1, 1), value(2, 1)], &meta)])
+            .map_values_vec(&[(vec![value(1, 1), value(2, 1)], &meta)], None)
             .await
             .unwrap();
         assert_eq!(
@@ -153,7 +160,7 @@ mod tests {
         );
 
         let result = values_mapper
-            .map_values_vec(&[(vec![value(2, 1), value(1, 1)], &meta)])
+            .map_values_vec(&[(vec![value(2, 1), value(1, 1)], &meta)], None)
             .await
             .unwrap();
         assert_eq!(
@@ -162,7 +169,10 @@ mod tests {
         );
 
         let result = values_mapper
-            .map_values_vec(&[(vec![value(2, 1)], &meta), (vec![value(1, 1)], &meta)])
+            .map_values_vec(
+                &[(vec![value(2, 1)], &meta), (vec![value(1, 1)], &meta)],
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -174,10 +184,13 @@ mod tests {
             Bitmap::from_lsb0_bytes(&[0b10101010], BitmapType::Roaring)
         );
         let result = values_mapper
-            .map_values_vec(&[
-                (vec![value(2, 1), value(1, 1)], &meta),
-                (vec![value(1, 1)], &meta),
-            ])
+            .map_values_vec(
+                &[
+                    (vec![value(2, 1), value(1, 1)], &meta),
+                    (vec![value(1, 1)], &meta),
+                ],
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(

@@ -19,7 +19,7 @@ pub use predicates_apply::PredicatesIndexApplier;
 
 use crate::bitmap::Bitmap;
 use crate::inverted_index::error::Result;
-use crate::inverted_index::format::reader::InvertedIndexReader;
+use crate::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
 
 /// The output of an apply operation.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,10 +44,11 @@ pub trait IndexApplier: Send + Sync {
     /// Applies the predefined predicates to the data read by the given index reader, returning
     /// a list of relevant indices (e.g., post IDs, group IDs, row IDs).
     #[allow(unused_parens)]
-    async fn apply<'a>(
+    async fn apply<'a, 'b>(
         &self,
         context: SearchContext,
         reader: &mut (dyn InvertedIndexReader + 'a),
+        metrics: Option<&'b mut InvertedIndexReadMetrics>,
     ) -> Result<ApplyOutput>;
 
     /// Returns the memory usage of the applier.
