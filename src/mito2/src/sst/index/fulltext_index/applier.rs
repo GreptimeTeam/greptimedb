@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use common_base::range_read::RangeReader;
 use common_telemetry::warn;
@@ -52,6 +53,15 @@ use crate::sst::index::puffin_manager::{
 };
 
 pub mod builder;
+
+/// Metrics for tracking fulltext index apply operations.
+#[derive(Debug, Default, Clone)]
+pub struct FulltextIndexApplyMetrics {
+    /// Total time spent applying the index.
+    pub apply_elapsed: std::time::Duration,
+    /// Number of blob cache misses.
+    pub blob_cache_miss: usize,
+}
 
 /// `FulltextIndexApplier` is responsible for applying fulltext index to the provided SST files
 pub struct FulltextIndexApplier {
@@ -124,14 +134,18 @@ impl FulltextIndexApplier {
 impl FulltextIndexApplier {
     /// Applies fine-grained fulltext index to the specified SST file.
     /// Returns the row ids that match the queries.
+    ///
+    /// # Arguments
+    /// * `file_id` - The region file ID to apply predicates to
+    /// * `file_size_hint` - Optional hint for file size to avoid extra metadata reads
+    /// * `metrics` - Optional mutable reference to collect metrics on demand
     pub async fn apply_fine(
         &self,
         file_id: RegionFileId,
         file_size_hint: Option<u64>,
+        mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<BTreeSet<RowId>>> {
-        let timer = INDEX_APPLY_ELAPSED
-            .with_label_values(&[TYPE_FULLTEXT_INDEX])
-            .start_timer();
+        let apply_start = Instant::now();
 
         let mut row_ids: Option<BTreeSet<RowId>> = None;
         for (column_id, request) in self.requests.iter() {
@@ -140,7 +154,7 @@ impl FulltextIndexApplier {
             }
 
             let Some(result) = self
-                .apply_fine_one_column(file_size_hint, file_id, *column_id, request)
+                .apply_fine_one_column(file_size_hint, file_id, *column_id, request, metrics.as_deref_mut())
                 .await?
             else {
                 continue;
@@ -159,9 +173,16 @@ impl FulltextIndexApplier {
             }
         }
 
-        if row_ids.is_none() {
-            timer.stop_and_discard();
+        // Record elapsed time to histogram and collect metrics if requested
+        let elapsed = apply_start.elapsed();
+        INDEX_APPLY_ELAPSED
+            .with_label_values(&[TYPE_FULLTEXT_INDEX])
+            .observe(elapsed.as_secs_f64());
+
+        if let Some(m) = metrics {
+            m.apply_elapsed += elapsed;
         }
+
         Ok(row_ids)
     }
 
@@ -171,6 +192,7 @@ impl FulltextIndexApplier {
         file_id: RegionFileId,
         column_id: ColumnId,
         request: &FulltextRequest,
+        metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<BTreeSet<RowId>>> {
         let blob_key = format!(
             "{INDEX_BLOB_TYPE_TANTIVY}-{}",
@@ -178,7 +200,7 @@ impl FulltextIndexApplier {
         );
         let dir = self
             .index_source
-            .dir(file_id, &blob_key, file_size_hint)
+            .dir(file_id, &blob_key, file_size_hint, metrics)
             .await?;
 
         let dir = match &dir {
@@ -240,15 +262,20 @@ impl FulltextIndexApplier {
     ///
     /// Row group id existing in the returned result means that the row group is searched.
     /// Empty ranges means that the row group is searched but no rows are found.
+    ///
+    /// # Arguments
+    /// * `file_id` - The region file ID to apply predicates to
+    /// * `file_size_hint` - Optional hint for file size to avoid extra metadata reads
+    /// * `row_groups` - Iterator of row group lengths and whether to search in the row group
+    /// * `metrics` - Optional mutable reference to collect metrics on demand
     pub async fn apply_coarse(
         &self,
         file_id: RegionFileId,
         file_size_hint: Option<u64>,
         row_groups: impl Iterator<Item = (usize, bool)>,
+        mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<Vec<(usize, Vec<Range<usize>>)>>> {
-        let timer = INDEX_APPLY_ELAPSED
-            .with_label_values(&[TYPE_FULLTEXT_INDEX])
-            .start_timer();
+        let apply_start = Instant::now();
 
         let (input, mut output) = Self::init_coarse_output(row_groups);
         let mut applied = false;
@@ -266,16 +293,27 @@ impl FulltextIndexApplier {
                     *column_id,
                     &request.terms,
                     &mut output,
+                    metrics.as_deref_mut(),
                 )
                 .await?;
         }
 
         if !applied {
-            timer.stop_and_discard();
             return Ok(None);
         }
 
         Self::adjust_coarse_output(input, &mut output);
+
+        // Record elapsed time to histogram and collect metrics if requested
+        let elapsed = apply_start.elapsed();
+        INDEX_APPLY_ELAPSED
+            .with_label_values(&[TYPE_FULLTEXT_INDEX])
+            .observe(elapsed.as_secs_f64());
+
+        if let Some(m) = metrics {
+            m.apply_elapsed += elapsed;
+        }
+
         Ok(Some(output))
     }
 
@@ -286,6 +324,7 @@ impl FulltextIndexApplier {
         column_id: ColumnId,
         terms: &[FulltextTerm],
         output: &mut [(usize, Vec<Range<usize>>)],
+        metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<bool> {
         let blob_key = format!(
             "{INDEX_BLOB_TYPE_BLOOM}-{}",
@@ -293,7 +332,7 @@ impl FulltextIndexApplier {
         );
         let Some(reader) = self
             .index_source
-            .blob(file_id, &blob_key, file_size_hint)
+            .blob(file_id, &blob_key, file_size_hint, metrics)
             .await?
         else {
             return Ok(false);
@@ -483,8 +522,17 @@ impl IndexSource {
         file_id: RegionFileId,
         key: &str,
         file_size_hint: Option<u64>,
+        metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<GuardWithMetadata<SstPuffinBlob>>> {
         let (reader, fallbacked) = self.ensure_reader(file_id, file_size_hint).await?;
+
+        // Track cache miss if fallbacked to remote
+        if fallbacked {
+            if let Some(m) = metrics {
+                m.blob_cache_miss += 1;
+            }
+        }
+
         let res = reader.blob(key).await;
         match res {
             Ok(blob) => Ok(Some(blob)),
@@ -514,8 +562,17 @@ impl IndexSource {
         file_id: RegionFileId,
         key: &str,
         file_size_hint: Option<u64>,
+        metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<GuardWithMetadata<SstPuffinDir>>> {
         let (reader, fallbacked) = self.ensure_reader(file_id, file_size_hint).await?;
+
+        // Track cache miss if fallbacked to remote
+        if fallbacked {
+            if let Some(m) = metrics {
+                m.blob_cache_miss += 1;
+            }
+        }
+
         let res = reader.dir(key).await;
         match res {
             Ok(dir) => Ok(Some(dir)),

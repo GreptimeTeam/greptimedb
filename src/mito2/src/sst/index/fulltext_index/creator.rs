@@ -724,14 +724,14 @@ mod tests {
             async move {
                 match backend {
                     FulltextBackend::Tantivy => {
-                        applier.apply_fine(region_file_id, None).await.unwrap()
+                        applier.apply_fine(region_file_id, None, None).await.unwrap()
                     }
                     FulltextBackend::Bloom => {
                         let coarse_mask = coarse_mask.unwrap_or_default();
                         let row_groups = (0..coarse_mask.len()).map(|i| (1, coarse_mask[i]));
                         // row group id == row id
                         let resp = applier
-                            .apply_coarse(region_file_id, None, row_groups)
+                            .apply_coarse(region_file_id, None, row_groups, None)
                             .await
                             .unwrap();
                         resp.map(|r| {

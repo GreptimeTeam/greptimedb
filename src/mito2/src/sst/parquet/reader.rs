@@ -526,8 +526,9 @@ impl ParquetReaderBuilder {
 
             // Slow path: apply the index from the file.
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
+            // TODO(yingwen): Collect applier metrics in verbose mode.
             let apply_res = index_applier
-                .apply_fine(self.file_handle.file_id(), Some(file_size_hint))
+                .apply_fine(self.file_handle.file_id(), Some(file_size_hint), None)
                 .await;
             let selection = match apply_res {
                 Ok(Some(res)) => {
@@ -749,8 +750,9 @@ impl ParquetReaderBuilder {
                             .unwrap_or(true),
                 )
             });
+            // TODO(yingwen): Collect applier metrics in verbose mode.
             let apply_res = index_applier
-                .apply_coarse(self.file_handle.file_id(), Some(file_size_hint), rgs)
+                .apply_coarse(self.file_handle.file_id(), Some(file_size_hint), rgs, None)
                 .await;
             let mut selection = match apply_res {
                 Ok(Some(apply_output)) => {
