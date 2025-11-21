@@ -74,7 +74,7 @@ async fn test_search(
     writer.finish().await.unwrap();
 
     let reader = puffin_manager.reader(&file_name).await.unwrap();
-    let index_dir = reader.dir(&blob_key).await.unwrap();
+    let (index_dir, _metrics) = reader.dir(&blob_key).await.unwrap();
     let searcher = TantivyFulltextIndexSearcher::new(index_dir.path(), config).unwrap();
     for (query, expected) in query_expected {
         let results = searcher.search(query).await.unwrap();
