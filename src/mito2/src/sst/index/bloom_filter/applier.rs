@@ -22,7 +22,9 @@ use std::time::Instant;
 use common_base::range_read::RangeReader;
 use common_telemetry::warn;
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
-use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
+use index::bloom_filter::reader::{
+    BloomFilterReadMetrics, BloomFilterReader, BloomFilterReaderImpl,
+};
 use index::target::IndexTarget;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
@@ -57,6 +59,8 @@ pub struct BloomFilterIndexApplyMetrics {
     pub blob_cache_miss: usize,
     /// Total size of blobs read (in bytes).
     pub blob_read_bytes: u64,
+    /// Metrics for bloom filter read operations.
+    pub read_metrics: BloomFilterReadMetrics,
 }
 
 pub(crate) type BloomFilterIndexApplierRef = Arc<BloomFilterIndexApplier>;
@@ -201,12 +205,12 @@ impl BloomFilterIndexApplier {
                     BloomFilterReaderImpl::new(blob),
                     bloom_filter_cache.clone(),
                 );
-                self.apply_predicates(reader, predicates, &mut output)
+                self.apply_predicates(reader, predicates, &mut output, metrics.as_deref_mut())
                     .await
                     .context(ApplyBloomFilterIndexSnafu)?;
             } else {
                 let reader = BloomFilterReaderImpl::new(blob);
-                self.apply_predicates(reader, predicates, &mut output)
+                self.apply_predicates(reader, predicates, &mut output, metrics.as_deref_mut())
                     .await
                     .context(ApplyBloomFilterIndexSnafu)?;
             }
@@ -354,6 +358,7 @@ impl BloomFilterIndexApplier {
         reader: R,
         predicates: &[InListPredicate],
         output: &mut [(usize, Vec<Range<usize>>)],
+        mut metrics: Option<&mut BloomFilterIndexApplyMetrics>,
     ) -> std::result::Result<(), index::bloom_filter::error::Error> {
         let mut applier = BloomFilterApplier::new(Box::new(reader)).await?;
 
@@ -363,7 +368,10 @@ impl BloomFilterIndexApplier {
                 continue;
             }
 
-            *row_group_output = applier.search(predicates, row_group_output, None).await?;
+            let read_metrics = metrics.as_deref_mut().map(|m| &mut m.read_metrics);
+            *row_group_output = applier
+                .search(predicates, row_group_output, read_metrics)
+                .await?;
         }
 
         Ok(())
