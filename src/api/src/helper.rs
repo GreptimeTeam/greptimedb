@@ -35,9 +35,9 @@ use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{
-    self, ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, JsonList,
-    JsonNativeTypeExtension, JsonObject, JsonTypeExtension, ListTypeExtension, QueryRequest, Row,
-    SemanticType, StructTypeExtension, VectorTypeExtension, json_value,
+    self, ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, DictionaryTypeExtension,
+    JsonList, JsonNativeTypeExtension, JsonObject, JsonTypeExtension, ListTypeExtension,
+    QueryRequest, Row, SemanticType, StructTypeExtension, VectorTypeExtension, json_value,
 };
 use paste::paste;
 use snafu::prelude::*;
@@ -216,6 +216,26 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                     ConcreteDataType::null_datatype()
                 }
             }
+            ColumnDataType::Dictionary => {
+                if let Some(TypeExt::DictionaryType(d)) = datatype_wrapper
+                    .datatype_ext
+                    .as_ref()
+                    .and_then(|datatype_ext| datatype_ext.type_ext.as_ref())
+                {
+                    let key_type = ColumnDataTypeWrapper {
+                        datatype: d.key_datatype(),
+                        datatype_ext: d.key_datatype_extension.clone().map(|ext| *ext),
+                    };
+                    let value_type = ColumnDataTypeWrapper {
+                        datatype: d.value_datatype(),
+                        datatype_ext: d.value_datatype_extension.clone().map(|ext| *ext),
+                    };
+                    ConcreteDataType::dictionary_datatype(key_type.into(), value_type.into())
+                } else {
+                    // invalid state: type extension not found
+                    ConcreteDataType::null_datatype()
+                }
+            }
         }
     }
 }
@@ -339,6 +359,23 @@ impl ColumnDataTypeWrapper {
             }),
         }
     }
+
+    pub fn dictionary_datatype(
+        key_type: ColumnDataTypeWrapper,
+        value_type: ColumnDataTypeWrapper,
+    ) -> Self {
+        ColumnDataTypeWrapper {
+            datatype: ColumnDataType::Dictionary,
+            datatype_ext: Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::DictionaryType(Box::new(DictionaryTypeExtension {
+                    key_datatype: key_type.datatype().into(),
+                    key_datatype_extension: key_type.datatype_ext.map(Box::new),
+                    value_datatype: value_type.datatype().into(),
+                    value_datatype_extension: value_type.datatype_ext.map(Box::new),
+                }))),
+            }),
+        }
+    }
 }
 
 impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
@@ -382,9 +419,8 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::Vector(_) => ColumnDataType::Vector,
             ConcreteDataType::List(_) => ColumnDataType::List,
             ConcreteDataType::Struct(_) => ColumnDataType::Struct,
-            ConcreteDataType::Null(_)
-            | ConcreteDataType::Dictionary(_)
-            | ConcreteDataType::Duration(_) => {
+            ConcreteDataType::Dictionary(_) => ColumnDataType::Dictionary,
+            ConcreteDataType::Null(_) | ConcreteDataType::Duration(_) => {
                 return error::IntoColumnDataTypeSnafu { from: datatype }.fail();
             }
         };
@@ -459,6 +495,25 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                     }
                     Some(ColumnDataTypeExtension {
                         type_ext: Some(TypeExt::StructType(StructTypeExtension { fields })),
+                    })
+                } else {
+                    None
+                }
+            }
+            ColumnDataType::Dictionary => {
+                if let ConcreteDataType::Dictionary(dict_type) = &datatype {
+                    let key_type = ColumnDataTypeWrapper::try_from(dict_type.key_type().clone())?;
+                    let value_type =
+                        ColumnDataTypeWrapper::try_from(dict_type.value_type().clone())?;
+                    Some(ColumnDataTypeExtension {
+                        type_ext: Some(TypeExt::DictionaryType(Box::new(
+                            DictionaryTypeExtension {
+                                key_datatype: key_type.datatype.into(),
+                                key_datatype_extension: key_type.datatype_ext.map(Box::new),
+                                value_datatype: value_type.datatype.into(),
+                                value_datatype_extension: value_type.datatype_ext.map(Box::new),
+                            },
+                        ))),
                     })
                 } else {
                     None
@@ -600,6 +655,9 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
         },
         ColumnDataType::Struct => Values {
             struct_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::Dictionary => Values {
             ..Default::default()
         },
     }
@@ -1305,6 +1363,9 @@ mod tests {
         let values = values_with_capacity(ColumnDataType::Json, 2);
         assert_eq!(2, values.json_values.capacity());
         assert_eq!(2, values.string_values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::Dictionary, 2);
+        assert!(values.bool_values.is_empty());
     }
 
     #[test]
@@ -1400,6 +1461,17 @@ mod tests {
         assert_eq!(
             ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::string_datatype())),
             ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::string_datatype()).into()
+        );
+        assert_eq!(
+            ConcreteDataType::dictionary_datatype(
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::string_datatype()
+            ),
+            ColumnDataTypeWrapper::dictionary_datatype(
+                ColumnDataTypeWrapper::int32_datatype(),
+                ColumnDataTypeWrapper::string_datatype()
+            )
+            .into()
         );
         let struct_type = StructType::new(Arc::new(vec![
             StructField::new("id".to_string(), ConcreteDataType::int64_datatype(), true),
@@ -1570,6 +1642,18 @@ mod tests {
         assert_eq!(
             ColumnDataTypeWrapper::vector_datatype(3),
             ConcreteDataType::vector_datatype(3).try_into().unwrap()
+        );
+        assert_eq!(
+            ColumnDataTypeWrapper::dictionary_datatype(
+                ColumnDataTypeWrapper::int32_datatype(),
+                ColumnDataTypeWrapper::string_datatype()
+            ),
+            ConcreteDataType::dictionary_datatype(
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::string_datatype()
+            )
+            .try_into()
+            .unwrap()
         );
 
         let result: Result<ColumnDataTypeWrapper> = ConcreteDataType::null_datatype().try_into();
