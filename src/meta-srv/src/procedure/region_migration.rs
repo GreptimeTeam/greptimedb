@@ -38,7 +38,7 @@ use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::kv_backend::ResettableKvBackendRef;
-use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock};
+use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_procedure::error::{
@@ -215,8 +215,6 @@ pub struct VolatileContext {
     /// the corresponding [RegionRoute](common_meta::rpc::router::RegionRoute) of the opening region
     /// was written into [TableRouteValue](common_meta::key::table_route::TableRouteValue).
     opening_region_guard: Option<OperatingRegionGuard>,
-    /// `table_route` is stored via previous steps for future use.
-    table_route: Option<DeserializedValueWithBytes<TableRouteValue>>,
     /// `datanode_table` is stored via previous steps for future use.
     from_peer_datanode_table: Option<DatanodeTableValue>,
     /// `table_info` is stored via previous steps for future use.
@@ -383,29 +381,23 @@ impl Context {
     /// Retry:
     /// - Failed to retrieve the metadata of table.
     pub async fn get_table_route_value(
-        &mut self,
-    ) -> Result<&DeserializedValueWithBytes<TableRouteValue>> {
-        let table_route_value = &mut self.volatile_ctx.table_route;
+        &self,
+    ) -> Result<DeserializedValueWithBytes<TableRouteValue>> {
+        let table_id = self.persistent_ctx.region_id.table_id();
+        let table_route = self
+            .table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .get_with_raw_bytes(table_id)
+            .await
+            .context(error::TableMetadataManagerSnafu)
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: format!("Failed to get TableRoute: {table_id}"),
+            })?
+            .context(error::TableRouteNotFoundSnafu { table_id })?;
 
-        if table_route_value.is_none() {
-            let table_id = self.persistent_ctx.region_id.table_id();
-            let table_route = self
-                .table_metadata_manager
-                .table_route_manager()
-                .table_route_storage()
-                .get_with_raw_bytes(table_id)
-                .await
-                .context(error::TableMetadataManagerSnafu)
-                .map_err(BoxedError::new)
-                .with_context(|_| error::RetryLaterWithSourceSnafu {
-                    reason: format!("Failed to get TableRoute: {table_id}"),
-                })?
-                .context(error::TableRouteNotFoundSnafu { table_id })?;
-
-            *table_route_value = Some(table_route);
-        }
-
-        Ok(table_route_value.as_ref().unwrap())
+        Ok(table_route)
     }
 
     /// Notifies the RegionSupervisor to register failure detectors of failed region.
@@ -445,12 +437,6 @@ impl Context {
         self.region_failure_detector_controller
             .deregister_failure_detectors(vec![(to_peer_id, region_id)])
             .await;
-    }
-
-    /// Removes the `table_route` of [VolatileContext], returns true if any.
-    pub fn remove_table_route_value(&mut self) -> bool {
-        let value = self.volatile_ctx.table_route.take();
-        value.is_some()
     }
 
     /// Returns the `table_info` of [VolatileContext] if any.
@@ -627,14 +613,13 @@ impl RegionMigrationProcedure {
         })
     }
 
-    async fn rollback_inner(&mut self) -> Result<()> {
+    async fn rollback_inner(&mut self, procedure_ctx: &ProcedureContext) -> Result<()> {
         let _timer = METRIC_META_REGION_MIGRATION_EXECUTE
             .with_label_values(&["rollback"])
             .start_timer();
 
         let table_id = self.context.region_id().table_id();
         let region_id = self.context.region_id();
-        self.context.remove_table_route_value();
         let table_metadata_manager = self.context.table_metadata_manager.clone();
         let table_route = self.context.get_table_route_value().await?;
 
@@ -647,9 +632,11 @@ impl RegionMigrationProcedure {
             .any(|route| route.is_leader_downgrading());
 
         if downgraded {
+            let table_lock = TableLock::Write(region_id.table_id()).into();
+            let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
             info!("Rollbacking downgraded region leader table route, region: {region_id}");
             table_metadata_manager
-                    .update_leader_region_status(table_id, table_route, |route| {
+                    .update_leader_region_status(table_id, &table_route, |route| {
                         if route.region.id == region_id {
                             Some(None)
                         } else {
@@ -676,8 +663,8 @@ impl Procedure for RegionMigrationProcedure {
         Self::TYPE_NAME
     }
 
-    async fn rollback(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<()> {
-        self.rollback_inner()
+    async fn rollback(&mut self, ctx: &ProcedureContext) -> ProcedureResult<()> {
+        self.rollback_inner(ctx)
             .await
             .map_err(ProcedureError::external)
     }

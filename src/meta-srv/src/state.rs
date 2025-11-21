@@ -75,6 +75,12 @@ impl State {
         })
     }
 
+    /// Returns true if the current state is a leader.
+    pub fn is_leader(&self) -> bool {
+        matches!(self, State::Leader(_))
+    }
+
+    /// Returns true if the leader cache is enabled.
     pub fn enable_leader_cache(&self) -> bool {
         match &self {
             State::Leader(leader) => leader.enable_leader_cache,
