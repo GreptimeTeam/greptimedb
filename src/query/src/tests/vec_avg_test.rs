@@ -34,7 +34,7 @@ async fn test_vec_avg_aggregator() -> Result<(), common_query::error::Error> {
     let sql = "SELECT vector FROM vectors";
     let vectors = exec_selection(engine, sql).await;
 
-    let column = vectors[0].column(0).to_arrow_array();
+    let column = vectors[0].column(0);
     let len = column.len();
     for i in 0..column.len() {
         let v = ScalarValue::try_from_array(&column, i)?;

@@ -22,8 +22,7 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, AsArray};
 use arrow::datatypes::{
-    Date32Type, Date64Type, Decimal128Type, DurationMicrosecondType, DurationMillisecondType,
-    DurationNanosecondType, DurationSecondType, Float32Type, Float64Type, Int8Type, Int16Type,
+    Date32Type, Date64Type, Decimal128Type, Float32Type, Float64Type, Int8Type, Int16Type,
     Int32Type, Int64Type, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType,
     Time32MillisecondType, Time32SecondType, Time64MicrosecondType, Time64NanosecondType,
     TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
@@ -34,9 +33,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
 use common_decimal::Decimal128;
 use common_recordbatch::RecordBatch;
 use common_time::time::Time;
-use common_time::{
-    Date, Duration, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp,
-};
+use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
@@ -567,26 +564,8 @@ impl RecordBatchRowIterator {
                     });
                     encoder.encode_field(&date)?;
                 }
-                DataType::Timestamp(time_unit, _) => {
-                    let v = match time_unit {
-                        TimeUnit::Second => {
-                            let array = column.as_primitive::<TimestampSecondType>();
-                            array.value(i)
-                        }
-                        TimeUnit::Millisecond => {
-                            let array = column.as_primitive::<TimestampMillisecondType>();
-                            array.value(i)
-                        }
-                        TimeUnit::Microsecond => {
-                            let array = column.as_primitive::<TimestampMicrosecondType>();
-                            array.value(i)
-                        }
-                        TimeUnit::Nanosecond => {
-                            let array = column.as_primitive::<TimestampNanosecondType>();
-                            array.value(i)
-                        }
-                    };
-                    let v = Timestamp::new(v, time_unit.into());
+                DataType::Timestamp(_, _) => {
+                    let v = datatypes::arrow_array::timestamp_array_value(column, i);
                     let datetime = v
                         .to_chrono_datetime_with_timezone(Some(&self.query_ctx.timezone()))
                         .map(|v| {
@@ -613,26 +592,8 @@ impl RecordBatchRowIterator {
                         encoder.encode_field(&PgInterval::from(v))?;
                     }
                 },
-                DataType::Duration(time_unit) => {
-                    let v = match time_unit {
-                        TimeUnit::Second => {
-                            let array = column.as_primitive::<DurationSecondType>();
-                            array.value(i)
-                        }
-                        TimeUnit::Millisecond => {
-                            let array = column.as_primitive::<DurationMillisecondType>();
-                            array.value(i)
-                        }
-                        TimeUnit::Microsecond => {
-                            let array = column.as_primitive::<DurationMicrosecondType>();
-                            array.value(i)
-                        }
-                        TimeUnit::Nanosecond => {
-                            let array = column.as_primitive::<DurationNanosecondType>();
-                            array.value(i)
-                        }
-                    };
-                    let d = Duration::new(v, time_unit.into());
+                DataType::Duration(_) => {
+                    let d = datatypes::arrow_array::duration_array_value(column, i);
                     match PgInterval::try_from(d) {
                         Ok(i) => encoder.encode_field(&i)?,
                         Err(e) => {
@@ -650,25 +611,8 @@ impl RecordBatchRowIterator {
                 DataType::Struct(_) => {
                     encode_struct(&self.query_ctx, Default::default(), encoder)?;
                 }
-                DataType::Time32(time_unit) | DataType::Time64(time_unit) => {
-                    let v = match time_unit {
-                        TimeUnit::Second => {
-                            let array = column.as_primitive::<Time32SecondType>();
-                            Time::new_second(array.value(i) as i64)
-                        }
-                        TimeUnit::Millisecond => {
-                            let array = column.as_primitive::<Time32MillisecondType>();
-                            Time::new_millisecond(array.value(i) as i64)
-                        }
-                        TimeUnit::Microsecond => {
-                            let array = column.as_primitive::<Time64MicrosecondType>();
-                            Time::new_microsecond(array.value(i))
-                        }
-                        TimeUnit::Nanosecond => {
-                            let array = column.as_primitive::<Time64NanosecondType>();
-                            Time::new_nanosecond(array.value(i))
-                        }
-                    };
+                DataType::Time32(_) | DataType::Time64(_) => {
+                    let v = datatypes::arrow_array::time_array_value(column, i);
                     encoder.encode_field(&v.to_chrono_time())?;
                 }
                 DataType::Decimal128(precision, scale) => {

@@ -18,9 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use client::DEFAULT_CATALOG_NAME;
 use common_query::{Output, OutputData};
-use datatypes::arrow::array::AsArray;
+use datatypes::arrow::array::{ArrayRef, AsArray, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::TimestampMillisecondType;
-use datatypes::vectors::{TimestampMillisecondVector, VectorRef};
 use frontend::instance::Instance;
 use itertools::Itertools;
 use rand::Rng;
@@ -85,12 +84,10 @@ async fn test_create_database_and_insert_query(
         OutputData::Stream(s) => {
             let batches = common_recordbatch::util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
-            assert_eq!(
-                Arc::new(TimestampMillisecondVector::from_vec(vec![
-                    1655276557000_i64
-                ])) as VectorRef,
-                *batches[0].column(0)
-            );
+            let expected = Arc::new(TimestampMillisecondArray::from_iter_values(vec![
+                1655276557000_i64,
+            ])) as ArrayRef;
+            assert_eq!(batches[0].column(0), &expected);
         }
         _ => unreachable!(),
     }
@@ -226,7 +223,7 @@ async fn ensure_data_exists(tables: &[Table], instance: &Arc<Instance>) {
         let queried = record_batches
             .into_iter()
             .flat_map(|rb| {
-                let array = rb.column(0).to_arrow_array();
+                let array = rb.column(0);
                 let array = array.as_primitive::<TimestampMillisecondType>();
                 array.iter().flatten().map(|x| x as u64).collect::<Vec<_>>()
             })

@@ -32,9 +32,7 @@ use common_telemetry::{debug, error, info};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use datatypes::data_type::DataType;
-use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
-use datatypes::types::jsonb_to_serde_json;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
 use http::{HeaderValue, Method};
@@ -55,8 +53,7 @@ use self::result::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
 use crate::elasticsearch;
 use crate::error::{
-    AddressBindSnafu, AlreadyStartedSnafu, ConvertSqlValueSnafu, Error, InternalIoSnafu,
-    InvalidHeaderValueSnafu, Result, ToJsonSnafu,
+    AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu, Result,
 };
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::otlp::OtlpState;
@@ -109,6 +106,7 @@ pub mod result;
 mod timeout;
 pub mod utils;
 
+use result::HttpOutputWriter;
 pub(crate) use timeout::DynamicTimeoutLayer;
 
 mod hints;
@@ -298,30 +296,10 @@ impl HttpRecordsOutput {
         } else {
             let num_rows = recordbatches.iter().map(|r| r.num_rows()).sum::<usize>();
             let mut rows = Vec::with_capacity(num_rows);
-            let schemas = schema.column_schemas();
-            let num_cols = schema.column_schemas().len();
-            rows.resize_with(num_rows, || Vec::with_capacity(num_cols));
 
-            let mut finished_row_cursor = 0;
             for recordbatch in recordbatches {
-                for (col_idx, col) in recordbatch.columns().iter().enumerate() {
-                    // safety here: schemas length is equal to the number of columns in the recordbatch
-                    let schema = &schemas[col_idx];
-                    for row_idx in 0..recordbatch.num_rows() {
-                        let value = col.get(row_idx);
-                        // TODO(sunng87): is this duplicated with `map_json_type_to_string` in recordbatch?
-                        let value = if let ConcreteDataType::Json(_json_type) = &schema.data_type
-                            && let datatypes::value::Value::Binary(bytes) = value
-                        {
-                            jsonb_to_serde_json(bytes.as_ref()).context(ConvertSqlValueSnafu)?
-                        } else {
-                            serde_json::Value::try_from(col.get(row_idx)).context(ToJsonSnafu)?
-                        };
-
-                        rows[row_idx + finished_row_cursor].push(value);
-                    }
-                }
-                finished_row_cursor += recordbatch.num_rows();
+                let mut writer = HttpOutputWriter::new(schema.num_columns(), None);
+                writer.write(recordbatch, &mut rows)?;
             }
 
             Ok(HttpRecordsOutput {
