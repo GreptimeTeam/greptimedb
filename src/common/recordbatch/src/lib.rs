@@ -758,11 +758,7 @@ impl Stream for MemoryTrackedStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
-                let additional = batch
-                    .columns()
-                    .iter()
-                    .map(|c| c.get_array_memory_size())
-                    .sum::<usize>();
+                let additional = batch.buffer_memory_size();
 
                 if let Err(e) = self.permit.track(additional, self.total_tracked) {
                     return Poll::Ready(Some(Err(e)));
