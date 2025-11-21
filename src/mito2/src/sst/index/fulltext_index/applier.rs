@@ -61,8 +61,30 @@ pub struct FulltextIndexApplyMetrics {
     pub apply_elapsed: std::time::Duration,
     /// Number of blob cache misses.
     pub blob_cache_miss: usize,
+    /// Number of directory cache hits.
+    pub dir_cache_hit: usize,
+    /// Number of directory cache misses.
+    pub dir_cache_miss: usize,
+    /// Elapsed time to initialize directory data.
+    pub dir_init_elapsed: std::time::Duration,
     /// Metrics for bloom filter reads.
     pub bloom_filter_read_metrics: BloomFilterReadMetrics,
+}
+
+impl FulltextIndexApplyMetrics {
+    /// Collects metrics from a directory read operation.
+    pub fn collect_dir_metrics(
+        &mut self,
+        elapsed: std::time::Duration,
+        dir_metrics: puffin::puffin_manager::DirMetrics,
+    ) {
+        self.dir_init_elapsed += elapsed;
+        if dir_metrics.cache_hit {
+            self.dir_cache_hit += 1;
+        } else {
+            self.dir_cache_miss += 1;
+        }
+    }
 }
 
 /// `FulltextIndexApplier` is responsible for applying fulltext index to the provided SST files
@@ -576,20 +598,27 @@ impl IndexSource {
         file_id: RegionFileId,
         key: &str,
         file_size_hint: Option<u64>,
-        metrics: Option<&mut FulltextIndexApplyMetrics>,
+        mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<GuardWithMetadata<SstPuffinDir>>> {
         let (reader, fallbacked) = self.ensure_reader(file_id, file_size_hint).await?;
 
         // Track cache miss if fallbacked to remote
         if fallbacked {
-            if let Some(m) = metrics {
+            if let Some(m) = &mut metrics {
                 m.blob_cache_miss += 1;
             }
         }
 
+        let start = metrics.as_ref().map(|_| Instant::now());
         let res = reader.dir(key).await;
         match res {
-            Ok(dir) => Ok(Some(dir)),
+            Ok((dir, dir_metrics)) => {
+                if let Some(m) = metrics {
+                    // Safety: start is Some when metrics is Some
+                    m.collect_dir_metrics(start.unwrap().elapsed(), dir_metrics);
+                }
+                Ok(Some(dir))
+            }
             Err(err) if err.is_blob_not_found() => Ok(None),
             Err(err) => {
                 if fallbacked {
@@ -597,9 +626,16 @@ impl IndexSource {
                 } else {
                     warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.");
                     let reader = self.build_remote(file_id, file_size_hint).await?;
+                    let start = metrics.as_ref().map(|_| Instant::now());
                     let res = reader.dir(key).await;
                     match res {
-                        Ok(dir) => Ok(Some(dir)),
+                        Ok((dir, dir_metrics)) => {
+                            if let Some(m) = metrics {
+                                // Safety: start is Some when metrics is Some
+                                m.collect_dir_metrics(start.unwrap().elapsed(), dir_metrics);
+                            }
+                            Ok(Some(dir))
+                        }
                         Err(err) if err.is_blob_not_found() => Ok(None),
                         Err(err) => Err(err).context(PuffinReadBlobSnafu),
                     }
