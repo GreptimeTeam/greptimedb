@@ -447,7 +447,7 @@ impl Stream for StreamWithMetricWrapper {
                         // we don't record elapsed time here
                         // since it's calling storage api involving I/O ops
                         this.metric
-                            .record_mem_usage(record_batch.array_memory_size());
+                            .record_mem_usage(record_batch.buffer_memory_size());
                         this.metric.record_output(record_batch.num_rows());
                         Poll::Ready(Some(Ok(record_batch.into_df_record_batch())))
                     }
