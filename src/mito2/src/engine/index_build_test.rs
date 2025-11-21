@@ -336,15 +336,15 @@ async fn test_index_build_type_manual_basic() {
 
     // Flush and make sure there is no index file (because create_on_flush is disabled).
     put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
-    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
     let scanner = engine
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
     // Index build task is triggered on flush, but not finished.
     assert_listener_counts(&listener, 1, 0);
-    assert!(scanner.num_files() == 1);
-    assert!(num_of_index_files(&engine, &scanner, region_id).await == 0);
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 0);
 
     // Trigger manual index build task and make sure index file is built without flush or compaction.
     let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
@@ -355,8 +355,33 @@ async fn test_index_build_type_manual_basic() {
         .await
         .unwrap();
     assert_listener_counts(&listener, 2, 1);
-    assert!(scanner.num_files() == 1);
-    assert!(num_of_index_files(&engine, &scanner, region_id).await == 1);
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
+
+    // Test idempotency: Second manual index build request on the same file.
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    engine.handle_request(region_id, request).await.unwrap();
+    reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    // Should still be 2 begin and 1 finish - no new task should be created for already indexed file.
+    assert_listener_counts(&listener, 2, 1);
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
+
+    // Test idempotency again: Third manual index build request to further verify.
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    engine.handle_request(region_id, request).await.unwrap();
+    reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_listener_counts(&listener, 2, 1);
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
 }
 
 #[tokio::test]
@@ -402,8 +427,8 @@ async fn test_index_build_type_manual_consistency() {
         .await
         .unwrap();
     assert_listener_counts(&listener, 1, 1);
-    assert!(scanner.num_files() == 1);
-    assert!(num_of_index_files(&engine, &scanner, region_id).await == 1);
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
 
     // Check index build task for consistent file will be skipped.
     let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
@@ -416,8 +441,8 @@ async fn test_index_build_type_manual_consistency() {
         .unwrap();
     // Because the file is consistent, no new index build task is triggered.
     assert_listener_counts(&listener, 1, 1);
-    assert!(scanner.num_files() == 1);
-    assert!(num_of_index_files(&engine, &scanner, region_id).await == 1);
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
 
     let mut altered_metadata = create_request.column_metadatas.clone();
     // Set index for field_0.
