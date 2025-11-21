@@ -115,9 +115,16 @@ impl<R> CachedBloomFilterIndexBlobReader<R> {
 
 #[async_trait]
 impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBlobReader<R> {
-    async fn range_read(&self, offset: u64, size: u32) -> Result<Bytes> {
+    async fn range_read(
+        &self,
+        offset: u64,
+        size: u32,
+        metrics: Option<&mut BloomFilterReadMetrics>,
+    ) -> Result<Bytes> {
+        let start = metrics.as_ref().map(|_| Instant::now());
         let inner = &self.inner;
-        self.cache
+        let result = self
+            .cache
             .get_or_load(
                 (self.file_id, self.column_id, self.tag),
                 self.blob_size,
@@ -126,7 +133,17 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
                 move |ranges| async move { inner.read_vec(&ranges, None).await },
             )
             .await
-            .map(|b| b.into())
+            .map(|b| b.into())?;
+
+        if let Some(m) = metrics {
+            m.total_ranges += 1;
+            m.total_bytes += size as u64;
+            if let Some(start) = start {
+                m.elapsed += start.elapsed();
+            }
+        }
+
+        Ok(result)
     }
 
     async fn read_vec(
@@ -165,7 +182,10 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
     }
 
     /// Reads the meta information of the bloom filter.
-    async fn metadata(&self) -> Result<BloomFilterMeta> {
+    async fn metadata(
+        &self,
+        metrics: Option<&mut BloomFilterReadMetrics>,
+    ) -> Result<BloomFilterMeta> {
         if let Some(cached) = self
             .cache
             .get_metadata((self.file_id, self.column_id, self.tag))
@@ -173,7 +193,7 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok((*cached).clone())
         } else {
-            let meta = self.inner.metadata().await?;
+            let meta = self.inner.metadata(metrics).await?;
             self.cache.put_metadata(
                 (self.file_id, self.column_id, self.tag),
                 Arc::new(meta.clone()),

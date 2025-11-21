@@ -318,10 +318,10 @@ async fn try_read_bloom_meta(
                             bloom_reader,
                             cache.clone(),
                         )
-                        .metadata()
+                        .metadata(None)
                         .await
                     }
-                    _ => bloom_reader.metadata().await,
+                    _ => bloom_reader.metadata(None).await,
                 };
 
                 match result {
