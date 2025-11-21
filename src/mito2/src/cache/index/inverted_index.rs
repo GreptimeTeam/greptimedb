@@ -146,12 +146,15 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         Ok(pages)
     }
 
-    async fn metadata(&self) -> Result<Arc<InvertedIndexMetas>> {
+    async fn metadata<'a>(
+        &self,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Arc<InvertedIndexMetas>> {
         if let Some(cached) = self.cache.get_metadata(self.file_id) {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(cached)
         } else {
-            let meta = self.inner.metadata().await?;
+            let meta = self.inner.metadata(metrics).await?;
             self.cache.put_metadata(self.file_id, meta.clone());
             CACHE_MISS.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(meta)
@@ -306,7 +309,7 @@ mod test {
             reader,
             Arc::new(InvertedIndexCache::new(8192, 8192, 50)),
         );
-        let metadata = cached_reader.metadata().await.unwrap();
+        let metadata = cached_reader.metadata(None).await.unwrap();
         assert_eq!(metadata.total_row_count, 8);
         assert_eq!(metadata.segment_row_count, 1);
         assert_eq!(metadata.metas.len(), 2);

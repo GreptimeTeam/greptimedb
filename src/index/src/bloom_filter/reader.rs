@@ -292,8 +292,10 @@ impl<R: RangeReader> BloomFilterMetaReader<R> {
                 .context(IoSnafu)?;
 
             if let Some(m) = metrics {
-                m.total_ranges += 2; // suffix read + meta read
-                m.total_bytes += (self.file_size - meta_start) + length;
+                // suffix read + meta read
+                m.total_ranges += 2;
+                // Ignores the meta length size to simplify the calculation.
+                m.total_bytes += self.file_size.min(self.prefetch_size) + length;
                 if let Some(start) = start {
                     m.fetch_elapsed += start.elapsed();
                 }
@@ -302,7 +304,8 @@ impl<R: RangeReader> BloomFilterMetaReader<R> {
             BloomFilterMeta::decode(meta).context(DecodeProtoSnafu)
         } else {
             if let Some(m) = metrics {
-                m.total_ranges += 1; // suffix read only
+                // suffix read only
+                m.total_ranges += 1;
                 m.total_bytes += self.file_size.min(self.prefetch_size);
                 if let Some(start) = start {
                     m.fetch_elapsed += start.elapsed();

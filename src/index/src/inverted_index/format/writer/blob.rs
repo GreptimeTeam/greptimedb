@@ -122,7 +122,7 @@ mod tests {
             .unwrap();
 
         let reader = InvertedIndexBlobReader::new(blob);
-        let metadata = reader.metadata().await.unwrap();
+        let metadata = reader.metadata(None).await.unwrap();
         assert_eq!(metadata.total_row_count, 8);
         assert_eq!(metadata.segment_row_count, 1);
         assert_eq!(metadata.metas.len(), 0);
@@ -182,7 +182,7 @@ mod tests {
             .unwrap();
 
         let reader = InvertedIndexBlobReader::new(blob);
-        let metadata = reader.metadata().await.unwrap();
+        let metadata = reader.metadata(None).await.unwrap();
         assert_eq!(metadata.total_row_count, 8);
         assert_eq!(metadata.segment_row_count, 1);
         assert_eq!(metadata.metas.len(), 2);
