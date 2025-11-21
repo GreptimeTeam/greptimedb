@@ -123,7 +123,7 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
     ) -> Result<Bytes> {
         let start = metrics.as_ref().map(|_| Instant::now());
         let inner = &self.inner;
-        let result = self
+        let (result, cache_metrics) = self
             .cache
             .get_or_load(
                 (self.file_id, self.column_id, self.tag),
@@ -132,18 +132,19 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
                 size,
                 move |ranges| async move { inner.read_vec(&ranges, None).await },
             )
-            .await
-            .map(|b| b.into())?;
+            .await?;
 
         if let Some(m) = metrics {
-            m.total_ranges += 1;
-            m.total_bytes += size as u64;
+            m.total_ranges += cache_metrics.num_pages;
+            m.total_bytes += cache_metrics.page_bytes;
+            m.cache_hit += cache_metrics.cache_hit;
+            m.cache_miss += cache_metrics.cache_miss;
             if let Some(start) = start {
                 m.fetch_elapsed += start.elapsed();
             }
         }
 
-        Ok(result)
+        Ok(result.into())
     }
 
     async fn read_vec(
@@ -154,9 +155,10 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
         let start = metrics.as_ref().map(|_| Instant::now());
 
         let mut pages = Vec::with_capacity(ranges.len());
+        let mut total_cache_metrics = crate::cache::index::IndexCacheMetrics::default();
         for range in ranges {
             let inner = &self.inner;
-            let page = self
+            let (page, cache_metrics) = self
                 .cache
                 .get_or_load(
                     (self.file_id, self.column_id, self.tag),
@@ -167,12 +169,15 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
                 )
                 .await?;
 
+            total_cache_metrics.merge(&cache_metrics);
             pages.push(Bytes::from(page));
         }
 
         if let Some(m) = metrics {
-            m.total_ranges += ranges.len();
-            m.total_bytes += ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+            m.total_ranges += total_cache_metrics.num_pages;
+            m.total_bytes += total_cache_metrics.page_bytes;
+            m.cache_hit += total_cache_metrics.cache_hit;
+            m.cache_miss += total_cache_metrics.cache_miss;
             if let Some(start) = start {
                 m.fetch_elapsed += start.elapsed();
             }
@@ -191,6 +196,9 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
             .get_metadata((self.file_id, self.column_id, self.tag))
         {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
+            if let Some(m) = metrics {
+                m.cache_hit += 1;
+            }
             Ok((*cached).clone())
         } else {
             let meta = self.inner.metadata(metrics).await?;

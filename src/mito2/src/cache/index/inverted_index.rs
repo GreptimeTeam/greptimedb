@@ -93,7 +93,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         let start = metrics.as_ref().map(|_| Instant::now());
 
         let inner = &self.inner;
-        let result = self
+        let (result, cache_metrics) = self
             .cache
             .get_or_load(
                 self.file_id,
@@ -105,8 +105,10 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
             .await?;
 
         if let Some(m) = metrics {
-            m.total_bytes += size as u64;
-            m.total_ranges += 1;
+            m.total_bytes += cache_metrics.page_bytes;
+            m.total_ranges += cache_metrics.num_pages;
+            m.cache_hit += cache_metrics.cache_hit;
+            m.cache_miss += cache_metrics.cache_miss;
             m.fetch_elapsed += start.unwrap().elapsed();
         }
 
@@ -121,9 +123,10 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         let start = metrics.as_ref().map(|_| Instant::now());
 
         let mut pages = Vec::with_capacity(ranges.len());
+        let mut total_cache_metrics = crate::cache::index::IndexCacheMetrics::default();
         for range in ranges {
             let inner = &self.inner;
-            let page = self
+            let (page, cache_metrics) = self
                 .cache
                 .get_or_load(
                     self.file_id,
@@ -134,12 +137,15 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
                 )
                 .await?;
 
+            total_cache_metrics.merge(&cache_metrics);
             pages.push(Bytes::from(page));
         }
 
         if let Some(m) = metrics {
-            m.total_bytes += ranges.iter().map(|r| r.end - r.start).sum::<u64>();
-            m.total_ranges += ranges.len();
+            m.total_bytes += total_cache_metrics.page_bytes;
+            m.total_ranges += total_cache_metrics.num_pages;
+            m.cache_hit += total_cache_metrics.cache_hit;
+            m.cache_miss += total_cache_metrics.cache_miss;
             m.fetch_elapsed += start.unwrap().elapsed();
         }
 
@@ -152,6 +158,9 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
     ) -> Result<Arc<InvertedIndexMetas>> {
         if let Some(cached) = self.cache.get_metadata(self.file_id) {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
+            if let Some(m) = metrics {
+                m.cache_hit += 1;
+            }
             Ok(cached)
         } else {
             let meta = self.inner.metadata(metrics).await?;
@@ -438,7 +447,7 @@ mod test {
             let size = rng.random_range(0..file_size as u32 - offset as u32);
             let expected = cached_reader.range_read(offset, size, None).await.unwrap();
             let inner = &cached_reader.inner;
-            let read = cached_reader
+            let (read, _cache_metrics) = cached_reader
                 .cache
                 .get_or_load(
                     cached_reader.file_id,
