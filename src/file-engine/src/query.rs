@@ -21,21 +21,26 @@ use std::task::{Context, Poll};
 
 use common_datasource::object_store::build_backend;
 use common_error::ext::BoxedError;
-use common_recordbatch::adapter::{RecordBatchMetrics, RecordBatchStreamAdapter};
-use common_recordbatch::error::{CastVectorSnafu, ExternalSnafu, Result as RecordBatchResult};
-use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::adapter::RecordBatchMetrics;
+use common_recordbatch::error::{
+    self as recordbatch_error, CastVectorSnafu, ExternalSnafu, Result as RecordBatchResult,
+};
+use common_recordbatch::{
+    DfSendableRecordBatchStream, OrderOption, RecordBatch, RecordBatchStream,
+    SendableRecordBatchStream,
+};
 use datafusion::logical_expr::utils as df_logical_expr_utils;
 use datafusion_expr::expr::Expr;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::VectorRef;
 use futures::Stream;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{GenerateImplicitData, OptionExt, ResultExt, ensure};
 use store_api::storage::ScanRequest;
 
 use self::file_stream::ScanPlanConfig;
 use crate::error::{
-    BuildBackendSnafu, BuildStreamAdapterSnafu, CreateDefaultSnafu, ExtractColumnFromFilterSnafu,
+    BuildBackendSnafu, CreateDefaultSnafu, ExtractColumnFromFilterSnafu,
     MissingColumnNoDefaultSnafu, ProjectSchemaSnafu, ProjectionOutOfBoundsSnafu, Result,
 };
 use crate::region::FileRegion;
@@ -47,6 +52,16 @@ impl FileRegion {
         let file_projection = self.projection_pushdown_to_file(&request.projection)?;
         let file_filters = self.filters_pushdown_to_file(&request.filters)?;
         let file_schema = Arc::new(Schema::new(self.file_options.file_column_schemas.clone()));
+
+        let projected_file_schema = if let Some(projection) = &file_projection {
+            Arc::new(
+                file_schema
+                    .try_project(projection)
+                    .context(ProjectSchemaSnafu)?,
+            )
+        } else {
+            file_schema.clone()
+        };
 
         let file_stream = file_stream::create_stream(
             &self.format,
@@ -60,14 +75,12 @@ impl FileRegion {
             },
         )?;
 
-        let file_stream =
-            RecordBatchStreamAdapter::try_new(file_stream).context(BuildStreamAdapterSnafu)?;
-
         let scan_schema = self.scan_schema(&request.projection)?;
 
         Ok(Box::pin(FileToScanRegionStream::new(
             scan_schema,
-            Box::pin(file_stream),
+            projected_file_schema,
+            file_stream,
         )))
     }
 
@@ -147,7 +160,8 @@ impl FileRegion {
 
 struct FileToScanRegionStream {
     scan_schema: SchemaRef,
-    file_stream: SendableRecordBatchStream,
+    file_schema: SchemaRef,
+    file_stream: DfSendableRecordBatchStream,
 }
 
 impl RecordBatchStream for FileToScanRegionStream {
@@ -170,15 +184,21 @@ impl Stream for FileToScanRegionStream {
     fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.file_stream).poll_next(ctx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(file_record_batch)) => {
-                let file_record_batch = file_record_batch?;
-                let scan_record_batch = if self.schema_eq(&file_record_batch) {
-                    Ok(file_record_batch)
-                } else {
-                    self.convert_record_batch(&file_record_batch)
-                };
-
-                Poll::Ready(Some(scan_record_batch))
+            Poll::Ready(Some(Ok(file_record_batch))) => Poll::Ready(Some(
+                RecordBatch::try_from_df_record_batch(self.file_schema.clone(), file_record_batch)
+                    .and_then(|file_record_batch| {
+                        if self.schema_eq(&file_record_batch) {
+                            Ok(file_record_batch)
+                        } else {
+                            self.convert_record_batch(&file_record_batch)
+                        }
+                    }),
+            )),
+            Poll::Ready(Some(Err(error))) => {
+                Poll::Ready(Some(Err(recordbatch_error::Error::PollStream {
+                    error,
+                    location: snafu::Location::generate(),
+                })))
             }
             Poll::Ready(None) => Poll::Ready(None),
         }
@@ -186,9 +206,14 @@ impl Stream for FileToScanRegionStream {
 }
 
 impl FileToScanRegionStream {
-    fn new(scan_schema: SchemaRef, file_stream: SendableRecordBatchStream) -> Self {
+    fn new(
+        scan_schema: SchemaRef,
+        file_schema: SchemaRef,
+        file_stream: DfSendableRecordBatchStream,
+    ) -> Self {
         Self {
             scan_schema,
+            file_schema,
             file_stream,
         }
     }
