@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use greptime_proto::v1::column_data_type_extension::TypeExt;
 use greptime_proto::v1::ColumnDataTypeExtension;
+use greptime_proto::v1::column_data_type_extension::TypeExt;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 use syn::spanned::Spanned;

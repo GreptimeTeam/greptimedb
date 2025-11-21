@@ -502,8 +502,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             }
             ColumnDataType::Dictionary => {
                 if let ConcreteDataType::Dictionary(dict_type) = &datatype {
-                    let key_type =
-                        ColumnDataTypeWrapper::try_from(dict_type.key_type().clone())?;
+                    let key_type = ColumnDataTypeWrapper::try_from(dict_type.key_type().clone())?;
                     let value_type =
                         ColumnDataTypeWrapper::try_from(dict_type.value_type().clone())?;
                     Some(ColumnDataTypeExtension {
