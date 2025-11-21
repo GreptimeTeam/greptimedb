@@ -223,7 +223,15 @@ fn push_column_to_rows(column: Column, rows: &mut [Row]) -> Result<()> {
             }
         }
 
-        )* }}
+        )* _ => {
+            return InvalidInsertRequestSnafu {
+                reason: format!(
+                    "Column '{}' with type {:?} is not supported in row inserts.",
+                    column.column_name, column_type
+                ),
+            }
+            .fail();
+        } }}
     }
 
     push_column_values_match_types!(
