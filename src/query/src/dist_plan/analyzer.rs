@@ -382,12 +382,18 @@ impl PlanRewriter {
 
         match Categorizer::check_plan(plan, self.partition_cols.clone())? {
             Commutativity::Commutative => {
-                // PATCH: we should reconsider SORT's commutativity instead of doing this trick
+                // PATCH: we should reconsider SORT's commutativity instead of doing this trick.
+                // explain: for a fully commutative SeriesDivide, its child Sort plan only serves it. I.e., that
+                //   Sort plan is also fully commutative, instead of conditional commutative. So we can remove
+                //   the generated MergeSort from stage safely.
                 if let LogicalPlan::Extension(ext_a) = plan
                     && ext_a.node.name() == SeriesDivide::name()
                     && let Some(LogicalPlan::Extension(ext_b)) = self.stage.last()
                     && ext_b.node.name() == MergeSortLogicalPlan::name()
                 {
+                    // revert last `ConditionalCommutative` result for Sort plan in this case.
+                    // `update_column_requriements` left unchanged because Sort won't generate
+                    // new columns or remove existing columns.
                     self.stage.pop();
                     self.expand_on_next_part_cond_trans_commutative = false;
                 }
