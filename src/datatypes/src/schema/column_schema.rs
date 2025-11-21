@@ -431,6 +431,10 @@ impl ColumnSchema {
 
         Ok(())
     }
+
+    pub fn is_indexed(&self) -> bool {
+        self.is_inverted_indexed() || self.is_fulltext_indexed() || self.is_skipping_indexed()
+    }
 }
 
 /// Column extended type set in column schema's metadata.

@@ -21,7 +21,7 @@ use common_catalog::build_db_string;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use futures_util::future;
 use partition::manager::{PartitionInfo, PartitionRuleManagerRef};
 use session::context::QueryContextRef;
@@ -113,7 +113,11 @@ impl Requester {
             })
             .collect();
 
-        info!("Handle table manual build index request: {:?}", request);
+        info!(
+            "Handle table manual build index for table {}",
+            request.table_name
+        );
+        debug!("Request details: {:?}", request);
 
         self.do_request(
             requests,

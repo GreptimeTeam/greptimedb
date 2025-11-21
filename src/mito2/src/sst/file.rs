@@ -146,7 +146,7 @@ pub struct FileMeta {
     /// Size of the file.
     pub file_size: u64,
     /// Available indexes of the file.
-    pub available_indexes: SmallVec<[IndexType; 4]>,
+    pub available_indexes: IndexTypes,
     /// Created indexes of the file for each column.
     ///
     /// This is essentially a more granular, column-level version of `available_indexes`,
@@ -250,10 +250,21 @@ pub enum IndexType {
     BloomFilterIndex,
 }
 
+/// Metadata of indexes created for a specific column in an SST file.
+///
+/// This structure tracks which index types have been successfully created for a column.
+/// It provides more granular, column-level index information compared to the file-level
+/// `available_indexes` field in [`FileMeta`].
+///
+/// This is primarily used for:
+/// - Manual index building in asynchronous index construction mode
+/// - Verifying index consistency between files and region metadata
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ColumnIndexMetadata {
+    /// The column ID this index metadata applies to.
     pub column_id: ColumnId,
+    /// List of index types that have been successfully created for this column.
     pub created_indexes: IndexTypes,
 }
 
@@ -290,10 +301,7 @@ impl FileMeta {
             .map(|index| (index.column_id, index.created_indexes.clone()))
             .collect::<std::collections::HashMap<_, _>>();
         for column in metadata {
-            if !column.column_schema.is_inverted_indexed()
-                && !column.column_schema.is_fulltext_indexed()
-                && !column.column_schema.is_skipping_indexed()
-            {
+            if !column.column_schema.is_indexed() {
                 continue;
             }
             if let Some(indexes) = id_to_indexes.get(&column.column_id) {

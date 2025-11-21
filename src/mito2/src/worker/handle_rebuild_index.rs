@@ -125,20 +125,16 @@ impl<S> RegionWorkerLoop<S> {
             .collect();
 
         let build_tasks = if request.file_metas.is_empty() {
-            if request.build_type == IndexBuildType::Manual {
-                // Find all files whose index is inconsistent with the region metadata.
-                all_files
-                    .values()
-                    .filter(|file| {
-                        !file
-                            .meta_ref()
-                            .is_index_consistent_with_region(&version.metadata.column_metadatas)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-            } else {
-                all_files.values().cloned().collect::<Vec<_>>()
-            }
+            // If no specific files are provided, find files whose index is inconsistent with the region metadata.
+            all_files
+                .values()
+                .filter(|file| {
+                    !file
+                        .meta_ref()
+                        .is_index_consistent_with_region(&version.metadata.column_metadatas)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
         } else {
             request
                 .file_metas

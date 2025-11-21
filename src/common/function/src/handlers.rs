@@ -49,7 +49,7 @@ pub trait TableMutationHandler: Send + Sync {
         ctx: QueryContextRef,
     ) -> Result<AffectedRows>;
 
-    /// Trigger a index build task for table.
+    /// Trigger an index build task for the table.
     async fn build_index(
         &self,
         request: BuildIndexTableRequest,
