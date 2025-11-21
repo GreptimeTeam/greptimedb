@@ -129,18 +129,27 @@ impl HeartbeatHandler for RegionLeaseHandler {
 
 #[cfg(test)]
 mod test {
+    use std::any::Any;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
     use common_meta::datanode::{RegionManifestInfo, RegionStat, Stat};
     use common_meta::distributed_time_constants;
+    use common_meta::error::Result as MetaResult;
     use common_meta::key::TableMetadataManager;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::txn::{Txn, TxnResponse};
+    use common_meta::kv_backend::{KvBackend, TxnService};
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
+    use common_meta::rpc::store::{
+        BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
+        BatchPutRequest, BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
+        PutResponse, RangeRequest, RangeResponse,
+    };
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
@@ -414,5 +423,103 @@ mod test {
             .collect::<HashMap<_, _>>();
 
         assert_eq!(granted, expected);
+    }
+
+    struct MockKvBackend;
+
+    #[async_trait::async_trait]
+    impl TxnService for MockKvBackend {
+        type Error = common_meta::error::Error;
+
+        async fn txn(&self, _txn: Txn) -> MetaResult<TxnResponse> {
+            unimplemented!()
+        }
+
+        fn max_txn_ops(&self) -> usize {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl KvBackend for MockKvBackend {
+        fn name(&self) -> &str {
+            "mock_kv_backend"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        async fn range(&self, _req: RangeRequest) -> MetaResult<RangeResponse> {
+            unimplemented!()
+        }
+
+        async fn put(&self, _req: PutRequest) -> MetaResult<PutResponse> {
+            unimplemented!()
+        }
+
+        async fn batch_put(&self, _req: BatchPutRequest) -> MetaResult<BatchPutResponse> {
+            unimplemented!()
+        }
+
+        async fn batch_get(&self, _req: BatchGetRequest) -> MetaResult<BatchGetResponse> {
+            common_meta::error::UnexpectedSnafu {
+                err_msg: "mock err",
+            }
+            .fail()
+        }
+
+        async fn delete_range(&self, _req: DeleteRangeRequest) -> MetaResult<DeleteRangeResponse> {
+            unimplemented!()
+        }
+
+        async fn batch_delete(&self, _req: BatchDeleteRequest) -> MetaResult<BatchDeleteResponse> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_renew_region_lease_failure() {
+        common_telemetry::init_default_ut_logging();
+        let kvbackend = Arc::new(MockKvBackend);
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kvbackend));
+
+        let datanode_id = 1;
+        let region_number = 1u32;
+        let table_id = 10;
+        let region_id = RegionId::new(table_id, region_number);
+        let another_region_id = RegionId::new(table_id, region_number + 1);
+        let no_exist_region_id = RegionId::new(table_id, region_number + 2);
+        let peer = Peer::empty(datanode_id);
+
+        let builder = MetasrvBuilder::new();
+        let metasrv = builder.build().await.unwrap();
+        let ctx = &mut metasrv.new_ctx();
+
+        let req = HeartbeatRequest {
+            duration_since_epoch: 1234,
+            ..Default::default()
+        };
+
+        let acc = &mut HeartbeatAccumulator::default();
+        acc.stat = Some(Stat {
+            id: peer.id,
+            region_stats: vec![
+                new_empty_region_stat(region_id, RegionRole::Leader),
+                new_empty_region_stat(another_region_id, RegionRole::Leader),
+                new_empty_region_stat(no_exist_region_id, RegionRole::Leader),
+            ],
+            ..Default::default()
+        });
+        let handler = RegionLeaseHandler::new(
+            distributed_time_constants::REGION_LEASE_SECS,
+            table_metadata_manager.clone(),
+            Default::default(),
+            None,
+        );
+        handler.handle(&req, ctx, acc).await.unwrap();
+
+        assert!(acc.region_lease.is_none());
+        assert!(acc.inactive_region_ids.is_empty());
     }
 }
