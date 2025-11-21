@@ -28,6 +28,7 @@ use crate::error::Result;
 use crate::gc::candidate::GcCandidate;
 use crate::gc::scheduler::{GcJobReport, GcScheduler};
 use crate::gc::tracker::RegionGcInfo;
+use crate::region;
 
 pub(crate) type Region2Peers = HashMap<RegionId, (Peer, Vec<Peer>)>;
 
@@ -72,7 +73,7 @@ impl GcScheduler {
 
         let duration = start_time.elapsed();
         info!(
-            "Finished GC cycle. Processed {} datanodes ({} successful). Duration: {:?}",
+            "Finished GC cycle. Processed {} datanodes ({} failed). Duration: {:?}",
             report.per_datanode_reports.len(), // Reuse field for datanode count
             report.failed_datanodes.len(),
             duration
@@ -212,7 +213,7 @@ impl GcScheduler {
         let all_related_regions = self.find_related_regions(&all_region_ids).await?;
 
         let (region_to_peer, _) = self
-            .discover_datanodes_for_regions(&all_related_regions.keys().cloned().collect_vec(), 0)
+            .discover_datanodes_for_regions(&all_related_regions.keys().cloned().collect_vec())
             .await?;
 
         // Step 1: Get file references for all regions on this datanode
@@ -227,19 +228,28 @@ impl GcScheduler {
             .await?;
 
         // Step 2: Create a single GcRegionProcedure for all regions on this datanode
-
         let (gc_report, fully_listed_regions) = {
             // Partition regions into full listing and fast listing in a single pass
-            let mut need_full_list_regions = Vec::new();
-            let mut fast_list_regions = Vec::new();
 
-            for region_id in &all_region_ids {
-                if self.should_use_full_listing(*region_id).await {
-                    need_full_list_regions.push(*region_id);
-                } else {
-                    fast_list_regions.push(*region_id);
-                }
-            }
+            let mut batch_full_listing_decisions =
+                self.batch_should_use_full_listing(&all_region_ids).await;
+
+            let need_full_list_regions = batch_full_listing_decisions
+                .iter()
+                .filter_map(
+                    |(&region_id, &need_full)| {
+                        if need_full { Some(region_id) } else { None }
+                    },
+                )
+                .collect_vec();
+            let mut fast_list_regions = batch_full_listing_decisions
+                .iter()
+                .filter_map(
+                    |(&region_id, &need_full)| {
+                        if !need_full { Some(region_id) } else { None }
+                    },
+                )
+                .collect_vec();
 
             let mut combined_report = GcReport::default();
 
@@ -251,7 +261,7 @@ impl GcScheduler {
                         peer.clone(),
                         &fast_list_regions,
                         &file_refs_manifest,
-                        true,
+                        false,
                         self.config.mailbox_timeout,
                     )
                     .await
@@ -325,7 +335,6 @@ impl GcScheduler {
     async fn discover_datanodes_for_regions(
         &self,
         regions: &[RegionId],
-        retry_round: usize,
     ) -> Result<(Region2Peers, Peer2Regions)> {
         let all_related_regions = self
             .find_related_regions(regions)
@@ -358,15 +367,15 @@ impl GcScheduler {
                         &table_regions,
                         &mut region_to_peer,
                         &mut peer_to_regions,
-                        retry_round,
                     );
                 }
                 Err(e) => {
-                    warn!(
-                        "Failed to get table route for table {} in retry round {}: {}",
-                        table_id, retry_round, e
-                    );
                     // Continue with other tables instead of failing completely
+                    // TODO(discord9): consider failing here instead
+                    warn!(
+                        "Failed to get table route for table {}: {}, skipping its regions",
+                        table_id, e
+                    );
                     continue;
                 }
             }
@@ -382,7 +391,6 @@ impl GcScheduler {
         table_regions: &[RegionId],
         region_to_peer: &mut Region2Peers,
         peer_to_regions: &mut Peer2Regions,
-        retry_round: usize,
     ) {
         for &region_id in table_regions {
             let mut found = false;
@@ -407,83 +415,37 @@ impl GcScheduler {
 
             if !found {
                 warn!(
-                    "Failed to find region {} in table route or no leader peer found in retry round {}",
-                    region_id, retry_round
+                    "Failed to find region {} in table route or no leader peer found",
+                    region_id,
                 );
             }
         }
     }
 
-    /// Process a batch of regions on a single peer.
-    async fn process_regions_batch_on_peer(
+    async fn batch_should_use_full_listing(
         &self,
-        peer: Peer,
-        regions: HashSet<RegionId>,
-        file_refs_manifest: FileRefsManifest,
-        retry_round: usize,
-    ) -> Option<GcReport> {
-        let regions = regions.into_iter().collect::<Vec<_>>();
-        // Determine if any region in the batch needs full listing
-        let should_full_listing = self.should_use_full_listing_for_batch(&regions).await;
-
-        match self
-            .ctx
-            .gc_regions(
-                peer.clone(),
-                &regions,
-                &file_refs_manifest,
-                should_full_listing,
-                self.config.mailbox_timeout,
-            )
-            .await
-        {
-            Ok(report) => {
-                let successful_regions = report.deleted_files.len();
-
-                // Update GC tracker for all successful regions
-                for &region_id in &regions {
-                    self.update_full_listing_time(region_id, should_full_listing)
-                        .await;
+        region_ids: &[RegionId],
+    ) -> HashMap<RegionId, bool> {
+        let mut result = HashMap::new();
+        let gc_tracker = self.region_gc_tracker.lock().await;
+        let now = Instant::now();
+        for &region_id in region_ids {
+            let use_full_listing = {
+                if let Some(gc_info) = gc_tracker.get(&region_id)
+                    && let Some(last_full_listing) = gc_info.last_full_listing_time
+                {
+                    // check if pass cooling down interval after last full listing
+                    let elapsed = now.duration_since(last_full_listing);
+                    elapsed >= self.config.full_file_listing_interval
+                } else {
+                    // Never did full listing for this region, do it now
+                    // or
+                    // First time GC for this region, do full listing
+                    true
                 }
-
-                info!(
-                    "Completed retry GC for datanode {} in round {}: {} regions processed, {} successful",
-                    peer,
-                    retry_round,
-                    regions.len(),
-                    successful_regions
-                );
-
-                Some(report)
-            }
-            Err(e) => {
-                error!(
-                    "Failed to retry GC for {} regions on datanode {} in round {}: {}",
-                    regions.len(),
-                    peer,
-                    retry_round,
-                    e
-                );
-
-                // Mark all regions in this batch as needing retry
-                let mut failed_report = GcReport::default();
-                for region_id in regions {
-                    failed_report.need_retry_regions.insert(region_id);
-                }
-
-                Some(failed_report)
-            }
+            };
+            result.insert(region_id, use_full_listing);
         }
-    }
-
-    /// Determine if full file listing should be used for any region in the batch.
-    async fn should_use_full_listing_for_batch(&self, regions: &[RegionId]) -> bool {
-        // Use full listing if any region in the batch needs it
-        for &region_id in regions {
-            if self.should_use_full_listing(region_id).await {
-                return true;
-            }
-        }
-        false
+        result
     }
 }

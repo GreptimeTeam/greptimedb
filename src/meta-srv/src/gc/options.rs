@@ -15,6 +15,7 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
 
 use crate::error::{self, Result};
 
@@ -45,7 +46,7 @@ pub struct GcSchedulerOptions {
     /// Weight for SST file count in GC scoring.
     pub sst_count_weight: f64,
     /// Weight for file removal rate in GC scoring.
-    pub file_removed_cnt_weight: f64,
+    pub file_removed_count_weight: f64,
     /// Cooldown period between GC operations on the same region.
     pub gc_cooldown_period: Duration,
     /// Maximum number of regions to select for GC per table.
@@ -73,7 +74,7 @@ impl Default for GcSchedulerOptions {
             region_gc_concurrency: 16,
             min_region_size_threshold: 100 * 1024 * 1024, // 100MB
             sst_count_weight: 1.0,
-            file_removed_cnt_weight: 0.5,
+            file_removed_count_weight: 0.5,
             gc_cooldown_period: Duration::from_secs(60 * 5), // 5 minutes
             regions_per_table_threshold: 20,                 // Select top 20 regions per table
             mailbox_timeout: Duration::from_secs(60),        // 60 seconds
@@ -88,82 +89,82 @@ impl Default for GcSchedulerOptions {
 impl GcSchedulerOptions {
     /// Validates the configuration options.
     pub fn validate(&self) -> Result<()> {
-        if self.max_concurrent_tables == 0 {
-            return error::InvalidArgumentsSnafu {
+        ensure!(
+            self.max_concurrent_tables > 0,
+            error::InvalidArgumentsSnafu {
                 err_msg: "max_concurrent_tables must be greater than 0",
             }
-            .fail();
-        }
+        );
 
-        if self.max_retries_per_region == 0 {
-            return error::InvalidArgumentsSnafu {
+        ensure!(
+            self.max_retries_per_region > 0,
+            error::InvalidArgumentsSnafu {
                 err_msg: "max_retries_per_region must be greater than 0",
             }
-            .fail();
-        }
+        );
 
-        if self.region_gc_concurrency == 0 {
-            return error::InvalidArgumentsSnafu {
+        ensure!(
+            self.region_gc_concurrency > 0,
+            error::InvalidArgumentsSnafu {
                 err_msg: "region_gc_concurrency must be greater than 0",
             }
-            .fail();
-        }
+        );
 
-        if self.retry_backoff_duration.is_zero() {
-            return error::InvalidArgumentsSnafu {
+        ensure!(
+            !self.retry_backoff_duration.is_zero(),
+            error::InvalidArgumentsSnafu {
                 err_msg: "retry_backoff_duration must be greater than 0",
             }
-            .fail();
-        }
+        );
 
-        if self.sst_count_weight < 0.0 {
-            return error::InvalidArgumentsSnafu {
+        ensure!(
+            self.sst_count_weight >= 0.0,
+            error::InvalidArgumentsSnafu {
                 err_msg: "sst_count_weight must be non-negative",
             }
-            .fail();
-        }
+        );
 
-        if self.file_removed_cnt_weight < 0.0 {
-            return error::InvalidArgumentsSnafu {
+        ensure!(
+            self.file_removed_count_weight >= 0.0,
+            error::InvalidArgumentsSnafu {
                 err_msg: "file_removal_rate_weight must be non-negative",
             }
-            .fail();
-        }
+        );
 
-        if self.gc_cooldown_period.is_zero() {
-            return error::InvalidArgumentsSnafu {
+        ensure!(
+            !self.gc_cooldown_period.is_zero(),
+            error::InvalidArgumentsSnafu {
                 err_msg: "gc_cooldown_period must be greater than 0",
             }
-            .fail();
-        }
+        );
 
-        if self.regions_per_table_threshold == 0 {
-            return error::InvalidArgumentsSnafu {
+        ensure!(
+            self.regions_per_table_threshold > 0,
+            error::InvalidArgumentsSnafu {
                 err_msg: "regions_per_table_threshold must be greater than 0",
             }
-            .fail();
-        }
+        );
 
-        if self.mailbox_timeout.is_zero() {
-            return error::InvalidArgumentsSnafu {
+        ensure!(
+            !self.mailbox_timeout.is_zero(),
+            error::InvalidArgumentsSnafu {
                 err_msg: "mailbox_timeout must be greater than 0",
             }
-            .fail();
-        }
+        );
 
-        if self.full_file_listing_interval.is_zero() {
-            return error::InvalidArgumentsSnafu {
+        ensure!(
+            !self.full_file_listing_interval.is_zero(),
+            error::InvalidArgumentsSnafu {
                 err_msg: "full_file_listing_interval must be greater than 0",
             }
-            .fail();
-        }
+        );
 
-        if self.tracker_cleanup_interval.is_zero() {
-            return error::InvalidArgumentsSnafu {
+        ensure!(
+            !self.tracker_cleanup_interval.is_zero(),
+            error::InvalidArgumentsSnafu {
                 err_msg: "tracker_cleanup_interval must be greater than 0",
             }
-            .fail();
-        }
+        );
 
         Ok(())
     }

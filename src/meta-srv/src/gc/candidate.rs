@@ -56,7 +56,7 @@ impl GcScheduler {
         let file_remove_cnt_score = match &region_stat.region_manifest {
             RegionManifestInfo::Mito {
                 file_removed_cnt, ..
-            } => *file_removed_cnt as f64 * self.config.file_removed_cnt_weight,
+            } => *file_removed_cnt as f64 * self.config.file_removed_count_weight,
             // Metric engine doesn't have file_removal_rate, also this should be unreachable since metrics engine doesn't support gc
             RegionManifestInfo::Metric { .. } => 0.0,
         };
@@ -74,6 +74,7 @@ impl GcScheduler {
 
         for (table_id, region_stats) in table_to_region_stats {
             let mut candidates = Vec::new();
+            let tracker = self.region_gc_tracker.lock().await;
 
             for region_stat in region_stats {
                 if region_stat.role != RegionRole::Leader {
@@ -86,7 +87,7 @@ impl GcScheduler {
                 }
 
                 // Skip regions that are in cooldown period
-                if let Some(gc_info) = self.region_gc_tracker.lock().await.get(&region_stat.id)
+                if let Some(gc_info) = tracker.get(&region_stat.id)
                     && now.duration_since(gc_info.last_gc_time) < self.config.gc_cooldown_period
                 {
                     debug!("Skipping region {} due to cooldown", region_stat.id);

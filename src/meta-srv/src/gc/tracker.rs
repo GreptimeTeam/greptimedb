@@ -46,11 +46,11 @@ impl GcScheduler {
     /// Clean up stale entries from the region GC tracker if enough time has passed.
     /// This removes entries for regions that no longer exist in the current table routes.
     pub(crate) async fn cleanup_tracker_if_needed(&self) -> Result<()> {
-        let mut last_cleanup = self.last_tracker_cleanup.lock().await;
+        let mut last_cleanup = *self.last_tracker_cleanup.lock().await;
         let now = Instant::now();
 
         // Check if enough time has passed since last cleanup
-        if now.duration_since(*last_cleanup) < self.config.tracker_cleanup_interval {
+        if now.duration_since(last_cleanup) < self.config.tracker_cleanup_interval {
             return Ok(());
         }
 
@@ -72,7 +72,7 @@ impl GcScheduler {
         tracker.retain(|region_id, _| current_regions.contains(region_id));
         let removed_count = initial_count - tracker.len();
 
-        *last_cleanup = now;
+        *self.last_tracker_cleanup.lock().await = now;
 
         info!(
             "Completed region GC tracker cleanup: removed {} stale entries out of {} total (retained {}). Duration: {:?}",

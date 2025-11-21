@@ -12,19 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManagerRef;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::{error, info};
 use store_api::storage::GcReport;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::cluster::MetaPeerClientRef;
 use crate::define_ticker;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::gc::ctx::{DefaultGcSchedulerCtx, SchedulerCtx};
 use crate::gc::options::{GcSchedulerOptions, TICKER_INTERVAL};
 use crate::gc::tracker::RegionGcTracker;
@@ -33,8 +35,8 @@ use crate::service::mailbox::MailboxRef;
 /// Report for a GC job.
 #[derive(Debug, Default)]
 pub struct GcJobReport {
-    pub per_datanode_reports: HashMap<u64, GcReport>,
-    pub failed_datanodes: HashMap<u64, Vec<crate::error::Error>>,
+    pub per_datanode_reports: HashMap<DatanodeId, GcReport>,
+    pub failed_datanodes: HashMap<DatanodeId, Vec<Error>>,
 }
 impl GcJobReport {
     pub fn merge(&mut self, mut other: GcJobReport) {
@@ -48,7 +50,7 @@ impl GcJobReport {
             .keys()
             .cloned()
             .chain(other.failed_datanodes.keys().cloned())
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<HashSet<_>>();
         for dn_id in all_failed_dn_ids {
             let entry = self.failed_datanodes.entry(dn_id).or_default();
             if let Some(other_errors) = other.failed_datanodes.remove(&dn_id) {
@@ -86,9 +88,9 @@ pub struct GcScheduler {
     /// GC configuration.
     pub(crate) config: GcSchedulerOptions,
     /// Tracks the last GC time for regions.
-    pub(crate) region_gc_tracker: Arc<tokio::sync::Mutex<RegionGcTracker>>,
+    pub(crate) region_gc_tracker: Arc<Mutex<RegionGcTracker>>,
     /// Last time the tracker was cleaned up.
-    pub(crate) last_tracker_cleanup: Arc<tokio::sync::Mutex<Instant>>,
+    pub(crate) last_tracker_cleanup: Arc<Mutex<Instant>>,
 }
 
 impl GcScheduler {
@@ -116,8 +118,8 @@ impl GcScheduler {
             )?),
             receiver: rx,
             config,
-            region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
+            region_gc_tracker: Arc::new(Mutex::new(HashMap::new())),
+            last_tracker_cleanup: Arc::new(Mutex::new(Instant::now())),
         };
         Ok((gc_trigger, gc_ticker))
     }
