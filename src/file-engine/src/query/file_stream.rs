@@ -17,8 +17,6 @@ use std::sync::Arc;
 use common_datasource::file_format::Format;
 use common_datasource::file_format::csv::CsvFormat;
 use common_datasource::file_format::parquet::DefaultParquetFileReaderFactory;
-use common_recordbatch::SendableRecordBatchStream;
-use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use datafusion::common::ToDFSchema;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
@@ -28,8 +26,10 @@ use datafusion::datasource::physical_plan::{
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_expr::execution_props::ExecutionProps;
-use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion::physical_plan::{
+    ExecutionPlan, SendableRecordBatchStream as DfSendableRecordBatchStream,
+};
 use datafusion::prelude::SessionContext;
 use datafusion_expr::expr::Expr;
 use datafusion_expr::utils::conjunction;
@@ -48,7 +48,7 @@ fn build_record_batch_stream(
     file_schema: Arc<ArrowSchema>,
     limit: Option<usize>,
     file_source: Arc<dyn FileSource>,
-) -> Result<SendableRecordBatchStream> {
+) -> Result<DfSendableRecordBatchStream> {
     let files = scan_plan_config
         .files
         .iter()
@@ -77,15 +77,13 @@ fn build_record_batch_stream(
         &ExecutionPlanMetricsSet::new(),
     )
     .context(error::BuildStreamSnafu)?;
-    let adapter = RecordBatchStreamAdapter::try_new(Box::pin(stream))
-        .context(error::BuildStreamAdapterSnafu)?;
-    Ok(Box::pin(adapter))
+    Ok(Box::pin(stream))
 }
 
 fn new_csv_stream(
     config: &ScanPlanConfig,
     format: &CsvFormat,
-) -> Result<SendableRecordBatchStream> {
+) -> Result<DfSendableRecordBatchStream> {
     let file_schema = config.file_schema.arrow_schema().clone();
 
     // push down limit only if there is no filter
@@ -98,7 +96,7 @@ fn new_csv_stream(
     build_record_batch_stream(config, file_schema, limit, csv_source)
 }
 
-fn new_json_stream(config: &ScanPlanConfig) -> Result<SendableRecordBatchStream> {
+fn new_json_stream(config: &ScanPlanConfig) -> Result<DfSendableRecordBatchStream> {
     let file_schema = config.file_schema.arrow_schema().clone();
 
     // push down limit only if there is no filter
@@ -108,7 +106,9 @@ fn new_json_stream(config: &ScanPlanConfig) -> Result<SendableRecordBatchStream>
     build_record_batch_stream(config, file_schema, limit, file_source)
 }
 
-fn new_parquet_stream_with_exec_plan(config: &ScanPlanConfig) -> Result<SendableRecordBatchStream> {
+fn new_parquet_stream_with_exec_plan(
+    config: &ScanPlanConfig,
+) -> Result<DfSendableRecordBatchStream> {
     let file_schema = config.file_schema.arrow_schema().clone();
     let ScanPlanConfig {
         files,
@@ -161,12 +161,10 @@ fn new_parquet_stream_with_exec_plan(config: &ScanPlanConfig) -> Result<Sendable
         .execute(0, task_ctx)
         .context(error::ParquetScanPlanSnafu)?;
 
-    Ok(Box::pin(
-        RecordBatchStreamAdapter::try_new(stream).context(error::BuildStreamAdapterSnafu)?,
-    ))
+    Ok(stream)
 }
 
-fn new_orc_stream(config: &ScanPlanConfig) -> Result<SendableRecordBatchStream> {
+fn new_orc_stream(config: &ScanPlanConfig) -> Result<DfSendableRecordBatchStream> {
     let file_schema = config.file_schema.arrow_schema().clone();
 
     // push down limit only if there is no filter
@@ -189,7 +187,7 @@ pub struct ScanPlanConfig<'a> {
 pub fn create_stream(
     format: &Format,
     config: &ScanPlanConfig,
-) -> Result<SendableRecordBatchStream> {
+) -> Result<DfSendableRecordBatchStream> {
     match format {
         Format::Csv(format) => new_csv_stream(config, format),
         Format::Json(_) => new_json_stream(config),
