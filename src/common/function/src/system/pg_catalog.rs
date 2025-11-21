@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod version;
-
 use std::sync::Arc;
 
 use common_catalog::consts::{
@@ -27,7 +25,6 @@ use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, TypeSignatur
 use datafusion_pg_catalog::pg_catalog::{self, PgCatalogStaticTables};
 use datatypes::arrow::datatypes::{DataType, Field};
 use derive_more::derive::Display;
-use version::PGVersionFunction;
 
 use crate::function::{Function, find_function_context};
 use crate::function_registry::FunctionRegistry;
@@ -183,7 +180,6 @@ impl PGCatalogFunction {
         let static_tables =
             Arc::new(PgCatalogStaticTables::try_new().expect("load postgres static tables"));
 
-        registry.register_scalar(PGVersionFunction::default());
         registry.register_scalar(CurrentSchemaFunction::default());
         registry.register_scalar(CurrentSchemasFunction::new());
         registry.register_scalar(SessionUserFunction::default());
