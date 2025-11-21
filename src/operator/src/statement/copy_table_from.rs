@@ -437,17 +437,7 @@ impl StatementExecutor {
             let mut pending = vec![];
 
             while let Some(r) = stream.next().await {
-                let record_batch = match r.context(error::ReadDfRecordBatchSnafu) {
-                    Ok(batch) => batch,
-                    Err(err) => {
-                        if let Some(csv_format) = csv_format_opt
-                            && csv_format.skip_bad_records
-                        {
-                            continue;
-                        }
-                        return Err(err);
-                    }
-                };
+                let record_batch = r.context(error::ReadDfRecordBatchSnafu)?;
                 let vectors =
                     Helper::try_into_vectors(record_batch.columns()).context(IntoVectorsSnafu)?;
 
