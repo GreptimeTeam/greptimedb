@@ -118,6 +118,10 @@ impl Table {
         self.table_info.meta.schema.clone()
     }
 
+    pub fn schema_ref(&self) -> &SchemaRef {
+        &self.table_info.meta.schema
+    }
+
     /// Get a reference to the table info.
     pub fn table_info(&self) -> TableInfoRef {
         self.table_info.clone()

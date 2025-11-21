@@ -41,7 +41,8 @@ use common_time::timezone::Timezone;
 use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema};
-use datatypes::types::TimestampType;
+use datatypes::types::json_type::JsonNativeType;
+use datatypes::types::{JsonFormat, JsonType, TimestampType};
 use datatypes::value::Value;
 use snafu::ResultExt;
 use sqlparser::ast::{ExactNumberInfo, Ident};
@@ -55,7 +56,7 @@ use crate::error::{
     SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu, SetJsonStructureSettingsSnafu,
     SetSkippingIndexOptionSnafu, SqlCommonSnafu,
 };
-use crate::statements::create::Column;
+use crate::statements::create::{Column, ColumnExtensions};
 pub use crate::statements::option_map::OptionMap;
 pub(crate) use crate::statements::transform::transform_statements;
 
@@ -109,7 +110,7 @@ pub fn column_to_schema(
         && !is_time_index;
 
     let name = column.name().value.clone();
-    let data_type = sql_data_type_to_concrete_data_type(column.data_type())?;
+    let data_type = sql_data_type_to_concrete_data_type(column.data_type(), &column.extensions)?;
     let default_constraint =
         parse_column_default_constraint(&name, &data_type, column.options(), timezone)
             .context(SqlCommonSnafu)?;
@@ -171,7 +172,7 @@ pub fn sql_column_def_to_grpc_column_def(
     timezone: Option<&Timezone>,
 ) -> Result<api::v1::ColumnDef> {
     let name = col.name.value.clone();
-    let data_type = sql_data_type_to_concrete_data_type(&col.data_type)?;
+    let data_type = sql_data_type_to_concrete_data_type(&col.data_type, &Default::default())?;
 
     let is_nullable = col
         .options
@@ -217,7 +218,10 @@ pub fn sql_column_def_to_grpc_column_def(
     })
 }
 
-pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
+pub fn sql_data_type_to_concrete_data_type(
+    data_type: &SqlDataType,
+    column_extensions: &ColumnExtensions,
+) -> Result<ConcreteDataType> {
     match data_type {
         SqlDataType::BigInt(_) | SqlDataType::Int64 => Ok(ConcreteDataType::int64_datatype()),
         SqlDataType::BigIntUnsigned(_) => Ok(ConcreteDataType::uint64_datatype()),
@@ -269,7 +273,14 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
                 Ok(ConcreteDataType::decimal128_datatype(*p as u8, *s as i8))
             }
         },
-        SqlDataType::JSON => Ok(ConcreteDataType::json_datatype()),
+        SqlDataType::JSON => {
+            let format = if column_extensions.json_datatype_options.is_some() {
+                JsonFormat::Native(Box::new(JsonNativeType::Null))
+            } else {
+                JsonFormat::Jsonb
+            };
+            Ok(ConcreteDataType::Json(JsonType::new(format)))
+        }
         // Vector type
         SqlDataType::Custom(name, d)
             if name.0.as_slice().len() == 1
@@ -354,7 +365,7 @@ mod tests {
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
         assert_eq!(
             data_type,
-            sql_data_type_to_concrete_data_type(&sql_type).unwrap()
+            sql_data_type_to_concrete_data_type(&sql_type, &Default::default()).unwrap()
         );
     }
 

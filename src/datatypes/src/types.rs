@@ -20,7 +20,7 @@ mod decimal_type;
 mod dictionary_type;
 mod duration_type;
 mod interval_type;
-pub(crate) mod json_type;
+pub mod json_type;
 mod list_type;
 mod null_type;
 mod primitive_type;

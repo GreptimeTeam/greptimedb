@@ -231,13 +231,15 @@ pub fn sql_value_to_value(
         }
     }
 
-    if value.data_type() != *data_type {
+    let value_datatype = value.data_type();
+    // The datatype of json value is determined by its actual data, so we can't simply "cast" it here.
+    if value_datatype.is_json() || value_datatype == *data_type {
+        Ok(value)
+    } else {
         datatypes::types::cast(value, data_type).with_context(|_| InvalidCastSnafu {
             sql_value: sql_val.clone(),
             datatype: data_type,
         })
-    } else {
-        Ok(value)
     }
 }
 

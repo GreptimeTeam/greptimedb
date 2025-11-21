@@ -20,7 +20,6 @@ use std::time::Instant;
 
 use api::helper::{
     ColumnDataTypeWrapper, is_column_type_value_eq, is_semantic_type_eq, proto_value_type,
-    to_proto_value,
 };
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value, WriteHint};
@@ -414,7 +413,7 @@ impl WriteRequest {
         };
 
         // Convert default value into proto's value.
-        Ok(to_proto_value(default_value))
+        Ok(api::helper::to_grpc_value(default_value))
     }
 }
 
