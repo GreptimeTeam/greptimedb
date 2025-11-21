@@ -33,7 +33,6 @@ use common_telemetry::{debug, tracing};
 use datafusion::datasource::physical_plan::{CsvSource, FileSource, JsonSource};
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datafusion::parquet::arrow::arrow_reader::ArrowReaderMetadata;
-use datafusion_common::SchemaExt;
 use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
@@ -375,16 +374,12 @@ impl StatementExecutor {
 
             if let Some(csv_format) = csv_format_opt
                 && csv_format.header
-                && !file_schema.equivalent_names_and_types(&table_schema)
+                && let Err(e) = ensure_schema_compatible(file_schema, &table_schema)
             {
                 if csv_format.continue_on_error {
                     continue;
                 } else {
-                    return error::InvalidHeaderSnafu {
-                        table_schema: table_schema.to_string(),
-                        file_schema: file_schema.to_string(),
-                    }
-                    .fail();
+                    return Err(e);
                 }
             };
 
@@ -520,6 +515,14 @@ fn can_cast_types_for_greptime(from: &ArrowDataType, to: &ArrowDataType) -> bool
 }
 
 fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
+    if from.fields().len() != to.fields().len() {
+        return error::InvalidHeaderSnafu {
+            table_schema: to.to_string(),
+            file_schema: from.to_string(),
+        }
+        .fail();
+    }
+
     let not_match = from
         .fields
         .iter()
