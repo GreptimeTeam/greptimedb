@@ -898,7 +898,13 @@ pub(super) fn parameters_to_scalar_values(
             .and_then(|t| t.as_ref());
 
         let client_type = if let Some(client_given_type) = client_param_types.get(idx) {
-            client_given_type.clone()
+            match (client_given_type, server_type) {
+                (&Type::UNKNOWN, Some(server_type)) => {
+                    // If client type is unknown, use the server type.
+                    type_gt_to_pg(server_type).map_err(convert_err)?
+                }
+                _ => client_given_type.clone(),
+            }
         } else if let Some(server_provided_type) = &server_type {
             type_gt_to_pg(server_provided_type).map_err(convert_err)?
         } else {
