@@ -107,7 +107,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         if let Some(m) = metrics {
             m.total_bytes += size as u64;
             m.total_ranges += 1;
-            m.elapsed += start.unwrap().elapsed();
+            m.fetch_elapsed += start.unwrap().elapsed();
         }
 
         Ok(result)
@@ -140,7 +140,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         if let Some(m) = metrics {
             m.total_bytes += ranges.iter().map(|r| r.end - r.start).sum::<u64>();
             m.total_ranges += ranges.len();
-            m.elapsed += start.unwrap().elapsed();
+            m.fetch_elapsed += start.unwrap().elapsed();
         }
 
         Ok(pages)

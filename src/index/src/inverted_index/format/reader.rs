@@ -37,8 +37,8 @@ pub struct InvertedIndexReadMetrics {
     pub total_bytes: u64,
     /// Total number of ranges to read.
     pub total_ranges: usize,
-    /// Elapsed time of the read_vec operation.
-    pub elapsed: Duration,
+    /// Elapsed time to fetch data.
+    pub fetch_elapsed: Duration,
 }
 
 /// InvertedIndexReader defines an asynchronous reader of inverted index data
