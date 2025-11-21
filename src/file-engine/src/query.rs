@@ -20,28 +20,23 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_datasource::object_store::build_backend;
-use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RecordBatchMetrics;
-use common_recordbatch::error::{
-    self as recordbatch_error, CastVectorSnafu, ExternalSnafu, Result as RecordBatchResult,
-};
+use common_recordbatch::error::{self as recordbatch_error, Result as RecordBatchResult};
 use common_recordbatch::{
     DfSendableRecordBatchStream, OrderOption, RecordBatch, RecordBatchStream,
     SendableRecordBatchStream,
 };
 use datafusion::logical_expr::utils as df_logical_expr_utils;
 use datafusion_expr::expr::Expr;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::vectors::VectorRef;
+use datatypes::schema::{Schema, SchemaRef};
 use futures::Stream;
-use snafu::{GenerateImplicitData, OptionExt, ResultExt, ensure};
+use snafu::{GenerateImplicitData, ResultExt, ensure};
 use store_api::storage::ScanRequest;
 
 use self::file_stream::ScanPlanConfig;
 use crate::error::{
-    BuildBackendSnafu, CreateDefaultSnafu, ExtractColumnFromFilterSnafu,
-    MissingColumnNoDefaultSnafu, ProjectSchemaSnafu, ProjectionOutOfBoundsSnafu, Result,
+    BuildBackendSnafu, ExtractColumnFromFilterSnafu, ProjectSchemaSnafu,
+    ProjectionOutOfBoundsSnafu, Result,
 };
 use crate::region::FileRegion;
 
@@ -184,16 +179,9 @@ impl Stream for FileToScanRegionStream {
     fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.file_stream).poll_next(ctx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(Ok(file_record_batch))) => Poll::Ready(Some(
-                RecordBatch::try_from_df_record_batch(self.file_schema.clone(), file_record_batch)
-                    .and_then(|file_record_batch| {
-                        if self.schema_eq(&file_record_batch) {
-                            Ok(file_record_batch)
-                        } else {
-                            self.convert_record_batch(&file_record_batch)
-                        }
-                    }),
-            )),
+            Poll::Ready(Some(Ok(file_record_batch))) => Poll::Ready(Some(Ok(
+                RecordBatch::from_df_record_batch(self.file_schema.clone(), file_record_batch),
+            ))),
             Poll::Ready(Some(Err(error))) => {
                 Poll::Ready(Some(Err(recordbatch_error::Error::PollStream {
                     error,
@@ -216,81 +204,5 @@ impl FileToScanRegionStream {
             file_schema,
             file_stream,
         }
-    }
-
-    fn schema_eq(&self, file_record_batch: &RecordBatch) -> bool {
-        self.scan_schema
-            .column_schemas()
-            .iter()
-            .all(|scan_column_schema| {
-                file_record_batch
-                    .column_by_name(&scan_column_schema.name)
-                    .map(|rb| rb.data_type() == scan_column_schema.data_type)
-                    .unwrap_or_default()
-            })
-    }
-
-    /// Converts a RecordBatch from file schema to scan schema.
-    ///
-    /// This function performs the following operations:
-    /// - Projection: Only columns present in scan schema are retained.
-    /// - Cast Type: Columns present in both file schema and scan schema but with different types are cast to the type in scan schema.
-    /// - Backfill: Columns present in scan schema but not in file schema are backfilled with default values.
-    fn convert_record_batch(
-        &self,
-        file_record_batch: &RecordBatch,
-    ) -> RecordBatchResult<RecordBatch> {
-        let file_row_count = file_record_batch.num_rows();
-        let columns = self
-            .scan_schema
-            .column_schemas()
-            .iter()
-            .map(|scan_column_schema| {
-                let file_column = file_record_batch.column_by_name(&scan_column_schema.name);
-                if let Some(file_column) = file_column {
-                    Self::cast_column_type(file_column, &scan_column_schema.data_type)
-                } else {
-                    Self::backfill_column(scan_column_schema, file_row_count)
-                }
-            })
-            .collect::<RecordBatchResult<Vec<_>>>()?;
-
-        RecordBatch::new(self.scan_schema.clone(), columns)
-    }
-
-    fn cast_column_type(
-        source_column: &VectorRef,
-        target_data_type: &ConcreteDataType,
-    ) -> RecordBatchResult<VectorRef> {
-        if &source_column.data_type() == target_data_type {
-            Ok(source_column.clone())
-        } else {
-            source_column
-                .cast(target_data_type)
-                .context(CastVectorSnafu {
-                    from_type: source_column.data_type(),
-                    to_type: target_data_type.clone(),
-                })
-        }
-    }
-
-    fn backfill_column(
-        column_schema: &ColumnSchema,
-        num_rows: usize,
-    ) -> RecordBatchResult<VectorRef> {
-        Self::create_default_vector(column_schema, num_rows)
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)
-    }
-
-    fn create_default_vector(column_schema: &ColumnSchema, num_rows: usize) -> Result<VectorRef> {
-        column_schema
-            .create_default_vector(num_rows)
-            .with_context(|_| CreateDefaultSnafu {
-                column: column_schema.name.clone(),
-            })?
-            .with_context(|| MissingColumnNoDefaultSnafu {
-                column: column_schema.name.clone(),
-            })
     }
 }

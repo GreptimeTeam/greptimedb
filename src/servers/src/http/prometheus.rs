@@ -19,16 +19,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use arrow::array::AsArray;
+use arrow::array::{Array, AsArray};
 use arrow::datatypes::{
-    Date32Type, Date64Type, Decimal128Type, DurationMicrosecondType, DurationMillisecondType,
-    DurationNanosecondType, DurationSecondType, Float32Type, Float64Type, Int8Type, Int16Type,
+    Date32Type, Date64Type, Decimal128Type, Float32Type, Float64Type, Int8Type, Int16Type,
     Int32Type, Int64Type, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType,
-    Time32MillisecondType, Time32SecondType, Time64MicrosecondType, Time64NanosecondType,
-    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
-    TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+    UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
-use arrow_schema::{DataType, IntervalUnit, TimeUnit};
+use arrow_schema::{DataType, IntervalUnit};
 use axum::extract::{Path, Query, State};
 use axum::{Extension, Form};
 use catalog::CatalogManagerRef;
@@ -39,18 +36,13 @@ use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::{debug, tracing};
-use common_time::time::Time;
 use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
-use common_time::{
-    Date, Duration, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp,
-};
+use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use common_version::OwnedBuildInfo;
 use datafusion_common::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::scalars::ScalarVector;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use datatypes::types::jsonb_to_string;
-use datatypes::vectors::Float64Vector;
 use futures::StreamExt;
 use futures::future::join_all;
 use itertools::Itertools;
@@ -950,47 +942,12 @@ impl RowWriter {
                         let v = Date::new((array.value(i) / 86_400_000) as i32);
                         self.insert(column, v);
                     }
-                    DataType::Timestamp(time_unit, _) => {
-                        let v = match time_unit {
-                            TimeUnit::Second => {
-                                let array = array.as_primitive::<TimestampSecondType>();
-                                array.value(i)
-                            }
-                            TimeUnit::Millisecond => {
-                                let array = array.as_primitive::<TimestampMillisecondType>();
-                                array.value(i)
-                            }
-                            TimeUnit::Microsecond => {
-                                let array = array.as_primitive::<TimestampMicrosecondType>();
-                                array.value(i)
-                            }
-                            TimeUnit::Nanosecond => {
-                                let array = array.as_primitive::<TimestampNanosecondType>();
-                                array.value(i)
-                            }
-                        };
-                        let v = Timestamp::new(v, time_unit.into());
+                    DataType::Timestamp(_, _) => {
+                        let v = datatypes::arrow_array::timestamp_array_value(array, i);
                         self.insert(column, v.to_iso8601_string());
                     }
-                    DataType::Time32(time_unit) | DataType::Time64(time_unit) => {
-                        let v = match time_unit {
-                            TimeUnit::Second => {
-                                let array = array.as_primitive::<Time32SecondType>();
-                                Time::new_second(array.value(i) as i64)
-                            }
-                            TimeUnit::Millisecond => {
-                                let array = array.as_primitive::<Time32MillisecondType>();
-                                Time::new_millisecond(array.value(i) as i64)
-                            }
-                            TimeUnit::Microsecond => {
-                                let array = array.as_primitive::<Time64MicrosecondType>();
-                                Time::new_microsecond(array.value(i))
-                            }
-                            TimeUnit::Nanosecond => {
-                                let array = array.as_primitive::<Time64NanosecondType>();
-                                Time::new_nanosecond(array.value(i))
-                            }
-                        };
+                    DataType::Time32(_) | DataType::Time64(_) => {
+                        let v = datatypes::arrow_array::time_array_value(array, i);
                         self.insert(column, v.to_iso8601_string());
                     }
                     DataType::Interval(interval_unit) => match interval_unit {
@@ -1010,26 +967,8 @@ impl RowWriter {
                             self.insert(column, v.to_iso8601_string());
                         }
                     },
-                    DataType::Duration(time_unit) => {
-                        let v = match time_unit {
-                            TimeUnit::Second => {
-                                let array = array.as_primitive::<DurationSecondType>();
-                                array.value(i)
-                            }
-                            TimeUnit::Millisecond => {
-                                let array = array.as_primitive::<DurationMillisecondType>();
-                                array.value(i)
-                            }
-                            TimeUnit::Microsecond => {
-                                let array = array.as_primitive::<DurationMicrosecondType>();
-                                array.value(i)
-                            }
-                            TimeUnit::Nanosecond => {
-                                let array = array.as_primitive::<DurationNanosecondType>();
-                                array.value(i)
-                            }
-                        };
-                        let d = Duration::new(v, time_unit.into());
+                    DataType::Duration(_) => {
+                        let d = datatypes::arrow_array::duration_array_value(array, i);
                         self.insert(column, d);
                     }
                     DataType::List(_) => {
@@ -1134,20 +1073,14 @@ fn record_batches_to_labels_name(
         let field_columns = field_column_indices
             .iter()
             .map(|i| {
-                batch
-                    .column(*i)
-                    .as_any()
-                    .downcast_ref::<Float64Vector>()
-                    .unwrap()
+                let column = batch.column(*i);
+                column.as_primitive::<Float64Type>()
             })
             .collect::<Vec<_>>();
 
         for row_index in 0..batch.num_rows() {
             // if all field columns are null, skip this row
-            if field_columns
-                .iter()
-                .all(|c| c.get_data(row_index).is_none())
-            {
+            if field_columns.iter().all(|c| c.is_null(row_index)) {
                 continue;
             }
 
