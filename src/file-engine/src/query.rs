@@ -21,7 +21,7 @@ use std::task::{Context, Poll};
 
 use common_datasource::object_store::build_backend;
 use common_error::ext::BoxedError;
-use common_recordbatch::adapter::RecordBatchMetrics;
+use common_recordbatch::adapter::{RecordBatchMetrics, RecordBatchStreamAdapter};
 use common_recordbatch::error::{CastVectorSnafu, ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::logical_expr::utils as df_logical_expr_utils;
@@ -35,7 +35,7 @@ use store_api::storage::ScanRequest;
 
 use self::file_stream::ScanPlanConfig;
 use crate::error::{
-    BuildBackendSnafu, CreateDefaultSnafu, ExtractColumnFromFilterSnafu,
+    BuildBackendSnafu, BuildStreamAdapterSnafu, CreateDefaultSnafu, ExtractColumnFromFilterSnafu,
     MissingColumnNoDefaultSnafu, ProjectSchemaSnafu, ProjectionOutOfBoundsSnafu, Result,
 };
 use crate::region::FileRegion;
@@ -60,11 +60,14 @@ impl FileRegion {
             },
         )?;
 
+        let file_stream =
+            RecordBatchStreamAdapter::try_new(file_stream).context(BuildStreamAdapterSnafu)?;
+
         let scan_schema = self.scan_schema(&request.projection)?;
 
         Ok(Box::pin(FileToScanRegionStream::new(
             scan_schema,
-            file_stream,
+            Box::pin(file_stream),
         )))
     }
 
