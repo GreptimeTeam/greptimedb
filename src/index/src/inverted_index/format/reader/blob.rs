@@ -95,14 +95,17 @@ impl<R: RangeReader + Sync> InvertedIndexReader for InvertedIndexBlobReader<R> {
         Ok(result)
     }
 
-    async fn metadata(&self) -> Result<Arc<InvertedIndexMetas>> {
+    async fn metadata<'a>(
+        &self,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Arc<InvertedIndexMetas>> {
         let metadata = self.source.metadata().await.context(CommonIoSnafu)?;
         let blob_size = metadata.content_length;
         Self::validate_blob_size(blob_size)?;
 
         let mut footer_reader = InvertedIndexFooterReader::new(&self.source, blob_size)
             .with_prefetch_size(DEFAULT_PREFETCH_SIZE);
-        footer_reader.metadata().await.map(Arc::new)
+        footer_reader.metadata(metrics).await.map(Arc::new)
     }
 }
 
@@ -202,7 +205,7 @@ mod tests {
         let blob = create_inverted_index_blob();
         let blob_reader = InvertedIndexBlobReader::new(blob);
 
-        let metas = blob_reader.metadata().await.unwrap();
+        let metas = blob_reader.metadata(None).await.unwrap();
         assert_eq!(metas.metas.len(), 2);
 
         let meta0 = metas.metas.get("tag0").unwrap();
@@ -229,7 +232,7 @@ mod tests {
         let blob = create_inverted_index_blob();
         let blob_reader = InvertedIndexBlobReader::new(blob);
 
-        let metas = blob_reader.metadata().await.unwrap();
+        let metas = blob_reader.metadata(None).await.unwrap();
         let meta = metas.metas.get("tag0").unwrap();
 
         let fst_map = blob_reader
@@ -263,7 +266,7 @@ mod tests {
         let blob = create_inverted_index_blob();
         let blob_reader = InvertedIndexBlobReader::new(blob);
 
-        let metas = blob_reader.metadata().await.unwrap();
+        let metas = blob_reader.metadata(None).await.unwrap();
         let meta = metas.metas.get("tag0").unwrap();
 
         let bitmap = blob_reader
@@ -277,7 +280,7 @@ mod tests {
             .unwrap();
         assert_eq!(bitmap, mock_bitmap());
 
-        let metas = blob_reader.metadata().await.unwrap();
+        let metas = blob_reader.metadata(None).await.unwrap();
         let meta = metas.metas.get("tag1").unwrap();
 
         let bitmap = blob_reader

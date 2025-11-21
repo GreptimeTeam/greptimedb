@@ -75,7 +75,10 @@ pub trait InvertedIndexReader: Send + Sync {
     }
 
     /// Retrieves metadata of all inverted indices stored within the blob.
-    async fn metadata(&self) -> Result<Arc<InvertedIndexMetas>>;
+    async fn metadata<'a>(
+        &self,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Arc<InvertedIndexMetas>>;
 
     /// Retrieves the finite state transducer (FST) map from the given offset and size.
     async fn fst<'a>(

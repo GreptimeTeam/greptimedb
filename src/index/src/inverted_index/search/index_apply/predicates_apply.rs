@@ -50,7 +50,7 @@ impl IndexApplier for PredicatesIndexApplier {
         metrics: Option<&'b mut InvertedIndexReadMetrics>,
     ) -> Result<ApplyOutput> {
         let mut metrics = metrics;
-        let metadata = reader.metadata().await?;
+        let metadata = reader.metadata(metrics.as_deref_mut()).await?;
         let mut output = ApplyOutput {
             matched_segment_ids: Bitmap::new_bitvec(),
             total_row_count: metadata.total_row_count as _,
@@ -225,7 +225,7 @@ mod tests {
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas([("tag-0", 0)])));
+            .returning(|_| Ok(mock_metas([("tag-0", 0)])));
         mock_reader.expect_fst_vec().returning(|_ranges, _metrics| {
             Ok(vec![
                 FstMap::from_iter([(b"tag-0_value-0", fst_value(2, 1))]).unwrap(),
@@ -258,7 +258,7 @@ mod tests {
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas([("tag-0", 0)])));
+            .returning(|_| Ok(mock_metas([("tag-0", 0)])));
         mock_reader.expect_fst_vec().returning(|_range, _metrics| {
             Ok(vec![
                 FstMap::from_iter([(b"tag-0_value-1", fst_value(2, 1))]).unwrap(),
@@ -285,7 +285,7 @@ mod tests {
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas([("tag-0", 0), ("tag-1", 1)])));
+            .returning(|_| Ok(mock_metas([("tag-0", 0), ("tag-1", 1)])));
         mock_reader.expect_fst_vec().returning(|ranges, _metrics| {
             let mut output = vec![];
             for range in ranges {
@@ -339,7 +339,7 @@ mod tests {
         let mut mock_reader: MockInvertedIndexReader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas([("tag-0", 0)])));
+            .returning(|_| Ok(mock_metas([("tag-0", 0)])));
 
         let output = applier
             .apply(SearchContext::default(), &mut mock_reader, None)
@@ -351,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn test_index_applier_with_empty_index() {
         let mut mock_reader = MockInvertedIndexReader::new();
-        mock_reader.expect_metadata().returning(move || {
+        mock_reader.expect_metadata().returning(move |_| {
             Ok(Arc::new(InvertedIndexMetas {
                 total_row_count: 0, // No rows
                 segment_row_count: 1,
@@ -378,7 +378,7 @@ mod tests {
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas(vec![])));
+            .returning(|_| Ok(mock_metas(vec![])));
 
         let mut mock_fst_applier = MockFstApplier::new();
         mock_fst_applier.expect_apply().never();
