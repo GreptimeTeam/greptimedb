@@ -139,7 +139,7 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
             m.total_ranges += 1;
             m.total_bytes += size as u64;
             if let Some(start) = start {
-                m.elapsed += start.elapsed();
+                m.fetch_elapsed += start.elapsed();
             }
         }
 
@@ -174,7 +174,7 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
             m.total_ranges += ranges.len();
             m.total_bytes += ranges.iter().map(|r| r.end - r.start).sum::<u64>();
             if let Some(start) = start {
-                m.elapsed += start.elapsed();
+                m.fetch_elapsed += start.elapsed();
             }
         }
 

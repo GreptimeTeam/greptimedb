@@ -42,8 +42,8 @@ pub struct BloomFilterReadMetrics {
     pub total_bytes: u64,
     /// Total number of ranges to read.
     pub total_ranges: usize,
-    /// Elapsed time of the read_vec operation.
-    pub elapsed: Duration,
+    /// Elapsed time to fetch data.
+    pub fetch_elapsed: Duration,
 }
 
 /// Safely converts bytes to Vec<u64> using bytemuck for optimal performance.
@@ -117,7 +117,7 @@ pub trait BloomFilterReader: Sync {
             m.total_ranges += ranges.len();
             m.total_bytes += ranges.iter().map(|r| r.end - r.start).sum::<u64>();
             if let Some(start) = start {
-                m.elapsed += start.elapsed();
+                m.fetch_elapsed += start.elapsed();
             }
         }
 
@@ -200,7 +200,7 @@ impl<R: RangeReader> BloomFilterReader for BloomFilterReaderImpl<R> {
             m.total_ranges += 1;
             m.total_bytes += size as u64;
             if let Some(start) = start {
-                m.elapsed += start.elapsed();
+                m.fetch_elapsed += start.elapsed();
             }
         }
 
@@ -219,7 +219,7 @@ impl<R: RangeReader> BloomFilterReader for BloomFilterReaderImpl<R> {
             m.total_ranges += ranges.len();
             m.total_bytes += ranges.iter().map(|r| r.end - r.start).sum::<u64>();
             if let Some(start) = start {
-                m.elapsed += start.elapsed();
+                m.fetch_elapsed += start.elapsed();
             }
         }
 
@@ -295,7 +295,7 @@ impl<R: RangeReader> BloomFilterMetaReader<R> {
                 m.total_ranges += 2; // suffix read + meta read
                 m.total_bytes += (self.file_size - meta_start) + length;
                 if let Some(start) = start {
-                    m.elapsed += start.elapsed();
+                    m.fetch_elapsed += start.elapsed();
                 }
             }
 
@@ -305,7 +305,7 @@ impl<R: RangeReader> BloomFilterMetaReader<R> {
                 m.total_ranges += 1; // suffix read only
                 m.total_bytes += self.file_size.min(self.prefetch_size);
                 if let Some(start) = start {
-                    m.elapsed += start.elapsed();
+                    m.fetch_elapsed += start.elapsed();
                 }
             }
 
