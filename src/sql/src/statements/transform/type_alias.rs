@@ -39,8 +39,8 @@ use crate::statements::{TimezoneInfo, sql_data_type_to_concrete_data_type};
 ///  - `INT2` for `smallint`
 ///  - `INT4` for `int`
 ///  - `INT8` for `bigint`
-///  - `float4` for `float`
-///  - `float8` for `double`
+///  - `FLOAT4` for `float`
+///  - `FLOAT8` for `double`
 ///
 /// Extended type aliases for Arrow types:
 ///  - `INT16` for `smallint`
