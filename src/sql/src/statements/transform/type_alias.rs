@@ -35,7 +35,7 @@ use crate::statements::{TimezoneInfo, sql_data_type_to_concrete_data_type};
 ///  - `TimestampNanosecond`, `Timestamp_ns` for `Timestamp(9)`.
 ///  -  TinyText, MediumText, LongText for `Text`.
 ///
-/// SQL dialect integer type aliases (MySQL & PostgreSQL)：
+/// SQL dialect integer type aliases (MySQL & PostgreSQL):
 ///  - `INT2` for `smallint`
 ///  - `INT4` for `int`
 ///  - `INT8` for `bigint`
