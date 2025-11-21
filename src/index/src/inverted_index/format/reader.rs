@@ -31,7 +31,7 @@ mod blob;
 mod footer;
 
 /// Metrics for inverted index read operations.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct InvertedIndexReadMetrics {
     /// Total byte size to read.
     pub total_bytes: u64,

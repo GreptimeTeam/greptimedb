@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use common_base::range_read::RangeReader;
 use common_telemetry::warn;
-use index::inverted_index::format::reader::InvertedIndexBlobReader;
+use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReadMetrics};
 use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
 };
@@ -54,6 +54,8 @@ pub struct InvertedIndexApplyMetrics {
     pub blob_cache_miss: usize,
     /// Total size of blobs read (in bytes).
     pub blob_read_bytes: u64,
+    /// Metrics for inverted index reads.
+    pub inverted_index_read_metrics: InvertedIndexReadMetrics,
 }
 
 /// `InvertedIndexApplier` is responsible for applying predicates to the provided SST files
@@ -146,7 +148,7 @@ impl InvertedIndexApplier {
         &self,
         file_id: RegionFileId,
         file_size_hint: Option<u64>,
-        metrics: Option<&mut InvertedIndexApplyMetrics>,
+        mut metrics: Option<&mut InvertedIndexApplyMetrics>,
     ) -> Result<ApplyOutput> {
         let start = Instant::now();
 
@@ -177,13 +179,25 @@ impl InvertedIndexApplier {
                 index_cache.clone(),
             );
             self.index_applier
-                .apply(context, &mut index_reader, None)
+                .apply(
+                    context,
+                    &mut index_reader,
+                    metrics
+                        .as_deref_mut()
+                        .map(|m| &mut m.inverted_index_read_metrics),
+                )
                 .await
                 .context(ApplyInvertedIndexSnafu)
         } else {
             let mut index_reader = InvertedIndexBlobReader::new(blob);
             self.index_applier
-                .apply(context, &mut index_reader, None)
+                .apply(
+                    context,
+                    &mut index_reader,
+                    metrics
+                        .as_deref_mut()
+                        .map(|m| &mut m.inverted_index_read_metrics),
+                )
                 .await
                 .context(ApplyInvertedIndexSnafu)
         };

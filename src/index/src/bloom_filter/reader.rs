@@ -36,7 +36,7 @@ const BLOOM_META_LEN_SIZE: u64 = 4;
 pub const DEFAULT_PREFETCH_SIZE: u64 = 8192; // 8KiB
 
 /// Metrics for bloom filter read operations.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct BloomFilterReadMetrics {
     /// Total byte size to read.
     pub total_bytes: u64,

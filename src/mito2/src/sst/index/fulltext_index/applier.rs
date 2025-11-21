@@ -21,7 +21,7 @@ use std::time::Instant;
 use common_base::range_read::RangeReader;
 use common_telemetry::warn;
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
-use index::bloom_filter::reader::BloomFilterReaderImpl;
+use index::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReaderImpl};
 use index::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
 use index::fulltext_index::tokenizer::{ChineseTokenizer, EnglishTokenizer, Tokenizer};
 use index::fulltext_index::{Analyzer, Config};
@@ -61,6 +61,8 @@ pub struct FulltextIndexApplyMetrics {
     pub apply_elapsed: std::time::Duration,
     /// Number of blob cache misses.
     pub blob_cache_miss: usize,
+    /// Metrics for bloom filter reads.
+    pub bloom_filter_read_metrics: BloomFilterReadMetrics,
 }
 
 /// `FulltextIndexApplier` is responsible for applying fulltext index to the provided SST files
@@ -330,7 +332,7 @@ impl FulltextIndexApplier {
         column_id: ColumnId,
         terms: &[FulltextTerm],
         output: &mut [(usize, Vec<Range<usize>>)],
-        metrics: Option<&mut FulltextIndexApplyMetrics>,
+        mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<bool> {
         let blob_key = format!(
             "{INDEX_BLOB_TYPE_BLOOM}-{}",
@@ -338,7 +340,7 @@ impl FulltextIndexApplier {
         );
         let Some(reader) = self
             .index_source
-            .blob(file_id, &blob_key, file_size_hint, metrics)
+            .blob(file_id, &blob_key, file_size_hint, metrics.as_deref_mut())
             .await?
         else {
             return Ok(false);
@@ -380,9 +382,14 @@ impl FulltextIndexApplier {
                 continue;
             }
 
-            // TODO(yingwen): Update reader metrics.
             *row_group_output = applier
-                .search(&predicates, row_group_output, None)
+                .search(
+                    &predicates,
+                    row_group_output,
+                    metrics
+                        .as_deref_mut()
+                        .map(|m| &mut m.bloom_filter_read_metrics),
+                )
                 .await
                 .context(ApplyBloomFilterIndexSnafu)?;
         }
