@@ -39,6 +39,10 @@ pub struct InvertedIndexReadMetrics {
     pub total_ranges: usize,
     /// Elapsed time to fetch data.
     pub fetch_elapsed: Duration,
+    /// Number of cache hits.
+    pub cache_hit: usize,
+    /// Number of cache misses.
+    pub cache_miss: usize,
 }
 
 /// InvertedIndexReader defines an asynchronous reader of inverted index data
