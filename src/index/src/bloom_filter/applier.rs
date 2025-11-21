@@ -38,7 +38,7 @@ pub struct BloomFilterApplier {
 
 impl BloomFilterApplier {
     pub async fn new(reader: Box<dyn BloomFilterReader + Send>) -> Result<Self> {
-        let meta = reader.metadata().await?;
+        let meta = reader.metadata(None).await?;
 
         Ok(Self { reader, meta })
     }

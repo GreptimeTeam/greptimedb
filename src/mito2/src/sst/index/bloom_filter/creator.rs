@@ -637,17 +637,17 @@ pub(crate) mod tests {
                 .unwrap();
             let reader = blob_guard.reader().await.unwrap();
             let bloom_filter = BloomFilterReaderImpl::new(reader);
-            let metadata = bloom_filter.metadata().await.unwrap();
+            let metadata = bloom_filter.metadata(None).await.unwrap();
 
             assert_eq!(metadata.segment_count, 10);
             for i in 0..5 {
                 let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[i] as usize];
-                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
+                let bf = bloom_filter.bloom_filter(loc, None).await.unwrap();
                 assert!(bf.contains(b"tag1"));
             }
             for i in 5..10 {
                 let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[i] as usize];
-                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
+                let bf = bloom_filter.bloom_filter(loc, None).await.unwrap();
                 assert!(bf.contains(b"tag2"));
             }
         }
@@ -662,13 +662,13 @@ pub(crate) mod tests {
                 .unwrap();
             let reader = blob_guard.reader().await.unwrap();
             let bloom_filter = BloomFilterReaderImpl::new(reader);
-            let metadata = bloom_filter.metadata().await.unwrap();
+            let metadata = bloom_filter.metadata(None).await.unwrap();
 
             assert_eq!(metadata.segment_count, 5);
             for i in 0u64..20 {
                 let idx = i as usize / 4;
                 let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[idx] as usize];
-                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
+                let bf = bloom_filter.bloom_filter(loc, None).await.unwrap();
                 let mut buf = vec![];
                 IndexValueCodec::encode_nonnull_value(ValueRef::UInt64(i), &sort_field, &mut buf)
                     .unwrap();
