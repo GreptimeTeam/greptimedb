@@ -480,7 +480,7 @@ CREATE TABLE data_types (
 ENGINE=mito
 "#;
 
-                assert_eq!(expected, c.clone().to_string());
+                assert_eq!(expected, c.to_string());
             }
             _ => unreachable!(),
         }
