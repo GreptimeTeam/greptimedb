@@ -16,9 +16,8 @@ use std::collections::HashMap;
 use std::fmt::{self, Display};
 use std::sync::Arc;
 
-use datafusion_common::arrow::array::builder::MapFieldNames;
 use datafusion_common::arrow::array::{
-    Array, ArrayRef, BinaryArray, BinaryViewArray, DictionaryArray, MapBuilder, StringBuilder,
+    Array, ArrayRef, BinaryArray, BinaryViewArray, DictionaryArray, ListBuilder, StringBuilder,
 };
 use datafusion_common::arrow::datatypes::{DataType, Field};
 use datafusion_common::{DataFusionError, ScalarValue};
@@ -42,7 +41,7 @@ pub(crate) struct DecodePrimaryKeyFunction {
 }
 
 const NAME: &str = "decode_primary_key";
-const MAP_VALUE_NULLABLE: bool = true;
+const NULL_VALUE_LITERAL: &str = "null";
 
 impl Default for DecodePrimaryKeyFunction {
     fn default() -> Self {
@@ -58,18 +57,7 @@ impl DecodePrimaryKeyFunction {
     }
 
     fn return_data_type() -> DataType {
-        let entry_field = Field::new(
-            "entries",
-            DataType::Struct(
-                vec![
-                    Field::new("key", DataType::Utf8, false),
-                    Field::new("value", DataType::Utf8, MAP_VALUE_NULLABLE),
-                ]
-                .into(),
-            ),
-            false,
-        );
-        DataType::Map(Arc::new(entry_field), false)
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, false)))
     }
 }
 
@@ -103,7 +91,7 @@ impl Function for DecodePrimaryKeyFunction {
             .collect();
 
         let decoded_rows = decode_primary_keys(encoded, number_rows, codec.as_ref(), &name_lookup)?;
-        let array = build_map_array(&decoded_rows)?;
+        let array = build_list_array(&decoded_rows)?;
 
         Ok(ColumnarValue::Array(array))
     }
@@ -260,15 +248,25 @@ fn decode_one(
             .into_iter()
             .map(|(column_id, value)| (column_name(column_id, name_lookup), value_to_string(value)))
             .collect(),
-        CompositeValues::Sparse(values) => values
-            .iter()
-            .map(|(column_id, value)| {
-                (
-                    column_name(*column_id, name_lookup),
-                    value_to_string(value.clone()),
-                )
-            })
-            .collect(),
+        CompositeValues::Sparse(values) => {
+            let mut values: Vec<_> = values
+                .iter()
+                .map(|(column_id, value)| {
+                    (
+                        *column_id,
+                        column_name(*column_id, name_lookup),
+                        value_to_string(value.clone()),
+                    )
+                })
+                .collect();
+            values.sort_by_key(|(column_id, _, _)| {
+                (ReservedColumnId::is_reserved(*column_id), *column_id)
+            });
+            values
+                .into_iter()
+                .map(|(_, name, value)| (name, value))
+                .collect()
+        }
     })
 }
 
@@ -294,27 +292,15 @@ fn value_to_string(value: Value) -> Option<String> {
     }
 }
 
-fn build_map_array(rows: &[Vec<(String, Option<String>)>]) -> datafusion_common::Result<ArrayRef> {
-    let field_names = MapFieldNames {
-        entry: "entries".to_string(),
-        key: "key".to_string(),
-        value: "value".to_string(),
-    };
-    let mut builder = MapBuilder::new(
-        Some(field_names),
-        StringBuilder::new(),
-        StringBuilder::new(),
-    );
+fn build_list_array(rows: &[Vec<(String, Option<String>)>]) -> datafusion_common::Result<ArrayRef> {
+    let mut builder = ListBuilder::new(StringBuilder::new());
 
     for row in rows {
         for (key, value) in row {
-            builder.keys().append_value(key);
-            match value {
-                Some(v) => builder.values().append_value(v),
-                None => builder.values().append_null(),
-            }
+            let value = value.as_deref().unwrap_or(NULL_VALUE_LITERAL);
+            builder.values().append_value(format!("{key} : {value}"));
         }
-        builder.append(true)?;
+        builder.append(true);
     }
 
     Ok(Arc::new(builder.finish()))
@@ -322,12 +308,10 @@ fn build_map_array(rows: &[Vec<(String, Option<String>)>]) -> datafusion_common:
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use api::v1::SemanticType;
     use datafusion_common::ScalarValue;
     use datatypes::arrow::array::builder::BinaryDictionaryBuilder;
-    use datatypes::arrow::array::{BinaryArray, MapArray, StringArray, StructArray};
+    use datatypes::arrow::array::{BinaryArray, ListArray, StringArray};
     use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
@@ -378,35 +362,12 @@ mod tests {
         builder.build().unwrap().to_json().unwrap()
     }
 
-    fn map_row(map: &MapArray, row_idx: usize) -> HashMap<String, Option<String>> {
-        let struct_values = map.value(row_idx);
-        let struct_array = struct_values
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .unwrap();
-        let keys = struct_array
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let values = struct_array
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-
-        let mut row = HashMap::with_capacity(struct_array.len());
-        for i in 0..struct_array.len() {
-            let key = keys.value(i).to_string();
-            let value = if values.is_null(i) {
-                None
-            } else {
-                Some(values.value(i).to_string())
-            };
-            row.insert(key, value);
-        }
-
-        row
+    fn list_row(list: &ListArray, row_idx: usize) -> Vec<String> {
+        let values = list.value(row_idx);
+        let values = values.as_any().downcast_ref::<StringArray>().unwrap();
+        (0..values.len())
+            .map(|i| values.value(i).to_string())
+            .collect()
     }
 
     #[test]
@@ -461,25 +422,16 @@ mod tests {
             .invoke_with_args(args)
             .and_then(|v| v.to_array(3))
             .unwrap();
-        let map = result.as_any().downcast_ref::<MapArray>().unwrap();
+        let list = result.as_any().downcast_ref::<ListArray>().unwrap();
 
         let expected = [
-            HashMap::from([
-                ("host".to_string(), Some("a".to_string())),
-                ("core".to_string(), Some("1".to_string())),
-            ]),
-            HashMap::from([
-                ("host".to_string(), Some("b".to_string())),
-                ("core".to_string(), Some("2".to_string())),
-            ]),
-            HashMap::from([
-                ("host".to_string(), Some("a".to_string())),
-                ("core".to_string(), Some("1".to_string())),
-            ]),
+            vec!["host : a".to_string(), "core : 1".to_string()],
+            vec!["host : b".to_string(), "core : 2".to_string()],
+            vec!["host : a".to_string(), "core : 1".to_string()],
         ];
 
         for (row_idx, expected_row) in expected.iter().enumerate() {
-            assert_eq!(*expected_row, map_row(map, row_idx));
+            assert_eq!(*expected_row, list_row(list, row_idx));
         }
     }
 
@@ -543,25 +495,25 @@ mod tests {
             .invoke_with_args(args)
             .and_then(|v| v.to_array(rows.len()))
             .unwrap();
-        let map = result.as_any().downcast_ref::<MapArray>().unwrap();
+        let list = result.as_any().downcast_ref::<ListArray>().unwrap();
 
         let expected = [
-            HashMap::from([
-                ("__table_id".to_string(), Some("1".to_string())),
-                ("__tsid".to_string(), Some("100".to_string())),
-                ("k0".to_string(), Some("a".to_string())),
-                ("k1".to_string(), Some("b".to_string())),
-            ]),
-            HashMap::from([
-                ("__table_id".to_string(), Some("1".to_string())),
-                ("__tsid".to_string(), Some("200".to_string())),
-                ("k0".to_string(), Some("c".to_string())),
-                ("k1".to_string(), Some("d".to_string())),
-            ]),
+            vec![
+                "k0 : a".to_string(),
+                "k1 : b".to_string(),
+                "__tsid : 100".to_string(),
+                "__table_id : 1".to_string(),
+            ],
+            vec![
+                "k0 : c".to_string(),
+                "k1 : d".to_string(),
+                "__tsid : 200".to_string(),
+                "__table_id : 1".to_string(),
+            ],
         ];
 
         for (row_idx, expected_row) in expected.iter().enumerate() {
-            assert_eq!(*expected_row, map_row(map, row_idx));
+            assert_eq!(*expected_row, list_row(list, row_idx));
         }
     }
 }
