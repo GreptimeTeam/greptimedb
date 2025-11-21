@@ -31,7 +31,7 @@ use object_store::{ErrorKind, ObjectStore, Reader};
 use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 use store_api::storage::{FileId, RegionId};
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 
 use crate::access_layer::TempFileCleaner;
 use crate::cache::{FILE_TYPE, INDEX_TYPE};
@@ -54,6 +54,17 @@ pub(crate) const DEFAULT_INDEX_CACHE_PERCENT: u8 = 20;
 
 /// Minimum capacity for each cache (512MB).
 const MIN_CACHE_CAPACITY: u64 = 512 * 1024 * 1024;
+
+/// Channel capacity for background download tasks.
+const DOWNLOAD_TASK_CHANNEL_SIZE: usize = 100;
+
+/// A task to download a file in the background.
+struct DownloadTask {
+    index_key: IndexKey,
+    remote_path: String,
+    remote_store: ObjectStore,
+    file_size: u64,
+}
 
 /// Inner struct for FileCache that can be used in spawned tasks.
 #[derive(Debug)]
@@ -243,6 +254,8 @@ impl FileCacheInner {
             .download_without_cleaning(index_key, remote_path, remote_store, file_size)
             .await
         {
+            error!(e; "Failed to download file '{}' for region {}", remote_path, index_key.region_id);
+
             let filename = index_key.to_string();
             TempFileCleaner::clean_atomic_dir_files(&self.local_store, &[&filename]).await;
 
@@ -261,6 +274,8 @@ pub(crate) struct FileCache {
     inner: Arc<FileCacheInner>,
     /// Capacity of the puffin (index) cache in bytes.
     puffin_capacity: u64,
+    /// Sender for background download tasks.
+    download_task_tx: Sender<DownloadTask>,
 }
 
 pub(crate) type FileCacheRef = Arc<FileCache>;
@@ -299,6 +314,9 @@ impl FileCache {
         let parquet_index = Self::build_cache(local_store.clone(), parquet_capacity, ttl, "file");
         let puffin_index = Self::build_cache(local_store.clone(), puffin_capacity, ttl, "index");
 
+        let (download_task_tx, download_task_rx) =
+            tokio::sync::mpsc::channel(DOWNLOAD_TASK_CHANNEL_SIZE);
+
         // Create inner cache shared with background worker
         let inner = Arc::new(FileCacheInner {
             local_store,
@@ -306,10 +324,36 @@ impl FileCache {
             puffin_index,
         });
 
+        // Spawn background task to process download tasks
+        Self::spawn_download_worker(inner.clone(), download_task_rx);
+
         FileCache {
             inner,
             puffin_capacity,
+            download_task_tx,
         }
+    }
+
+    /// Spawns a background worker to process download tasks.
+    fn spawn_download_worker(
+        inner: Arc<FileCacheInner>,
+        mut download_task_rx: tokio::sync::mpsc::Receiver<DownloadTask>,
+    ) {
+        tokio::spawn(async move {
+            info!("Background download worker started");
+            while let Some(task) = download_task_rx.recv().await {
+                // Ignores background download errors.
+                let _ = inner
+                    .download(
+                        task.index_key,
+                        &task.remote_path,
+                        &task.remote_store,
+                        task.file_size,
+                    )
+                    .await;
+            }
+            info!("Background download worker stopped");
+        });
     }
 
     /// Builds a cache for a specific file type.
@@ -582,13 +626,30 @@ impl FileCache {
 
     /// Downloads a file in `remote_path` from the remote object store to the local cache
     /// (specified by `index_key`) in the background. Errors are logged but not returned.
+    ///
+    /// This method attempts to send a download task to the background worker.
+    /// If the channel is full, the task is silently dropped.
     pub(crate) fn maybe_download_background(
         &self,
-        _index_key: IndexKey,
-        _remote_path: String,
-        _remote_store: ObjectStore,
-        _file_size: u64,
+        index_key: IndexKey,
+        remote_path: String,
+        remote_store: ObjectStore,
+        file_size: u64,
     ) {
+        let task = DownloadTask {
+            index_key,
+            remote_path,
+            remote_store,
+            file_size,
+        };
+
+        // Try to send the task; if the channel is full, just drop it
+        if let Err(e) = self.download_task_tx.try_send(task) {
+            debug!(
+                "Failed to queue background download task for region {}, file {}: {:?}",
+                index_key.region_id, index_key.file_id, e
+            );
+        }
     }
 }
 
