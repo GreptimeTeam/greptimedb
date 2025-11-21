@@ -392,7 +392,7 @@ impl PlanRewriter {
                     && ext_b.node.name() == MergeSortLogicalPlan::name()
                 {
                     // revert last `ConditionalCommutative` result for Sort plan in this case.
-                    // `update_column_requriements` left unchanged because Sort won't generate
+                    // `update_column_requirements` left unchanged because Sort won't generate
                     // new columns or remove existing columns.
                     self.stage.pop();
                     self.expand_on_next_part_cond_trans_commutative = false;
