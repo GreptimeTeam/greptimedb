@@ -14,6 +14,7 @@
 
 use bytes::BufMut;
 use pgwire::types::ToSqlText;
+use pgwire::types::format::FormatOptions;
 use postgres_types::{IsNull, ToSql, Type};
 
 #[derive(Debug)]
@@ -23,11 +24,12 @@ impl ToSqlText for HexOutputBytea<'_> {
         &self,
         ty: &Type,
         out: &mut bytes::BytesMut,
+        format_options: &FormatOptions,
     ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
     where
         Self: Sized,
     {
-        let _ = self.0.to_sql_text(ty, out);
+        let _ = self.0.to_sql_text(ty, out, format_options);
         Ok(IsNull::No)
     }
 }
@@ -66,6 +68,7 @@ impl ToSqlText for EscapeOutputBytea<'_> {
         &self,
         _ty: &Type,
         out: &mut bytes::BytesMut,
+        _format_options: &FormatOptions,
     ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
     where
         Self: Sized,
@@ -120,7 +123,9 @@ mod tests {
 
         let expected = b"abcklm*\\251T";
         let mut out = bytes::BytesMut::new();
-        let is_null = input.to_sql_text(&Type::BYTEA, &mut out).unwrap();
+        let is_null = input
+            .to_sql_text(&Type::BYTEA, &mut out, &FormatOptions::default())
+            .unwrap();
         assert!(matches!(is_null, IsNull::No));
         assert_eq!(&out[..], expected);
 
@@ -138,7 +143,9 @@ mod tests {
 
         let expected = b"\\x68656c6c6f2c20776f726c6421";
         let mut out = bytes::BytesMut::new();
-        let is_null = input.to_sql_text(&Type::BYTEA, &mut out).unwrap();
+        let is_null = input
+            .to_sql_text(&Type::BYTEA, &mut out, &FormatOptions::default())
+            .unwrap();
         assert!(matches!(is_null, IsNull::No));
         assert_eq!(&out[..], expected);
 

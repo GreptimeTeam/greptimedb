@@ -18,7 +18,8 @@ use bytes::{Buf, BufMut};
 use common_time::interval::IntervalFormat;
 use common_time::timestamp::TimeUnit;
 use common_time::{Duration, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
-use pgwire::types::ToSqlText;
+use pgwire::types::format::FormatOptions;
+use pgwire::types::{FromSqlText, ToSqlText};
 use postgres_types::{FromSql, IsNull, ToSql, Type, to_sql_checked};
 
 use crate::error;
@@ -201,6 +202,7 @@ impl ToSqlText for PgInterval {
         &self,
         ty: &Type,
         out: &mut bytes::BytesMut,
+        _format_options: &FormatOptions,
     ) -> std::result::Result<postgres_types::IsNull, Box<dyn snafu::Error + Sync + Send>>
     where
         Self: Sized,
@@ -212,6 +214,20 @@ impl ToSqlText for PgInterval {
 
         out.put_slice(fmt.as_bytes());
         Ok(IsNull::No)
+    }
+}
+
+impl<'a> FromSqlText<'a> for PgInterval {
+    fn from_sql_text(
+        _ty: &Type,
+        _input: &[u8],
+        _format_options: &FormatOptions,
+    ) -> std::result::Result<Self, Box<dyn snafu::Error + Sync + Send>>
+    where
+        Self: Sized,
+    {
+        // TODO(sunng87): implement this
+        Err("Parsing Interval from text input is not implemented yet".into())
     }
 }
 
