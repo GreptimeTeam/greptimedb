@@ -9183,9 +9183,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_interval"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe46640b465e284b048ef065cbed8ef17a622878d310c724578396b4cfd00df2"
+dependencies = [
+ "bytes",
+ "chrono",
+ "postgres-types",
+]
+
+[[package]]
 name = "pgwire"
-version = "0.35.0"
-source = "git+https://github.com/sunng87/pgwire?rev=0d00bbf067d57ec47cd6c8f8234d9eb747d6a510#0d00bbf067d57ec47cd6c8f8234d9eb747d6a510"
+version = "0.36.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5cc59678d0c10c73a552d465ce9156995189d1c678f2784dc817fe8623487f5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -11585,6 +11597,7 @@ dependencies = [
  "otel-arrow-rust",
  "parking_lot 0.12.4",
  "permutation",
+ "pg_interval",
  "pgwire",
  "pin-project",
  "pipeline",

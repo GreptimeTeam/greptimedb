@@ -220,14 +220,22 @@ impl ToSqlText for PgInterval {
 impl<'a> FromSqlText<'a> for PgInterval {
     fn from_sql_text(
         _ty: &Type,
-        _input: &[u8],
+        input: &[u8],
         _format_options: &FormatOptions,
     ) -> std::result::Result<Self, Box<dyn snafu::Error + Sync + Send>>
     where
         Self: Sized,
     {
-        // TODO(sunng87): implement this
-        Err("Parsing Interval from text input is not implemented yet".into())
+        // only support parsing interval from postgres format
+        if let Ok(interval) = pg_interval::Interval::from_postgres(str::from_utf8(input)?) {
+            Ok(PgInterval {
+                months: interval.months,
+                days: interval.days,
+                microseconds: interval.microseconds,
+            })
+        } else {
+            Err("invalid interval format".into())
+        }
     }
 }
 
