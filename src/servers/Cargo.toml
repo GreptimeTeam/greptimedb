@@ -88,8 +88,8 @@ otel-arrow-rust.workspace = true
 parking_lot.workspace = true
 pg_interval = "0.4"
 pgwire = { version = "0.36", default-features = false, features = [
-   "server-api-ring",
-   "pg-ext-types",
+    "server-api-ring",
+    "pg-ext-types",
 ] }
 pin-project = "1.0"
 pipeline.workspace = true
