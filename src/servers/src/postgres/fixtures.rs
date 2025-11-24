@@ -22,7 +22,7 @@ use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo, QueryResponse
 use pgwire::error::PgWireResult;
 use pgwire::messages::data::DataRow;
 use regex::Regex;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 
 fn build_string_data_rows(
     schema: Arc<Vec<FieldInfo>>,
@@ -60,11 +60,7 @@ static ABORT_TRANSACTION_PATTERN: Lazy<Regex> =
 
 /// Test if given query statement matches the patterns
 pub(crate) fn matches(query: &str) -> bool {
-    START_TRANSACTION_PATTERN.is_match(query)
-        || COMMIT_TRANSACTION_PATTERN.is_match(query)
-        || ABORT_TRANSACTION_PATTERN.is_match(query)
-        || SHOW_PATTERN.captures(query).is_some()
-        || SET_TRANSACTION_PATTERN.is_match(query)
+    process(query, QueryContext::arc()).is_some()
 }
 
 fn set_transaction_warning(query_ctx: QueryContextRef) {

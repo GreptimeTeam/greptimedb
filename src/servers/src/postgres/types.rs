@@ -29,7 +29,7 @@ use arrow::datatypes::{
     TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
 use arrow_schema::{DataType, IntervalUnit, TimeUnit};
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
 use common_decimal::Decimal128;
 use common_recordbatch::RecordBatch;
 use common_time::time::Time;
@@ -717,7 +717,7 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
         &Type::INT4 => Ok(ConcreteDataType::int32_datatype()),
         &Type::INT8 => Ok(ConcreteDataType::int64_datatype()),
         &Type::VARCHAR | &Type::TEXT => Ok(ConcreteDataType::string_datatype()),
-        &Type::TIMESTAMP => Ok(ConcreteDataType::timestamp_datatype(
+        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Ok(ConcreteDataType::timestamp_datatype(
             common_time::timestamp::TimeUnit::Millisecond,
         )),
         &Type::DATE => Ok(ConcreteDataType::date_datatype()),
@@ -1050,7 +1050,7 @@ pub(super) fn parameters_to_scalar_values(
                                 None,
                             ),
                             TimestampType::Nanosecond(_) => ScalarValue::TimestampNanosecond(
-                                data.map(|ts| ts.and_utc().timestamp_micros()),
+                                data.and_then(|ts| ts.and_utc().timestamp_nanos_opt()),
                                 None,
                             ),
                         },
@@ -1066,6 +1066,38 @@ pub(super) fn parameters_to_scalar_values(
                         data.map(|ts| ts.and_utc().timestamp_millis()),
                         None,
                     )
+                }
+            }
+            &Type::TIMESTAMPTZ => {
+                let data = portal.parameter::<DateTime<FixedOffset>>(idx, &client_type)?;
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Timestamp(unit) => match *unit {
+                            TimestampType::Second(_) => {
+                                ScalarValue::TimestampSecond(data.map(|ts| ts.timestamp()), None)
+                            }
+                            TimestampType::Millisecond(_) => ScalarValue::TimestampMillisecond(
+                                data.map(|ts| ts.timestamp_millis()),
+                                None,
+                            ),
+                            TimestampType::Microsecond(_) => ScalarValue::TimestampMicrosecond(
+                                data.map(|ts| ts.timestamp_micros()),
+                                None,
+                            ),
+                            TimestampType::Nanosecond(_) => ScalarValue::TimestampNanosecond(
+                                data.and_then(|ts| ts.timestamp_nanos_opt()),
+                                None,
+                            ),
+                        },
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ));
+                        }
+                    }
+                } else {
+                    ScalarValue::TimestampMillisecond(data.map(|ts| ts.timestamp_millis()), None)
                 }
             }
             &Type::DATE => {

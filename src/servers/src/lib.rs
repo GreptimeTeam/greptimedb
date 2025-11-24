@@ -56,7 +56,7 @@ pub mod server;
 pub mod tls;
 
 /// Cached SQL and logical plan for database interfaces
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SqlPlan {
     query: String,
     // Store the parsed statement to determine if it is a query and whether to track it.
