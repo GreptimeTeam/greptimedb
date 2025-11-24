@@ -112,8 +112,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let now = Instant::now();
 
             // First step: clear all staging manifest files.
-            let manager = region.manifest_ctx.manifest_manager.write().await;
-            match manager.store().clear_staging_manifests().await {
+            let mut manager = region.manifest_ctx.manifest_manager.write().await;
+            match manager.clear_staging_manifests().await {
                 Ok(_) => {
                     info!(
                         "Cleared all staging manifest files for region {}, elapsed: {:?}",
@@ -151,11 +151,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .update_manifest(RegionLeaderState::EnteringStaging, action_list, true)
                 .await
                 .map(|_| ());
-            info!(
-                "Created staging manifest for region {}, elapsed: {:?}",
-                region.region_id,
-                now.elapsed(),
-            );
+            if result.is_ok() {
+                info!(
+                    "Created staging manifest for region {}, elapsed: {:?}",
+                    region.region_id,
+                    now.elapsed(),
+                );
+            } else if let Err(ref e) = result {
+                error!(
+                    "Failed to create staging manifest for region {}: {:?}, elapsed: {:?}",
+                    region.region_id,
+                    e,
+                    now.elapsed(),
+                );
+            }
 
             let notify = WorkerRequest::Background {
                 region_id: region.region_id,

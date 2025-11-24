@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use common_telemetry::{debug, error, info, warn};
+use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
 use snafu::{OptionExt, ensure};
 use store_api::ManifestVersion;
