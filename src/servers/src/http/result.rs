@@ -43,17 +43,14 @@ pub(crate) mod null_result;
 pub(crate) mod prometheus_resp;
 pub(crate) mod table_result;
 
-pub(super) struct HttpOutputWriter {
+pub struct HttpOutputWriter {
     columns: usize,
     value_transformer: Option<Box<dyn Fn(Value) -> Value>>,
     current: Option<Vec<serde_json::Value>>,
 }
 
 impl HttpOutputWriter {
-    pub(super) fn new(
-        columns: usize,
-        value_transformer: Option<Box<dyn Fn(Value) -> Value>>,
-    ) -> Self {
+    pub fn new(columns: usize, value_transformer: Option<Box<dyn Fn(Value) -> Value>>) -> Self {
         Self {
             columns,
             value_transformer,
@@ -101,7 +98,7 @@ impl HttpOutputWriter {
         self.current.take().unwrap_or_default()
     }
 
-    pub(super) fn write(
+    pub fn write(
         &mut self,
         record_batch: RecordBatch,
         rows: &mut Vec<Vec<serde_json::Value>>,
