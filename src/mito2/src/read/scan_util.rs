@@ -45,6 +45,7 @@ use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::flat_format::time_index_column_index;
 use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
+use crate::sst::parquet::row_group::ParquetFetchMetrics;
 
 /// Verbose scan metrics for a partition.
 #[derive(Default)]
@@ -823,9 +824,10 @@ pub fn build_file_range_scan_stream(
 ) -> impl Stream<Item = Result<Batch>> {
     try_stream! {
         let reader_metrics = &mut ReaderMetrics::default();
+        let fetch_metrics = ParquetFetchMetrics::default();
         for range in ranges {
             let build_reader_start = Instant::now();
-            let reader = range.reader(stream_ctx.input.series_row_selector).await?;
+            let reader = range.reader(stream_ctx.input.series_row_selector, &fetch_metrics).await?;
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
             let compat_batch = range.compat_batch();
@@ -858,9 +860,10 @@ pub fn build_flat_file_range_scan_stream(
 ) -> impl Stream<Item = Result<RecordBatch>> {
     try_stream! {
         let reader_metrics = &mut ReaderMetrics::default();
+        let fetch_metrics = ParquetFetchMetrics::default();
         for range in ranges {
             let build_reader_start = Instant::now();
-            let mut reader = range.flat_reader().await?;
+            let mut reader = range.flat_reader(&fetch_metrics).await?;
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
 

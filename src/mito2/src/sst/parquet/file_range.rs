@@ -45,6 +45,7 @@ use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{
     FlatRowGroupReader, MaybeFilter, RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext,
 };
+use crate::sst::parquet::row_group::ParquetFetchMetrics;
 
 /// Checks if a row group contains delete operations by examining the min value of op_type column.
 ///
@@ -117,11 +118,16 @@ impl FileRange {
     pub(crate) async fn reader(
         &self,
         selector: Option<TimeSeriesRowSelector>,
+        fetch_metrics: &ParquetFetchMetrics,
     ) -> Result<PruneReader> {
         let parquet_reader = self
             .context
             .reader_builder
-            .build(self.row_group_idx, self.row_selection.clone())
+            .build(
+                self.row_group_idx,
+                self.row_selection.clone(),
+                fetch_metrics,
+            )
             .await?;
 
         let use_last_row_reader = if selector
@@ -168,11 +174,18 @@ impl FileRange {
     }
 
     /// Creates a flat reader that returns RecordBatch.
-    pub(crate) async fn flat_reader(&self) -> Result<FlatPruneReader> {
+    pub(crate) async fn flat_reader(
+        &self,
+        fetch_metrics: &ParquetFetchMetrics,
+    ) -> Result<FlatPruneReader> {
         let parquet_reader = self
             .context
             .reader_builder
-            .build(self.row_group_idx, self.row_selection.clone())
+            .build(
+                self.row_group_idx,
+                self.row_selection.clone(),
+                fetch_metrics,
+            )
             .await?;
 
         // Compute skip_fields once for this row group
