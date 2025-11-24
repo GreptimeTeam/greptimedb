@@ -36,7 +36,7 @@ use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
 use servers::server::{Server, ServerHandlers};
-use servers::tls::{ReloadableTlsServerConfig, maybe_watch_tls_config};
+use servers::tls::{ReloadableTlsServerConfig, maybe_watch_server_tls_config};
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartServerSnafu, TomlFormatSnafu};
@@ -258,7 +258,7 @@ where
             );
 
             // will not watch if watch is disabled in tls option
-            maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
+            maybe_watch_server_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
             let mysql_server = MysqlServer::create_server(
                 common_runtime::global_runtime(),
@@ -287,7 +287,7 @@ where
                 ReloadableTlsServerConfig::try_new(opts.tls.clone()).context(StartServerSnafu)?,
             );
 
-            maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
+            maybe_watch_server_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
             let pg_server = Box::new(PostgresServer::new(
                 ServerSqlQueryHandlerAdapter::arc(instance.clone()),

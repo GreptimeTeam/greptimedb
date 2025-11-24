@@ -23,7 +23,7 @@ use api::v1::query_request::Query;
 use api::v1::{CreateTableExpr, QueryRequest};
 use client::{Client, Database};
 use common_error::ext::{BoxedError, ErrorExt};
-use common_grpc::channel_manager::{ChannelConfig, ChannelManager, load_tls_config};
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager, load_client_tls_config};
 use common_meta::cluster::{NodeInfo, NodeInfoKey, Role};
 use common_meta::peer::Peer;
 use common_meta::rpc::store::RangeRequest;
@@ -124,7 +124,7 @@ impl FrontendClient {
                     .connect_timeout(batch_opts.grpc_conn_timeout)
                     .timeout(batch_opts.query_timeout);
 
-                let tls_config = load_tls_config(batch_opts.frontend_tls.as_ref())
+                let tls_config = load_client_tls_config(batch_opts.frontend_tls.clone())
                     .context(InvalidClientConfigSnafu)?;
                 ChannelManager::with_config(cfg, tls_config)
             },
