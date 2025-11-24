@@ -86,7 +86,8 @@ opentelemetry-proto.workspace = true
 operator.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
-pgwire = { version = "0.34", default-features = false, features = [
+pg_interval = "0.4"
+pgwire = { version = "0.36", default-features = false, features = [
     "server-api-ring",
     "pg-ext-types",
 ] }

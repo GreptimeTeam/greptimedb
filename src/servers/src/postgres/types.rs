@@ -749,7 +749,13 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
 pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWireResult<String> {
     // the index is managed from portal's parameters count so it's safe to
     // unwrap here.
-    let param_type = portal.statement.parameter_types.get(idx).unwrap();
+    let param_type = portal
+        .statement
+        .parameter_types
+        .get(idx)
+        .unwrap()
+        .as_ref()
+        .unwrap_or(&Type::UNKNOWN);
     match param_type {
         &Type::VARCHAR | &Type::TEXT => Ok(format!(
             "'{}'",
@@ -828,7 +834,7 @@ pub(super) fn parameters_to_scalar_values(
     let mut results = Vec::with_capacity(param_count);
 
     let client_param_types = &portal.statement.parameter_types;
-    let param_types = plan
+    let server_param_types = plan
         .get_parameter_types()
         .context(DataFusionSnafu)
         .map_err(convert_err)?
@@ -837,18 +843,12 @@ pub(super) fn parameters_to_scalar_values(
         .collect::<HashMap<_, _>>();
 
     for idx in 0..param_count {
-        let server_type = param_types
+        let server_type = server_param_types
             .get(&format!("${}", idx + 1))
             .and_then(|t| t.as_ref());
 
-        let client_type = if let Some(client_given_type) = client_param_types.get(idx) {
-            match (client_given_type, server_type) {
-                (&Type::UNKNOWN, Some(server_type)) => {
-                    // If client type is unknown, use the server type.
-                    type_gt_to_pg(server_type).map_err(convert_err)?
-                }
-                _ => client_given_type.clone(),
-            }
+        let client_type = if let Some(Some(client_given_type)) = client_param_types.get(idx) {
+            client_given_type.clone()
         } else if let Some(server_provided_type) = &server_type {
             type_gt_to_pg(server_provided_type).map_err(convert_err)?
         } else {
