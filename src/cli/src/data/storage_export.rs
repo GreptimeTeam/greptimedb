@@ -81,7 +81,7 @@ pub struct S3Backend {
 impl S3Backend {
     pub fn new(config: PrefixedS3Connection) -> Result<Self, BoxedError> {
         // Validate required fields
-        if config.bucket().is_empty() {
+        if config.s3_bucket.is_empty() {
             return Err(BoxedError::new(
                 error::MissingConfigSnafu {
                     msg: "S3 bucket must be set when --s3 is enabled",
@@ -89,7 +89,7 @@ impl S3Backend {
                 .build(),
             ));
         }
-        if config.access_key_id().expose_secret().is_empty() {
+        if config.s3_access_key_id.expose_secret().is_empty() {
             return Err(BoxedError::new(
                 error::MissingConfigSnafu {
                     msg: "S3 access key ID must be set when --s3 is enabled",
@@ -97,7 +97,7 @@ impl S3Backend {
                 .build(),
             ));
         }
-        if config.secret_access_key().expose_secret().is_empty() {
+        if config.s3_secret_access_key.expose_secret().is_empty() {
             return Err(BoxedError::new(
                 error::MissingConfigSnafu {
                     msg: "S3 secret access key must be set when --s3 is enabled",
@@ -112,11 +112,11 @@ impl S3Backend {
 #[async_trait]
 impl StorageExport for S3Backend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
-        let bucket = self.config.bucket();
-        let root = if self.config.root().is_empty() {
+        let bucket = &self.config.s3_bucket;
+        let root = if self.config.s3_root.is_empty() {
             String::new()
         } else {
-            format!("/{}", self.config.root())
+            format!("/{}", self.config.s3_root)
         };
 
         let s3_path = format!("s3://{}{}/{}/{}/", bucket, root, catalog, schema);
@@ -124,19 +124,19 @@ impl StorageExport for S3Backend {
         let mut connection_options = vec![
             format!(
                 "ACCESS_KEY_ID='{}'",
-                self.config.access_key_id().expose_secret()
+                self.config.s3_access_key_id.expose_secret()
             ),
             format!(
                 "SECRET_ACCESS_KEY='{}'",
-                self.config.secret_access_key().expose_secret()
+                self.config.s3_secret_access_key.expose_secret()
             ),
         ];
 
-        if let Some(region) = self.config.region() {
+        if let Some(region) = &self.config.s3_region {
             connection_options.push(format!("REGION='{}'", region));
         }
 
-        if let Some(endpoint) = self.config.endpoint() {
+        if let Some(endpoint) = &self.config.s3_endpoint {
             connection_options.push(format!("ENDPOINT='{}'", endpoint));
         }
 
@@ -145,20 +145,20 @@ impl StorageExport for S3Backend {
     }
 
     fn format_output_path(&self, _catalog: &str, file_path: &str) -> String {
-        let bucket = self.config.bucket();
-        let root = if self.config.root().is_empty() {
+        let bucket = &self.config.s3_bucket;
+        let root = if self.config.s3_root.is_empty() {
             String::new()
         } else {
-            format!("/{}", self.config.root())
+            format!("/{}", self.config.s3_root)
         };
         format!("s3://{}{}/{}", bucket, root, file_path)
     }
 
     fn mask_sensitive_info(&self, sql: &str) -> String {
         let mut masked = sql.to_string();
-        masked = masked.replace(self.config.access_key_id().expose_secret(), "[REDACTED]");
+        masked = masked.replace(self.config.s3_access_key_id.expose_secret(), "[REDACTED]");
         masked = masked.replace(
-            self.config.secret_access_key().expose_secret(),
+            self.config.s3_secret_access_key.expose_secret(),
             "[REDACTED]",
         );
         masked
@@ -174,7 +174,7 @@ pub struct OssBackend {
 impl OssBackend {
     pub fn new(config: PrefixedOssConnection) -> Result<Self, BoxedError> {
         // Validate required fields
-        if config.bucket().is_empty() {
+        if config.oss_bucket.is_empty() {
             return Err(BoxedError::new(
                 error::MissingConfigSnafu {
                     msg: "OSS bucket must be set when --oss is enabled",
@@ -182,7 +182,7 @@ impl OssBackend {
                 .build(),
             ));
         }
-        if config.endpoint().is_empty() {
+        if config.oss_endpoint.is_empty() {
             return Err(BoxedError::new(
                 error::MissingConfigSnafu {
                     msg: "OSS endpoint must be set when --oss is enabled",
@@ -190,7 +190,7 @@ impl OssBackend {
                 .build(),
             ));
         }
-        if config.access_key_id().expose_secret().is_empty() {
+        if config.oss_access_key_id.expose_secret().is_empty() {
             return Err(BoxedError::new(
                 error::MissingConfigSnafu {
                     msg: "OSS access key ID must be set when --oss is enabled",
@@ -198,7 +198,7 @@ impl OssBackend {
                 .build(),
             ));
         }
-        if config.access_key_secret().expose_secret().is_empty() {
+        if config.oss_access_key_secret.expose_secret().is_empty() {
             return Err(BoxedError::new(
                 error::MissingConfigSnafu {
                     msg: "OSS access key secret must be set when --oss is enabled",
@@ -213,22 +213,22 @@ impl OssBackend {
 #[async_trait]
 impl StorageExport for OssBackend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
-        let bucket = self.config.bucket();
+        let bucket = &self.config.oss_bucket;
         let oss_path = format!("oss://{}/{}/{}/", bucket, catalog, schema);
 
         let mut connection_options = vec![
             format!(
                 "ACCESS_KEY_ID='{}'",
-                self.config.access_key_id().expose_secret()
+                self.config.oss_access_key_id.expose_secret()
             ),
             format!(
                 "ACCESS_KEY_SECRET='{}'",
-                self.config.access_key_secret().expose_secret()
+                self.config.oss_access_key_secret.expose_secret()
             ),
         ];
 
-        if !self.config.endpoint().is_empty() {
-            connection_options.push(format!("ENDPOINT='{}'", self.config.endpoint()));
+        if !self.config.oss_endpoint.is_empty() {
+            connection_options.push(format!("ENDPOINT='{}'", self.config.oss_endpoint));
         }
 
         let connection_str = format!(" CONNECTION ({})", connection_options.join(", "));
@@ -236,15 +236,15 @@ impl StorageExport for OssBackend {
     }
 
     fn format_output_path(&self, catalog: &str, file_path: &str) -> String {
-        let bucket = self.config.bucket();
+        let bucket = &self.config.oss_bucket;
         format!("oss://{}/{}/{}", bucket, catalog, file_path)
     }
 
     fn mask_sensitive_info(&self, sql: &str) -> String {
         let mut masked = sql.to_string();
-        masked = masked.replace(self.config.access_key_id().expose_secret(), "[REDACTED]");
+        masked = masked.replace(self.config.oss_access_key_id.expose_secret(), "[REDACTED]");
         masked = masked.replace(
-            self.config.access_key_secret().expose_secret(),
+            self.config.oss_access_key_secret.expose_secret(),
             "[REDACTED]",
         );
         masked
@@ -260,7 +260,7 @@ pub struct GcsBackend {
 impl GcsBackend {
     pub fn new(config: PrefixedGcsConnection) -> Result<Self, BoxedError> {
         // Validate required fields
-        if config.bucket().is_empty() {
+        if config.gcs_bucket.is_empty() {
             return Err(BoxedError::new(
                 error::MissingConfigSnafu {
                     msg: "GCS bucket must be set when --gcs is enabled",
@@ -269,8 +269,8 @@ impl GcsBackend {
             ));
         }
         // At least one of credential_path or credential must be set
-        if config.credential_path().expose_secret().is_empty()
-            && config.credential().expose_secret().is_empty()
+        if config.gcs_credential_path.expose_secret().is_empty()
+            && config.gcs_credential.expose_secret().is_empty()
         {
             return Err(BoxedError::new(
                 error::MissingConfigSnafu {
@@ -286,33 +286,33 @@ impl GcsBackend {
 #[async_trait]
 impl StorageExport for GcsBackend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
-        let bucket = self.config.bucket();
-        let root = if self.config.root().is_empty() {
+        let bucket = &self.config.gcs_bucket;
+        let root = if self.config.gcs_root.is_empty() {
             String::new()
         } else {
-            format!("/{}", self.config.root())
+            format!("/{}", self.config.gcs_root)
         };
 
         let gcs_path = format!("gcs://{}{}/{}/{}/", bucket, root, catalog, schema);
 
         let mut connection_options = Vec::new();
 
-        if !self.config.credential_path().expose_secret().is_empty() {
+        if !self.config.gcs_credential_path.expose_secret().is_empty() {
             connection_options.push(format!(
                 "CREDENTIAL_PATH='{}'",
-                self.config.credential_path().expose_secret()
+                self.config.gcs_credential_path.expose_secret()
             ));
         }
 
-        if !self.config.credential().expose_secret().is_empty() {
+        if !self.config.gcs_credential.expose_secret().is_empty() {
             connection_options.push(format!(
                 "CREDENTIAL='{}'",
-                self.config.credential().expose_secret()
+                self.config.gcs_credential.expose_secret()
             ));
         }
 
-        if !self.config.endpoint().is_empty() {
-            connection_options.push(format!("ENDPOINT='{}'", self.config.endpoint()));
+        if !self.config.gcs_endpoint.is_empty() {
+            connection_options.push(format!("ENDPOINT='{}'", self.config.gcs_endpoint));
         }
 
         let connection_str = if connection_options.is_empty() {
@@ -325,22 +325,25 @@ impl StorageExport for GcsBackend {
     }
 
     fn format_output_path(&self, _catalog: &str, file_path: &str) -> String {
-        let bucket = self.config.bucket();
-        let root = if self.config.root().is_empty() {
+        let bucket = &self.config.gcs_bucket;
+        let root = if self.config.gcs_root.is_empty() {
             String::new()
         } else {
-            format!("/{}", self.config.root())
+            format!("/{}", self.config.gcs_root)
         };
         format!("gcs://{}{}/{}", bucket, root, file_path)
     }
 
     fn mask_sensitive_info(&self, sql: &str) -> String {
         let mut masked = sql.to_string();
-        if !self.config.credential_path().expose_secret().is_empty() {
-            masked = masked.replace(self.config.credential_path().expose_secret(), "[REDACTED]");
+        if !self.config.gcs_credential_path.expose_secret().is_empty() {
+            masked = masked.replace(
+                self.config.gcs_credential_path.expose_secret(),
+                "[REDACTED]",
+            );
         }
-        if !self.config.credential().expose_secret().is_empty() {
-            masked = masked.replace(self.config.credential().expose_secret(), "[REDACTED]");
+        if !self.config.gcs_credential.expose_secret().is_empty() {
+            masked = masked.replace(self.config.gcs_credential.expose_secret(), "[REDACTED]");
         }
         masked
     }
@@ -355,7 +358,7 @@ pub struct AzblobBackend {
 impl AzblobBackend {
     pub fn new(config: PrefixedAzblobConnection) -> Result<Self, BoxedError> {
         // Validate required fields
-        if config.container().is_empty() {
+        if config.azblob_container.is_empty() {
             return Err(BoxedError::new(
                 error::MissingConfigSnafu {
                     msg: "Azure Blob container must be set when --azblob is enabled",
@@ -363,7 +366,7 @@ impl AzblobBackend {
                 .build(),
             ));
         }
-        if config.account_name().expose_secret().is_empty() {
+        if config.azblob_account_name.expose_secret().is_empty() {
             return Err(BoxedError::new(
                 error::MissingConfigSnafu {
                     msg: "Azure Blob account name must be set when --azblob is enabled",
@@ -371,7 +374,7 @@ impl AzblobBackend {
                 .build(),
             ));
         }
-        if config.account_key().expose_secret().is_empty() {
+        if config.azblob_account_key.expose_secret().is_empty() {
             return Err(BoxedError::new(
                 error::MissingConfigSnafu {
                     msg: "Azure Blob account key must be set when --azblob is enabled",
@@ -386,11 +389,11 @@ impl AzblobBackend {
 #[async_trait]
 impl StorageExport for AzblobBackend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
-        let container = self.config.container();
-        let root = if self.config.root().is_empty() {
+        let container = &self.config.azblob_container;
+        let root = if self.config.azblob_root.is_empty() {
             String::new()
         } else {
-            format!("/{}", self.config.root())
+            format!("/{}", self.config.azblob_root)
         };
 
         let azblob_path = format!("azblob://{}{}/{}/{}/", container, root, catalog, schema);
@@ -398,19 +401,19 @@ impl StorageExport for AzblobBackend {
         let mut connection_options = vec![
             format!(
                 "ACCOUNT_NAME='{}'",
-                self.config.account_name().expose_secret()
+                self.config.azblob_account_name.expose_secret()
             ),
             format!(
                 "ACCOUNT_KEY='{}'",
-                self.config.account_key().expose_secret()
+                self.config.azblob_account_key.expose_secret()
             ),
         ];
 
-        if !self.config.endpoint().is_empty() {
-            connection_options.push(format!("ENDPOINT='{}'", self.config.endpoint()));
+        if !self.config.azblob_endpoint.is_empty() {
+            connection_options.push(format!("ENDPOINT='{}'", self.config.azblob_endpoint));
         }
 
-        if let Some(sas_token) = self.config.sas_token() {
+        if let Some(sas_token) = &self.config.azblob_sas_token {
             connection_options.push(format!("SAS_TOKEN='{}'", sas_token));
         }
 
@@ -419,20 +422,23 @@ impl StorageExport for AzblobBackend {
     }
 
     fn format_output_path(&self, _catalog: &str, file_path: &str) -> String {
-        let container = self.config.container();
-        let root = if self.config.root().is_empty() {
+        let container = &self.config.azblob_container;
+        let root = if self.config.azblob_root.is_empty() {
             String::new()
         } else {
-            format!("/{}", self.config.root())
+            format!("/{}", self.config.azblob_root)
         };
         format!("azblob://{}{}/{}", container, root, file_path)
     }
 
     fn mask_sensitive_info(&self, sql: &str) -> String {
         let mut masked = sql.to_string();
-        masked = masked.replace(self.config.account_name().expose_secret(), "[REDACTED]");
-        masked = masked.replace(self.config.account_key().expose_secret(), "[REDACTED]");
-        if let Some(sas_token) = self.config.sas_token() {
+        masked = masked.replace(
+            self.config.azblob_account_name.expose_secret(),
+            "[REDACTED]",
+        );
+        masked = masked.replace(self.config.azblob_account_key.expose_secret(), "[REDACTED]");
+        if let Some(sas_token) = &self.config.azblob_sas_token {
             masked = masked.replace(sas_token, "[REDACTED]");
         }
         masked
