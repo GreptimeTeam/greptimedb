@@ -47,6 +47,10 @@ pub struct ParquetFetchMetrics {
     write_cache_hit: std::sync::atomic::AtomicUsize,
     /// Number of write cache misses.
     write_cache_miss: std::sync::atomic::AtomicUsize,
+    /// Elapsed time in microseconds fetching from write cache.
+    write_cache_fetch_elapsed: std::sync::atomic::AtomicU64,
+    /// Elapsed time in microseconds fetching from object store.
+    object_store_fetch_elapsed: std::sync::atomic::AtomicU64,
 }
 
 impl ParquetFetchMetrics {
@@ -95,6 +99,30 @@ impl ParquetFetchMetrics {
     /// Returns the write cache miss count.
     pub fn write_cache_miss(&self) -> usize {
         self.write_cache_miss
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Adds elapsed time in microseconds for write cache fetch.
+    pub fn add_write_cache_fetch_elapsed(&self, elapsed_us: u64) {
+        self.write_cache_fetch_elapsed
+            .fetch_add(elapsed_us, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns the elapsed time in microseconds for write cache fetch.
+    pub fn write_cache_fetch_elapsed(&self) -> u64 {
+        self.write_cache_fetch_elapsed
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Adds elapsed time in microseconds for object store fetch.
+    pub fn add_object_store_fetch_elapsed(&self, elapsed_us: u64) {
+        self.object_store_fetch_elapsed
+            .fetch_add(elapsed_us, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns the elapsed time in microseconds for object store fetch.
+    pub fn object_store_fetch_elapsed(&self) -> u64 {
+        self.object_store_fetch_elapsed
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
@@ -359,8 +387,11 @@ impl<'a> InMemoryRowGroup<'a> {
         metrics.inc_page_cache_miss();
 
         let key = IndexKey::new(self.region_id, self.file_id, FileType::Parquet);
-        let pages = match self.fetch_ranges_from_write_cache(key, ranges).await {
+        let start = std::time::Instant::now();
+        let write_cache_result = self.fetch_ranges_from_write_cache(key, ranges).await;
+        let pages = match write_cache_result {
             Some(data) => {
+                metrics.add_write_cache_fetch_elapsed(start.elapsed().as_micros() as u64);
                 metrics.inc_write_cache_hit();
                 data
             }
@@ -371,9 +402,12 @@ impl<'a> InMemoryRowGroup<'a> {
                     .with_label_values(&["cache_miss_read"])
                     .start_timer();
 
-                fetch_byte_ranges(self.file_path, self.object_store.clone(), ranges)
+                let start = std::time::Instant::now();
+                let data = fetch_byte_ranges(self.file_path, self.object_store.clone(), ranges)
                     .await
-                    .map_err(|e| ParquetError::External(Box::new(e)))?
+                    .map_err(|e| ParquetError::External(Box::new(e)))?;
+                metrics.add_object_store_fetch_elapsed(start.elapsed().as_micros() as u64);
+                data
             }
         };
 
