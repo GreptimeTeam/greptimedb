@@ -712,7 +712,7 @@ impl RegionSupervisor {
         let from_peer_id = from_peer.id;
         let to_peer = tasks[0].0.to_peer.clone();
         let to_peer_id = to_peer.id;
-        let timeout = Duration::from_secs(120) * max_count;
+        let timeout = DEFAULT_REGION_MIGRATION_TIMEOUT * max_count;
         let trigger_reason = RegionMigrationTriggerReason::Failover;
         let task = RegionMigrationTask {
             region_ids,
