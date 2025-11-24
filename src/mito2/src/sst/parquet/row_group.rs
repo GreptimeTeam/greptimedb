@@ -125,6 +125,26 @@ impl ParquetFetchMetrics {
         self.object_store_fetch_elapsed
             .load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    /// Merges metrics from another [ParquetFetchMetrics].
+    pub fn merge_from(&self, other: &ParquetFetchMetrics) {
+        self.page_cache_hit
+            .fetch_add(other.page_cache_hit(), std::sync::atomic::Ordering::Relaxed);
+        self.page_cache_miss
+            .fetch_add(other.page_cache_miss(), std::sync::atomic::Ordering::Relaxed);
+        self.write_cache_hit
+            .fetch_add(other.write_cache_hit(), std::sync::atomic::Ordering::Relaxed);
+        self.write_cache_miss
+            .fetch_add(other.write_cache_miss(), std::sync::atomic::Ordering::Relaxed);
+        self.write_cache_fetch_elapsed.fetch_add(
+            other.write_cache_fetch_elapsed(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.object_store_fetch_elapsed.fetch_add(
+            other.object_store_fetch_elapsed(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
 }
 
 pub(crate) struct RowGroupBase<'a> {
@@ -336,7 +356,7 @@ impl<'a> InMemoryRowGroup<'a> {
         &mut self,
         projection: &ProjectionMask,
         selection: Option<&RowSelection>,
-        metrics: &ParquetFetchMetrics,
+        metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<()> {
         if let Some((selection, offset_index)) = selection.zip(self.base.offset_index) {
             let (fetch_ranges, page_start_offsets) =
@@ -375,28 +395,36 @@ impl<'a> InMemoryRowGroup<'a> {
     async fn fetch_bytes(
         &self,
         ranges: &[Range<u64>],
-        metrics: &ParquetFetchMetrics,
+        metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<Vec<Bytes>> {
         // Now fetch page timer includes the whole time to read pages.
         let _timer = READ_STAGE_FETCH_PAGES.start_timer();
         let page_key = PageKey::new(self.file_id, self.row_group_idx, ranges.to_vec());
         if let Some(pages) = self.cache_strategy.get_pages(&page_key) {
-            metrics.inc_page_cache_hit();
+            if let Some(metrics) = metrics {
+                metrics.inc_page_cache_hit();
+            }
             return Ok(pages.compressed.clone());
         }
-        metrics.inc_page_cache_miss();
+        if let Some(metrics) = metrics {
+            metrics.inc_page_cache_miss();
+        }
 
         let key = IndexKey::new(self.region_id, self.file_id, FileType::Parquet);
         let start = std::time::Instant::now();
         let write_cache_result = self.fetch_ranges_from_write_cache(key, ranges).await;
         let pages = match write_cache_result {
             Some(data) => {
-                metrics.add_write_cache_fetch_elapsed(start.elapsed().as_micros() as u64);
-                metrics.inc_write_cache_hit();
+                if let Some(metrics) = metrics {
+                    metrics.add_write_cache_fetch_elapsed(start.elapsed().as_micros() as u64);
+                    metrics.inc_write_cache_hit();
+                }
                 data
             }
             None => {
-                metrics.inc_write_cache_miss();
+                if let Some(metrics) = metrics {
+                    metrics.inc_write_cache_miss();
+                }
                 // Fetch data from object store.
                 let _timer = READ_STAGE_ELAPSED
                     .with_label_values(&["cache_miss_read"])
@@ -406,7 +434,9 @@ impl<'a> InMemoryRowGroup<'a> {
                 let data = fetch_byte_ranges(self.file_path, self.object_store.clone(), ranges)
                     .await
                     .map_err(|e| ParquetError::External(Box::new(e)))?;
-                metrics.add_object_store_fetch_elapsed(start.elapsed().as_micros() as u64);
+                if let Some(metrics) = metrics {
+                    metrics.add_object_store_fetch_elapsed(start.elapsed().as_micros() as u64);
+                }
                 data
             }
         };

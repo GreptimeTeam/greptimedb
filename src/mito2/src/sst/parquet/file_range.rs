@@ -118,7 +118,7 @@ impl FileRange {
     pub(crate) async fn reader(
         &self,
         selector: Option<TimeSeriesRowSelector>,
-        fetch_metrics: &ParquetFetchMetrics,
+        fetch_metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<PruneReader> {
         let parquet_reader = self
             .context
@@ -176,7 +176,7 @@ impl FileRange {
     /// Creates a flat reader that returns RecordBatch.
     pub(crate) async fn flat_reader(
         &self,
-        fetch_metrics: &ParquetFetchMetrics,
+        fetch_metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<FlatPruneReader> {
         let parquet_reader = self
             .context

@@ -1089,6 +1089,8 @@ pub struct ReaderMetrics {
     pub(crate) num_rows: usize,
     /// Metrics for parquet metadata cache.
     pub(crate) metadata_cache_metrics: MetadataCacheMetrics,
+    /// Optional metrics for page/row group fetch operations.
+    pub(crate) fetch_metrics: Option<Arc<ParquetFetchMetrics>>,
 }
 
 impl ReaderMetrics {
@@ -1102,6 +1104,13 @@ impl ReaderMetrics {
         self.num_rows += other.num_rows;
         self.metadata_cache_metrics
             .merge_from(&other.metadata_cache_metrics);
+        if let Some(other_fetch) = &other.fetch_metrics {
+            if let Some(self_fetch) = &self.fetch_metrics {
+                self_fetch.merge_from(other_fetch);
+            } else {
+                self.fetch_metrics = Some(other_fetch.clone());
+            }
+        }
     }
 
     /// Reports total rows.
@@ -1156,7 +1165,7 @@ impl RowGroupReaderBuilder {
         &self,
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
-        fetch_metrics: &ParquetFetchMetrics,
+        fetch_metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<ParquetRecordBatchReader> {
         let mut row_group = InMemoryRowGroup::create(
             self.file_handle.region_id(),
@@ -1339,7 +1348,7 @@ impl BatchReader for ParquetReader {
             let parquet_reader = self
                 .context
                 .reader_builder()
-                .build(row_group_idx, Some(row_selection), &self.fetch_metrics)
+                .build(row_group_idx, Some(row_selection), Some(&self.fetch_metrics))
                 .await?;
 
             // Resets the parquet reader.
@@ -1400,7 +1409,7 @@ impl ParquetReader {
         let reader_state = if let Some((row_group_idx, row_selection)) = selection.pop_first() {
             let parquet_reader = context
                 .reader_builder()
-                .build(row_group_idx, Some(row_selection), &fetch_metrics)
+                .build(row_group_idx, Some(row_selection), Some(&fetch_metrics))
                 .await?;
             // Compute skip_fields once for this row group
             let skip_fields = context.should_skip_fields(row_group_idx);
