@@ -382,7 +382,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
     type Error = error::Error;
 
     fn try_from(datatype: ConcreteDataType) -> Result<Self> {
-        let column_datatype = match datatype {
+        let column_datatype = match &datatype {
             ConcreteDataType::Boolean(_) => ColumnDataType::Boolean,
             ConcreteDataType::Int8(_) => ColumnDataType::Int8,
             ConcreteDataType::Int16(_) => ColumnDataType::Int16,

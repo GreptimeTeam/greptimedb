@@ -2208,6 +2208,7 @@ dependencies = [
  "hyperloglogplus",
  "jsonb",
  "memchr",
+ "mito-codec",
  "nalgebra",
  "num",
  "num-traits",

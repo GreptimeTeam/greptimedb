@@ -83,6 +83,11 @@ impl SparseValues {
     pub fn insert(&mut self, column_id: ColumnId, value: Value) {
         self.values.insert(column_id, value);
     }
+
+    /// Returns an iterator over all stored column id/value pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&ColumnId, &Value)> {
+        self.values.iter()
+    }
 }
 
 /// The column id of the tsid.
