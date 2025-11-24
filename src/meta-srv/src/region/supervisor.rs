@@ -745,7 +745,7 @@ impl RegionSupervisor {
         }
         if !result.table_not_found.is_empty() {
             let detecting_regions = result
-                .migrated
+                .table_not_found
                 .iter()
                 .map(|region_id| (from_peer_id, *region_id))
                 .collect::<Vec<_>>();

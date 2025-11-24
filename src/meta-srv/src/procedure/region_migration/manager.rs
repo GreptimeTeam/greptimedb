@@ -449,7 +449,7 @@ impl RegionMigrationManager {
             });
         }
 
-        let submmiting_region_ids = task.region_ids.clone();
+        let submitting_region_ids = task.region_ids.clone();
         let procedure_id = self
             .submit_procedure_inner(task, procedure_guards, catalog_and_schema)
             .await?;
@@ -459,7 +459,7 @@ impl RegionMigrationManager {
             peer_conflict,
             table_not_found,
             migrating: migrating_region_ids,
-            submitted: submmiting_region_ids,
+            submitted: submitting_region_ids,
             procedure_id: Some(procedure_id),
         })
     }
