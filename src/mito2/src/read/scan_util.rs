@@ -315,6 +315,7 @@ impl ScanMetricsSet {
             num_rows,
             scan_cost: _,
             metadata_cache_metrics: _,
+            fetch_metrics: _,
         } = other;
 
         self.build_parts_cost += *build_cost;
@@ -828,11 +829,14 @@ pub fn build_file_range_scan_stream(
     ranges: SmallVec<[FileRange; 2]>,
 ) -> impl Stream<Item = Result<Batch>> {
     try_stream! {
-        let reader_metrics = &mut ReaderMetrics::default();
-        let fetch_metrics = ParquetFetchMetrics::default();
+        let fetch_metrics = Arc::new(ParquetFetchMetrics::default());
+        let reader_metrics = &mut ReaderMetrics {
+            fetch_metrics: Some(fetch_metrics.clone()),
+            ..Default::default()
+        };
         for range in ranges {
             let build_reader_start = Instant::now();
-            let reader = range.reader(stream_ctx.input.series_row_selector, &fetch_metrics).await?;
+            let reader = range.reader(stream_ctx.input.series_row_selector, Some(&fetch_metrics)).await?;
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
             let compat_batch = range.compat_batch();
@@ -864,11 +868,14 @@ pub fn build_flat_file_range_scan_stream(
     ranges: SmallVec<[FileRange; 2]>,
 ) -> impl Stream<Item = Result<RecordBatch>> {
     try_stream! {
-        let reader_metrics = &mut ReaderMetrics::default();
-        let fetch_metrics = ParquetFetchMetrics::default();
+        let fetch_metrics = Arc::new(ParquetFetchMetrics::default());
+        let reader_metrics = &mut ReaderMetrics {
+            fetch_metrics: Some(fetch_metrics.clone()),
+            ..Default::default()
+        };
         for range in ranges {
             let build_reader_start = Instant::now();
-            let mut reader = range.flat_reader(&fetch_metrics).await?;
+            let mut reader = range.flat_reader(Some(&fetch_metrics)).await?;
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
 
