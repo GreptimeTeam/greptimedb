@@ -421,6 +421,8 @@ pub struct QueryScanContext {
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
 /// You can use this trait to implement an [`ExecutionPlan`](datafusion_physical_plan::ExecutionPlan).
 pub trait RegionScanner: Debug + DisplayAs + Send {
+    fn name(&self) -> &str;
+
     /// Returns the properties of the scanner.
     fn properties(&self) -> &ScannerProperties;
 
@@ -866,6 +868,10 @@ impl Debug for SinglePartitionScanner {
 }
 
 impl RegionScanner for SinglePartitionScanner {
+    fn name(&self) -> &str {
+        "SinglePartition"
+    }
+
     fn properties(&self) -> &ScannerProperties {
         &self.properties
     }
