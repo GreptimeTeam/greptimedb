@@ -694,7 +694,7 @@ impl SyncManifestResponse {
 /// Request to remap manifests from old regions to new regions.
 #[derive(Debug, Clone)]
 pub struct RemapManifestsRequest {
-    /// The [`RegionId`] of the region to remap manifests to.
+    /// The [`RegionId`] of a staging region used to obtain table directory and storage configuration for the remap operation.
     pub region_id: RegionId,
     /// Regions to remap manifests from.
     pub input_regions: Vec<RegionId>,

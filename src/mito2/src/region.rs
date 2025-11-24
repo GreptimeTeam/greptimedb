@@ -1037,7 +1037,7 @@ impl RegionMap {
 
     /// Gets staging region by region id.
     ///
-    /// Returns error if the region does not exist or is not writable.
+    /// Returns error if the region does not exist or is not in staging state.
     pub(crate) fn staging_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
         let region = self
             .get_region(region_id)
