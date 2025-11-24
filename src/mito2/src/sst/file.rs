@@ -733,6 +733,37 @@ mod tests {
     }
 
     #[test]
+    fn test_file_meta_indexes_backward_compatibility() {
+        // Old FileMeta format without the 'indexes' field
+        let json_old_file_meta = r#"{
+            "region_id": 0,
+            "file_id": "bc5896ec-e4d8-4017-a80d-f2de73188d55",
+            "time_range": [
+                {"value": 0, "unit": "Millisecond"},
+                {"value": 0, "unit": "Millisecond"}
+            ],
+            "available_indexes": ["InvertedIndex"],
+            "level": 0,
+            "file_size": 0,
+            "index_file_size": 0,
+            "num_rows": 0,
+            "num_row_groups": 0
+        }"#;
+
+        let deserialized_file_meta: FileMeta = serde_json::from_str(json_old_file_meta).unwrap();
+        
+        // Verify backward compatibility: indexes field should default to empty vec
+        assert_eq!(deserialized_file_meta.indexes, vec![]);
+        
+        let expected_indexes: IndexTypes = SmallVec::from_iter([IndexType::InvertedIndex]);
+        assert_eq!(deserialized_file_meta.available_indexes, expected_indexes);
+        
+        assert_eq!(
+            deserialized_file_meta.file_id,
+            FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap()
+        );
+    }
+    #[test]
     fn test_is_index_consistent_with_region() {
         fn new_column_meta(
             id: ColumnId,
