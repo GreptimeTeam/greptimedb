@@ -12,10 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
+use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
+use common_meta::FlownodeId;
+use common_meta::kv_backend::KvBackendRef;
+use flow::FrontendClient;
 
 use crate::extension::common::GrpcExtensionRef;
 
+/// The extension point for flownode instance.
 #[derive(Default)]
 pub struct Extension {
     pub grpc: Option<GrpcExtensionRef>,
@@ -29,12 +36,19 @@ pub trait ExtensionFactory: Send + Sync {
     ) -> impl Future<Output = Result<Extension, BoxedError>> + Send;
 }
 
-pub struct ExtensionContext {}
+/// Context provided to ExtensionFactory during extension creation.
+pub struct ExtensionContext {
+    pub kv_backend: KvBackendRef,
+    pub fe_client: Arc<FrontendClient>,
+    pub flownode_id: FlownodeId,
+    pub catalog_manager: CatalogManagerRef,
+}
 
+/// Default no-op implementation of ExtensionFactory.
 pub struct DefaultExtensionFactory;
 
 impl ExtensionFactory for DefaultExtensionFactory {
-    async fn create(&self, _ctx: ExtensionContext) -> Result<Extension, BoxedError> {
+    async fn create(&self, _: ExtensionContext) -> Result<Extension, BoxedError> {
         Ok(Extension::default())
     }
 }

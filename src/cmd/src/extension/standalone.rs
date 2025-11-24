@@ -54,18 +54,22 @@ pub struct ExtensionContext {
 /// These are typically provided by enterprise or optional modules, such as:
 /// - `information_schema.triggers`
 /// - `information_schema.alerts`
+///
+/// It is separated from the [`ExtensionFactory`] to avoid circular dependencies,
+/// since the [`CatalogManagerRef`] of [`ExtensionContext`] is dependent on the
+/// [`InformationSchemaTableFactories`].
 #[async_trait::async_trait]
 pub trait InformationSchemaTableFactories: Send + Sync {
     async fn create_factories(
         &self,
-        ctx: TableFactoryContext,
+        ctx: InfoTableFactoryContext,
     ) -> Result<HashMap<String, InformationSchemaTableFactoryRef>, BoxedError>;
 }
 
 pub type InformationSchemaTableFactoriesRef = Arc<dyn InformationSchemaTableFactories>;
 
 /// Context for information schema table factory providers.
-pub struct TableFactoryContext {
+pub struct InfoTableFactoryContext {
     pub fe_client: Arc<FrontendClient>,
 }
 
@@ -76,7 +80,7 @@ pub struct DefaultExtensionFactory;
 impl InformationSchemaTableFactories for DefaultExtensionFactory {
     async fn create_factories(
         &self,
-        _ctx: TableFactoryContext,
+        _ctx: InfoTableFactoryContext,
     ) -> Result<HashMap<String, InformationSchemaTableFactoryRef>, BoxedError> {
         Ok(HashMap::new())
     }

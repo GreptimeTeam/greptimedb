@@ -47,7 +47,6 @@ use crate::error::{
     BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu,
     MissingConfigSnafu, OtherSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
-use crate::extension::common::GrpcExtensionContext;
 use crate::extension::flownode::{ExtensionContext, ExtensionFactory};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
@@ -403,21 +402,22 @@ impl StartCommand {
 
         let mut flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
 
-        let mut builder =
-            FlownodeServiceBuilder::grpc_server_builder(&opts, flownode.flownode_server());
+        let context = ExtensionContext {
+            kv_backend: cached_meta_backend.clone(),
+            fe_client: frontend_client.clone(),
+            flownode_id: member_id,
+            catalog_manager: catalog_manager.clone(),
+        };
         let extension = extension_factory
-            .create(ExtensionContext {})
+            .create(context)
             .await
             .context(OtherSnafu)?;
+
+        let mut builder =
+            FlownodeServiceBuilder::grpc_server_builder(&opts, flownode.flownode_server());
         if let Some(grpc_extension) = extension.grpc {
-            let ctx = GrpcExtensionContext {
-                kv_backend: cached_meta_backend.clone(),
-                fe_client: frontend_client.clone(),
-                flownode_id: member_id,
-                catalog_manager: catalog_manager.clone(),
-            };
             grpc_extension
-                .extend_grpc_services(&mut builder, ctx)
+                .extend_grpc_services(&mut builder)
                 .await
                 .context(OtherSnafu)?
         }

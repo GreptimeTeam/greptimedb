@@ -21,6 +21,7 @@ use meta_client::MetaClientRef;
 #[cfg(feature = "enterprise")]
 use operator::statement::TriggerQuerierRef;
 
+/// The extension point for frontend instance.
 #[derive(Default)]
 pub struct Extension {
     pub info_schema_factories: Option<HashMap<String, InformationSchemaTableFactoryRef>>,
@@ -36,15 +37,17 @@ pub trait ExtensionFactory: Send + Sync {
     ) -> impl Future<Output = Result<Extension, BoxedError>> + Send;
 }
 
+/// Context provided to ExtensionFactory during extension creation.
 pub struct ExtensionContext {
     pub kv_backend: KvBackendRef,
     pub meta_client: MetaClientRef,
 }
 
+/// Default no-op implementation of ExtensionFactory.
 pub struct DefaultExtensionFactory;
 
 impl ExtensionFactory for DefaultExtensionFactory {
-    async fn create(&self, _ctx: ExtensionContext) -> Result<Extension, BoxedError> {
+    async fn create(&self, _: ExtensionContext) -> Result<Extension, BoxedError> {
         Ok(Extension::default())
     }
 }

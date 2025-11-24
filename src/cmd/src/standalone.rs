@@ -65,7 +65,7 @@ use standalone::options::StandaloneOptions;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{OtherSnafu, Result, StartFlownodeSnafu};
-use crate::extension::standalone::{ExtensionContext, ExtensionFactory, TableFactoryContext};
+use crate::extension::standalone::{ExtensionContext, ExtensionFactory, InfoTableFactoryContext};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
@@ -425,7 +425,7 @@ impl StartCommand {
         let frontend_client = Arc::new(frontend_client);
 
         let info_schema_table_factories = extension_factory
-            .create_factories(TableFactoryContext {
+            .create_factories(InfoTableFactoryContext {
                 fe_client: frontend_client.clone(),
             })
             .await
@@ -524,7 +524,7 @@ impl StartCommand {
             .context(error::InitDdlManagerSnafu)?;
         #[cfg(feature = "enterprise")]
         let ddl_manager = if let Some(trigger_ddl_manager) = extension.trigger_ddl_manager {
-            ddl_manager.with_trigger_ddl_manager_opt(Some(trigger_ddl_manager))
+            ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
         } else {
             ddl_manager
         };

@@ -415,7 +415,7 @@ impl MetasrvBuilder {
         #[cfg(feature = "enterprise")]
         let ddl_manager =
             if let Some(trigger_ddl_manager) = extension.and_then(|e| e.trigger_ddl_manager) {
-                ddl_manager.with_trigger_ddl_manager_opt(Some(trigger_ddl_manager))
+                ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
             } else {
                 ddl_manager
             };
