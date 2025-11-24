@@ -310,6 +310,7 @@ impl ScanMetricsSet {
             num_batches,
             num_rows,
             scan_cost: _,
+            metadata_cache_metrics: _,
         } = other;
 
         self.build_parts_cost += *build_cost;

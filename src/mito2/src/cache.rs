@@ -44,6 +44,7 @@ use crate::cache::write_cache::WriteCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
 use crate::sst::file::RegionFileId;
+use crate::sst::parquet::reader::MetadataCacheMetrics;
 
 /// Metrics type key for sst meta.
 const SST_META_TYPE: &str = "sst_meta";
@@ -87,6 +88,32 @@ impl CacheStrategy {
                 cache_manager.get_parquet_meta_data(file_id).await
             }
             CacheStrategy::Disabled => None,
+        }
+    }
+
+    /// Gets parquet metadata with cache metrics tracking.
+    /// Returns the metadata and updates the provided metrics.
+    pub(crate) async fn get_parquet_meta_data_with_metrics(
+        &self,
+        file_id: RegionFileId,
+        metrics: &mut MetadataCacheMetrics,
+    ) -> Option<Arc<ParquetMetaData>> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => {
+                cache_manager
+                    .get_parquet_meta_data_with_metrics(file_id, metrics)
+                    .await
+            }
+            CacheStrategy::Compaction(cache_manager) => {
+                cache_manager
+                    .get_parquet_meta_data_with_metrics(file_id, metrics)
+                    .await
+            }
+            CacheStrategy::Disabled => {
+                metrics.mem_cache_miss += 1;
+                metrics.file_cache_miss += 1;
+                None
+            }
         }
     }
 
@@ -317,6 +344,36 @@ impl CacheManager {
         None
     }
 
+    /// Gets cached [ParquetMetaData] with metrics tracking.
+    /// Tries in-memory cache first, then file cache, updating metrics accordingly.
+    pub(crate) async fn get_parquet_meta_data_with_metrics(
+        &self,
+        file_id: RegionFileId,
+        metrics: &mut MetadataCacheMetrics,
+    ) -> Option<Arc<ParquetMetaData>> {
+        // Try to get metadata from sst meta cache
+        if let Some(metadata) = self.get_parquet_meta_data_from_mem_cache_inner(file_id) {
+            metrics.mem_cache_hit += 1;
+            return Some(metadata);
+        }
+        metrics.mem_cache_miss += 1;
+
+        // Try to get metadata from write cache
+        let key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
+        if let Some(write_cache) = &self.write_cache
+            && let Some(metadata) = write_cache.file_cache().get_parquet_meta_data(key).await
+        {
+            metrics.file_cache_hit += 1;
+            let metadata = Arc::new(metadata);
+            // Put metadata into sst meta cache
+            self.put_parquet_meta_data(file_id, metadata.clone());
+            return Some(metadata);
+        };
+        metrics.file_cache_miss += 1;
+
+        None
+    }
+
     /// Gets cached [ParquetMetaData] from in-memory cache.
     /// This method does not perform I/O.
     pub fn get_parquet_meta_data_from_mem_cache(
@@ -327,6 +384,17 @@ impl CacheManager {
         self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
             let value = sst_meta_cache.get(&SstMetaKey(file_id.region_id(), file_id.file_id()));
             update_hit_miss(value, SST_META_TYPE)
+        })
+    }
+
+    /// Gets cached [ParquetMetaData] from in-memory cache without updating global metrics.
+    /// This is used by `get_parquet_meta_data_with_metrics` to avoid double counting.
+    fn get_parquet_meta_data_from_mem_cache_inner(
+        &self,
+        file_id: RegionFileId,
+    ) -> Option<Arc<ParquetMetaData>> {
+        self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
+            sst_meta_cache.get(&SstMetaKey(file_id.region_id(), file_id.file_id()))
         })
     }
 

@@ -253,7 +253,9 @@ impl ParquetReaderBuilder {
         let file_size = self.file_handle.meta_ref().file_size;
 
         // Loads parquet metadata of the file.
-        let parquet_meta = self.read_parquet_metadata(&file_path, file_size).await?;
+        let parquet_meta = self
+            .read_parquet_metadata(&file_path, file_size, &mut metrics.metadata_cache_metrics)
+            .await?;
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
         // Gets the metadata stored in the SST.
@@ -378,25 +380,34 @@ impl ParquetReaderBuilder {
         &self,
         file_path: &str,
         file_size: u64,
+        cache_metrics: &mut MetadataCacheMetrics,
     ) -> Result<Arc<ParquetMetaData>> {
+        let start = Instant::now();
         let _t = READ_STAGE_ELAPSED
             .with_label_values(&["read_parquet_metadata"])
             .start_timer();
 
         let file_id = self.file_handle.file_id();
-        // Tries to get from global cache.
-        if let Some(metadata) = self.cache_strategy.get_parquet_meta_data(file_id).await {
+        // Tries to get from cache with metrics tracking.
+        if let Some(metadata) = self
+            .cache_strategy
+            .get_parquet_meta_data_with_metrics(file_id, cache_metrics)
+            .await
+        {
+            cache_metrics.metadata_load_cost += start.elapsed();
             return Ok(metadata);
         }
 
         // Cache miss, load metadata directly.
         let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);
         let metadata = metadata_loader.load().await?;
+
         let metadata = Arc::new(metadata);
         // Cache the metadata.
         self.cache_strategy
             .put_parquet_meta_data(file_id, metadata.clone());
 
+        cache_metrics.metadata_load_cost += start.elapsed();
         Ok(metadata)
     }
 
@@ -991,6 +1002,32 @@ impl ReaderFilterMetrics {
     }
 }
 
+/// Metrics for parquet metadata cache operations.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct MetadataCacheMetrics {
+    /// Number of memory cache hits for parquet metadata.
+    pub(crate) mem_cache_hit: usize,
+    /// Number of memory cache misses for parquet metadata.
+    pub(crate) mem_cache_miss: usize,
+    /// Number of file cache hits for parquet metadata.
+    pub(crate) file_cache_hit: usize,
+    /// Number of file cache misses for parquet metadata.
+    pub(crate) file_cache_miss: usize,
+    /// Duration to load parquet metadata.
+    pub(crate) metadata_load_cost: Duration,
+}
+
+impl MetadataCacheMetrics {
+    /// Adds `other` metrics to this metrics.
+    pub(crate) fn merge_from(&mut self, other: &MetadataCacheMetrics) {
+        self.mem_cache_hit += other.mem_cache_hit;
+        self.mem_cache_miss += other.mem_cache_miss;
+        self.file_cache_hit += other.file_cache_hit;
+        self.file_cache_miss += other.file_cache_miss;
+        self.metadata_load_cost += other.metadata_load_cost;
+    }
+}
+
 /// Parquet reader metrics.
 #[derive(Debug, Default, Clone)]
 pub struct ReaderMetrics {
@@ -1006,6 +1043,8 @@ pub struct ReaderMetrics {
     pub(crate) num_batches: usize,
     /// Number of rows read.
     pub(crate) num_rows: usize,
+    /// Metrics for parquet metadata cache.
+    pub(crate) metadata_cache_metrics: MetadataCacheMetrics,
 }
 
 impl ReaderMetrics {
@@ -1017,6 +1056,8 @@ impl ReaderMetrics {
         self.num_record_batches += other.num_record_batches;
         self.num_batches += other.num_batches;
         self.num_rows += other.num_rows;
+        self.metadata_cache_metrics
+            .merge_from(&other.metadata_cache_metrics);
     }
 
     /// Reports total rows.
