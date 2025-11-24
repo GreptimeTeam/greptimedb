@@ -110,6 +110,8 @@ pub const INFORMATION_SCHEMA_SSTS_MANIFEST_TABLE_ID: u32 = 37;
 pub const INFORMATION_SCHEMA_SSTS_STORAGE_TABLE_ID: u32 = 38;
 /// id for information_schema.ssts_index_meta
 pub const INFORMATION_SCHEMA_SSTS_INDEX_META_TABLE_ID: u32 = 39;
+/// id for information_schema.alerts
+pub const INFORMATION_SCHEMA_ALERTS_TABLE_ID: u32 = 40;
 
 // ----- End of information_schema tables -----
 
