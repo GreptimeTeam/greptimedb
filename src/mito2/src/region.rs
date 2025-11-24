@@ -516,8 +516,13 @@ impl MitoRegion {
     }
 
     /// Switches the region state to `RegionRoleState::Leader(RegionLeaderState::Staging)` if the current state is `expect`.
-    pub(crate) fn switch_state_to_staging(&self, expect: RegionLeaderState) -> Result<()> {
-        self.compare_exchange_state(expect, RegionRoleState::Leader(RegionLeaderState::Staging))
+    /// Otherwise, logs an error.
+    pub(crate) fn switch_state_to_staging(&self, expect: RegionLeaderState) {
+        if let Err(e) =
+            self.compare_exchange_state(expect, RegionRoleState::Leader(RegionLeaderState::Staging))
+        {
+            error!(e; "failed to switch region state to staging, expect state is {:?}", expect);
+        }
     }
 
     /// Returns the region statistic.
@@ -610,15 +615,10 @@ impl MitoRegion {
             .await
             .map(|m| m.files.clone())
             .unwrap_or_default();
-        debug!(
-            "manifest files: {:?}, staging files: {:?}",
-            manifest_files, staging_files
-        );
         let files = manifest_files
             .into_iter()
             .chain(staging_files.into_iter())
             .collect::<HashMap<_, _>>();
-        debug!("files: {:?}", files);
 
         files
             .values()

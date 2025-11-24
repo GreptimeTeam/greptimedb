@@ -201,22 +201,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        let clean_staging_manifests = |region: MitoRegionRef| {
-            common_runtime::spawn_global(async move {
-                let mut manager = region.manifest_ctx.manifest_manager.write().await;
-                if let Err(e) = manager.clear_staging_manifests().await {
-                    error!(e; "Failed to clear staging manifests after failed to switch region state to staging");
-                }
-            });
-        };
-
-        if let Err(e) = region.switch_state_to_staging(RegionLeaderState::EnteringStaging) {
-            error!(e; "Failed to switch region state to staging");
-            enter_staging_result.sender.send(Err(e));
-            clean_staging_manifests(region);
-            return;
-        }
-
         if enter_staging_result.result.is_ok() {
             info!(
                 "Updating region {} staging partition expr to {}",
@@ -226,8 +210,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 &region,
                 enter_staging_result.partition_expr,
             );
+            region.switch_state_to_staging(RegionLeaderState::EnteringStaging);
         } else {
-            clean_staging_manifests(region);
+            region.switch_state_to_writable(RegionLeaderState::EnteringStaging);
         }
         enter_staging_result
             .sender

@@ -151,6 +151,9 @@ pub struct RegionManifestManager {
     last_version: Arc<AtomicU64>,
     checkpointer: Checkpointer,
     manifest: Arc<RegionManifest>,
+    // Staging manifest is used to store the manifest of the staging region before it becomes available.
+    // It is initially inherited from the previous manifest(i.e., `self.manifest`).
+    // When the staging manifest becomes available, it will be used to construct the new manifest.
     staging_manifest: Option<Arc<RegionManifest>>,
     stats: ManifestStats,
     stopped: bool,
@@ -557,7 +560,6 @@ impl RegionManifestManager {
 
         if is_staging {
             let new_manifest = manifest_builder.try_build()?;
-            debug!("Built staging manifest: {:?}", new_manifest);
             self.staging_manifest = Some(Arc::new(new_manifest));
 
             info!(

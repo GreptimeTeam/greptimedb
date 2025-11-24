@@ -471,7 +471,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         // One file for flush operation
         normal_count_before,
         2,
-        "Normal manifest directory should initially contain 2 file"
+        "Normal manifest directory should initially contain 2 files"
     );
 
     // Try read data before exiting staging, SST files should be invisible

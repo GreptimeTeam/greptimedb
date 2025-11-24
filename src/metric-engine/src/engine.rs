@@ -23,6 +23,7 @@ mod options;
 mod put;
 mod read;
 mod region_metadata;
+mod staging;
 mod state;
 mod sync;
 
@@ -213,12 +214,7 @@ impl RegionEngine for MetricEngine {
         let result = match request {
             RegionRequest::EnterStaging(_) => {
                 if self.inner.is_physical_region(region_id) {
-                    self.inner
-                        .mito
-                        .handle_request(region_id, request)
-                        .await
-                        .context(error::MitoEnterStagingOperationSnafu)
-                        .map(|response| response.affected_rows)
+                    self.handle_enter_staging_request(region_id, request).await
                 } else {
                     UnsupportedRegionRequestSnafu { request }.fail()
                 }

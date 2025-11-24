@@ -1420,7 +1420,7 @@ impl RegionBulkInsertsRequest {
 /// Request to stage a region with a new region rule(partition expression).
 ///
 /// This request transitions a region into the staging mode.
-/// It first flushes the memtable for the old region rule,
+/// It first flushes the memtable for the old region rule if it is not empty,
 /// then enters the staging mode with the new region rule.
 #[derive(Debug, Clone)]
 pub struct EnterStagingRequest {
