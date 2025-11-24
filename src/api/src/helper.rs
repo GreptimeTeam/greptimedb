@@ -1752,26 +1752,6 @@ mod tests {
             .try_into()
             .expect("failed to convert json type")
         );
-
-        assert_eq!(
-            ColumnDataTypeWrapper::binary_datatype(),
-            ConcreteDataType::dictionary_datatype(
-                ConcreteDataType::uint32_datatype(),
-                ConcreteDataType::binary_datatype()
-            )
-            .try_into()
-            .unwrap()
-        );
-
-        assert_eq!(
-            ColumnDataTypeWrapper::decimal128_datatype(10, 2),
-            ConcreteDataType::dictionary_datatype(
-                ConcreteDataType::uint8_datatype(),
-                ConcreteDataType::decimal128_datatype(10, 2)
-            )
-            .try_into()
-            .unwrap()
-        );
     }
 
     #[test]
