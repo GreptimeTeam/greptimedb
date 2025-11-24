@@ -44,6 +44,9 @@ use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::flat_format::time_index_column_index;
+use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplyMetrics;
+use crate::sst::index::fulltext_index::applier::FulltextIndexApplyMetrics;
+use crate::sst::index::inverted_index::applier::InvertedIndexApplyMetrics;
 use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 
@@ -622,6 +625,11 @@ impl PartitionMetrics {
         let mut metrics_set = self.0.metrics.lock().unwrap();
         metrics_set.set_distributor_metrics(metrics);
     }
+
+    /// Returns whether verbose explain is enabled.
+    pub(crate) fn explain_verbose(&self) -> bool {
+        self.0.explain_verbose
+    }
 }
 
 impl fmt::Debug for PartitionMetrics {
@@ -775,6 +783,21 @@ fn can_split_series(num_rows: u64, num_series: u64) -> bool {
     num_series < NUM_SERIES_THRESHOLD || num_rows / num_series >= BATCH_SIZE_THRESHOLD
 }
 
+/// Creates a new [ReaderFilterMetrics] with optional apply metrics initialized
+/// based on the `explain_verbose` flag.
+fn new_filter_metrics(explain_verbose: bool) -> ReaderFilterMetrics {
+    if explain_verbose {
+        ReaderFilterMetrics {
+            inverted_index_apply_metrics: Some(InvertedIndexApplyMetrics::default()),
+            bloom_filter_apply_metrics: Some(BloomFilterIndexApplyMetrics::default()),
+            fulltext_index_apply_metrics: Some(FulltextIndexApplyMetrics::default()),
+            ..Default::default()
+        }
+    } else {
+        ReaderFilterMetrics::default()
+    }
+}
+
 /// Scans file ranges at `index`.
 pub(crate) async fn scan_file_ranges(
     stream_ctx: Arc<StreamContext>,
@@ -783,7 +806,10 @@ pub(crate) async fn scan_file_ranges(
     read_type: &'static str,
     range_builder: Arc<RangeBuilderList>,
 ) -> Result<impl Stream<Item = Result<Batch>>> {
-    let mut reader_metrics = ReaderMetrics::default();
+    let mut reader_metrics = ReaderMetrics {
+        filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
+        ..Default::default()
+    };
     let ranges = range_builder
         .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
         .await?;
@@ -806,7 +832,10 @@ pub(crate) async fn scan_flat_file_ranges(
     read_type: &'static str,
     range_builder: Arc<RangeBuilderList>,
 ) -> Result<impl Stream<Item = Result<RecordBatch>>> {
-    let mut reader_metrics = ReaderMetrics::default();
+    let mut reader_metrics = ReaderMetrics {
+        filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
+        ..Default::default()
+    };
     let ranges = range_builder
         .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
         .await?;
@@ -829,14 +858,18 @@ pub fn build_file_range_scan_stream(
     ranges: SmallVec<[FileRange; 2]>,
 ) -> impl Stream<Item = Result<Batch>> {
     try_stream! {
-        let fetch_metrics = Arc::new(ParquetFetchMetrics::default());
+        let fetch_metrics = if part_metrics.explain_verbose() {
+            Some(Arc::new(ParquetFetchMetrics::default()))
+        } else {
+            None
+        };
         let reader_metrics = &mut ReaderMetrics {
-            fetch_metrics: Some(fetch_metrics.clone()),
+            fetch_metrics: fetch_metrics.clone(),
             ..Default::default()
         };
         for range in ranges {
             let build_reader_start = Instant::now();
-            let reader = range.reader(stream_ctx.input.series_row_selector, Some(&fetch_metrics)).await?;
+            let reader = range.reader(stream_ctx.input.series_row_selector, fetch_metrics.as_deref()).await?;
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
             let compat_batch = range.compat_batch();
@@ -868,14 +901,18 @@ pub fn build_flat_file_range_scan_stream(
     ranges: SmallVec<[FileRange; 2]>,
 ) -> impl Stream<Item = Result<RecordBatch>> {
     try_stream! {
-        let fetch_metrics = Arc::new(ParquetFetchMetrics::default());
+        let fetch_metrics = if part_metrics.explain_verbose() {
+            Some(Arc::new(ParquetFetchMetrics::default()))
+        } else {
+            None
+        };
         let reader_metrics = &mut ReaderMetrics {
-            fetch_metrics: Some(fetch_metrics.clone()),
+            fetch_metrics: fetch_metrics.clone(),
             ..Default::default()
         };
         for range in ranges {
             let build_reader_start = Instant::now();
-            let mut reader = range.flat_reader(Some(&fetch_metrics)).await?;
+            let mut reader = range.flat_reader(fetch_metrics.as_deref()).await?;
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
 
