@@ -442,7 +442,9 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                             type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
                         }),
                         JsonFormat::Native(inner) => {
-                            let inner_type = ColumnDataTypeWrapper::try_from(*inner.clone())?;
+                            let inner_type = ColumnDataTypeWrapper::try_from(
+                                ConcreteDataType::from(inner.as_ref()),
+                            )?;
                             Some(ColumnDataTypeExtension {
                                 type_ext: Some(TypeExt::JsonNativeType(Box::new(
                                     JsonNativeTypeExtension {
@@ -1711,6 +1713,20 @@ mod tests {
                             type_ext: Some(TypeExt::StructType(StructTypeExtension {
                                 fields: vec![
                                     v1::StructField {
+                                        name: "address".to_string(),
+                                        datatype: ColumnDataTypeWrapper::string_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "age".to_string(),
+                                        datatype: ColumnDataTypeWrapper::int64_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
                                         name: "id".to_string(),
                                         datatype: ColumnDataTypeWrapper::int64_datatype()
                                             .datatype()
@@ -1724,20 +1740,6 @@ mod tests {
                                             .into(),
                                         datatype_extension: None
                                     },
-                                    v1::StructField {
-                                        name: "age".to_string(),
-                                        datatype: ColumnDataTypeWrapper::int32_datatype()
-                                            .datatype()
-                                            .into(),
-                                        datatype_extension: None
-                                    },
-                                    v1::StructField {
-                                        name: "address".to_string(),
-                                        datatype: ColumnDataTypeWrapper::string_datatype()
-                                            .datatype()
-                                            .into(),
-                                        datatype_extension: None
-                                    }
                                 ]
                             }))
                         }))

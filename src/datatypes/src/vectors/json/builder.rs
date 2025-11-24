@@ -320,10 +320,10 @@ mod tests {
             Ok(()),
             Ok(()),
             Err(
-                "Failed to merge JSON datatype: datatypes have conflict, this: Int64, that: String",
+                "Failed to merge JSON datatype: datatypes have conflict, this: Number(I64), that: String",
             ),
             Err(
-                "Failed to merge JSON datatype: datatypes have conflict, this: Int64, that: List<Boolean>",
+                "Failed to merge JSON datatype: datatypes have conflict, this: Number(I64), that: Array[Bool]",
             ),
         ];
         let mut builder = JsonVectorBuilder::with_capacity(1);
@@ -395,12 +395,12 @@ mod tests {
         // test children builders:
         assert_eq!(builder.builders.len(), 6);
         let expect_types = [
-            r#"Json<Struct<"list": List<Int64>, "s": String>>"#,
-            r#"Json<Struct<"float": Float64, "s": String>>"#,
-            r#"Json<Struct<"float": Float64, "int": Int64>>"#,
-            r#"Json<Struct<"int": Int64, "object": Struct<"hello": String, "timestamp": Int64>>>"#,
-            r#"Json<Struct<"nested": Struct<"a": Struct<"b": Struct<"b": Struct<"a": String>>>>, "object": Struct<"timestamp": Int64>>>"#,
-            r#"Json<Struct<"nested": Struct<"a": Struct<"b": Struct<"a": Struct<"b": String>>>>, "object": Struct<"timestamp": Int64>>>"#,
+            r#"Json<Object{"list": Array[Number(I64)], "s": String}>"#,
+            r#"Json<Object{"float": Number(F64), "s": String}>"#,
+            r#"Json<Object{"float": Number(F64), "int": Number(I64)}>"#,
+            r#"Json<Object{"int": Number(I64), "object": Object{"hello": String, "timestamp": Number(I64)}}>"#,
+            r#"Json<Object{"nested": Object{"a": Object{"b": Object{"b": Object{"a": String}}}}, "object": Object{"timestamp": Number(I64)}}>"#,
+            r#"Json<Object{"nested": Object{"a": Object{"b": Object{"a": Object{"b": String}}}}, "object": Object{"timestamp": Number(I64)}}>"#,
         ];
         let expect_vectors = [
             r#"
@@ -455,7 +455,7 @@ mod tests {
         }
 
         // test final merged json type:
-        let expected = r#"Json<Struct<"float": Float64, "int": Int64, "list": List<Int64>, "nested": Struct<"a": Struct<"b": Struct<"a": Struct<"b": String>, "b": Struct<"a": String>>>>, "object": Struct<"hello": String, "timestamp": Int64>, "s": String>>"#;
+        let expected = r#"Json<Object{"float": Number(F64), "int": Number(I64), "list": Array[Number(I64)], "nested": Object{"a": Object{"b": Object{"a": Object{"b": String}, "b": Object{"a": String}}}}, "object": Object{"hello": String, "timestamp": Number(I64)}, "s": String}>"#;
         assert_eq!(builder.data_type().to_string(), expected);
 
         // test final produced vector:

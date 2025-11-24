@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Number;
 
 use crate::data_type::ConcreteDataType;
+use crate::types::json_type::JsonNativeType;
 use crate::types::{JsonType, StructField, StructType};
 use crate::value::{ListValue, ListValueRef, StructValue, StructValueRef, Value, ValueRef};
 
@@ -108,38 +109,35 @@ pub enum JsonVariant {
 }
 
 impl JsonVariant {
-    fn json_type(&self) -> JsonType {
+    fn native_type(&self) -> JsonNativeType {
         match self {
-            JsonVariant::Null => JsonType::new_native(ConcreteDataType::null_datatype()),
-            JsonVariant::Bool(_) => JsonType::new_native(ConcreteDataType::boolean_datatype()),
-            JsonVariant::Number(n) => JsonType::new_native(match n {
-                JsonNumber::PosInt(_) => ConcreteDataType::uint64_datatype(),
-                JsonNumber::NegInt(_) => ConcreteDataType::int64_datatype(),
-                JsonNumber::Float(_) => ConcreteDataType::float64_datatype(),
-            }),
-            JsonVariant::String(_) => JsonType::new_native(ConcreteDataType::string_datatype()),
+            JsonVariant::Null => JsonNativeType::Null,
+            JsonVariant::Bool(_) => JsonNativeType::Bool,
+            JsonVariant::Number(n) => match n {
+                JsonNumber::PosInt(_) => JsonNativeType::u64(),
+                JsonNumber::NegInt(_) => JsonNativeType::i64(),
+                JsonNumber::Float(_) => JsonNativeType::f64(),
+            },
+            JsonVariant::String(_) => JsonNativeType::String,
             JsonVariant::Array(array) => {
                 let item_type = if let Some(first) = array.first() {
-                    first.json_type().native_type()
+                    first.native_type()
                 } else {
-                    ConcreteDataType::null_datatype()
+                    JsonNativeType::Null
                 };
-                JsonType::new_native(ConcreteDataType::list_datatype(Arc::new(item_type)))
+                JsonNativeType::Array(Box::new(item_type))
             }
-            JsonVariant::Object(object) => {
-                let mut fields = Vec::with_capacity(object.len());
-                for (k, v) in object.iter() {
-                    fields.push(StructField::new(
-                        k.clone(),
-                        v.json_type().native_type(),
-                        true,
-                    ))
-                }
-                JsonType::new_native(ConcreteDataType::struct_datatype(StructType::new(
-                    Arc::new(fields),
-                )))
-            }
+            JsonVariant::Object(object) => JsonNativeType::Object(
+                object
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.native_type()))
+                    .collect(),
+            ),
         }
+    }
+
+    fn json_type(&self) -> JsonType {
+        JsonType::new_native(self.native_type())
     }
 
     fn as_ref(&self) -> JsonVariantRef<'_> {
@@ -333,20 +331,20 @@ impl JsonValue {
                 JsonVariant::String(x) => Value::String(x.into()),
                 JsonVariant::Array(array) => {
                     let item_type = if let Some(first) = array.first() {
-                        first.json_type().native_type()
+                        first.native_type()
                     } else {
-                        ConcreteDataType::null_datatype()
+                        JsonNativeType::Null
                     };
                     Value::List(ListValue::new(
                         array.into_iter().map(helper).collect(),
-                        Arc::new(item_type),
+                        Arc::new((&item_type).into()),
                     ))
                 }
                 JsonVariant::Object(object) => {
                     let mut fields = Vec::with_capacity(object.len());
                     let mut items = Vec::with_capacity(object.len());
                     for (k, v) in object {
-                        fields.push(StructField::new(k, v.json_type().native_type(), true));
+                        fields.push(StructField::new(k, (&v.native_type()).into(), true));
                         items.push(helper(v));
                     }
                     Value::Struct(StructValue::new(items, StructType::new(Arc::new(fields))))
@@ -448,37 +446,33 @@ pub enum JsonVariantRef<'a> {
 
 impl JsonVariantRef<'_> {
     fn json_type(&self) -> JsonType {
-        match self {
-            JsonVariantRef::Null => JsonType::new_native(ConcreteDataType::null_datatype()),
-            JsonVariantRef::Bool(_) => JsonType::new_native(ConcreteDataType::boolean_datatype()),
-            JsonVariantRef::Number(n) => JsonType::new_native(match n {
-                JsonNumber::PosInt(_) => ConcreteDataType::uint64_datatype(),
-                JsonNumber::NegInt(_) => ConcreteDataType::int64_datatype(),
-                JsonNumber::Float(_) => ConcreteDataType::float64_datatype(),
-            }),
-            JsonVariantRef::String(_) => JsonType::new_native(ConcreteDataType::string_datatype()),
-            JsonVariantRef::Array(array) => {
-                let item_type = if let Some(first) = array.first() {
-                    first.json_type().native_type()
-                } else {
-                    ConcreteDataType::null_datatype()
-                };
-                JsonType::new_native(ConcreteDataType::list_datatype(Arc::new(item_type)))
-            }
-            JsonVariantRef::Object(object) => {
-                let mut fields = Vec::with_capacity(object.len());
-                for (k, v) in object.iter() {
-                    fields.push(StructField::new(
-                        k.to_string(),
-                        v.json_type().native_type(),
-                        true,
-                    ))
+        fn native_type(v: &JsonVariantRef<'_>) -> JsonNativeType {
+            match v {
+                JsonVariantRef::Null => JsonNativeType::Null,
+                JsonVariantRef::Bool(_) => JsonNativeType::Bool,
+                JsonVariantRef::Number(n) => match n {
+                    JsonNumber::PosInt(_) => JsonNativeType::u64(),
+                    JsonNumber::NegInt(_) => JsonNativeType::i64(),
+                    JsonNumber::Float(_) => JsonNativeType::f64(),
+                },
+                JsonVariantRef::String(_) => JsonNativeType::String,
+                JsonVariantRef::Array(array) => {
+                    let item_type = if let Some(first) = array.first() {
+                        native_type(first)
+                    } else {
+                        JsonNativeType::Null
+                    };
+                    JsonNativeType::Array(Box::new(item_type))
                 }
-                JsonType::new_native(ConcreteDataType::struct_datatype(StructType::new(
-                    Arc::new(fields),
-                )))
+                JsonVariantRef::Object(object) => JsonNativeType::Object(
+                    object
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), native_type(v)))
+                        .collect(),
+                ),
             }
         }
+        JsonType::new_native(native_type(self))
     }
 }
 
