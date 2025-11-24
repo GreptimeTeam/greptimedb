@@ -155,13 +155,6 @@ impl JaegerQueryHandler for Instance {
             filters.push(col(TIMESTAMP_COLUMN).lt_eq(lit_timestamp_nano(end_time)));
         }
 
-        let limit = if start_time.is_some() && end_time.is_some() {
-            // allow unlimited limit if time range is specified
-            limit
-        } else {
-            limit.or(Some(DEFAULT_LIMIT))
-        };
-
         Ok(query_trace_table(
             ctx,
             self.catalog_manager(),
