@@ -468,7 +468,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     let normal_count_before = normal_files_before.len();
     assert_eq!(
         // One file for table creation
-        // One files for flush operation
+        // One file for flush operation
         normal_count_before,
         2,
         "Normal manifest directory should initially contain 2 file"

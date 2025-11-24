@@ -61,7 +61,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         let version = region.version();
         if !version.memtables.is_empty() {
-            // If memtable is empty, we can't enter staging directly and need to flush
+            // If memtable is not empty, we can't enter staging directly and need to flush
             // all memtables first.
             info!("Flush region: {} before entering staging", region_id);
             debug_assert!(!region.is_staging());
@@ -127,6 +127,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         "Failed to clear staging manifest files for region {}",
                         region.region_id
                     );
+                    if let Err(e) = region.exit_entering_staging() {
+                        error!(e; "Failed to exit entering staging after failed to clear staging manifest files");
+                    }
                     sender.send(Err(e));
                     return;
                 }
@@ -202,13 +205,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             common_runtime::spawn_global(async move {
                 let mut manager = region.manifest_ctx.manifest_manager.write().await;
                 if let Err(e) = manager.clear_staging_manifests().await {
-                    error!(e; "Failed to clear staging manifests after failed to switch region state to entering staging");
+                    error!(e; "Failed to clear staging manifests after failed to switch region state to staging");
                 }
             });
         };
 
         if let Err(e) = region.switch_state_to_staging(RegionLeaderState::EnteringStaging) {
-            error!(e; "Failed to switch region state to entering staging");
+            error!(e; "Failed to switch region state to staging");
             enter_staging_result.sender.send(Err(e));
             clean_staging_manifests(region);
             return;
