@@ -44,7 +44,7 @@ use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::metasrv::{RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef};
 use crate::procedure::region_migration::manager::{
-    RegionMigrationManagerRef, RegionMigrationTriggerReason,
+    RegionMigrationManagerRef, RegionMigrationTriggerReason, SubmitRegionMigrationTaskResult,
 };
 use crate::procedure::region_migration::utils::RegionMigrationTask;
 use crate::procedure::region_migration::{
@@ -725,6 +725,24 @@ impl RegionSupervisor {
             .region_migration_manager
             .submit_region_migration_task(task)
             .await?;
+        self.handle_submit_region_migration_task_result(
+            from_peer_id,
+            to_peer_id,
+            timeout,
+            trigger_reason,
+            result,
+        )
+        .await
+    }
+
+    async fn handle_submit_region_migration_task_result(
+        &mut self,
+        from_peer_id: DatanodeId,
+        to_peer_id: DatanodeId,
+        timeout: Duration,
+        trigger_reason: RegionMigrationTriggerReason,
+        result: SubmitRegionMigrationTaskResult,
+    ) -> Result<()> {
         if !result.migrated.is_empty() {
             let detecting_regions = result
                 .migrated
@@ -859,7 +877,10 @@ pub(crate) mod tests {
     use tokio::time::sleep;
 
     use super::RegionSupervisorSelector;
-    use crate::procedure::region_migration::manager::RegionMigrationManager;
+    use crate::procedure::region_migration::RegionMigrationTriggerReason;
+    use crate::procedure::region_migration::manager::{
+        RegionMigrationManager, SubmitRegionMigrationTaskResult,
+    };
     use crate::procedure::region_migration::test_util::TestingEnv;
     use crate::region::supervisor::{
         DatanodeHeartbeat, Event, RegionFailureDetectorControl, RegionSupervisor,
@@ -1130,5 +1151,173 @@ pub(crate) mod tests {
         let (tx, rx) = oneshot::channel();
         sender.send(Event::Dump(tx)).await.unwrap();
         assert!(rx.await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_submit_region_migration_task_result_migrated() {
+        common_telemetry::init_default_ut_logging();
+        let (mut supervisor, _) = new_test_supervisor();
+        let region_id = RegionId::new(1, 1);
+        let detecting_region = (1, region_id);
+        supervisor
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+        supervisor.failover_counts.insert(detecting_region, 1);
+        let result = SubmitRegionMigrationTaskResult {
+            migrated: vec![region_id],
+            ..Default::default()
+        };
+        supervisor
+            .handle_submit_region_migration_task_result(
+                1,
+                2,
+                Duration::from_millis(1000),
+                RegionMigrationTriggerReason::Manual,
+                result,
+            )
+            .await
+            .unwrap();
+        assert!(!supervisor.failure_detector.contains(&detecting_region));
+        assert!(supervisor.failover_counts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_submit_region_migration_task_result_migrating() {
+        common_telemetry::init_default_ut_logging();
+        let (mut supervisor, _) = new_test_supervisor();
+        let region_id = RegionId::new(1, 1);
+        let detecting_region = (1, region_id);
+        supervisor
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+        supervisor.failover_counts.insert(detecting_region, 1);
+        let result = SubmitRegionMigrationTaskResult {
+            migrating: vec![region_id],
+            ..Default::default()
+        };
+        supervisor
+            .handle_submit_region_migration_task_result(
+                1,
+                2,
+                Duration::from_millis(1000),
+                RegionMigrationTriggerReason::Manual,
+                result,
+            )
+            .await
+            .unwrap();
+        assert!(supervisor.failure_detector.contains(&detecting_region));
+        assert!(supervisor.failover_counts.contains_key(&detecting_region));
+    }
+
+    #[tokio::test]
+    async fn test_handle_submit_region_migration_task_result_table_not_found() {
+        common_telemetry::init_default_ut_logging();
+        let (mut supervisor, _) = new_test_supervisor();
+        let region_id = RegionId::new(1, 1);
+        let detecting_region = (1, region_id);
+        supervisor
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+        supervisor.failover_counts.insert(detecting_region, 1);
+        let result = SubmitRegionMigrationTaskResult {
+            table_not_found: vec![region_id],
+            ..Default::default()
+        };
+        supervisor
+            .handle_submit_region_migration_task_result(
+                1,
+                2,
+                Duration::from_millis(1000),
+                RegionMigrationTriggerReason::Manual,
+                result,
+            )
+            .await
+            .unwrap();
+        assert!(!supervisor.failure_detector.contains(&detecting_region));
+        assert!(supervisor.failover_counts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_submit_region_migration_task_result_leader_changed() {
+        common_telemetry::init_default_ut_logging();
+        let (mut supervisor, _) = new_test_supervisor();
+        let region_id = RegionId::new(1, 1);
+        let detecting_region = (1, region_id);
+        supervisor
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+        supervisor.failover_counts.insert(detecting_region, 1);
+        let result = SubmitRegionMigrationTaskResult {
+            leader_changed: vec![region_id],
+            ..Default::default()
+        };
+        supervisor
+            .handle_submit_region_migration_task_result(
+                1,
+                2,
+                Duration::from_millis(1000),
+                RegionMigrationTriggerReason::Manual,
+                result,
+            )
+            .await
+            .unwrap();
+        assert!(!supervisor.failure_detector.contains(&detecting_region));
+        assert!(supervisor.failover_counts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_submit_region_migration_task_result_peer_conflict() {
+        common_telemetry::init_default_ut_logging();
+        let (mut supervisor, _) = new_test_supervisor();
+        let region_id = RegionId::new(1, 1);
+        let detecting_region = (1, region_id);
+        supervisor
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+        supervisor.failover_counts.insert(detecting_region, 1);
+        let result = SubmitRegionMigrationTaskResult {
+            peer_conflict: vec![region_id],
+            ..Default::default()
+        };
+        supervisor
+            .handle_submit_region_migration_task_result(
+                1,
+                2,
+                Duration::from_millis(1000),
+                RegionMigrationTriggerReason::Manual,
+                result,
+            )
+            .await
+            .unwrap();
+        assert!(supervisor.failure_detector.contains(&detecting_region));
+        assert!(supervisor.failover_counts.contains_key(&detecting_region));
+    }
+
+    #[tokio::test]
+    async fn test_handle_submit_region_migration_task_result_submitted() {
+        common_telemetry::init_default_ut_logging();
+        let (mut supervisor, _) = new_test_supervisor();
+        let region_id = RegionId::new(1, 1);
+        let detecting_region = (1, region_id);
+        supervisor
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+        supervisor.failover_counts.insert(detecting_region, 1);
+        let result = SubmitRegionMigrationTaskResult {
+            submitted: vec![region_id],
+            ..Default::default()
+        };
+        supervisor
+            .handle_submit_region_migration_task_result(
+                1,
+                2,
+                Duration::from_millis(1000),
+                RegionMigrationTriggerReason::Manual,
+                result,
+            )
+            .await
+            .unwrap();
+        assert!(supervisor.failure_detector.contains(&detecting_region));
+        assert!(supervisor.failover_counts.contains_key(&detecting_region));
     }
 }

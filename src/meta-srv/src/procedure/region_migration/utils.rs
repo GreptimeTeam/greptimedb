@@ -68,7 +68,7 @@ impl RegionMigrationTask {
 }
 
 /// Represents the result of analyzing a migration task.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct RegionMigrationAnalysis {
     /// Regions already migrated to the `to_peer`.
     pub(crate) migrated: Vec<RegionId>,
@@ -197,4 +197,265 @@ pub async fn analyze_region_migration_task(
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+
+    use std::assert_matches::assert_matches;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use common_meta::key::TableMetadataManager;
+    use common_meta::key::table_route::{
+        LogicalTableRouteValue, PhysicalTableRouteValue, TableRouteValue,
+    };
+    use common_meta::kv_backend::TxnService;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::peer::Peer;
+    use common_meta::rpc::router::{Region, RegionRoute};
+    use store_api::storage::RegionId;
+
+    use crate::error::Error;
+    use crate::procedure::region_migration::RegionMigrationTriggerReason;
+    use crate::procedure::region_migration::utils::{
+        RegionMigrationAnalysis, RegionMigrationTask, analyze_region_migration_task,
+        update_result_with_region_route,
+    };
+
+    #[test]
+    fn test_update_result_with_region_route() {
+        // The region is already migrated to the to_peer.
+        let mut result = RegionMigrationAnalysis::default();
+        let region_id = RegionId::new(1, 1);
+        let region_route = RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(Peer::empty(1)),
+            follower_peers: vec![],
+            leader_state: None,
+            leader_down_since: None,
+        };
+        update_result_with_region_route(&mut result, &region_route, 2, 1).unwrap();
+        assert_eq!(
+            result,
+            RegionMigrationAnalysis {
+                migrated: vec![region_id],
+                ..Default::default()
+            }
+        );
+
+        // Test region leader changed.
+        let mut result = RegionMigrationAnalysis::default();
+        let region_id = RegionId::new(1, 1);
+        let region_route = RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(Peer::empty(1)),
+            follower_peers: vec![],
+            leader_state: None,
+            leader_down_since: None,
+        };
+        update_result_with_region_route(&mut result, &region_route, 2, 3).unwrap();
+        assert_eq!(
+            result,
+            RegionMigrationAnalysis {
+                leader_changed: vec![region_id],
+                ..Default::default()
+            }
+        );
+
+        // Test region peer conflict.
+        let mut result = RegionMigrationAnalysis::default();
+        let region_id = RegionId::new(1, 1);
+        let region_route = RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(Peer::empty(1)),
+            follower_peers: vec![Peer::empty(2)],
+            leader_state: None,
+            leader_down_since: None,
+        };
+        update_result_with_region_route(&mut result, &region_route, 1, 2).unwrap();
+        assert_eq!(
+            result,
+            RegionMigrationAnalysis {
+                peer_conflict: vec![region_id],
+                ..Default::default()
+            }
+        );
+
+        // Test normal case.
+        let mut result = RegionMigrationAnalysis::default();
+        let region_id = RegionId::new(1, 1);
+        let region_route = RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(Peer::empty(1)),
+            follower_peers: vec![],
+            leader_state: None,
+            leader_down_since: None,
+        };
+        update_result_with_region_route(&mut result, &region_route, 1, 3).unwrap();
+        assert_eq!(
+            result,
+            RegionMigrationAnalysis {
+                pending: vec![region_id],
+                ..Default::default()
+            }
+        );
+
+        // Test leader peer not set
+        let mut result = RegionMigrationAnalysis::default();
+        let region_id = RegionId::new(1, 1);
+        let region_route = RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: None,
+            follower_peers: vec![],
+            leader_state: None,
+            leader_down_since: None,
+        };
+        let err = update_result_with_region_route(&mut result, &region_route, 1, 3).unwrap_err();
+        assert_matches!(err, Error::Unexpected { .. });
+    }
+
+    #[tokio::test]
+    async fn test_analyze_region_migration_task_invalid_task() {
+        let task = &RegionMigrationTask {
+            region_ids: vec![RegionId::new(1, 1)],
+            from_peer: Peer::empty(1),
+            to_peer: Peer::empty(1),
+            timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
+        };
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let err = analyze_region_migration_task(task, &table_metadata_manager)
+            .await
+            .unwrap_err();
+        assert_matches!(err, Error::InvalidArguments { .. });
+    }
+
+    #[tokio::test]
+    async fn test_analyze_region_migration_table_not_found() {
+        let task = &RegionMigrationTask {
+            region_ids: vec![RegionId::new(1, 1)],
+            from_peer: Peer::empty(1),
+            to_peer: Peer::empty(2),
+            timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
+        };
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let result = analyze_region_migration_task(task, &table_metadata_manager)
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            RegionMigrationAnalysis {
+                table_not_found: vec![RegionId::new(1, 1)],
+                ..Default::default()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_region_migration_unexpected_logical_table() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let (txn, _) = table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .build_create_txn(
+                1024,
+                &TableRouteValue::Logical(LogicalTableRouteValue::new(
+                    1024,
+                    vec![RegionId::new(1023, 1)],
+                )),
+            )
+            .unwrap();
+        kv_backend.txn(txn).await.unwrap();
+        let task = &RegionMigrationTask {
+            region_ids: vec![RegionId::new(1024, 1)],
+            from_peer: Peer::empty(1),
+            to_peer: Peer::empty(2),
+            timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
+        };
+        let err = analyze_region_migration_task(task, &table_metadata_manager)
+            .await
+            .unwrap_err();
+        assert_matches!(err, Error::UnexpectedLogicalRouteTable { .. });
+    }
+
+    #[tokio::test]
+    async fn test_analyze_region_migration_normal_case() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let (txn, _) = table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .build_create_txn(
+                1024,
+                &TableRouteValue::Physical(PhysicalTableRouteValue::new(vec![
+                    // Already migrated to the to_peer.
+                    RegionRoute {
+                        region: Region::new_test(RegionId::new(1024, 1)),
+                        leader_peer: Some(Peer::empty(2)),
+                        follower_peers: vec![],
+                        leader_state: None,
+                        leader_down_since: None,
+                    },
+                    // Leader peer changed.
+                    RegionRoute {
+                        region: Region::new_test(RegionId::new(1024, 2)),
+                        leader_peer: Some(Peer::empty(3)),
+                        follower_peers: vec![],
+                        leader_state: None,
+                        leader_down_since: None,
+                    },
+                    // Peer conflict.
+                    RegionRoute {
+                        region: Region::new_test(RegionId::new(1024, 3)),
+                        leader_peer: Some(Peer::empty(1)),
+                        follower_peers: vec![Peer::empty(2)],
+                        leader_state: None,
+                        leader_down_since: None,
+                    },
+                    // Normal case.
+                    RegionRoute {
+                        region: Region::new_test(RegionId::new(1024, 4)),
+                        leader_peer: Some(Peer::empty(1)),
+                        follower_peers: vec![],
+                        leader_state: None,
+                        leader_down_since: None,
+                    },
+                ])),
+            )
+            .unwrap();
+
+        kv_backend.txn(txn).await.unwrap();
+        let task = &RegionMigrationTask {
+            region_ids: vec![
+                RegionId::new(1024, 1),
+                RegionId::new(1024, 2),
+                RegionId::new(1024, 3),
+                RegionId::new(1024, 4),
+                RegionId::new(1025, 1),
+            ],
+            from_peer: Peer::empty(1),
+            to_peer: Peer::empty(2),
+            timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
+        };
+        let result = analyze_region_migration_task(task, &table_metadata_manager)
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            RegionMigrationAnalysis {
+                pending: vec![RegionId::new(1024, 4)],
+                migrated: vec![RegionId::new(1024, 1)],
+                leader_changed: vec![RegionId::new(1024, 2)],
+                peer_conflict: vec![RegionId::new(1024, 3)],
+                table_not_found: vec![RegionId::new(1025, 1)],
+            }
+        );
+    }
 }

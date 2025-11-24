@@ -154,6 +154,7 @@ impl Display for RegionMigrationProcedureTask {
     }
 }
 
+/// The result of submitting a region migration task.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SubmitRegionMigrationTaskResult {
     /// Regions already migrated to the `to_peer`.
