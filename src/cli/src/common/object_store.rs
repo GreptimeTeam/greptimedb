@@ -35,7 +35,7 @@ macro_rules! wrap_with_clap_prefix {
                     $( #[doc = $doc] )?
                     $( #[clap(alias = $alias)] )?
                     #[clap(long $(, default_value_t = $default )? )]
-                    [<$prefix $field>]: $type,
+                    pub [<$prefix $field>]: $type,
                 )*
             }
 
@@ -70,38 +70,6 @@ wrap_with_clap_prefix! {
     }
 }
 
-impl PrefixedAzblobConnection {
-    /// Get the container name.
-    pub fn container(&self) -> &str {
-        &self.azblob_container
-    }
-
-    /// Get the root path.
-    pub fn root(&self) -> &str {
-        &self.azblob_root
-    }
-
-    /// Get the account name.
-    pub fn account_name(&self) -> &SecretString {
-        &self.azblob_account_name
-    }
-
-    /// Get the account key.
-    pub fn account_key(&self) -> &SecretString {
-        &self.azblob_account_key
-    }
-
-    /// Get the endpoint.
-    pub fn endpoint(&self) -> &str {
-        &self.azblob_endpoint
-    }
-
-    /// Get the SAS token.
-    pub fn sas_token(&self) -> Option<&String> {
-        self.azblob_sas_token.as_ref()
-    }
-}
-
 wrap_with_clap_prefix! {
     PrefixedS3Connection,
     "s3-",
@@ -124,43 +92,6 @@ wrap_with_clap_prefix! {
     }
 }
 
-impl PrefixedS3Connection {
-    /// Get the bucket name.
-    pub fn bucket(&self) -> &str {
-        &self.s3_bucket
-    }
-
-    /// Get the root path.
-    pub fn root(&self) -> &str {
-        &self.s3_root
-    }
-
-    /// Get the access key ID.
-    pub fn access_key_id(&self) -> &SecretString {
-        &self.s3_access_key_id
-    }
-
-    /// Get the secret access key.
-    pub fn secret_access_key(&self) -> &SecretString {
-        &self.s3_secret_access_key
-    }
-
-    /// Get the endpoint.
-    pub fn endpoint(&self) -> Option<&String> {
-        self.s3_endpoint.as_ref()
-    }
-
-    /// Get the region.
-    pub fn region(&self) -> Option<&String> {
-        self.s3_region.as_ref()
-    }
-
-    /// Check if virtual host style is enabled.
-    pub fn enable_virtual_host_style(&self) -> bool {
-        self.s3_enable_virtual_host_style
-    }
-}
-
 wrap_with_clap_prefix! {
     PrefixedOssConnection,
     "oss-",
@@ -176,33 +107,6 @@ wrap_with_clap_prefix! {
         access_key_secret: SecretString = Default::default(),
         #[doc = "The endpoint of the object store."]
         endpoint: String = Default::default(),
-    }
-}
-
-impl PrefixedOssConnection {
-    /// Get the bucket name.
-    pub fn bucket(&self) -> &str {
-        &self.oss_bucket
-    }
-
-    /// Get the root path.
-    pub fn root(&self) -> &str {
-        &self.oss_root
-    }
-
-    /// Get the access key ID.
-    pub fn access_key_id(&self) -> &SecretString {
-        &self.oss_access_key_id
-    }
-
-    /// Get the access key secret.
-    pub fn access_key_secret(&self) -> &SecretString {
-        &self.oss_access_key_secret
-    }
-
-    /// Get the endpoint.
-    pub fn endpoint(&self) -> &str {
-        &self.oss_endpoint
     }
 }
 
@@ -223,38 +127,6 @@ wrap_with_clap_prefix! {
         credential: SecretString = Default::default(),
         #[doc = "The endpoint of the object store."]
         endpoint: String = Default::default(),
-    }
-}
-
-impl PrefixedGcsConnection {
-    /// Get the bucket name.
-    pub fn bucket(&self) -> &str {
-        &self.gcs_bucket
-    }
-
-    /// Get the root path.
-    pub fn root(&self) -> &str {
-        &self.gcs_root
-    }
-
-    /// Get the scope.
-    pub fn scope(&self) -> &str {
-        &self.gcs_scope
-    }
-
-    /// Get the credential path.
-    pub fn credential_path(&self) -> &SecretString {
-        &self.gcs_credential_path
-    }
-
-    /// Get the credential.
-    pub fn credential(&self) -> &SecretString {
-        &self.gcs_credential
-    }
-
-    /// Get the endpoint.
-    pub fn endpoint(&self) -> &str {
-        &self.gcs_endpoint
     }
 }
 
