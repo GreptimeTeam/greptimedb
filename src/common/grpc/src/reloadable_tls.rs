@@ -136,10 +136,10 @@ where
     info!("Spawning background task for watching TLS cert/key file changes");
     std::thread::spawn(move || {
         let _watcher = watcher;
-        while let Ok(res) = rx.recv() {
-            if let Ok(event) = res {
-                match event.kind {
-                    EventKind::Modify(_) | EventKind::Create(_) => {
+        loop {
+            match rx.recv() {
+                Ok(Ok(event)) => {
+                    if let EventKind::Modify(_) | EventKind::Create(_) = event.kind {
                         info!("Detected TLS cert/key file change: {:?}", event);
                         if let Err(err) = tls_config_for_watcher.reload() {
                             error!("Failed to reload TLS config: {}", err);
@@ -148,7 +148,12 @@ where
                             on_reload();
                         }
                     }
-                    _ => {}
+                }
+                Ok(Err(err)) => {
+                    error!("Failed to watch TLS cert/key file: {}", err);
+                }
+                Err(err) => {
+                    error!("TLS cert/key file watcher channel closed: {}", err);
                 }
             }
         }
