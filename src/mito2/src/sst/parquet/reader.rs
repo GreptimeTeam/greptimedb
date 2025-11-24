@@ -52,9 +52,15 @@ use crate::metrics::{
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
-use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
-use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
-use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
+use crate::sst::index::bloom_filter::applier::{
+    BloomFilterIndexApplierRef, BloomFilterIndexApplyMetrics,
+};
+use crate::sst::index::fulltext_index::applier::{
+    FulltextIndexApplierRef, FulltextIndexApplyMetrics,
+};
+use crate::sst::index::inverted_index::applier::{
+    InvertedIndexApplierRef, InvertedIndexApplyMetrics,
+};
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PreFilterMode, row_group_contains_delete,
 };
@@ -537,9 +543,12 @@ impl ParquetReaderBuilder {
 
             // Slow path: apply the index from the file.
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
-            // TODO(yingwen): Collect applier metrics in verbose mode.
             let apply_res = index_applier
-                .apply_fine(self.file_handle.file_id(), Some(file_size_hint), None)
+                .apply_fine(
+                    self.file_handle.file_id(),
+                    Some(file_size_hint),
+                    metrics.fulltext_index_apply_metrics.as_mut(),
+                )
                 .await;
             let selection = match apply_res {
                 Ok(Some(res)) => {
@@ -606,15 +615,18 @@ impl ParquetReaderBuilder {
 
             // Slow path: apply the index from the file.
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
-            // TODO(yingwen): Collect applier metrics in verbose mode.
             let apply_res = index_applier
-                .apply(self.file_handle.file_id(), Some(file_size_hint), None)
+                .apply(
+                    self.file_handle.file_id(),
+                    Some(file_size_hint),
+                    metrics.inverted_index_apply_metrics.as_mut(),
+                )
                 .await;
             let selection = match apply_res {
-                Ok(output) => RowGroupSelection::from_inverted_index_apply_output(
+                Ok(apply_output) => RowGroupSelection::from_inverted_index_apply_output(
                     row_group_size,
                     num_row_groups,
-                    output,
+                    apply_output,
                 ),
                 Err(err) => {
                     handle_index_error!(err, self.file_handle, INDEX_TYPE_INVERTED);
@@ -682,9 +694,13 @@ impl ParquetReaderBuilder {
                             .unwrap_or(true),
                 )
             });
-            // TODO(yingwen): Collect metrics for applier
             let apply_res = index_applier
-                .apply(self.file_handle.file_id(), Some(file_size_hint), rgs, None)
+                .apply(
+                    self.file_handle.file_id(),
+                    Some(file_size_hint),
+                    rgs,
+                    metrics.bloom_filter_apply_metrics.as_mut(),
+                )
                 .await;
             let mut selection = match apply_res {
                 Ok(apply_output) => {
@@ -761,9 +777,13 @@ impl ParquetReaderBuilder {
                             .unwrap_or(true),
                 )
             });
-            // TODO(yingwen): Collect applier metrics in verbose mode.
             let apply_res = index_applier
-                .apply_coarse(self.file_handle.file_id(), Some(file_size_hint), rgs, None)
+                .apply_coarse(
+                    self.file_handle.file_id(),
+                    Some(file_size_hint),
+                    rgs,
+                    metrics.fulltext_index_apply_metrics.as_mut(),
+                )
                 .await;
             let mut selection = match apply_res {
                 Ok(Some(apply_output)) => {
@@ -907,7 +927,7 @@ fn all_required_row_groups_searched(
 }
 
 /// Metrics of filtering rows groups and rows.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ReaderFilterMetrics {
     /// Number of row groups before filtering.
     pub(crate) rg_total: usize,
@@ -930,6 +950,13 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) rows_bloom_filtered: usize,
     /// Number of rows filtered by precise filter.
     pub(crate) rows_precise_filtered: usize,
+
+    /// Optional metrics for inverted index applier.
+    pub(crate) inverted_index_apply_metrics: Option<InvertedIndexApplyMetrics>,
+    /// Optional metrics for bloom filter index applier.
+    pub(crate) bloom_filter_apply_metrics: Option<BloomFilterIndexApplyMetrics>,
+    /// Optional metrics for fulltext index applier.
+    pub(crate) fulltext_index_apply_metrics: Option<FulltextIndexApplyMetrics>,
 }
 
 impl ReaderFilterMetrics {
@@ -946,6 +973,23 @@ impl ReaderFilterMetrics {
         self.rows_inverted_filtered += other.rows_inverted_filtered;
         self.rows_bloom_filtered += other.rows_bloom_filtered;
         self.rows_precise_filtered += other.rows_precise_filtered;
+
+        // Merge optional applier metrics
+        if let Some(other_metrics) = &other.inverted_index_apply_metrics {
+            self.inverted_index_apply_metrics
+                .get_or_insert_with(Default::default)
+                .merge_from(other_metrics);
+        }
+        if let Some(other_metrics) = &other.bloom_filter_apply_metrics {
+            self.bloom_filter_apply_metrics
+                .get_or_insert_with(Default::default)
+                .merge_from(other_metrics);
+        }
+        if let Some(other_metrics) = &other.fulltext_index_apply_metrics {
+            self.fulltext_index_apply_metrics
+                .get_or_insert_with(Default::default)
+                .merge_from(other_metrics);
+        }
     }
 
     /// Reports metrics.

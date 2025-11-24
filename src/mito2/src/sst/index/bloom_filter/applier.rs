@@ -63,6 +63,16 @@ pub struct BloomFilterIndexApplyMetrics {
     pub read_metrics: BloomFilterReadMetrics,
 }
 
+impl BloomFilterIndexApplyMetrics {
+    /// Merges another metrics into this one.
+    pub fn merge_from(&mut self, other: &Self) {
+        self.apply_elapsed += other.apply_elapsed;
+        self.blob_cache_miss += other.blob_cache_miss;
+        self.blob_read_bytes += other.blob_read_bytes;
+        self.read_metrics.merge_from(&other.read_metrics);
+    }
+}
+
 pub(crate) type BloomFilterIndexApplierRef = Arc<BloomFilterIndexApplier>;
 
 /// `BloomFilterIndexApplier` applies bloom filter predicates to the SST file.

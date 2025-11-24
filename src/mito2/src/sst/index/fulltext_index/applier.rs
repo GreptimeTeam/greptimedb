@@ -85,6 +85,17 @@ impl FulltextIndexApplyMetrics {
             self.dir_cache_miss += 1;
         }
     }
+
+    /// Merges another metrics into this one.
+    pub fn merge_from(&mut self, other: &Self) {
+        self.apply_elapsed += other.apply_elapsed;
+        self.blob_cache_miss += other.blob_cache_miss;
+        self.dir_cache_hit += other.dir_cache_hit;
+        self.dir_cache_miss += other.dir_cache_miss;
+        self.dir_init_elapsed += other.dir_init_elapsed;
+        self.bloom_filter_read_metrics
+            .merge_from(&other.bloom_filter_read_metrics);
+    }
 }
 
 /// `FulltextIndexApplier` is responsible for applying fulltext index to the provided SST files
