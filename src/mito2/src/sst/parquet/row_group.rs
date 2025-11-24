@@ -35,6 +35,70 @@ use crate::cache::{CacheStrategy, PageKey, PageValue};
 use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
 use crate::sst::parquet::helper::{MERGE_GAP, fetch_byte_ranges};
 
+/// Metrics for tracking page/row group fetch operations.
+/// Uses atomic counters for thread-safe updates.
+#[derive(Debug, Default)]
+pub struct ParquetFetchMetrics {
+    /// Number of page cache hits.
+    page_cache_hit: std::sync::atomic::AtomicUsize,
+    /// Number of page cache misses.
+    page_cache_miss: std::sync::atomic::AtomicUsize,
+    /// Number of write cache hits.
+    write_cache_hit: std::sync::atomic::AtomicUsize,
+    /// Number of write cache misses.
+    write_cache_miss: std::sync::atomic::AtomicUsize,
+}
+
+impl ParquetFetchMetrics {
+    /// Increments page cache hit counter.
+    pub fn inc_page_cache_hit(&self) {
+        self.page_cache_hit
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Increments page cache miss counter.
+    pub fn inc_page_cache_miss(&self) {
+        self.page_cache_miss
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Increments write cache hit counter.
+    pub fn inc_write_cache_hit(&self) {
+        self.write_cache_hit
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Increments write cache miss counter.
+    pub fn inc_write_cache_miss(&self) {
+        self.write_cache_miss
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns the page cache hit count.
+    pub fn page_cache_hit(&self) -> usize {
+        self.page_cache_hit
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Returns the page cache miss count.
+    pub fn page_cache_miss(&self) -> usize {
+        self.page_cache_miss
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Returns the write cache hit count.
+    pub fn write_cache_hit(&self) -> usize {
+        self.write_cache_hit
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Returns the write cache miss count.
+    pub fn write_cache_miss(&self) -> usize {
+        self.write_cache_miss
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 pub(crate) struct RowGroupBase<'a> {
     metadata: &'a RowGroupMetaData,
     pub(crate) offset_index: Option<&'a [OffsetIndexMetaData]>,
@@ -244,13 +308,14 @@ impl<'a> InMemoryRowGroup<'a> {
         &mut self,
         projection: &ProjectionMask,
         selection: Option<&RowSelection>,
+        metrics: &ParquetFetchMetrics,
     ) -> Result<()> {
         if let Some((selection, offset_index)) = selection.zip(self.base.offset_index) {
             let (fetch_ranges, page_start_offsets) =
                 self.base
                     .calc_sparse_read_ranges(projection, offset_index, selection);
 
-            let chunk_data = self.fetch_bytes(&fetch_ranges).await?;
+            let chunk_data = self.fetch_bytes(&fetch_ranges, metrics).await?;
             // Assign sparse chunk data to base.
             self.base
                 .assign_sparse_chunk(projection, chunk_data, page_start_offsets);
@@ -268,7 +333,7 @@ impl<'a> InMemoryRowGroup<'a> {
             }
 
             // Fetch data with ranges
-            let chunk_data = self.fetch_bytes(&fetch_ranges).await?;
+            let chunk_data = self.fetch_bytes(&fetch_ranges, metrics).await?;
 
             // Assigns fetched data to base.
             self.base.assign_dense_chunk(projection, chunk_data);
@@ -279,18 +344,28 @@ impl<'a> InMemoryRowGroup<'a> {
 
     /// Try to fetch data from the memory cache or the WriteCache,
     /// if not in WriteCache, fetch data from object store directly.
-    async fn fetch_bytes(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn fetch_bytes(
+        &self,
+        ranges: &[Range<u64>],
+        metrics: &ParquetFetchMetrics,
+    ) -> Result<Vec<Bytes>> {
         // Now fetch page timer includes the whole time to read pages.
         let _timer = READ_STAGE_FETCH_PAGES.start_timer();
         let page_key = PageKey::new(self.file_id, self.row_group_idx, ranges.to_vec());
         if let Some(pages) = self.cache_strategy.get_pages(&page_key) {
+            metrics.inc_page_cache_hit();
             return Ok(pages.compressed.clone());
         }
+        metrics.inc_page_cache_miss();
 
         let key = IndexKey::new(self.region_id, self.file_id, FileType::Parquet);
         let pages = match self.fetch_ranges_from_write_cache(key, ranges).await {
-            Some(data) => data,
+            Some(data) => {
+                metrics.inc_write_cache_hit();
+                data
+            }
             None => {
+                metrics.inc_write_cache_miss();
                 // Fetch data from object store.
                 let _timer = READ_STAGE_ELAPSED
                     .with_label_values(&["cache_miss_read"])

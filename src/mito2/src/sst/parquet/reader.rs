@@ -60,7 +60,7 @@ use crate::sst::parquet::file_range::{
 };
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
-use crate::sst::parquet::row_group::InMemoryRowGroup;
+use crate::sst::parquet::row_group::{InMemoryRowGroup, ParquetFetchMetrics};
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
@@ -1071,6 +1071,7 @@ impl RowGroupReaderBuilder {
         &self,
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
+        fetch_metrics: &ParquetFetchMetrics,
     ) -> Result<ParquetRecordBatchReader> {
         let mut row_group = InMemoryRowGroup::create(
             self.file_handle.region_id(),
@@ -1083,7 +1084,7 @@ impl RowGroupReaderBuilder {
         );
         // Fetches data into memory.
         row_group
-            .fetch(&self.projection, row_selection.as_ref())
+            .fetch(&self.projection, row_selection.as_ref(), fetch_metrics)
             .await
             .context(ReadParquetSnafu {
                 path: &self.file_path,
@@ -1232,6 +1233,8 @@ pub struct ParquetReader {
     selection: RowGroupSelection,
     /// Reader of current row group.
     reader_state: ReaderState,
+    /// Metrics for tracking row group fetch operations.
+    fetch_metrics: ParquetFetchMetrics,
 }
 
 #[async_trait]
@@ -1251,7 +1254,7 @@ impl BatchReader for ParquetReader {
             let parquet_reader = self
                 .context
                 .reader_builder()
-                .build(row_group_idx, Some(row_selection))
+                .build(row_group_idx, Some(row_selection), &self.fetch_metrics)
                 .await?;
 
             // Resets the parquet reader.
@@ -1307,11 +1310,12 @@ impl ParquetReader {
         context: FileRangeContextRef,
         mut selection: RowGroupSelection,
     ) -> Result<Self> {
+        let fetch_metrics = ParquetFetchMetrics::default();
         // No more items in current row group, reads next row group.
         let reader_state = if let Some((row_group_idx, row_selection)) = selection.pop_first() {
             let parquet_reader = context
                 .reader_builder()
-                .build(row_group_idx, Some(row_selection))
+                .build(row_group_idx, Some(row_selection), &fetch_metrics)
                 .await?;
             // Compute skip_fields once for this row group
             let skip_fields = context.should_skip_fields(row_group_idx);
@@ -1328,6 +1332,7 @@ impl ParquetReader {
             context,
             selection,
             reader_state,
+            fetch_metrics,
         })
     }
 
