@@ -45,6 +45,17 @@ pub struct InvertedIndexReadMetrics {
     pub cache_miss: usize,
 }
 
+impl InvertedIndexReadMetrics {
+    /// Merges another metrics into this one.
+    pub fn merge_from(&mut self, other: &Self) {
+        self.total_bytes += other.total_bytes;
+        self.total_ranges += other.total_ranges;
+        self.fetch_elapsed += other.fetch_elapsed;
+        self.cache_hit += other.cache_hit;
+        self.cache_miss += other.cache_miss;
+    }
+}
+
 /// InvertedIndexReader defines an asynchronous reader of inverted index data
 #[mockall::automock]
 #[async_trait]

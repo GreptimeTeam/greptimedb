@@ -305,6 +305,10 @@ impl ScanMetricsSet {
                     rows_inverted_filtered,
                     rows_bloom_filtered,
                     rows_precise_filtered,
+                    // Optional applier metrics are not collected here.
+                    inverted_index_apply_metrics: _,
+                    bloom_filter_apply_metrics: _,
+                    fulltext_index_apply_metrics: _,
                 },
             num_record_batches,
             num_batches,

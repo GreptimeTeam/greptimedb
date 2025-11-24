@@ -58,6 +58,17 @@ pub struct InvertedIndexApplyMetrics {
     pub inverted_index_read_metrics: InvertedIndexReadMetrics,
 }
 
+impl InvertedIndexApplyMetrics {
+    /// Merges another metrics into this one.
+    pub fn merge_from(&mut self, other: &Self) {
+        self.apply_elapsed += other.apply_elapsed;
+        self.blob_cache_miss += other.blob_cache_miss;
+        self.blob_read_bytes += other.blob_read_bytes;
+        self.inverted_index_read_metrics
+            .merge_from(&other.inverted_index_read_metrics);
+    }
+}
+
 /// `InvertedIndexApplier` is responsible for applying predicates to the provided SST files
 /// and returning the relevant row group ids for further scan.
 pub(crate) struct InvertedIndexApplier {
