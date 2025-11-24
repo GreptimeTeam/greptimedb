@@ -419,6 +419,8 @@ impl MetasrvBuilder {
             } else {
                 ddl_manager
             };
+        #[cfg(not(feature = "enterprise"))]
+        let _ = extension;
 
         let ddl_manager = Arc::new(ddl_manager);
 

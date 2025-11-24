@@ -25,8 +25,7 @@ use flow::FrontendClient;
 #[cfg(feature = "enterprise")]
 use operator::statement::TriggerQuerierRef;
 
-use crate::extension::common::{InformationSchemaTableFactories, TableFactoryContext};
-
+/// The extension point for standalone instance.
 #[derive(Default)]
 pub struct Extension {
     #[cfg(feature = "enterprise")]
@@ -35,7 +34,7 @@ pub struct Extension {
     pub trigger_querier: Option<TriggerQuerierRef>,
 }
 
-/// Factory trait to create Extension instances.
+/// Factory trait to create Extension instance.
 pub trait ExtensionFactory: InformationSchemaTableFactories + Send + Sync {
     fn create(
         &self,
@@ -49,6 +48,28 @@ pub struct ExtensionContext {
     pub frontend_client: Arc<FrontendClient>,
 }
 
+/// Provides additional information schema table factories beyond the built-in
+/// ones.
+///
+/// These are typically provided by enterprise or optional modules, such as:
+/// - `information_schema.triggers`
+/// - `information_schema.alerts`
+#[async_trait::async_trait]
+pub trait InformationSchemaTableFactories: Send + Sync {
+    async fn create_factories(
+        &self,
+        ctx: TableFactoryContext,
+    ) -> Result<HashMap<String, InformationSchemaTableFactoryRef>, BoxedError>;
+}
+
+pub type InformationSchemaTableFactoriesRef = Arc<dyn InformationSchemaTableFactories>;
+
+/// Context for information schema table factory providers.
+pub struct TableFactoryContext {
+    pub fe_client: Arc<FrontendClient>,
+}
+
+/// Default no-op implementation of ExtensionFactory.
 pub struct DefaultExtensionFactory;
 
 #[async_trait::async_trait]

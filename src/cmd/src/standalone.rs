@@ -65,8 +65,7 @@ use standalone::options::StandaloneOptions;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{OtherSnafu, Result, StartFlownodeSnafu};
-use crate::extension::common::TableFactoryContext;
-use crate::extension::standalone::{ExtensionContext, ExtensionFactory};
+use crate::extension::standalone::{ExtensionContext, ExtensionFactory, TableFactoryContext};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
