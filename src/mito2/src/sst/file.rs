@@ -751,13 +751,13 @@ mod tests {
         }"#;
 
         let deserialized_file_meta: FileMeta = serde_json::from_str(json_old_file_meta).unwrap();
-        
+
         // Verify backward compatibility: indexes field should default to empty vec
         assert_eq!(deserialized_file_meta.indexes, vec![]);
-        
+
         let expected_indexes: IndexTypes = SmallVec::from_iter([IndexType::InvertedIndex]);
         assert_eq!(deserialized_file_meta.available_indexes, expected_indexes);
-        
+
         assert_eq!(
             deserialized_file_meta.file_id,
             FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap()
