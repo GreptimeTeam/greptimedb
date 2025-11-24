@@ -30,7 +30,7 @@ use common_telemetry::{debug, error, info, warn};
 use common_time::Timestamp;
 use object_store::{Entry, Lister};
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt as _};
+use snafu::ResultExt as _;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 use tokio_stream::StreamExt;
@@ -212,35 +212,9 @@ impl LocalGcWorker {
     /// Outdated regions are added to `outdated_regions` set, which means their manifest version in
     /// self.file_ref_manifest is older than the current manifest version on datanode.
     /// so they need to retry GC later by metasrv with updated tmp ref files.
-    pub async fn read_tmp_ref_files(
-        &self,
-        outdated_regions: &mut HashSet<RegionId>,
-    ) -> Result<HashMap<RegionId, HashSet<FileId>>> {
-        // verify manifest version before reading tmp ref files
-        for (region_id, mito_region) in &self.regions {
-            let current_version = mito_region.manifest_ctx.manifest_version().await;
-            if &current_version
-                > self
-                    .file_ref_manifest
-                    .manifest_version
-                    .get(region_id)
-                    .with_context(|| UnexpectedSnafu {
-                        reason: format!(
-                            "Region {} not found in tmp ref manifest version map",
-                            region_id
-                        ),
-                    })?
-            {
-                outdated_regions.insert(*region_id);
-            }
-        }
-
+    pub async fn read_tmp_ref_files(&self) -> Result<HashMap<RegionId, HashSet<FileId>>> {
         let mut tmp_ref_files = HashMap::new();
         for (region_id, file_refs) in &self.file_ref_manifest.file_refs {
-            if outdated_regions.contains(region_id) {
-                // skip outdated regions
-                continue;
-            }
             tmp_ref_files
                 .entry(*region_id)
                 .or_insert_with(HashSet::new)
@@ -259,9 +233,8 @@ impl LocalGcWorker {
         info!("LocalGcWorker started");
         let now = std::time::Instant::now();
 
-        let mut outdated_regions = HashSet::new();
         let mut deleted_files = HashMap::new();
-        let tmp_ref_files = self.read_tmp_ref_files(&mut outdated_regions).await?;
+        let tmp_ref_files = self.read_tmp_ref_files().await?;
         for (region_id, region) in &self.regions {
             let per_region_time = std::time::Instant::now();
             if region.manifest_ctx.current_state() == RegionRoleState::Follower {
@@ -291,7 +264,7 @@ impl LocalGcWorker {
         );
         let report = GcReport {
             deleted_files,
-            need_retry_regions: outdated_regions.into_iter().collect(),
+            need_retry_regions: HashSet::new(),
         };
         Ok(report)
     }
