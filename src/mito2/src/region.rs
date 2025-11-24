@@ -1047,7 +1047,7 @@ impl RegionMap {
             RegionStateSnafu {
                 region_id,
                 state: region.state(),
-                expect: RegionRoleState::Leader(RegionLeaderState::Writable),
+                expect: RegionRoleState::Leader(RegionLeaderState::Staging),
             }
         );
         Ok(region)
