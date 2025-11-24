@@ -12,45 +12,57 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use catalog::CatalogManagerRef;
+use catalog::information_schema::InformationSchemaTableFactoryRef;
+use common_error::ext::BoxedError;
 #[cfg(feature = "enterprise")]
-pub use ee::*;
+use common_meta::ddl_manager::TriggerDdlManagerRef;
+use common_meta::kv_backend::KvBackendRef;
+use flow::FrontendClient;
 #[cfg(feature = "enterprise")]
-use operator::statement::TriggerQuerierFactoryRef;
+use operator::statement::TriggerQuerierRef;
 
-use crate::extension::common::InformationSchemaTableFactoriesRef;
-
-#[cfg(feature = "enterprise")]
-mod ee {
-    use std::sync::Arc;
-
-    use catalog::CatalogManagerRef;
-    use common_error::ext::BoxedError;
-    use common_meta::ddl_manager::TriggerDdlManagerRef;
-    use common_meta::kv_backend::KvBackendRef;
-    use flow::FrontendClient;
-
-    #[async_trait::async_trait]
-    pub trait TriggerDdlManagerFactory: Send + Sync {
-        async fn create(
-            &self,
-            ctx: TriggerDdlManagerRequest,
-        ) -> Result<TriggerDdlManagerRef, BoxedError>;
-    }
-
-    pub type TriggerDdlManagerFactoryRef = Arc<dyn TriggerDdlManagerFactory>;
-
-    pub struct TriggerDdlManagerRequest {
-        pub kv_backend: KvBackendRef,
-        pub catalog_manager: CatalogManagerRef,
-        pub fe_client: Arc<FrontendClient>,
-    }
-}
+use crate::extension::common::{InformationSchemaTableFactories, TableFactoryContext};
 
 #[derive(Default)]
 pub struct Extension {
-    pub info_schema_factories: Option<InformationSchemaTableFactoriesRef>,
     #[cfg(feature = "enterprise")]
-    pub trigger_ddl_manager_factory: Option<TriggerDdlManagerFactoryRef>,
+    pub trigger_ddl_manager: Option<TriggerDdlManagerRef>,
     #[cfg(feature = "enterprise")]
-    pub trigger_querier_factory: Option<TriggerQuerierFactoryRef>,
+    pub trigger_querier: Option<TriggerQuerierRef>,
+}
+
+/// Factory trait to create Extension instances.
+pub trait ExtensionFactory: InformationSchemaTableFactories + Send + Sync {
+    fn create(
+        &self,
+        ctx: ExtensionContext,
+    ) -> impl Future<Output = Result<Extension, BoxedError>> + Send;
+}
+
+pub struct ExtensionContext {
+    pub kv_backend: KvBackendRef,
+    pub catalog_manager: CatalogManagerRef,
+    pub frontend_client: Arc<FrontendClient>,
+}
+
+pub struct DefaultExtensionFactory;
+
+#[async_trait::async_trait]
+impl InformationSchemaTableFactories for DefaultExtensionFactory {
+    async fn create_factories(
+        &self,
+        _ctx: TableFactoryContext,
+    ) -> Result<HashMap<String, InformationSchemaTableFactoryRef>, BoxedError> {
+        Ok(HashMap::new())
+    }
+}
+
+impl ExtensionFactory for DefaultExtensionFactory {
+    async fn create(&self, _ctx: ExtensionContext) -> Result<Extension, BoxedError> {
+        Ok(Extension::default())
+    }
 }

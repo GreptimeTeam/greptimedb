@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use extension::*;
-
-mod extension;
+pub mod extension;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -44,10 +42,12 @@ use tokio::sync::{Mutex, oneshot};
 use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
+use crate::bootstrap::extension::{ExtensionContext, ExtensionFactory};
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::election::etcd::EtcdElection;
+use crate::error::OtherSnafu;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{
     BackendImpl, ElectionRef, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
@@ -249,11 +249,11 @@ pub fn router(metasrv: Arc<Metasrv>) -> Router {
     router.add_service(admin::make_admin_service(metasrv))
 }
 
-pub async fn metasrv_builder(
+pub async fn metasrv_builder<F: ExtensionFactory>(
     opts: &MetasrvOptions,
     plugins: Plugins,
     kv_backend: Option<KvBackendRef>,
-    extension: Option<extension::Extension>,
+    extension_factory: F,
 ) -> Result<MetasrvBuilder> {
     let (mut kv_backend, election) = match (kv_backend, &opts.backend) {
         (Some(kv_backend), _) => (kv_backend, None),
@@ -407,6 +407,12 @@ pub async fn metasrv_builder(
         selector
     };
 
+    let ctx = ExtensionContext {
+        kv_backend: kv_backend.clone(),
+        meta_peer_client: meta_peer_client.clone(),
+    };
+    let extension = extension_factory.create(ctx).await.context(OtherSnafu)?;
+
     Ok(MetasrvBuilder::new()
         .options(opts.clone())
         .kv_backend(kv_backend)
@@ -415,7 +421,7 @@ pub async fn metasrv_builder(
         .election(election)
         .meta_peer_client(meta_peer_client)
         .plugins(plugins)
-        .extension_opt(extension))
+        .extension(extension))
 }
 
 pub(crate) fn build_default_meta_peer_client(

@@ -12,14 +12,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "enterprise")]
-use operator::statement::TriggerQuerierFactoryRef;
+use std::collections::HashMap;
 
-use crate::extension::common::InformationSchemaTableFactoriesRef;
+use catalog::information_schema::InformationSchemaTableFactoryRef;
+use common_error::ext::BoxedError;
+use common_meta::kv_backend::KvBackendRef;
+use meta_client::MetaClientRef;
+#[cfg(feature = "enterprise")]
+use operator::statement::TriggerQuerierRef;
 
 #[derive(Default)]
 pub struct Extension {
-    pub info_schema_factories: Option<InformationSchemaTableFactoriesRef>,
+    pub info_schema_factories: Option<HashMap<String, InformationSchemaTableFactoryRef>>,
     #[cfg(feature = "enterprise")]
-    pub trigger_querier_factory: Option<TriggerQuerierFactoryRef>,
+    pub trigger_querier: Option<TriggerQuerierRef>,
+}
+
+/// Factory trait to create Extension instances.
+pub trait ExtensionFactory: Send + Sync {
+    fn create(
+        &self,
+        ctx: ExtensionContext,
+    ) -> impl Future<Output = Result<Extension, BoxedError>> + Send;
+}
+
+pub struct ExtensionContext {
+    pub kv_backend: KvBackendRef,
+    pub meta_client: MetaClientRef,
+}
+
+pub struct DefaultExtensionFactory;
+
+impl ExtensionFactory for DefaultExtensionFactory {
+    async fn create(&self, _ctx: ExtensionContext) -> Result<Extension, BoxedError> {
+        Ok(Extension::default())
+    }
 }

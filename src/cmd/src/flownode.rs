@@ -48,7 +48,7 @@ use crate::error::{
     MissingConfigSnafu, OtherSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::extension::common::GrpcExtensionContext;
-use crate::extension::flownode::Extension;
+use crate::extension::flownode::{ExtensionContext, ExtensionFactory};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
@@ -109,12 +109,12 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build<E: Debug>(
+    pub async fn build<E: Debug, F: ExtensionFactory>(
         &self,
         opts: FlownodeOptions<E>,
-        extension: Extension,
+        extension_factory: F,
     ) -> Result<Instance> {
-        self.subcmd.build(opts, extension).await
+        self.subcmd.build(opts, extension_factory).await
     }
 
     pub fn load_options<E: Configurable>(
@@ -133,13 +133,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build<E: Debug>(
+    async fn build<E: Debug, F: ExtensionFactory>(
         &self,
         opts: FlownodeOptions<E>,
-        extension: Extension,
+        extension_factory: F,
     ) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build(opts, extension).await,
+            SubCommand::Start(cmd) => cmd.build(opts, extension_factory).await,
         }
     }
 }
@@ -262,10 +262,10 @@ impl StartCommand {
         Ok(())
     }
 
-    async fn build<E: Debug>(
+    async fn build<E: Debug, F: ExtensionFactory>(
         &self,
         opts: FlownodeOptions<E>,
-        extension: Extension,
+        extension_factory: F,
     ) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
@@ -405,14 +405,18 @@ impl StartCommand {
 
         let mut builder =
             FlownodeServiceBuilder::grpc_server_builder(&opts, flownode.flownode_server());
-        if let Some(extension) = extension.grpc.as_ref() {
+        let extension = extension_factory
+            .create(ExtensionContext {})
+            .await
+            .context(OtherSnafu)?;
+        if let Some(grpc_extension) = extension.grpc {
             let ctx = GrpcExtensionContext {
                 kv_backend: cached_meta_backend.clone(),
                 fe_client: frontend_client.clone(),
                 flownode_id: member_id,
                 catalog_manager: catalog_manager.clone(),
             };
-            extension
+            grpc_extension
                 .extend_grpc_services(&mut builder, ctx)
                 .await
                 .context(OtherSnafu)?

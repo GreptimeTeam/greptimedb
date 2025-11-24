@@ -49,8 +49,8 @@ use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
-use crate::error::{self, Result};
-use crate::extension::frontend::Extension;
+use crate::error::{self, OtherSnafu, Result};
+use crate::extension::frontend::{ExtensionContext, ExtensionFactory};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
@@ -111,12 +111,12 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build<E: Debug>(
+    pub async fn build<E: Debug, F: ExtensionFactory>(
         &self,
         opts: FrontendOptions<E>,
-        extension: Extension,
+        extension_factory: F,
     ) -> Result<Instance> {
-        self.subcmd.build(opts, extension).await
+        self.subcmd.build(opts, extension_factory).await
     }
 
     pub fn load_options<E: Configurable>(
@@ -133,13 +133,13 @@ pub enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build<E: Debug>(
+    async fn build<E: Debug, F: ExtensionFactory>(
         &self,
         opts: FrontendOptions<E>,
-        extension: Extension,
+        extension_factory: F,
     ) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build(opts, extension).await,
+            SubCommand::Start(cmd) => cmd.build(opts, extension_factory).await,
         }
     }
 
@@ -329,14 +329,11 @@ impl StartCommand {
         Ok(())
     }
 
-    async fn build<E: Debug>(
+    async fn build<E: Debug, F: ExtensionFactory>(
         &self,
         opts: FrontendOptions<E>,
-        extension: Extension,
+        extension_factory: F,
     ) -> Result<Instance> {
-        #[cfg(not(feature = "enterprise"))]
-        let _ = extension;
-
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -436,18 +433,21 @@ impl StartCommand {
             Some(meta_client.clone()),
         ));
 
+        let extension = extension_factory
+            .create(ExtensionContext {
+                kv_backend: cached_meta_backend.clone(),
+                meta_client: meta_client.clone(),
+            })
+            .await
+            .context(OtherSnafu)?;
+
         let builder = KvBackendCatalogManagerBuilder::new(
             information_extension,
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
         )
         .with_process_manager(process_manager.clone());
-        #[cfg(feature = "enterprise")]
         let builder = if let Some(factories) = extension.info_schema_factories {
-            let factories = factories
-                .create_factories(crate::extension::common::TableFactoryContext { fe_client: None })
-                .await
-                .context(crate::error::OtherSnafu)?;
             builder.with_extra_information_table_factories(factories)
         } else {
             builder
@@ -484,8 +484,8 @@ impl StartCommand {
         .with_local_cache_invalidator(layered_cache_registry);
 
         #[cfg(feature = "enterprise")]
-        let builder = if let Some(factory) = extension.trigger_querier_factory {
-            builder.with_trigger_querier(factory)
+        let builder = if let Some(trigger_querier) = extension.trigger_querier {
+            builder.with_trigger_querier(trigger_querier)
         } else {
             builder
         };

@@ -64,9 +64,9 @@ use standalone::StandaloneInformationExtension;
 use standalone::options::StandaloneOptions;
 use tracing_appender::non_blocking::WorkerGuard;
 
-use crate::error::{Result, StartFlownodeSnafu};
+use crate::error::{OtherSnafu, Result, StartFlownodeSnafu};
 use crate::extension::common::TableFactoryContext;
-use crate::extension::standalone::Extension;
+use crate::extension::standalone::{ExtensionContext, ExtensionFactory};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
@@ -79,12 +79,12 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build<E: Debug>(
+    pub async fn build<E: Debug, F: ExtensionFactory>(
         &self,
         opts: GreptimeOptions<StandaloneOptions, E>,
-        extension: Extension,
+        extension_factory: F,
     ) -> Result<Instance> {
-        self.subcmd.build(opts, extension).await
+        self.subcmd.build(opts, extension_factory).await
     }
 
     pub fn load_options<E: Configurable>(
@@ -101,13 +101,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build<E: Debug>(
+    async fn build<E: Debug, F: ExtensionFactory>(
         &self,
         opts: GreptimeOptions<StandaloneOptions, E>,
-        extension: Extension,
+        extension_factory: F,
     ) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build(opts, extension).await,
+            SubCommand::Start(cmd) => cmd.build(opts, extension_factory).await,
         }
     }
 
@@ -329,10 +329,10 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     /// Build GreptimeDB instance with the loaded options.
-    pub async fn build<E: Debug>(
+    pub async fn build<E: Debug, F: ExtensionFactory>(
         &self,
         opts: GreptimeOptions<StandaloneOptions, E>,
-        extension: Extension,
+        extension_factory: F,
     ) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
@@ -425,18 +425,13 @@ impl StartCommand {
             FrontendClient::from_empty_grpc_handler(opts.query.clone());
         let frontend_client = Arc::new(frontend_client);
 
-        let builder = if let Some(provider) = extension.info_schema_factories.as_ref() {
-            let factories = provider
-                .create_factories(TableFactoryContext {
-                    fe_client: Some(frontend_client.clone()),
-                })
-                .await
-                .context(crate::error::OtherSnafu)?;
-            builder.with_extra_information_table_factories(factories)
-        } else {
-            builder
-        };
-
+        let info_schema_table_factories = extension_factory
+            .create_factories(TableFactoryContext {
+                fe_client: frontend_client.clone(),
+            })
+            .await
+            .context(OtherSnafu)?;
+        let builder = builder.with_extra_information_table_factories(info_schema_table_factories);
         let catalog_manager = builder.build();
 
         let table_metadata_manager =
@@ -504,6 +499,16 @@ impl StartCommand {
             flow_id_sequence,
         ));
 
+        let context = ExtensionContext {
+            kv_backend: kv_backend.clone(),
+            catalog_manager: catalog_manager.clone(),
+            frontend_client: frontend_client.clone(),
+        };
+        let extension = extension_factory
+            .create(context)
+            .await
+            .context(OtherSnafu)?;
+
         let ddl_context = DdlContext {
             node_manager: node_manager.clone(),
             cache_invalidator: layered_cache_registry.clone(),
@@ -519,13 +524,7 @@ impl StartCommand {
         let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager.clone(), true)
             .context(error::InitDdlManagerSnafu)?;
         #[cfg(feature = "enterprise")]
-        let ddl_manager = if let Some(factory) = extension.trigger_ddl_manager_factory.as_ref() {
-            let req = crate::extension::standalone::TriggerDdlManagerRequest {
-                kv_backend: kv_backend.clone(),
-                catalog_manager: catalog_manager.clone(),
-                fe_client: frontend_client.clone(),
-            };
-            let trigger_ddl_manager = factory.create(req).await.context(error::OtherSnafu)?;
+        let ddl_manager = if let Some(trigger_ddl_manager) = extension.trigger_ddl_manager {
             ddl_manager.with_trigger_ddl_manager_opt(Some(trigger_ddl_manager))
         } else {
             ddl_manager
@@ -547,8 +546,8 @@ impl StartCommand {
         )
         .with_plugin(plugins.clone());
         #[cfg(feature = "enterprise")]
-        let builder = if let Some(factory) = extension.trigger_querier_factory {
-            builder.with_trigger_querier(factory)
+        let builder = if let Some(trigger_querier) = extension.trigger_querier {
+            builder.with_trigger_querier(trigger_querier)
         } else {
             builder
         };

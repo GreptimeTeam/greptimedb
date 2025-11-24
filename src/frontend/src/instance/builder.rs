@@ -33,7 +33,7 @@ use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
 #[cfg(feature = "enterprise")]
-use operator::statement::TriggerQuerierFactoryRef;
+use operator::statement::TriggerQuerierRef;
 use operator::statement::{StatementExecutor, StatementExecutorRef};
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
@@ -61,7 +61,7 @@ pub struct FrontendBuilder {
     procedure_executor: ProcedureExecutorRef,
     process_manager: ProcessManagerRef,
     #[cfg(feature = "enterprise")]
-    trigger_querier_factory: Option<TriggerQuerierFactoryRef>,
+    trigger_querier: Option<TriggerQuerierRef>,
 }
 
 impl FrontendBuilder {
@@ -86,7 +86,7 @@ impl FrontendBuilder {
             procedure_executor,
             process_manager,
             #[cfg(feature = "enterprise")]
-            trigger_querier_factory: None,
+            trigger_querier: None,
         }
     }
 
@@ -105,9 +105,9 @@ impl FrontendBuilder {
     }
 
     #[cfg(feature = "enterprise")]
-    pub fn with_trigger_querier(self, trigger_querier: TriggerQuerierFactoryRef) -> Self {
+    pub fn with_trigger_querier(self, trigger_querier: TriggerQuerierRef) -> Self {
         Self {
-            trigger_querier_factory: Some(trigger_querier),
+            trigger_querier: Some(trigger_querier),
             ..self
         }
     }
@@ -202,8 +202,7 @@ impl FrontendBuilder {
         );
 
         #[cfg(feature = "enterprise")]
-        let statement_executor = if let Some(factory) = self.trigger_querier_factory.as_ref() {
-            let trigger_querier = factory.create(kv_backend.clone());
+        let statement_executor = if let Some(trigger_querier) = self.trigger_querier {
             statement_executor.with_trigger_querier(trigger_querier)
         } else {
             statement_executor

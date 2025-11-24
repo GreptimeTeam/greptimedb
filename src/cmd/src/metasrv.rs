@@ -23,7 +23,8 @@ use common_config::Configurable;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_version::{short_version, verbose_version};
-use meta_srv::bootstrap::{Extension, MetasrvInstance};
+use meta_srv::bootstrap::extension::ExtensionFactory;
+use meta_srv::bootstrap::{MetasrvInstance, metasrv_builder};
 use meta_srv::metasrv::BackendImpl;
 use snafu::ResultExt;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -89,12 +90,12 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build<E: Debug>(
+    pub async fn build<E: Debug, F: ExtensionFactory>(
         &self,
         opts: MetasrvOptions<E>,
-        extension: Extension,
+        extension_factory: F,
     ) -> Result<Instance> {
-        self.subcmd.build(opts, extension).await
+        self.subcmd.build(opts, extension_factory).await
     }
 
     pub fn load_options<E: Configurable>(
@@ -119,13 +120,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build<E: Debug>(
+    async fn build<E: Debug, F: ExtensionFactory>(
         &self,
         opts: MetasrvOptions<E>,
-        extension: Extension,
+        extension_factory: F,
     ) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build(opts, extension).await,
+            SubCommand::Start(cmd) => cmd.build(opts, extension_factory).await,
         }
     }
 
@@ -330,10 +331,10 @@ impl StartCommand {
         Ok(())
     }
 
-    pub async fn build<E: Debug>(
+    pub async fn build<E: Debug, F: ExtensionFactory>(
         &self,
         opts: MetasrvOptions<E>,
-        extension: Extension,
+        extension_factory: F,
     ) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
@@ -362,7 +363,7 @@ impl StartCommand {
             .await
             .context(StartMetaServerSnafu)?;
 
-        let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins, None, Some(extension))
+        let builder = metasrv_builder(&opts, plugins, None, extension_factory)
             .await
             .context(error::BuildMetaServerSnafu)?;
         let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;

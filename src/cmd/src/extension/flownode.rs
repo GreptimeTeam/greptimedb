@@ -12,9 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::ext::BoxedError;
+
 use crate::extension::common::GrpcExtensionRef;
 
 #[derive(Default)]
 pub struct Extension {
     pub grpc: Option<GrpcExtensionRef>,
+}
+
+/// Factory trait to create Extension instances.
+pub trait ExtensionFactory: Send + Sync {
+    fn create(
+        &self,
+        ctx: ExtensionContext,
+    ) -> impl Future<Output = Result<Extension, BoxedError>> + Send;
+}
+
+pub struct ExtensionContext {}
+
+pub struct DefaultExtensionFactory;
+
+impl ExtensionFactory for DefaultExtensionFactory {
+    async fn create(&self, _ctx: ExtensionContext) -> Result<Extension, BoxedError> {
+        Ok(Extension::default())
+    }
 }

@@ -42,7 +42,7 @@ pub type InformationSchemaTableFactoriesRef = Arc<dyn InformationSchemaTableFact
 
 /// Context for information schema table factory providers.
 pub struct TableFactoryContext {
-    pub fe_client: Option<Arc<FrontendClient>>,
+    pub fe_client: Arc<FrontendClient>,
 }
 
 /// Allows extending the gRPC server with additional services (e.g., enterprise

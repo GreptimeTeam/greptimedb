@@ -51,7 +51,8 @@ use common_telemetry::{info, warn};
 use snafu::{ResultExt, ensure};
 use store_api::storage::MAX_REGION_SEQ;
 
-use crate::bootstrap::{Extension, build_default_meta_peer_client};
+use crate::bootstrap::build_default_meta_peer_client;
+use crate::bootstrap::extension::Extension;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
@@ -176,8 +177,8 @@ impl MetasrvBuilder {
         self
     }
 
-    pub fn extension_opt(mut self, extension: Option<Extension>) -> Self {
-        self.extension = extension;
+    pub fn extension(mut self, extension: Extension) -> Self {
+        self.extension = Some(extension);
         self
     }
 
@@ -410,23 +411,14 @@ impl MetasrvBuilder {
         let procedure_manager_c = procedure_manager.clone();
         let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager_c, true)
             .context(error::InitDdlManagerSnafu)?;
+
         #[cfg(feature = "enterprise")]
         let ddl_manager =
-            if let Some(factory) = extension.and_then(|e| e.trigger_ddl_manager_factory) {
-                let trigger_ddl_manager = factory
-                    .create(crate::bootstrap::TriggerDdlManagerRequest {
-                        kv_backend: kv_backend.clone(),
-                        selector: selector.clone(),
-                        select_ctx: selector_ctx.clone(),
-                    })
-                    .await
-                    .context(error::OtherSnafu)?;
+            if let Some(trigger_ddl_manager) = extension.and_then(|e| e.trigger_ddl_manager) {
                 ddl_manager.with_trigger_ddl_manager_opt(Some(trigger_ddl_manager))
             } else {
                 ddl_manager
             };
-        #[cfg(not(feature = "enterprise"))]
-        let _ = extension;
 
         let ddl_manager = Arc::new(ddl_manager);
 

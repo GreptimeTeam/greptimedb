@@ -17,10 +17,14 @@
 use clap::{Parser, Subcommand};
 use cmd::datanode::builder::InstanceBuilder;
 use cmd::error::{InitTlsProviderSnafu, Result};
+use cmd::extension::flownode::DefaultExtensionFactory as FlowExtensionFactory;
+use cmd::extension::frontend::DefaultExtensionFactory as FrontendExtensionFactory;
+use cmd::extension::standalone::DefaultExtensionFactory as StandaloneExtensionFactory;
 use cmd::options::{EmptyOptions, GlobalOptions};
 use cmd::{App, cli, datanode, flownode, frontend, metasrv, standalone};
 use common_base::Plugins;
 use common_version::{verbose_version, version};
+use meta_srv::bootstrap::extension::DefaultExtensionFactory as MetaExtensionFactory;
 use servers::install_ring_crypto_provider;
 
 #[derive(Parser)]
@@ -113,40 +117,23 @@ async fn start(cli: Command) -> Result<()> {
             datanode::SubCommand::Objbench(ref bench) => bench.run().await,
         },
         SubCommand::Flownode(cmd) => {
-            cmd.build(
-                cmd.load_options::<EmptyOptions>(&cli.global_options)?,
-                Default::default(),
-            )
-            .await?
-            .run()
-            .await
+            let opts = cmd.load_options::<EmptyOptions>(&cli.global_options)?;
+            cmd.build(opts, FlowExtensionFactory).await?.run().await
         }
         SubCommand::Frontend(cmd) => {
-            cmd.build(
-                cmd.load_options::<EmptyOptions>(&cli.global_options)?,
-                Default::default(),
-            )
-            .await?
-            .run()
-            .await
+            let opts = cmd.load_options::<EmptyOptions>(&cli.global_options)?;
+            cmd.build(opts, FrontendExtensionFactory).await?.run().await
         }
         SubCommand::Metasrv(cmd) => {
-            cmd.build(
-                cmd.load_options::<EmptyOptions>(&cli.global_options)?,
-                Default::default(),
-            )
-            .await?
-            .run()
-            .await
+            let opts = cmd.load_options::<EmptyOptions>(&cli.global_options)?;
+            cmd.build(opts, MetaExtensionFactory).await?.run().await
         }
         SubCommand::Standalone(cmd) => {
-            cmd.build(
-                cmd.load_options::<EmptyOptions>(&cli.global_options)?,
-                Default::default(),
-            )
-            .await?
-            .run()
-            .await
+            let opts = cmd.load_options::<EmptyOptions>(&cli.global_options)?;
+            cmd.build(opts, StandaloneExtensionFactory)
+                .await?
+                .run()
+                .await
         }
         SubCommand::Cli(cmd) => {
             cmd.build(cmd.load_options(&cli.global_options)?)

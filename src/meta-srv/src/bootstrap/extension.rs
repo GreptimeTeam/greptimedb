@@ -12,38 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::ext::BoxedError;
 #[cfg(feature = "enterprise")]
-pub use ee::*;
+use common_meta::ddl_manager::TriggerDdlManagerRef;
+use common_meta::kv_backend::KvBackendRef;
 
-#[cfg(feature = "enterprise")]
-mod ee {
-    use std::sync::Arc;
-
-    use common_error::ext::BoxedError;
-    use common_meta::ddl_manager::TriggerDdlManagerRef;
-    use common_meta::kv_backend::KvBackendRef;
-
-    use crate::metasrv::{SelectorContext, SelectorRef};
-
-    #[async_trait::async_trait]
-    pub trait TriggerDdlManagerFactory {
-        async fn create(
-            &self,
-            req: TriggerDdlManagerRequest,
-        ) -> Result<TriggerDdlManagerRef, BoxedError>;
-    }
-
-    pub type TriggerDdlManagerFactoryRef = Arc<dyn TriggerDdlManagerFactory + Send + Sync>;
-
-    pub struct TriggerDdlManagerRequest {
-        pub kv_backend: KvBackendRef,
-        pub selector: SelectorRef,
-        pub select_ctx: SelectorContext,
-    }
-}
+use crate::cluster::MetaPeerClientRef;
 
 #[derive(Default)]
 pub struct Extension {
     #[cfg(feature = "enterprise")]
-    pub trigger_ddl_manager_factory: Option<TriggerDdlManagerFactoryRef>,
+    pub trigger_ddl_manager: Option<TriggerDdlManagerRef>,
+}
+
+/// Factory trait to create Extension instances.
+pub trait ExtensionFactory: Send + Sync {
+    fn create(
+        &self,
+        ctx: ExtensionContext,
+    ) -> impl Future<Output = Result<Extension, BoxedError>> + Send;
+}
+
+pub struct ExtensionContext {
+    pub kv_backend: KvBackendRef,
+    pub meta_peer_client: MetaPeerClientRef,
+}
+
+pub struct DefaultExtensionFactory;
+
+impl ExtensionFactory for DefaultExtensionFactory {
+    async fn create(&self, _ctx: ExtensionContext) -> Result<Extension, BoxedError> {
+        Ok(Extension::default())
+    }
 }
