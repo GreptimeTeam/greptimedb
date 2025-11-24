@@ -223,6 +223,11 @@ impl RegionScanExec {
         self.is_partition_set
     }
 
+    pub fn scanner_type(&self) -> String {
+        let scanner = self.scanner.lock().unwrap();
+        scanner.name().to_string()
+    }
+
     /// Update the partition ranges of underlying scanner.
     pub fn with_new_partitions(
         &self,

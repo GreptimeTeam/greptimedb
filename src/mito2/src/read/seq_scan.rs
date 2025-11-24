@@ -609,6 +609,10 @@ impl SeqScan {
 }
 
 impl RegionScanner for SeqScan {
+    fn name(&self) -> &str {
+        "SeqScan"
+    }
+
     fn properties(&self) -> &ScannerProperties {
         &self.properties
     }

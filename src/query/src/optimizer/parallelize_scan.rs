@@ -62,7 +62,9 @@ impl ParallelizeScan {
                     plan.as_any().downcast_ref::<RegionScanExec>()
                 {
                     let expected_partition_num = config.execution.target_partitions;
-                    if region_scan_exec.is_partition_set() {
+                    if region_scan_exec.is_partition_set()
+                        || region_scan_exec.scanner_type().as_str() == "SinglePartition"
+                    {
                         return Ok(Transformed::no(plan));
                     }
 

@@ -284,6 +284,10 @@ fn new_channel_list(num_partitions: usize) -> (SenderList, ReceiverList) {
 }
 
 impl RegionScanner for SeriesScan {
+    fn name(&self) -> &str {
+        "SeriesScan"
+    }
+
     fn properties(&self) -> &ScannerProperties {
         &self.properties
     }
