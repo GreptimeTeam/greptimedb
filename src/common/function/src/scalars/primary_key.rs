@@ -35,6 +35,8 @@ use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
 use crate::function::{Function, extract_args};
 use crate::function_registry::FunctionRegistry;
 
+type NameValuePair = (String, Option<String>);
+
 #[derive(Clone, Debug)]
 pub(crate) struct DecodePrimaryKeyFunction {
     signature: Signature,
@@ -57,7 +59,7 @@ impl DecodePrimaryKeyFunction {
     }
 
     fn return_data_type() -> DataType {
-        DataType::List(Arc::new(Field::new("item", DataType::Utf8, false)))
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)))
     }
 }
 
@@ -158,7 +160,7 @@ fn parse_region_metadata(arg: &ColumnarValue) -> datafusion_common::Result<Regio
     };
 
     RegionMetadata::from_json(json)
-        .map_err(|e| DataFusionError::Execution(format!("failed to parse region metadata: {e}")))
+        .map_err(|e| DataFusionError::Execution(format!("failed to parse region metadata: {e:?}")))
 }
 
 fn decode_primary_keys(
@@ -166,7 +168,7 @@ fn decode_primary_keys(
     number_rows: usize,
     codec: &dyn PrimaryKeyCodec,
     name_lookup: &HashMap<ColumnId, String>,
-) -> datafusion_common::Result<Vec<Vec<(String, Option<String>)>>> {
+) -> datafusion_common::Result<Vec<Vec<NameValuePair>>> {
     if let Some(dict) = encoded
         .as_any()
         .downcast_ref::<DictionaryArray<UInt32Type>>()
@@ -188,7 +190,7 @@ fn decode_dictionary(
     number_rows: usize,
     codec: &dyn PrimaryKeyCodec,
     name_lookup: &HashMap<ColumnId, String>,
-) -> datafusion_common::Result<Vec<Vec<(String, Option<String>)>>> {
+) -> datafusion_common::Result<Vec<Vec<NameValuePair>>> {
     let values = dict
         .values()
         .as_any()
@@ -218,7 +220,7 @@ fn decode_binary_array(
     array: &BinaryArray,
     codec: &dyn PrimaryKeyCodec,
     name_lookup: &HashMap<ColumnId, String>,
-) -> datafusion_common::Result<Vec<Vec<(String, Option<String>)>>> {
+) -> datafusion_common::Result<Vec<Vec<NameValuePair>>> {
     (0..array.len())
         .map(|i| decode_one(array.value(i), codec, name_lookup))
         .collect()
@@ -228,7 +230,7 @@ fn decode_binary_view_array(
     array: &BinaryViewArray,
     codec: &dyn PrimaryKeyCodec,
     name_lookup: &HashMap<ColumnId, String>,
-) -> datafusion_common::Result<Vec<Vec<(String, Option<String>)>>> {
+) -> datafusion_common::Result<Vec<Vec<NameValuePair>>> {
     (0..array.len())
         .map(|i| decode_one(array.value(i), codec, name_lookup))
         .collect()
@@ -238,7 +240,7 @@ fn decode_one(
     pk: &[u8],
     codec: &dyn PrimaryKeyCodec,
     name_lookup: &HashMap<ColumnId, String>,
-) -> datafusion_common::Result<Vec<(String, Option<String>)>> {
+) -> datafusion_common::Result<Vec<NameValuePair>> {
     let decoded = codec
         .decode(pk)
         .map_err(|e| DataFusionError::Execution(format!("failed to decode primary key: {e}")))?;
@@ -292,7 +294,7 @@ fn value_to_string(value: Value) -> Option<String> {
     }
 }
 
-fn build_list_array(rows: &[Vec<(String, Option<String>)>]) -> datafusion_common::Result<ArrayRef> {
+fn build_list_array(rows: &[Vec<NameValuePair>]) -> datafusion_common::Result<ArrayRef> {
     let mut builder = ListBuilder::new(StringBuilder::new());
 
     for row in rows {
