@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::Instant;
 
-use common_recordbatch::RecordBatch as GtRecordBatch;
 use common_telemetry::warn;
 use datafusion::arrow::array::AsArray;
 use datafusion::arrow::compute::{self, SortOptions, concat_batches};
@@ -41,9 +40,8 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::{Column, Expr};
 use datatypes::prelude::{ConcreteDataType, DataType as GtDataType};
-use datatypes::schema::Schema as GtSchema;
 use datatypes::value::{OrderedF64, ValueRef};
-use datatypes::vectors::MutableVector;
+use datatypes::vectors::{Helper, MutableVector};
 use futures::{Stream, StreamExt, ready};
 
 /// `HistogramFold` will fold the conventional (non-native) histogram ([1]) for later
@@ -560,36 +558,29 @@ impl HistogramFoldStream {
         let mut remaining_rows = self.input_buffered_rows;
         let mut cursor = 0;
 
-        let gt_schema = GtSchema::try_from(self.input.schema()).unwrap();
-        let batch = GtRecordBatch::try_from_df_record_batch(Arc::new(gt_schema), batch).unwrap();
+        // TODO(LFC): Try to get rid of the Arrow array to vector conversion here.
+        let vectors = Helper::try_into_vectors(batch.columns())
+            .map_err(|e| DataFusionError::Execution(e.to_string()))?;
 
         while remaining_rows >= bucket_num {
             // "sample" normal columns
             for normal_index in &self.normal_indices {
-                let val = batch.column(*normal_index).get(cursor);
+                let val = vectors[*normal_index].get(cursor);
                 self.output_buffer[*normal_index].push_value_ref(&val.as_value_ref());
             }
             // "fold" `le` and field columns
             let le_array = batch.column(self.le_column_index);
+            let le_array = le_array.as_string::<i32>();
             let field_array = batch.column(self.field_column_index);
+            let field_array = field_array.as_primitive::<Float64Type>();
             let mut bucket = vec![];
             let mut counters = vec![];
             for bias in 0..bucket_num {
-                let le_str_val = le_array.get(cursor + bias);
-                let le_str_val_ref = le_str_val.as_value_ref();
-                let le_str = le_str_val_ref
-                    .try_into_string()
-                    .unwrap()
-                    .expect("le column should not be nullable");
+                let le_str = le_array.value(cursor + bias);
                 let le = le_str.parse::<f64>().unwrap();
                 bucket.push(le);
 
-                let counter = field_array
-                    .get(cursor + bias)
-                    .as_value_ref()
-                    .try_into_f64()
-                    .unwrap()
-                    .expect("field column should not be nullable");
+                let counter = field_array.value(cursor + bias);
                 counters.push(counter);
             }
             // ignore invalid data
@@ -600,7 +591,7 @@ impl HistogramFoldStream {
             self.output_buffered_rows += 1;
         }
 
-        let remaining_input_batch = batch.into_df_record_batch().slice(cursor, remaining_rows);
+        let remaining_input_batch = batch.slice(cursor, remaining_rows);
         self.input_buffered_rows = remaining_input_batch.num_rows();
         self.input_buffer.push(remaining_input_batch);
 

@@ -33,8 +33,8 @@ use crate::types::{
     BinaryType, BooleanType, DateType, Decimal128Type, DictionaryType, DurationMicrosecondType,
     DurationMillisecondType, DurationNanosecondType, DurationSecondType, DurationType, Float32Type,
     Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, IntervalDayTimeType,
-    IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonFormat, JsonType, ListType,
-    NullType, StringType, StructType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
+    IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonType, ListType, NullType,
+    StringType, StructType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
     UInt8Type, UInt16Type, UInt32Type, UInt64Type, VectorType,
 };
@@ -677,7 +677,7 @@ impl ConcreteDataType {
     }
 
     pub fn json_native_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {
-        ConcreteDataType::Json(JsonType::new(JsonFormat::Native(Box::new(inner_type))))
+        ConcreteDataType::Json(JsonType::new_native((&inner_type).into()))
     }
 }
 

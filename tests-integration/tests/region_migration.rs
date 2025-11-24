@@ -34,9 +34,8 @@ use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
 use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
-use datatypes::prelude::ScalarVector;
-use datatypes::value::Value;
-use datatypes::vectors::{Helper, UInt64Vector};
+use datatypes::arrow::array::AsArray;
+use datatypes::arrow::datatypes::UInt64Type;
 use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
 use futures::future::BoxFuture;
@@ -1189,12 +1188,12 @@ async fn find_region_distribution_by_sql(
     let mut distribution = RegionDistribution::new();
 
     for batch in recordbatches.take() {
-        let datanode_ids: &UInt64Vector =
-            unsafe { Helper::static_cast(batch.column_by_name("datanode_id").unwrap()) };
-        let region_ids: &UInt64Vector =
-            unsafe { Helper::static_cast(batch.column_by_name("region_id").unwrap()) };
+        let column = batch.column_by_name("datanode_id").unwrap();
+        let datanode_ids = column.as_primitive::<UInt64Type>();
+        let column = batch.column_by_name("region_id").unwrap();
+        let region_ids = column.as_primitive::<UInt64Type>();
 
-        for (datanode_id, region_id) in datanode_ids.iter_data().zip(region_ids.iter_data()) {
+        for (datanode_id, region_id) in datanode_ids.iter().zip(region_ids.iter()) {
             let (Some(datanode_id), Some(region_id)) = (datanode_id, region_id) else {
                 unreachable!();
             };
@@ -1231,11 +1230,10 @@ async fn trigger_migration_by_sql(
 
     info!("SQL result:\n {}", recordbatches.pretty_print().unwrap());
 
-    let Value::String(procedure_id) = recordbatches.take()[0].column(0).get(0) else {
-        unreachable!();
-    };
-
-    procedure_id.as_utf8().to_string()
+    let record_batch = &recordbatches.take()[0];
+    let column = record_batch.column(0);
+    let column = column.as_string::<i32>();
+    column.value(0).to_string()
 }
 
 /// Query procedure state by SQL.
@@ -1254,11 +1252,10 @@ async fn query_procedure_by_sql(instance: &Arc<Instance>, pid: &str) -> String {
 
     info!("SQL result:\n {}", recordbatches.pretty_print().unwrap());
 
-    let Value::String(state) = recordbatches.take()[0].column(0).get(0) else {
-        unreachable!();
-    };
-
-    state.as_utf8().to_string()
+    let record_batch = &recordbatches.take()[0];
+    let column = record_batch.column(0);
+    let column = column.as_string::<i32>();
+    column.value(0).to_string()
 }
 
 async fn insert_values(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Output>> {

@@ -201,7 +201,7 @@ impl QueryParser for DefaultQueryParser {
         &self,
         _client: &C,
         sql: &str,
-        _types: &[Type],
+        _types: &[Option<Type>],
     ) -> PgWireResult<Self::Statement> {
         crate::metrics::METRIC_POSTGRES_PREPARED_COUNT.inc();
         let query_ctx = self.session.new_query_context();
@@ -341,7 +341,9 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         C: ClientInfo + Unpin + Send + Sync,
     {
         let sql_plan = &stmt.statement;
-        let (param_types, sql_plan, format) = if let Some(plan) = &sql_plan.plan {
+        // client provided parameter types, can be empty if client doesn't try to parse statement
+        let provided_param_types = &stmt.parameter_types;
+        let server_inferenced_types = if let Some(plan) = &sql_plan.plan {
             let param_types = plan
                 .get_parameter_types()
                 .context(DataFusionSnafu)
@@ -352,14 +354,36 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
 
             let types = param_types_to_pg_types(&param_types).map_err(convert_err)?;
 
-            (types, sql_plan, &Format::UnifiedBinary)
+            Some(types)
         } else {
-            let param_types = stmt.parameter_types.clone();
-            (param_types, sql_plan, &Format::UnifiedBinary)
+            None
         };
 
+        let param_count = if provided_param_types.is_empty() {
+            server_inferenced_types
+                .as_ref()
+                .map(|types| types.len())
+                .unwrap_or(0)
+        } else {
+            provided_param_types.len()
+        };
+
+        let param_types = (0..param_count)
+            .map(|i| {
+                let client_type = provided_param_types.get(i);
+                // use server type when client provided type is None (oid: 0 or other invalid values)
+                match client_type {
+                    Some(Some(client_type)) => client_type.clone(),
+                    _ => server_inferenced_types
+                        .as_ref()
+                        .and_then(|types| types.get(i).cloned())
+                        .unwrap_or(Type::UNKNOWN),
+                }
+            })
+            .collect::<Vec<_>>();
+
         if let Some(schema) = &sql_plan.schema {
-            schema_to_pg(schema, format)
+            schema_to_pg(schema, &Format::UnifiedBinary)
                 .map(|fields| DescribeStatementResponse::new(param_types, fields))
                 .map_err(convert_err)
         } else {
