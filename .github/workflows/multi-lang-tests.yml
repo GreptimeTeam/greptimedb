@@ -115,6 +115,11 @@ jobs:
           go mod verify
           go version
 
+      - name: Kill existing GreptimeDB processes
+        run: |
+          pkill -f greptime || true
+          sleep 2
+
       - name: Start GreptimeDB standalone
         run: |
           ./bin/greptime standalone start \
