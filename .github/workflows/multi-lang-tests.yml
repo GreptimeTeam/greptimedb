@@ -75,7 +75,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: greptime-bin
-          path: .
+          path: bin
 
       - name: Setup greptime binary
         run: |
