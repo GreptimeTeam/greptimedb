@@ -491,8 +491,11 @@ pub struct LokiPbParser {
 impl LokiPbParser {
     pub fn from_bytes(bytes: Bytes) -> Result<Self> {
         let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
-        let req = loki_proto::logproto::PushRequest::decode(&decompressed[..])
-            .context(DecodeOtlpRequestSnafu)?;
+        let req = loki_proto::logproto::PushRequest::decode(&decompressed[..]).context(
+            DecodeOtlpRequestSnafu {
+                content_type: "application/x-protobuf",
+            },
+        )?;
 
         Ok(Self {
             streams: req.streams.into(),
