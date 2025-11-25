@@ -313,7 +313,8 @@ jobs:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && always() }} # Not requiring successful dependent jobs, always run.
     name: Send notification to Greptime team
     needs: [
-      release-images-to-dockerhub
+      release-images-to-dockerhub,
+      run-multi-lang-tests,
     ]
     runs-on: ubuntu-latest
     permissions:
@@ -331,17 +332,17 @@ jobs:
         run: pnpm tsx bin/report-ci-failure.ts
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CI_REPORT_STATUS: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result == 'success' }}
+          CI_REPORT_STATUS: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result == 'success' && (needs.run-multi-lang-tests.result == 'success' || needs.run-multi-lang-tests.result == 'skipped') }}
       - name: Notify nightly build successful result
         uses: slackapi/slack-github-action@v1.23.0
-        if: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result == 'success' }}
+        if: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result == 'success' && (needs.run-multi-lang-tests.result == 'success' || needs.run-multi-lang-tests.result == 'skipped') }}
         with:
           payload: |
             {"text": "GreptimeDB's ${{ env.NEXT_RELEASE_VERSION }} build has completed successfully."}
 
       - name: Notify nightly build failed result
         uses: slackapi/slack-github-action@v1.23.0
-        if: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result != 'success' }}
+        if: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result != 'success' || needs.run-multi-lang-tests.result == 'failure' }}
         with:
           payload: |
             {"text": "GreptimeDB's ${{ env.NEXT_RELEASE_VERSION }} build has failed, please check ${{ steps.report-ci-status.outputs.html_url }}."}
