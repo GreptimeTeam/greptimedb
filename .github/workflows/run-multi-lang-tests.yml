@@ -108,6 +108,11 @@ jobs:
           cache: true
           cache-dependency-path: go-tests/go.sum
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
       - name: Install Python dependencies
         run: |
           pip install mysql-connector-python psycopg2-binary
@@ -152,10 +157,11 @@ jobs:
       - name: Run multi-language tests
         env:
           DB_NAME: ${{ inputs.db-name }}
-          MYSQL_HOST: localhost
+          MYSQL_HOST: 127.0.0.1
           MYSQL_PORT: ${{ inputs.mysql-port }}
-          POSTGRES_HOST: localhost
+          POSTGRES_HOST: 127.0.0.1
           POSTGRES_PORT: ${{ inputs.postgres-port }}
+          HTTP_HOST: 127.0.0.1
           HTTP_PORT: ${{ inputs.http-port }}
           GREPTIME_USERNAME: ${{ inputs.username }}
           GREPTIME_PASSWORD: ${{ inputs.password }}
