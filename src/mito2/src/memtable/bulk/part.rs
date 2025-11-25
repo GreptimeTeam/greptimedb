@@ -1462,11 +1462,14 @@ fn binary_array_to_dictionary(input: &BinaryArray) -> Result<PrimaryKeyArray> {
 mod tests {
     use std::collections::VecDeque;
 
-    use api::v1::{Row, WriteHint};
+    use api::v1::{Row, SemanticType, WriteHint};
     use datafusion_common::ScalarValue;
     use datatypes::arrow::array::Float64Array;
     use datatypes::prelude::{ConcreteDataType, ScalarVector, Value};
+    use datatypes::schema::ColumnSchema;
     use datatypes::vectors::{Float64Vector, TimestampMillisecondVector};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
     use store_api::storage::consts::ReservedColumnId;
 
     use super::*;
@@ -2438,5 +2441,380 @@ mod tests {
                 "Encoded primary key should not be empty"
             );
         }
+    }
+
+    #[test]
+    fn test_convert_bulk_part_empty() {
+        let metadata = metadata_for_test();
+        let schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+        let primary_key_codec = build_primary_key_codec(&metadata);
+
+        // Create empty batch
+        let empty_batch = RecordBatch::new_empty(schema.clone());
+        let empty_part = BulkPart {
+            batch: empty_batch,
+            max_timestamp: 0,
+            min_timestamp: 0,
+            sequence: 0,
+            timestamp_index: 0,
+            raw_data: None,
+        };
+
+        let result =
+            convert_bulk_part(empty_part, &metadata, primary_key_codec, schema, true).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_convert_bulk_part_dense_with_pk_columns() {
+        let metadata = metadata_for_test();
+        let primary_key_codec = build_primary_key_codec(&metadata);
+
+        let k0_array = Arc::new(arrow::array::StringArray::from(vec![
+            "key1", "key2", "key1",
+        ]));
+        let k1_array = Arc::new(arrow::array::UInt32Array::from(vec![1, 2, 1]));
+        let v0_array = Arc::new(arrow::array::Int64Array::from(vec![100, 200, 300]));
+        let v1_array = Arc::new(arrow::array::Float64Array::from(vec![1.0, 2.0, 3.0]));
+        let ts_array = Arc::new(TimestampMillisecondArray::from(vec![1000, 2000, 1500]));
+
+        let input_schema = Arc::new(Schema::new(vec![
+            Field::new("k0", ArrowDataType::Utf8, false),
+            Field::new("k1", ArrowDataType::UInt32, false),
+            Field::new("v0", ArrowDataType::Int64, true),
+            Field::new("v1", ArrowDataType::Float64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+
+        let input_batch = RecordBatch::try_new(
+            input_schema,
+            vec![k0_array, k1_array, v0_array, v1_array, ts_array],
+        )
+        .unwrap();
+
+        let part = BulkPart {
+            batch: input_batch,
+            max_timestamp: 2000,
+            min_timestamp: 1000,
+            sequence: 5,
+            timestamp_index: 4,
+            raw_data: None,
+        };
+
+        let output_schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+
+        let result = convert_bulk_part(
+            part,
+            &metadata,
+            primary_key_codec,
+            output_schema,
+            true, // store primary key columns
+        )
+        .unwrap();
+
+        let converted = result.unwrap();
+
+        assert_eq!(converted.num_rows(), 3);
+        assert_eq!(converted.max_timestamp, 2000);
+        assert_eq!(converted.min_timestamp, 1000);
+        assert_eq!(converted.sequence, 5);
+
+        let schema = converted.batch.schema();
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            field_names,
+            vec![
+                "k0",
+                "k1",
+                "v0",
+                "v1",
+                "ts",
+                "__primary_key",
+                "__sequence",
+                "__op_type"
+            ]
+        );
+
+        let k0_col = converted.batch.column_by_name("k0").unwrap();
+        assert!(matches!(
+            k0_col.data_type(),
+            ArrowDataType::Dictionary(_, _)
+        ));
+
+        let pk_col = converted.batch.column_by_name("__primary_key").unwrap();
+        let dict_array = pk_col
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt32Type>>()
+            .unwrap();
+        let keys = dict_array.keys();
+
+        assert_eq!(keys.len(), 3);
+    }
+
+    #[test]
+    fn test_convert_bulk_part_dense_without_pk_columns() {
+        let metadata = metadata_for_test();
+        let primary_key_codec = build_primary_key_codec(&metadata);
+
+        // Create input batch with primary key columns (k0, k1)
+        let k0_array = Arc::new(arrow::array::StringArray::from(vec!["key1", "key2"]));
+        let k1_array = Arc::new(arrow::array::UInt32Array::from(vec![1, 2]));
+        let v0_array = Arc::new(arrow::array::Int64Array::from(vec![100, 200]));
+        let v1_array = Arc::new(arrow::array::Float64Array::from(vec![1.0, 2.0]));
+        let ts_array = Arc::new(TimestampMillisecondArray::from(vec![1000, 2000]));
+
+        let input_schema = Arc::new(Schema::new(vec![
+            Field::new("k0", ArrowDataType::Utf8, false),
+            Field::new("k1", ArrowDataType::UInt32, false),
+            Field::new("v0", ArrowDataType::Int64, true),
+            Field::new("v1", ArrowDataType::Float64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+
+        let input_batch = RecordBatch::try_new(
+            input_schema,
+            vec![k0_array, k1_array, v0_array, v1_array, ts_array],
+        )
+        .unwrap();
+
+        let part = BulkPart {
+            batch: input_batch,
+            max_timestamp: 2000,
+            min_timestamp: 1000,
+            sequence: 3,
+            timestamp_index: 4,
+            raw_data: None,
+        };
+
+        let output_schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions {
+                raw_pk_columns: false,
+                string_pk_use_dict: true,
+            },
+        );
+
+        let result = convert_bulk_part(
+            part,
+            &metadata,
+            primary_key_codec,
+            output_schema,
+            false, // don't store primary key columns
+        )
+        .unwrap();
+
+        let converted = result.unwrap();
+
+        assert_eq!(converted.num_rows(), 2);
+        assert_eq!(converted.max_timestamp, 2000);
+        assert_eq!(converted.min_timestamp, 1000);
+        assert_eq!(converted.sequence, 3);
+
+        // Verify schema does NOT include individual primary key columns
+        let schema = converted.batch.schema();
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            field_names,
+            vec!["v0", "v1", "ts", "__primary_key", "__sequence", "__op_type"]
+        );
+
+        // Verify __primary_key column is present and is a dictionary
+        let pk_col = converted.batch.column_by_name("__primary_key").unwrap();
+        assert!(matches!(
+            pk_col.data_type(),
+            ArrowDataType::Dictionary(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_convert_bulk_part_sparse_encoding() {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("k1", ConcreteDataType::string_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("v0", ConcreteDataType::int64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("v1", ConcreteDataType::float64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .primary_key(vec![0, 1])
+            .primary_key_encoding(PrimaryKeyEncoding::Sparse);
+        let metadata = Arc::new(builder.build().unwrap());
+
+        let primary_key_codec = build_primary_key_codec(&metadata);
+
+        // Create input batch with __primary_key column (sparse encoding)
+        let pk_array = Arc::new(arrow::array::BinaryArray::from(vec![
+            b"encoded_key_1".as_slice(),
+            b"encoded_key_2".as_slice(),
+        ]));
+        let v0_array = Arc::new(arrow::array::Int64Array::from(vec![100, 200]));
+        let v1_array = Arc::new(arrow::array::Float64Array::from(vec![1.0, 2.0]));
+        let ts_array = Arc::new(TimestampMillisecondArray::from(vec![1000, 2000]));
+
+        let input_schema = Arc::new(Schema::new(vec![
+            Field::new("__primary_key", ArrowDataType::Binary, false),
+            Field::new("v0", ArrowDataType::Int64, true),
+            Field::new("v1", ArrowDataType::Float64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+
+        let input_batch =
+            RecordBatch::try_new(input_schema, vec![pk_array, v0_array, v1_array, ts_array])
+                .unwrap();
+
+        let part = BulkPart {
+            batch: input_batch,
+            max_timestamp: 2000,
+            min_timestamp: 1000,
+            sequence: 7,
+            timestamp_index: 3,
+            raw_data: None,
+        };
+
+        let output_schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+
+        let result = convert_bulk_part(
+            part,
+            &metadata,
+            primary_key_codec,
+            output_schema,
+            true, // store_primary_key_columns (ignored for sparse)
+        )
+        .unwrap();
+
+        let converted = result.unwrap();
+
+        assert_eq!(converted.num_rows(), 2);
+        assert_eq!(converted.max_timestamp, 2000);
+        assert_eq!(converted.min_timestamp, 1000);
+        assert_eq!(converted.sequence, 7);
+
+        // Verify schema does NOT include individual primary key columns (sparse encoding)
+        let schema = converted.batch.schema();
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            field_names,
+            vec!["v0", "v1", "ts", "__primary_key", "__sequence", "__op_type"]
+        );
+
+        // Verify __primary_key is dictionary encoded
+        let pk_col = converted.batch.column_by_name("__primary_key").unwrap();
+        assert!(matches!(
+            pk_col.data_type(),
+            ArrowDataType::Dictionary(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_convert_bulk_part_sorting_with_multiple_series() {
+        let metadata = metadata_for_test();
+        let primary_key_codec = build_primary_key_codec(&metadata);
+
+        // Create unsorted batch with multiple series and timestamps
+        let k0_array = Arc::new(arrow::array::StringArray::from(vec![
+            "series_b", "series_a", "series_b", "series_a",
+        ]));
+        let k1_array = Arc::new(arrow::array::UInt32Array::from(vec![2, 1, 2, 1]));
+        let v0_array = Arc::new(arrow::array::Int64Array::from(vec![200, 100, 400, 300]));
+        let v1_array = Arc::new(arrow::array::Float64Array::from(vec![2.0, 1.0, 4.0, 3.0]));
+        let ts_array = Arc::new(TimestampMillisecondArray::from(vec![
+            2000, 1000, 4000, 3000,
+        ]));
+
+        let input_schema = Arc::new(Schema::new(vec![
+            Field::new("k0", ArrowDataType::Utf8, false),
+            Field::new("k1", ArrowDataType::UInt32, false),
+            Field::new("v0", ArrowDataType::Int64, true),
+            Field::new("v1", ArrowDataType::Float64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+
+        let input_batch = RecordBatch::try_new(
+            input_schema,
+            vec![k0_array, k1_array, v0_array, v1_array, ts_array],
+        )
+        .unwrap();
+
+        let part = BulkPart {
+            batch: input_batch,
+            max_timestamp: 4000,
+            min_timestamp: 1000,
+            sequence: 10,
+            timestamp_index: 4,
+            raw_data: None,
+        };
+
+        let output_schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+
+        let result =
+            convert_bulk_part(part, &metadata, primary_key_codec, output_schema, true).unwrap();
+
+        let converted = result.unwrap();
+
+        assert_eq!(converted.num_rows(), 4);
+
+        // Verify data is sorted by (primary_key, timestamp, sequence desc)
+        let ts_col = converted.batch.column(converted.timestamp_index);
+        let ts_array = ts_col
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+
+        // After sorting by (pk, ts), we should have:
+        // series_a,1: ts=1000, 3000
+        // series_b,2: ts=2000, 4000
+        let timestamps: Vec<i64> = ts_array.values().to_vec();
+        assert_eq!(timestamps, vec![1000, 3000, 2000, 4000]);
     }
 }
