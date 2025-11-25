@@ -46,12 +46,13 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
 use common_query::Output;
-use common_telemetry::tracing;
+use common_telemetry::{debug, tracing};
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use humantime::format_duration;
+use itertools::Itertools;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::QueryEngineRef;
 use query::parser::QueryStatement;
@@ -451,6 +452,13 @@ impl StatementExecutor {
 
     fn set_variables(&self, set_var: SetVariables, query_ctx: QueryContextRef) -> Result<Output> {
         let var_name = set_var.variable.to_string().to_uppercase();
+
+        debug!(
+            "Trying to set {}={} for session: {} ",
+            var_name,
+            set_var.value.iter().map(|e| e.to_string()).join(", "),
+            query_ctx.conn_info()
+        );
 
         match var_name.as_str() {
             "READ_PREFERENCE" => set_read_preference(set_var.value, query_ctx)?,
