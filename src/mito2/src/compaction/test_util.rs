@@ -75,6 +75,7 @@ pub fn new_file_handle_with_size_and_sequence(
             level,
             file_size,
             available_indexes: Default::default(),
+            indexes: Default::default(),
             index_file_size: 0,
             index_file_id: None,
             num_rows: 0,
