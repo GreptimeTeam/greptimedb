@@ -210,8 +210,8 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
                 }
             }
             ConcreteDataType::Binary(_) => Ok(ScalarValue::Binary(Some(b.to_vec()))),
-            ConcreteDataType::Timestamp(ts_type) => covert_bytes_to_timestamp(b, ts_type),
-            ConcreteDataType::Date(_) => covert_bytes_to_date(b),
+            ConcreteDataType::Timestamp(ts_type) => convert_bytes_to_timestamp(b, ts_type),
+            ConcreteDataType::Date(_) => convert_bytes_to_date(b),
             _ => error::PreparedStmtTypeMismatchSnafu {
                 expected: t,
                 actual: param.coltype,
@@ -286,7 +286,7 @@ pub fn convert_expr_to_scalar_value(param: &Expr, t: &ConcreteDataType) -> Resul
     }
 }
 
-fn covert_bytes_to_timestamp(bytes: &[u8], ts_type: &TimestampType) -> Result<ScalarValue> {
+fn convert_bytes_to_timestamp(bytes: &[u8], ts_type: &TimestampType) -> Result<ScalarValue> {
     let ts = Timestamp::from_str_utc(&String::from_utf8_lossy(bytes))
         .map_err(|e| {
             error::MysqlValueConversionSnafu {
@@ -315,7 +315,7 @@ fn covert_bytes_to_timestamp(bytes: &[u8], ts_type: &TimestampType) -> Result<Sc
     }
 }
 
-fn covert_bytes_to_date(bytes: &[u8]) -> Result<ScalarValue> {
+fn convert_bytes_to_date(bytes: &[u8]) -> Result<ScalarValue> {
     let date = Date::from_str_utc(&String::from_utf8_lossy(bytes)).map_err(|e| {
         error::MysqlValueConversionSnafu {
             err_msg: e.to_string(),
@@ -524,7 +524,7 @@ mod tests {
         ];
 
         for (input, ts_type, expected) in test_cases {
-            let result = covert_bytes_to_timestamp(input.as_bytes(), &ts_type).unwrap();
+            let result = convert_bytes_to_timestamp(input.as_bytes(), &ts_type).unwrap();
             assert_eq!(result, expected);
         }
     }
@@ -544,7 +544,7 @@ mod tests {
         ];
 
         for (input, expected) in test_cases {
-            let result = covert_bytes_to_date(input.as_bytes()).unwrap();
+            let result = convert_bytes_to_date(input.as_bytes()).unwrap();
             assert_eq!(result, expected, "Failed for input: {}", input);
         }
     }
