@@ -173,62 +173,35 @@ pub fn new_fs_object_store(root: &str) -> std::result::Result<ObjectStore, Boxed
     Ok(with_instrument_layers(object_store, false))
 }
 
+macro_rules! gen_object_store_builder {
+    ($method:ident, $field:ident, $conn_type:ty, $service_type:ty) => {
+        pub fn $method(&self) -> Result<ObjectStore, BoxedError> {
+            let config = <$conn_type>::from(self.$field.clone());
+            common_telemetry::info!(
+                "Building object store with {}: {:?}",
+                stringify!($field),
+                config
+            );
+            let object_store = ObjectStore::new(<$service_type>::from(&config))
+                .context(error::InitBackendSnafu)
+                .map_err(BoxedError::new)?
+                .finish();
+            Ok(with_instrument_layers(
+                with_retry_layers(object_store),
+                false,
+            ))
+        }
+    };
+}
+
 impl ObjectStoreConfig {
-    /// Builds the object store with S3.
-    pub fn build_s3(&self) -> Result<ObjectStore, BoxedError> {
-        let s3 = S3Connection::from(self.s3.clone());
-        common_telemetry::info!("Building object store with s3: {:?}", s3);
-        let object_store = ObjectStore::new(S3::from(&s3))
-            .context(error::InitBackendSnafu)
-            .map_err(BoxedError::new)?
-            .finish();
-        Ok(with_instrument_layers(
-            with_retry_layers(object_store),
-            false,
-        ))
-    }
+    gen_object_store_builder!(build_s3, s3, S3Connection, S3);
 
-    /// Builds the object store with OSS.
-    pub fn build_oss(&self) -> Result<ObjectStore, BoxedError> {
-        let oss = OssConnection::from(self.oss.clone());
-        common_telemetry::info!("Building object store with oss: {:?}", oss);
-        let object_store = ObjectStore::new(Oss::from(&oss))
-            .context(error::InitBackendSnafu)
-            .map_err(BoxedError::new)?
-            .finish();
-        Ok(with_instrument_layers(
-            with_retry_layers(object_store),
-            false,
-        ))
-    }
+    gen_object_store_builder!(build_oss, oss, OssConnection, Oss);
 
-    /// Builds the object store with GCS.
-    pub fn build_gcs(&self) -> Result<ObjectStore, BoxedError> {
-        let gcs = GcsConnection::from(self.gcs.clone());
-        common_telemetry::info!("Building object store with gcs: {:?}", gcs);
-        let object_store = ObjectStore::new(Gcs::from(&gcs))
-            .context(error::InitBackendSnafu)
-            .map_err(BoxedError::new)?
-            .finish();
-        Ok(with_instrument_layers(
-            with_retry_layers(object_store),
-            false,
-        ))
-    }
+    gen_object_store_builder!(build_gcs, gcs, GcsConnection, Gcs);
 
-    /// Builds the object store with Azure Blob.
-    pub fn build_azblob(&self) -> Result<ObjectStore, BoxedError> {
-        let azblob = AzblobConnection::from(self.azblob.clone());
-        common_telemetry::info!("Building object store with azblob: {:?}", azblob);
-        let object_store = ObjectStore::new(Azblob::from(&azblob))
-            .context(error::InitBackendSnafu)
-            .map_err(BoxedError::new)?
-            .finish();
-        Ok(with_instrument_layers(
-            with_retry_layers(object_store),
-            false,
-        ))
-    }
+    gen_object_store_builder!(build_azblob, azblob, AzblobConnection, Azblob);
 
     /// Builds the object store from the config.
     pub fn build(&self) -> Result<Option<ObjectStore>, BoxedError> {
