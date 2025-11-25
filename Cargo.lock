@@ -8675,6 +8675,7 @@ dependencies = [
  "futures",
  "futures-util",
  "humantime",
+ "itertools 0.14.0",
  "jsonb",
  "lazy_static",
  "meta-client",
