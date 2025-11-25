@@ -261,7 +261,7 @@ impl TimePartitions {
             converter.append_key_values(kvs)?;
             let part = converter.convert()?;
 
-            return self.write_bulk(part);
+            return self.write_bulk_inner(part);
         }
 
         // Get all parts.
@@ -291,6 +291,7 @@ impl TimePartitions {
         self.write_multi_parts(kvs, &parts)
     }
 
+    /// Writes a bulk part.
     pub fn write_bulk(&self, part: BulkPart) -> Result<()> {
         // Convert the bulk part if bulk_schema is Some
         let part = if let Some(bulk_schema) = &self.bulk_schema {
@@ -310,6 +311,11 @@ impl TimePartitions {
             part
         };
 
+        self.write_bulk_inner(part)
+    }
+
+    /// Writes a bulk part without converting.
+    fn write_bulk_inner(&self, part: BulkPart) -> Result<()> {
         let time_type = self
             .metadata
             .time_index_column()
