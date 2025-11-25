@@ -1,16 +1,6 @@
 name: Multi-language Integration Tests
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths-ignore:
-      - 'docs/**'
-      - 'config/**'
-      - '**.md'
-      - '.dockerignore'
-      - 'docker/**'
-      - '.gitignore'
-      - 'grafana/**'
   push:
     branches:
       - main
