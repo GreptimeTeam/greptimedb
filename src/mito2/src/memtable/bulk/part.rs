@@ -908,7 +908,14 @@ pub fn convert_bulk_part(
                 .context(ColumnNotFoundSnafu {
                     column: PRIMARY_KEY_COLUMN_NAME,
                 })?;
-        part.batch.column(*pk_col_idx).clone()
+        let col = part.batch.column(*pk_col_idx);
+
+        // Casts to dictionary type if needed
+        let target_type = ArrowDataType::Dictionary(
+            Box::new(ArrowDataType::UInt32),
+            Box::new(ArrowDataType::Binary),
+        );
+        arrow::compute::cast(col, &target_type).context(ComputeArrowSnafu)?
     };
     output_columns.push(pk_dictionary);
 
