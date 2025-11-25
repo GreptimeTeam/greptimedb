@@ -191,6 +191,8 @@ impl BulkPart {
         // Finds columns that need to be filled
         let mut columns_to_fill = Vec::new();
         for column_meta in &region_metadata.column_metadatas {
+            // TODO(yingwen): Returns error if it is impure default after we support filling
+            // bulk insert request in the frontend
             if !batch_columns.contains(column_meta.column_schema.name.as_str()) {
                 columns_to_fill.push(column_meta);
             }
@@ -460,32 +462,6 @@ impl UnorderedPart {
         self.max_sequence = 0;
     }
 }
-
-// /// Gets the default value for a column.
-// /// Similar to WriteRequest::column_default_value but always returns Put operation defaults.
-// fn get_column_default_value(
-//     region_id: RegionId,
-//     column: &ColumnMetadata,
-// ) -> Result<datatypes::value::Value> {
-//     // TODO(yingwen): Check column.column_schema.is_default_impure() and return error.
-//     // We should add this check after the frontend can fill defaults for bulk requests.
-//     let default_value = column
-//         .column_schema
-//         .create_default()
-//         .context(CreateDefaultSnafu {
-//             region_id,
-//             column: &column.column_schema.name,
-//         })?
-//         .with_context(|| InvalidRequestSnafu {
-//             region_id,
-//             reason: format!(
-//                 "column {} does not have default value",
-//                 column.column_schema.name
-//             ),
-//         })?;
-
-//     Ok(default_value)
-// }
 
 /// More accurate estimation of the size of a record batch.
 pub(crate) fn record_batch_estimated_size(batch: &RecordBatch) -> usize {
@@ -775,11 +751,10 @@ fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
 }
 
 /// Converts a `BulkPart` that is unordered and without encoded primary keys into a `BulkPart`
-/// with the same format as produced by `BulkPartConverter`.
+/// with the same format as produced by [BulkPartConverter].
 ///
 /// This function takes a `BulkPart` where:
-/// - For dense encoding: Primary key columns may be stored as individual columns at the beginning,
-///   and there is no encoded `__primary_key` dictionary column
+/// - For dense encoding: Primary key columns may be stored as individual columns
 /// - For sparse encoding: The `__primary_key` column should already be present with encoded keys
 /// - The batch may not be sorted
 ///
@@ -793,7 +768,7 @@ fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
 /// * `part` - The input `BulkPart` to convert
 /// * `region_metadata` - Region metadata containing schema information
 /// * `primary_key_codec` - Codec for encoding primary keys
-/// * `schema` - Target schema for the output batch (from `to_flat_sst_arrow_schema`)
+/// * `schema` - Target schema for the output batch
 /// * `store_primary_key_columns` - If true and encoding is not sparse, stores individual primary key columns
 ///
 /// # Returns
@@ -814,7 +789,7 @@ pub fn convert_bulk_part(
     let num_rows = part.num_rows();
     let is_sparse = region_metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse;
 
-    // Build a column name-to-index map for efficient lookups
+    // Builds a column name-to-index map for efficient lookups
     let input_schema = part.batch.schema();
     let column_indices: HashMap<&str, usize> = input_schema
         .fields()
@@ -823,10 +798,10 @@ pub fn convert_bulk_part(
         .map(|(idx, field)| (field.name().as_str(), idx))
         .collect();
 
-    // Determine the structure of the input batch by looking up columns by name
+    // Determines the structure of the input batch by looking up columns by name
     let mut output_columns = Vec::new();
 
-    // Extract primary key columns if we need to encode them (dense encoding)
+    // Extracts primary key columns if we need to encode them (dense encoding)
     let pk_array = if is_sparse {
         // For sparse encoding, the input should already have the __primary_key column
         // We need to find it in the input batch
@@ -853,7 +828,7 @@ pub fn convert_bulk_part(
         for row_idx in 0..num_rows {
             encode_buf.clear();
 
-            // Collect primary key values with column IDs for this row
+            // Collects primary key values with column IDs for this row
             let pk_values_with_ids: Vec<_> = region_metadata
                 .primary_key
                 .iter()
@@ -861,7 +836,7 @@ pub fn convert_bulk_part(
                 .map(|(col_id, vector)| (*col_id, vector.get_ref(row_idx)))
                 .collect();
 
-            // Encode the primary key
+            // Encodes the primary key
             primary_key_codec
                 .encode_value_refs(&pk_values_with_ids, &mut encode_buf)
                 .context(EncodeSnafu)?;
@@ -874,10 +849,7 @@ pub fn convert_bulk_part(
         Some(key_array_builder.finish())
     };
 
-    // Build output columns according to the target schema
-    // Schema format: [pk_columns (optional)..., field_columns..., timestamp, __primary_key, __sequence, __op_type]
-
-    // Add primary key columns if storing them (only for dense encoding)
+    // Adds primary key columns if storing them (only for dense encoding)
     if store_primary_key_columns && !is_sparse {
         for col_meta in region_metadata.primary_key_columns() {
             let col_idx = column_indices
@@ -887,9 +859,8 @@ pub fn convert_bulk_part(
                 })?;
             let col = part.batch.column(*col_idx);
 
-            // Convert to dictionary if needed for string types
+            // Converts to dictionary if needed for string types
             let col = if col_meta.column_schema.data_type.is_string() {
-                // Use arrow::compute::cast to convert String array to Dictionary<UInt32, Utf8> array
                 let target_type = ArrowDataType::Dictionary(
                     Box::new(ArrowDataType::UInt32),
                     Box::new(ArrowDataType::Utf8),
@@ -902,7 +873,7 @@ pub fn convert_bulk_part(
         }
     }
 
-    // Add field columns
+    // Adds field columns
     for col_meta in region_metadata.field_columns() {
         let col_idx = column_indices
             .get(col_meta.column_schema.name.as_str())
@@ -912,7 +883,7 @@ pub fn convert_bulk_part(
         output_columns.push(part.batch.column(*col_idx).clone());
     }
 
-    // Add timestamp column
+    // Adds timestamp column
     let new_timestamp_index = output_columns.len();
     let ts_col_idx = column_indices
         .get(
@@ -927,12 +898,10 @@ pub fn convert_bulk_part(
         })?;
     output_columns.push(part.batch.column(*ts_col_idx).clone());
 
-    // Add encoded primary key dictionary column
+    // Adds encoded primary key dictionary column
     let pk_dictionary = if let Some(pk_dict_array) = pk_array {
-        // PrimaryKeyArrayBuilder::finish() already returns a dictionary array
         Arc::new(pk_dict_array) as ArrayRef
     } else {
-        // For sparse encoding, extract the existing __primary_key column by index
         let pk_col_idx =
             column_indices
                 .get(PRIMARY_KEY_COLUMN_NAME)
@@ -943,18 +912,15 @@ pub fn convert_bulk_part(
     };
     output_columns.push(pk_dictionary);
 
-    // Add sequence column - create from BulkPart::sequence
     let sequence_array = UInt64Array::from(vec![part.sequence; num_rows]);
     output_columns.push(Arc::new(sequence_array) as ArrayRef);
 
-    // Add op_type column - always Put (1)
     let op_type_array = UInt8Array::from(vec![OpType::Put as u8; num_rows]);
     output_columns.push(Arc::new(op_type_array) as ArrayRef);
 
-    // Create the new batch with the target schema
     let batch = RecordBatch::try_new(schema, output_columns).context(NewRecordBatchSnafu)?;
 
-    // Sort the batch by (primary_key, timestamp, sequence desc)
+    // Sorts the batch by (primary_key, timestamp, sequence desc)
     let sorted_batch = sort_primary_key_record_batch(&batch)?;
 
     Ok(Some(BulkPart {
