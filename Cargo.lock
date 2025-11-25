@@ -8675,6 +8675,7 @@ dependencies = [
  "futures",
  "futures-util",
  "humantime",
+ "itertools 0.14.0",
  "jsonb",
  "lazy_static",
  "meta-client",
@@ -9198,9 +9199,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.36.0"
+version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5cc59678d0c10c73a552d465ce9156995189d1c678f2784dc817fe8623487f5"
+checksum = "d331bb0eef5bc83a221c0a85b1f205bccf094d4f72a26ae1d68a1b1c535123b7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
