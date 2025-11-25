@@ -528,4 +528,24 @@ mod tests {
             assert_eq!(result, expected);
         }
     }
+
+    #[test]
+    fn test_convert_bytes_to_date() {
+        let test_cases = vec![
+            // Standard date format: YYYY-MM-DD
+            ("1970-01-01", ScalarValue::Date32(Some(0))),
+            ("1969-12-31", ScalarValue::Date32(Some(-1))),
+            ("2024-02-29", ScalarValue::Date32(Some(19782))),
+            ("2024-01-01", ScalarValue::Date32(Some(19723))),
+            ("2024-12-31", ScalarValue::Date32(Some(20088))),
+            ("2001-01-02", ScalarValue::Date32(Some(11324))),
+            ("2050-06-14", ScalarValue::Date32(Some(29384))),
+            ("2020-03-15", ScalarValue::Date32(Some(18336))),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = covert_bytes_to_date(input.as_bytes()).unwrap();
+            assert_eq!(result, expected, "Failed for input: {}", input);
+        }
+    }
 }
