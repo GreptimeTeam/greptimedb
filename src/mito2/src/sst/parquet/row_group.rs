@@ -37,7 +37,7 @@ use crate::sst::parquet::helper::{MERGE_GAP, fetch_byte_ranges};
 
 /// Metrics for tracking page/row group fetch operations.
 /// Uses atomic counters for thread-safe updates.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ParquetFetchMetrics {
     /// Number of page cache hits.
     page_cache_hit: std::sync::atomic::AtomicUsize,
@@ -51,6 +51,63 @@ pub struct ParquetFetchMetrics {
     write_cache_fetch_elapsed: std::sync::atomic::AtomicU64,
     /// Elapsed time in microseconds fetching from object store.
     object_store_fetch_elapsed: std::sync::atomic::AtomicU64,
+}
+
+impl std::fmt::Debug for ParquetFetchMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{{")?;
+        let mut first = true;
+
+        let page_cache_hit = self.page_cache_hit();
+        let page_cache_miss = self.page_cache_miss();
+        let write_cache_hit = self.write_cache_hit();
+        let write_cache_miss = self.write_cache_miss();
+        let write_cache_elapsed = self.write_cache_fetch_elapsed();
+        let object_store_elapsed = self.object_store_fetch_elapsed();
+
+        if page_cache_hit > 0 {
+            write!(f, "\"page_cache_hit\":{}", page_cache_hit)?;
+            first = false;
+        }
+        if page_cache_miss > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"page_cache_miss\":{}", page_cache_miss)?;
+            first = false;
+        }
+        if write_cache_hit > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"write_cache_hit\":{}", write_cache_hit)?;
+            first = false;
+        }
+        if write_cache_miss > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"write_cache_miss\":{}", write_cache_miss)?;
+            first = false;
+        }
+        if write_cache_elapsed > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            let duration = std::time::Duration::from_micros(write_cache_elapsed);
+            write!(f, "\"write_cache_fetch_elapsed\":\"{:?}\"", duration)?;
+            first = false;
+        }
+        if object_store_elapsed > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            let duration = std::time::Duration::from_micros(object_store_elapsed);
+            write!(f, "\"object_store_fetch_elapsed\":\"{:?}\"", duration)?;
+        }
+
+        write!(f, "}}")
+    }
 }
 
 impl ParquetFetchMetrics {
@@ -130,12 +187,18 @@ impl ParquetFetchMetrics {
     pub fn merge_from(&self, other: &ParquetFetchMetrics) {
         self.page_cache_hit
             .fetch_add(other.page_cache_hit(), std::sync::atomic::Ordering::Relaxed);
-        self.page_cache_miss
-            .fetch_add(other.page_cache_miss(), std::sync::atomic::Ordering::Relaxed);
-        self.write_cache_hit
-            .fetch_add(other.write_cache_hit(), std::sync::atomic::Ordering::Relaxed);
-        self.write_cache_miss
-            .fetch_add(other.write_cache_miss(), std::sync::atomic::Ordering::Relaxed);
+        self.page_cache_miss.fetch_add(
+            other.page_cache_miss(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.write_cache_hit.fetch_add(
+            other.write_cache_hit(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.write_cache_miss.fetch_add(
+            other.write_cache_miss(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         self.write_cache_fetch_elapsed.fetch_add(
             other.write_cache_fetch_elapsed(),
             std::sync::atomic::Ordering::Relaxed,

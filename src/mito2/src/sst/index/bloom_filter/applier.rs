@@ -51,7 +51,7 @@ pub use crate::sst::index::bloom_filter::applier::builder::BloomFilterIndexAppli
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 
 /// Metrics for tracking bloom filter index apply operations.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct BloomFilterIndexApplyMetrics {
     /// Total time spent applying the index.
     pub apply_elapsed: std::time::Duration,
@@ -61,6 +61,47 @@ pub struct BloomFilterIndexApplyMetrics {
     pub blob_read_bytes: u64,
     /// Metrics for bloom filter read operations.
     pub read_metrics: BloomFilterReadMetrics,
+}
+
+impl std::fmt::Debug for BloomFilterIndexApplyMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{{")?;
+        let mut first = true;
+
+        if !self.apply_elapsed.is_zero() {
+            write!(f, "\"apply_elapsed\":\"{:?}\"", self.apply_elapsed)?;
+            first = false;
+        }
+        if self.blob_cache_miss > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"blob_cache_miss\":{}", self.blob_cache_miss)?;
+            first = false;
+        }
+        if self.blob_read_bytes > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"blob_read_bytes\":{}", self.blob_read_bytes)?;
+            first = false;
+        }
+        if self.read_metrics.header_size > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"header_size\":{}", self.read_metrics.header_size)?;
+            first = false;
+        }
+        if self.read_metrics.bitset_size > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"bitset_size\":{}", self.read_metrics.bitset_size)?;
+        }
+
+        write!(f, "}}")
+    }
 }
 
 impl BloomFilterIndexApplyMetrics {
