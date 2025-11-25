@@ -18,7 +18,7 @@ use std::time::Duration;
 use chrono::NaiveDate;
 use common_query::prelude::ScalarValue;
 use common_sql::convert::sql_value_to_value;
-use common_time::Timestamp;
+use common_time::{Date, Timestamp};
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
@@ -211,6 +211,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
             }
             ConcreteDataType::Binary(_) => Ok(ScalarValue::Binary(Some(b.to_vec()))),
             ConcreteDataType::Timestamp(ts_type) => covert_bytes_to_timestamp(b, ts_type),
+            ConcreteDataType::Date(_) => covert_bytes_to_date(b),
             _ => error::PreparedStmtTypeMismatchSnafu {
                 expected: t,
                 actual: param.coltype,
@@ -312,6 +313,17 @@ fn covert_bytes_to_timestamp(bytes: &[u8], ts_type: &TimestampType) -> Result<Sc
         }
         TimestampType::Second(_) => Ok(ScalarValue::TimestampSecond(Some(ts.value()), None)),
     }
+}
+
+fn covert_bytes_to_date(bytes: &[u8]) -> Result<ScalarValue> {
+    let date = Date::from_str_utc(&String::from_utf8_lossy(bytes)).map_err(|e| {
+        error::MysqlValueConversionSnafu {
+            err_msg: e.to_string(),
+        }
+        .build()
+    })?;
+
+    Ok(ScalarValue::Date32(Some(date.val())))
 }
 
 #[cfg(test)]
