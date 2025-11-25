@@ -89,9 +89,9 @@ async fn send_gc_regions(
     mailbox: &MailboxRef,
     peer: &Peer,
     gc_regions: GcRegions,
-    description: &str,
     server_addr: &str,
     timeout: Duration,
+    description: &str,
 ) -> Result<GcReport> {
     let instruction = instruction::Instruction::GcRegions(gc_regions.clone());
     let msg = MailboxMessage::json_message(
@@ -190,9 +190,9 @@ impl GcRegionProcedure {
             &self.mailbox,
             &self.data.peer,
             self.data.gc_regions.clone(),
-            &self.data.description,
             &self.data.server_addr,
             self.data.timeout,
+            &self.data.description,
         )
         .await
     }
@@ -250,6 +250,8 @@ impl Procedure for GcRegionProcedure {
     }
 }
 
+/// Procedure to perform get file refs then batch GC for multiple regions, should only be used by admin function
+/// for triggering manual gc, as it holds locks for too long and for all regions during the procedure.
 pub struct BatchGcProcedure {
     mailbox: MailboxRef,
     data: BatchGcData,
@@ -410,8 +412,6 @@ impl BatchGcProcedure {
 
     /// Send GC instruction to all datanodes that host the regions
     async fn send_gc_instructions(&self) -> Result<()> {
-        use std::collections::HashMap;
-
         let regions = &self.data.regions;
         let region_routes = &self.data.region_routes;
         let file_refs = &self.data.file_refs;
@@ -448,9 +448,9 @@ impl BatchGcProcedure {
                 &self.mailbox,
                 &peer,
                 gc_regions,
-                "Batch GC",
-                "batch_gc",
+                self.data.server_addr.as_str(),
                 timeout,
+                "Batch GC",
             )
             .await?;
 
