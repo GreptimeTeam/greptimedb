@@ -55,7 +55,7 @@ use crate::sst::index::puffin_manager::{
 pub mod builder;
 
 /// Metrics for tracking fulltext index apply operations.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct FulltextIndexApplyMetrics {
     /// Total time spent applying the index.
     pub apply_elapsed: std::time::Duration,
@@ -69,6 +69,69 @@ pub struct FulltextIndexApplyMetrics {
     pub dir_init_elapsed: std::time::Duration,
     /// Metrics for bloom filter reads.
     pub bloom_filter_read_metrics: BloomFilterReadMetrics,
+}
+
+impl std::fmt::Debug for FulltextIndexApplyMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{{")?;
+        let mut first = true;
+
+        if !self.apply_elapsed.is_zero() {
+            write!(f, "\"apply_elapsed\":\"{:?}\"", self.apply_elapsed)?;
+            first = false;
+        }
+        if self.blob_cache_miss > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"blob_cache_miss\":{}", self.blob_cache_miss)?;
+            first = false;
+        }
+        if self.dir_cache_hit > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"dir_cache_hit\":{}", self.dir_cache_hit)?;
+            first = false;
+        }
+        if self.dir_cache_miss > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"dir_cache_miss\":{}", self.dir_cache_miss)?;
+            first = false;
+        }
+        if !self.dir_init_elapsed.is_zero() {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"dir_init_elapsed\":\"{:?}\"", self.dir_init_elapsed)?;
+            first = false;
+        }
+        if self.bloom_filter_read_metrics.header_size > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(
+                f,
+                "\"header_size\":{}",
+                self.bloom_filter_read_metrics.header_size
+            )?;
+            first = false;
+        }
+        if self.bloom_filter_read_metrics.bitset_size > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(
+                f,
+                "\"bitset_size\":{}",
+                self.bloom_filter_read_metrics.bitset_size
+            )?;
+        }
+
+        write!(f, "}}")
+    }
 }
 
 impl FulltextIndexApplyMetrics {

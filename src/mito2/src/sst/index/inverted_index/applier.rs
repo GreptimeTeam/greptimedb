@@ -46,7 +46,7 @@ use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 
 /// Metrics for tracking inverted index apply operations.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct InvertedIndexApplyMetrics {
     /// Total time spent applying the index.
     pub apply_elapsed: std::time::Duration,
@@ -56,6 +56,66 @@ pub struct InvertedIndexApplyMetrics {
     pub blob_read_bytes: u64,
     /// Metrics for inverted index reads.
     pub inverted_index_read_metrics: InvertedIndexReadMetrics,
+}
+
+impl std::fmt::Debug for InvertedIndexApplyMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{{")?;
+        let mut first = true;
+
+        if !self.apply_elapsed.is_zero() {
+            write!(f, "\"apply_elapsed\":\"{:?}\"", self.apply_elapsed)?;
+            first = false;
+        }
+        if self.blob_cache_miss > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"blob_cache_miss\":{}", self.blob_cache_miss)?;
+            first = false;
+        }
+        if self.blob_read_bytes > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"blob_read_bytes\":{}", self.blob_read_bytes)?;
+            first = false;
+        }
+        if self.inverted_index_read_metrics.fst_size > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(
+                f,
+                "\"fst_size\":{}",
+                self.inverted_index_read_metrics.fst_size
+            )?;
+            first = false;
+        }
+        if self.inverted_index_read_metrics.dict_size > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(
+                f,
+                "\"dict_size\":{}",
+                self.inverted_index_read_metrics.dict_size
+            )?;
+            first = false;
+        }
+        if self.inverted_index_read_metrics.bitmap_size > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(
+                f,
+                "\"bitmap_size\":{}",
+                self.inverted_index_read_metrics.bitmap_size
+            )?;
+        }
+
+        write!(f, "}}")
+    }
 }
 
 impl InvertedIndexApplyMetrics {

@@ -1047,7 +1047,7 @@ impl ReaderFilterMetrics {
 }
 
 /// Metrics for parquet metadata cache operations.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Default, Clone, Copy)]
 pub(crate) struct MetadataCacheMetrics {
     /// Number of memory cache hits for parquet metadata.
     pub(crate) mem_cache_hit: usize,
@@ -1059,6 +1059,51 @@ pub(crate) struct MetadataCacheMetrics {
     pub(crate) file_cache_miss: usize,
     /// Duration to load parquet metadata.
     pub(crate) metadata_load_cost: Duration,
+}
+
+impl std::fmt::Debug for MetadataCacheMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{{")?;
+        let mut first = true;
+
+        if self.mem_cache_hit > 0 {
+            write!(f, "\"mem_cache_hit\":{}", self.mem_cache_hit)?;
+            first = false;
+        }
+        if self.mem_cache_miss > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"mem_cache_miss\":{}", self.mem_cache_miss)?;
+            first = false;
+        }
+        if self.file_cache_hit > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"file_cache_hit\":{}", self.file_cache_hit)?;
+            first = false;
+        }
+        if self.file_cache_miss > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"file_cache_miss\":{}", self.file_cache_miss)?;
+            first = false;
+        }
+        if !self.metadata_load_cost.is_zero() {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(
+                f,
+                "\"metadata_load_cost\":\"{:?}\"",
+                self.metadata_load_cost
+            )?;
+        }
+
+        write!(f, "}}")
+    }
 }
 
 impl MetadataCacheMetrics {
@@ -1348,7 +1393,11 @@ impl BatchReader for ParquetReader {
             let parquet_reader = self
                 .context
                 .reader_builder()
-                .build(row_group_idx, Some(row_selection), Some(&self.fetch_metrics))
+                .build(
+                    row_group_idx,
+                    Some(row_selection),
+                    Some(&self.fetch_metrics),
+                )
                 .await?;
 
             // Resets the parquet reader.

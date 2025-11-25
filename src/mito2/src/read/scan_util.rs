@@ -41,12 +41,12 @@ use crate::read::range::{RangeBuilderList, RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::{Batch, BoxedBatchStream, BoxedRecordBatchStream, ScannerMetrics, Source};
 use crate::sst::file::FileTimeRange;
-use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
-use crate::sst::parquet::file_range::FileRange;
-use crate::sst::parquet::flat_format::time_index_column_index;
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplyMetrics;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplyMetrics;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplyMetrics;
+use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
+use crate::sst::parquet::file_range::FileRange;
+use crate::sst::parquet::flat_format::time_index_column_index;
 use crate::sst::parquet::reader::{MetadataCacheMetrics, ReaderFilterMetrics, ReaderMetrics};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 
