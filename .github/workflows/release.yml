@@ -310,7 +310,9 @@ jobs:
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
-    if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: |
+      !cancelled() && !failure() &&
+      (inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule')
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -386,7 +388,9 @@ jobs:
 
   publish-github-release:
     name: Create GitHub release and upload artifacts
-    if: ${{ inputs.publish_github_release || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: |
+      !cancelled() && !failure() &&
+      (inputs.publish_github_release || github.event_name == 'push' || github.event_name == 'schedule')
     needs: [ # The job have to wait for all the artifacts are built.
       allocate-runners,
       build-linux-amd64-artifacts,

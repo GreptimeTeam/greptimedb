@@ -1,3 +1,7 @@
+# Reusable workflow for running multi-language SDK tests against GreptimeDB
+# Used by: multi-lang-tests.yml, release.yml, nightly-build.yml
+# Supports both direct binary artifacts and tarball artifacts
+
 name: Run Multi-language SDK Tests
 
 on:
@@ -69,13 +73,17 @@ jobs:
       - name: Setup greptime binary
         run: |
           mkdir -p bin
-          if [ "${{ inputs.artifact-is-tarball }}" == "true" ]; then
+          if [ "${{ inputs.artifact-is-tarball }}" = "true" ]; then
             # Extract tarball and find greptime binary
             tar -xzf artifact/*.tar.gz -C artifact
             find artifact -name "greptime" -type f -exec cp {} bin/greptime \;
           else
             # Direct binary format
-            cp artifact/greptime bin/greptime 2>/dev/null || cp artifact/* bin/greptime
+            if [ -f artifact/greptime ]; then
+              cp artifact/greptime bin/greptime
+            else
+              cp artifact/* bin/greptime
+            fi
           fi
           chmod +x ./bin/greptime
           ls -lh ./bin/greptime
