@@ -106,28 +106,6 @@ impl std::fmt::Debug for FulltextIndexApplyMetrics {
                 write!(f, ", ")?;
             }
             write!(f, "\"dir_init_elapsed\":\"{:?}\"", self.dir_init_elapsed)?;
-            first = false;
-        }
-        if self.bloom_filter_read_metrics.header_size > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(
-                f,
-                "\"header_size\":{}",
-                self.bloom_filter_read_metrics.header_size
-            )?;
-            first = false;
-        }
-        if self.bloom_filter_read_metrics.bitset_size > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(
-                f,
-                "\"bitset_size\":{}",
-                self.bloom_filter_read_metrics.bitset_size
-            )?;
         }
 
         write!(f, "}}")

@@ -84,20 +84,6 @@ impl std::fmt::Debug for BloomFilterIndexApplyMetrics {
                 write!(f, ", ")?;
             }
             write!(f, "\"blob_read_bytes\":{}", self.blob_read_bytes)?;
-            first = false;
-        }
-        if self.read_metrics.header_size > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"header_size\":{}", self.read_metrics.header_size)?;
-            first = false;
-        }
-        if self.read_metrics.bitset_size > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"bitset_size\":{}", self.read_metrics.bitset_size)?;
         }
 
         write!(f, "}}")
