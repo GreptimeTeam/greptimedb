@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::task::Poll;
@@ -593,17 +594,22 @@ impl HistogramFoldStream {
         let field_array = field_array.as_primitive::<Float64Type>();
 
         while remaining_rows >= bucket_num && self.mode == FoldMode::Optimistic {
-            let inf_index = cursor + bucket_num - 1;
-            if !Self::is_positive_infinity(&le_array, inf_index) {
+            let normal_values = self.collect_normal_values(&vectors, cursor);
+            if !self.validate_optimistic_group(
+                &vectors,
+                &le_array,
+                cursor,
+                bucket_num,
+                &normal_values,
+            ) {
                 let remaining_input_batch = batch.slice(cursor, remaining_rows);
                 self.switch_to_safe_mode(remaining_input_batch)?;
                 return Ok(());
             }
 
             // "sample" normal columns
-            for normal_index in &self.normal_indices {
-                let val = vectors[*normal_index].get(cursor);
-                self.output_buffer[*normal_index].push_value_ref(&val.as_value_ref());
+            for (idx, value) in self.normal_indices.iter().zip(normal_values.iter()) {
+                self.output_buffer[*idx].push_value_ref(&value.as_value_ref());
             }
             // "fold" `le` and field columns
             let mut bucket = Vec::with_capacity(bucket_num);
@@ -672,6 +678,30 @@ impl HistogramFoldStream {
             .iter()
             .map(|idx| vectors[*idx].get(row))
             .collect()
+    }
+
+    fn validate_optimistic_group(
+        &self,
+        vectors: &[VectorRef],
+        le_array: &StringArray,
+        cursor: usize,
+        bucket_num: usize,
+        normal_values: &[Value],
+    ) -> bool {
+        let inf_index = cursor + bucket_num - 1;
+        if !Self::is_positive_infinity(le_array, inf_index) {
+            return false;
+        }
+
+        for offset in 1..bucket_num {
+            let row = cursor + offset;
+            for (idx, expected) in self.normal_indices.iter().zip(normal_values.iter()) {
+                if vectors[*idx].get(row) != *expected {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     fn push_output_row(&mut self, normal_values: &[Value], result: f64) {
@@ -867,8 +897,30 @@ impl HistogramFoldStream {
         }
 
         // check input value
-        debug_assert!(bucket.windows(2).all(|w| w[0] <= w[1]), "{bucket:?}");
-        debug_assert!(counter.windows(2).all(|w| w[0] <= w[1]), "{counter:?}");
+        if !bucket.windows(2).all(|w| w[0] <= w[1]) {
+            return Ok(f64::NAN);
+        }
+        let counter = {
+            let needs_fix = counter
+                .iter()
+                .any(|v| !v.is_finite())
+                || !counter.windows(2).all(|w| w[0] <= w[1]);
+            if !needs_fix {
+                Cow::Borrowed(counter)
+            } else {
+                let mut fixed = Vec::with_capacity(counter.len());
+                let mut prev = 0.0;
+                for (idx, &v) in counter.iter().enumerate() {
+                    let mut val = if v.is_finite() { v } else { prev };
+                    if idx > 0 && val < prev {
+                        val = prev;
+                    }
+                    fixed.push(val);
+                    prev = val;
+                }
+                Cow::Owned(fixed)
+            }
+        };
 
         let total = *counter.last().unwrap();
         let expected_pos = total * quantile;
@@ -887,6 +939,9 @@ impl HistogramFoldStream {
                 lower_bound = bucket[fit_bucket_pos - 1];
                 lower_count = counter[fit_bucket_pos - 1];
             }
+            if (upper_count - lower_count).abs() < f64::EPSILON {
+                return Ok(f64::NAN);
+            }
             Ok(lower_bound
                 + (upper_bound - lower_bound) / (upper_count - lower_count)
                     * (expected_pos - lower_count))
@@ -898,8 +953,8 @@ impl HistogramFoldStream {
 mod test {
     use std::sync::Arc;
 
-    use datafusion::arrow::array::Float64Array;
-    use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
+    use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
+    use datafusion::arrow::datatypes::{Field, Schema, SchemaRef, TimeUnit};
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
@@ -970,6 +1025,7 @@ mod test {
         batches: Vec<RecordBatch>,
         schema: SchemaRef,
         quantile: f64,
+        ts_column_index: usize,
     ) -> Arc<HistogramFoldExec> {
         let memory_exec = Arc::new(DataSourceExec::new(Arc::new(
             MemorySourceConfig::try_new(&[batches], schema.clone(), None).unwrap(),
@@ -994,7 +1050,7 @@ mod test {
             le_column_index: 1,
             field_column_index: 2,
             quantile,
-            ts_column_index: 9999, // not exist but doesn't matter
+            ts_column_index,
             input: memory_exec,
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
@@ -1087,7 +1143,7 @@ mod test {
         let val_column = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 3.0, 1.0, 5.0])) as _;
         let batch =
             RecordBatch::try_new(schema.clone(), vec![host_column, le_column, val_column]).unwrap();
-        let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5);
+        let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 0);
         let session_context = SessionContext::default();
         let result = datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
             .await
@@ -1120,7 +1176,7 @@ mod test {
         let val_column = Arc::new(Float64Array::from(vec![1.0, 2.0])) as _;
         let batch =
             RecordBatch::try_new(schema.clone(), vec![host_column, le_column, val_column]).unwrap();
-        let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.9);
+        let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.9, 0);
         let session_context = SessionContext::default();
         let result = datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
             .await
@@ -1137,6 +1193,49 @@ mod test {
 +------+-----+",
         );
         assert_eq!(result_literal, expected);
+    }
+
+    #[tokio::test]
+    async fn safe_mode_handles_misaligned_groups() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new("le", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+        ]));
+
+        let ts_column = Arc::new(TimestampMillisecondArray::from(vec![
+            2900000, 2900000, 2900000, 3000000, 3000000, 3000000, 3000000, 3005000, 3005000,
+            3010000, 3010000, 3010000, 3010000, 3010000,
+        ])) as _;
+        let le_column = Arc::new(StringArray::from(vec![
+            "0.1", "1", "5", "0.1", "1", "5", "+Inf", "0.1", "+Inf", "0.1", "1", "3", "5", "+Inf",
+        ])) as _;
+        let val_column = Arc::new(Float64Array::from(vec![
+            0.0, 0.0, 0.0, 50.0, 70.0, 110.0, 120.0, 10.0, 30.0, 10.0, 20.0, 30.0, 40.0, 50.0,
+        ])) as _;
+        let batch = RecordBatch::try_new(schema.clone(), vec![ts_column, le_column, val_column])
+            .unwrap();
+        let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 0);
+        let session_context = SessionContext::default();
+        let result = datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
+            .await
+            .unwrap();
+
+        let mut values = Vec::new();
+        for batch in result {
+            let array = batch.column(1).as_primitive::<Float64Type>();
+            values.extend(array.iter().map(|v| v.unwrap()));
+        }
+
+        assert_eq!(values.len(), 4);
+        assert!(values[0].is_nan());
+        assert!((values[1] - 0.55).abs() < 1e-10);
+        assert!((values[2] - 0.1).abs() < 1e-10);
+        assert!((values[3] - 2.0).abs() < 1e-10);
     }
 
     #[test]
@@ -1211,11 +1310,11 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
     fn evaluate_out_of_order_input() {
         let bucket = [0.0, 1.0, 2.0, 3.0, 4.0, f64::INFINITY];
         let counters = [5.0, 4.0, 3.0, 2.0, 1.0, 0.0];
-        HistogramFoldStream::evaluate_row(0.5, &bucket, &counters).unwrap();
+        let result = HistogramFoldStream::evaluate_row(0.5, &bucket, &counters).unwrap();
+        assert_eq!(0.0, result);
     }
 
     #[test]
@@ -1232,5 +1331,21 @@ mod test {
         let counters = [0.0, 1.0 / 300.0, 2.0 / 300.0, 0.01, 0.01];
         let result = HistogramFoldStream::evaluate_row(0.5, &bucket, &counters).unwrap();
         assert_eq!(3.0, result);
+    }
+
+    #[test]
+    fn evaluate_non_monotonic_counter() {
+        let bucket = [0.0, 1.0, 2.0, 3.0, f64::INFINITY];
+        let counters = [0.1, 0.2, 0.4, 0.17, 0.5];
+        let result = HistogramFoldStream::evaluate_row(0.5, &bucket, &counters).unwrap();
+        assert!((result - 1.25).abs() < 1e-10, "{result}");
+    }
+
+    #[test]
+    fn evaluate_nan_counter() {
+        let bucket = [0.0, 1.0, 2.0, 3.0, f64::INFINITY];
+        let counters = [f64::NAN, 1.0, 2.0, 3.0, 3.0];
+        let result = HistogramFoldStream::evaluate_row(0.5, &bucket, &counters).unwrap();
+        assert!((result - 1.5).abs() < 1e-10, "{result}");
     }
 }

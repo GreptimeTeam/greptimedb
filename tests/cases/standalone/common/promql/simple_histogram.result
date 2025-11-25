@@ -395,10 +395,16 @@ insert into histogram5_bucket values
 
 Affected Rows: 14
 
-tql eval (3000, 3010, '3s') histogram_quantile(0.5, sum by(le, s) (rate(histogram5_bucket[5m])));
+tql eval (3000, 3010, '3s') histogram_quantile(0.5, histogram5_bucket);
 
-++
-++
++---------------------+---+--------------------+
+| ts                  | s | val                |
++---------------------+---+--------------------+
+| 1970-01-01T00:50:00 | a | 0.5499999999999999 |
+| 1970-01-01T00:50:03 | a | 0.5499999999999999 |
+| 1970-01-01T00:50:06 | a | 0.775              |
+| 1970-01-01T00:50:09 | a | 0.775              |
++---------------------+---+--------------------+
 
 drop table histogram5_bucket;
 

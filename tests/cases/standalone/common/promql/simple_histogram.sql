@@ -234,6 +234,6 @@ insert into histogram5_bucket values
     (3010000, "+Inf", "a", 50);
 
 
-tql eval (3000, 3010, '3s') histogram_quantile(0.5, sum by(le, s) (rate(histogram5_bucket[5m])));
+tql eval (3000, 3010, '3s') histogram_quantile(0.5, histogram5_bucket);
 
 drop table histogram5_bucket;
