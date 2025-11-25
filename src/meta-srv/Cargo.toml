@@ -64,6 +64,7 @@ lazy_static.workspace = true
 once_cell.workspace = true
 ordered-float.workspace = true
 parking_lot.workspace = true
+partition.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 rand.workspace = true
