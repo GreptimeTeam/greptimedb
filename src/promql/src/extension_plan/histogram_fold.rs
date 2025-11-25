@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use common_telemetry::warn;
 use datafusion::arrow::array::{Array, AsArray, StringArray};
-use datafusion::arrow::compute::{self, SortOptions, concat_batches};
+use datafusion::arrow::compute::{concat_batches, SortOptions};
 use datafusion::arrow::datatypes::{DataType, Float64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
@@ -520,19 +520,18 @@ impl HistogramFoldStream {
                 self.process_safe_mode_buffer()?;
             }
             FoldMode::Optimistic => {
-                let Some(bucket_num) = self.calculate_bucket_num(&input)? else {
-                    self.push_input_buf(input);
+                self.push_input_buf(input);
+                let Some(bucket_num) = self.calculate_bucket_num_from_buffer()? else {
                     return Ok(None);
                 };
                 self.bucket_size = Some(bucket_num);
 
-                if self.input_buffered_rows + input.num_rows() < bucket_num {
+                if self.input_buffered_rows < bucket_num {
                     // not enough rows to fold
-                    self.push_input_buf(input);
                     return Ok(None);
                 }
 
-                self.fold_buf(bucket_num, input)?;
+                self.fold_buf(bucket_num)?;
             }
         }
 
@@ -562,25 +561,52 @@ impl HistogramFoldStream {
         Ok(builders)
     }
 
-    fn calculate_bucket_num(&mut self, batch: &RecordBatch) -> DataFusionResult<Option<usize>> {
+    fn calculate_bucket_num_from_buffer(&mut self) -> DataFusionResult<Option<usize>> {
         if let Some(size) = self.bucket_size {
             return Ok(Some(size));
         }
 
-        let inf_pos = self.find_positive_inf(batch)?;
-        if inf_pos == batch.num_rows() {
+        if self.input_buffer.is_empty() {
             return Ok(None);
         }
 
-        // else we found the positive inf.
-        // calculate the bucket size
-        let bucket_size = inf_pos + self.input_buffered_rows + 1;
-        Ok(Some(bucket_size))
+        let batch_refs: Vec<&RecordBatch> = self.input_buffer.iter().collect();
+        let batch = concat_batches(&self.input_schema, batch_refs)?;
+        self.find_first_complete_bucket(&batch)
+    }
+
+    fn find_first_complete_bucket(
+        &self,
+        batch: &RecordBatch,
+    ) -> DataFusionResult<Option<usize>> {
+        if batch.num_rows() == 0 {
+            return Ok(None);
+        }
+
+        let vectors = Helper::try_into_vectors(batch.columns())
+            .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+        let le_array = batch.column(self.le_column_index).as_string::<i32>();
+
+        let mut current_group_values = self.collect_normal_values(&vectors, 0);
+        let mut group_start = 0usize;
+
+        for row in 0..batch.num_rows() {
+            if !self.is_same_group(&vectors, row, &current_group_values) {
+                // new group begins
+                current_group_values = self.collect_normal_values(&vectors, row);
+                group_start = row;
+            }
+
+            if Self::is_positive_infinity(le_array, row) {
+                return Ok(Some(row - group_start + 1));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Fold record batches from input buffer and put to output buffer
-    fn fold_buf(&mut self, bucket_num: usize, input: RecordBatch) -> DataFusionResult<()> {
-        self.push_input_buf(input);
+    fn fold_buf(&mut self, bucket_num: usize) -> DataFusionResult<()> {
         let batch = concat_batches(&self.input_schema, self.input_buffer.drain(..).as_ref())?;
         let mut remaining_rows = self.input_buffered_rows;
         let mut cursor = 0;
@@ -704,6 +730,18 @@ impl HistogramFoldStream {
         true
     }
 
+    fn is_same_group(
+        &self,
+        vectors: &[VectorRef],
+        row: usize,
+        normal_values: &[Value],
+    ) -> bool {
+        self.normal_indices
+            .iter()
+            .zip(normal_values.iter())
+            .all(|(idx, expected)| vectors[*idx].get(row) == *expected)
+    }
+
     fn push_output_row(&mut self, normal_values: &[Value], result: f64) {
         debug_assert_eq!(self.normal_indices.len(), normal_values.len());
         for (idx, value) in self.normal_indices.iter().zip(normal_values.iter()) {
@@ -810,38 +848,6 @@ impl HistogramFoldStream {
         RecordBatch::try_new(self.output_schema.clone(), columns)
             .map(Some)
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
-    }
-
-    /// Find the first `+Inf` which indicates the end of the bucket group
-    ///
-    /// If the return value equals to batch's num_rows means the it's not found
-    /// in this batch
-    fn find_positive_inf(&self, batch: &RecordBatch) -> DataFusionResult<usize> {
-        let string_le_array = batch.column(self.le_column_index);
-        let float_le_array = compute::cast(&string_le_array, &DataType::Float64).map_err(|e| {
-            DataFusionError::Execution(format!(
-                "cannot cast {} array to float64 array: {:?}",
-                string_le_array.data_type(),
-                e
-            ))
-        })?;
-        let le_as_f64_array = float_le_array
-            .as_primitive_opt::<Float64Type>()
-            .ok_or_else(|| {
-                DataFusionError::Execution(format!(
-                    "expect a float64 array, but found {}",
-                    float_le_array.data_type()
-                ))
-            })?;
-        for (i, v) in le_as_f64_array.iter().enumerate() {
-            if let Some(v) = v
-                && v == f64::INFINITY
-            {
-                return Ok(i);
-            }
-        }
-
-        Ok(batch.num_rows())
     }
 
     fn flush_remaining(&mut self) -> DataFusionResult<()> {
@@ -1236,6 +1242,111 @@ mod test {
         assert!((values[1] - 0.55).abs() < 1e-10);
         assert!((values[2] - 0.1).abs() < 1e-10);
         assert!((values[3] - 2.0).abs() < 1e-10);
+    }
+
+    #[tokio::test]
+    async fn missing_buckets_at_first_timestamp() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new("le", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+        ]));
+
+        let ts_column = Arc::new(TimestampMillisecondArray::from(vec![
+            2_900_000,
+            3_000_000,
+            3_000_000,
+            3_000_000,
+            3_000_000,
+            3_005_000,
+            3_005_000,
+            3_010_000,
+            3_010_000,
+            3_010_000,
+            3_010_000,
+            3_010_000,
+        ])) as _;
+        let le_column = Arc::new(StringArray::from(vec![
+            "0.1",
+            "0.1",
+            "1",
+            "5",
+            "+Inf",
+            "0.1",
+            "+Inf",
+            "0.1",
+            "1",
+            "3",
+            "5",
+            "+Inf",
+        ])) as _;
+        let val_column = Arc::new(Float64Array::from(vec![
+            0.0, 50.0, 70.0, 110.0, 120.0, 10.0, 30.0, 10.0, 20.0, 30.0, 40.0, 50.0,
+        ])) as _;
+
+        let batch = RecordBatch::try_new(schema.clone(), vec![ts_column, le_column, val_column])
+            .unwrap();
+        let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 0);
+        let session_context = SessionContext::default();
+        let result = datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
+            .await
+            .unwrap();
+
+        let mut values = Vec::new();
+        for batch in result {
+            let array = batch.column(1).as_primitive::<Float64Type>();
+            values.extend(array.iter().map(|v| v.unwrap()));
+        }
+
+        assert_eq!(values.len(), 4);
+        assert!(values[0].is_nan());
+        assert!((values[1] - 0.55).abs() < 1e-10);
+        assert!((values[2] - 0.1).abs() < 1e-10);
+        assert!((values[3] - 2.0).abs() < 1e-10);
+    }
+
+    #[tokio::test]
+    async fn missing_inf_in_first_group() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new("le", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+        ]));
+
+        let ts_column = Arc::new(TimestampMillisecondArray::from(vec![
+            1000, 1000, 1000, 2000, 2000, 2000, 2000,
+        ])) as _;
+        let le_column = Arc::new(StringArray::from(vec![
+            "0.1", "1", "5", "0.1", "1", "5", "+Inf",
+        ])) as _;
+        let val_column = Arc::new(Float64Array::from(vec![
+            0.0, 0.0, 0.0, 10.0, 20.0, 30.0, 30.0,
+        ])) as _;
+        let batch = RecordBatch::try_new(schema.clone(), vec![ts_column, le_column, val_column])
+            .unwrap();
+        let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 0);
+        let session_context = SessionContext::default();
+        let result = datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
+            .await
+            .unwrap();
+
+        let mut values = Vec::new();
+        for batch in result {
+            let array = batch.column(1).as_primitive::<Float64Type>();
+            values.extend(array.iter().map(|v| v.unwrap()));
+        }
+
+        assert_eq!(values.len(), 2);
+        assert!(values[0].is_nan());
+        assert!((values[1] - 0.55).abs() < 1e-10, "{values:?}");
     }
 
     #[test]
