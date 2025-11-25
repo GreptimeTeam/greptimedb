@@ -209,9 +209,6 @@ impl LocalGcWorker {
 
     /// Get tmp ref files for all current regions
     ///
-    /// Outdated regions are added to `outdated_regions` set, which means their manifest version in
-    /// self.file_ref_manifest is older than the current manifest version on datanode.
-    /// so they need to retry GC later by metasrv with updated tmp ref files.
     pub async fn read_tmp_ref_files(&self) -> Result<HashMap<RegionId, HashSet<FileId>>> {
         let mut tmp_ref_files = HashMap::new();
         for (region_id, file_refs) in &self.file_ref_manifest.file_refs {
