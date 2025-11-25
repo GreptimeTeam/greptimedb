@@ -101,9 +101,11 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistentContext {
     /// The table catalog.
+    #[deprecated(note = "use `catalog_and_schema` instead")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) catalog: Option<String>,
     /// The table schema.
+    #[deprecated(note = "use `catalog_and_schema` instead")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) schema: Option<String>,
     /// The catalog and schema of the regions.
@@ -124,6 +126,29 @@ pub struct PersistentContext {
     pub(crate) trigger_reason: RegionMigrationTriggerReason,
 }
 
+impl PersistentContext {
+    pub fn new(
+        catalog_and_schema: Vec<(String, String)>,
+        from_peer: Peer,
+        to_peer: Peer,
+        region_ids: Vec<RegionId>,
+        timeout: Duration,
+        trigger_reason: RegionMigrationTriggerReason,
+    ) -> Self {
+        #[allow(deprecated)]
+        Self {
+            catalog: None,
+            schema: None,
+            catalog_and_schema,
+            from_peer,
+            to_peer,
+            region_ids,
+            timeout,
+            trigger_reason,
+        }
+    }
+}
+
 fn default_timeout() -> Duration {
     Duration::from_secs(10)
 }
@@ -132,6 +157,7 @@ impl PersistentContext {
     pub fn lock_key(&self) -> Vec<StringKey> {
         let mut lock_keys =
             Vec::with_capacity(self.region_ids.len() + 2 + self.catalog_and_schema.len() * 2);
+        #[allow(deprecated)]
         if let (Some(catalog), Some(schema)) = (&self.catalog, &self.schema) {
             lock_keys.push(CatalogLock::Read(catalog).into());
             lock_keys.push(SchemaLock::read(catalog, schema).into());

@@ -104,11 +104,12 @@ impl Event for ProcedureEvent {
                 ProcedureState::Poisoned { error, .. } => format!("{:?}", error),
                 _ => "".to_string(),
             };
-            let mut values = vec![
+            let mut values = Vec::with_capacity(3 + internal_event_extra_row.values.len());
+            values.extend([
                 ValueData::StringValue(self.procedure_id.to_string()).into(),
                 ValueData::StringValue(self.state.as_str_name().to_string()).into(),
                 ValueData::StringValue(error_str).into(),
-            ];
+            ]);
             values.append(&mut internal_event_extra_row.values);
             rows.push(Row { values });
         }

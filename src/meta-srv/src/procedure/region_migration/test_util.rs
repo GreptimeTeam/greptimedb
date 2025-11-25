@@ -185,16 +185,14 @@ impl TestingEnv {
 
 /// Generates a [PersistentContext].
 pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> PersistentContext {
-    PersistentContext {
-        catalog: Some("greptime".into()),
-        schema: Some("public".into()),
-        catalog_and_schema: vec![],
-        from_peer: Peer::empty(from),
-        to_peer: Peer::empty(to),
-        region_ids: vec![region_id],
-        timeout: Duration::from_secs(10),
-        trigger_reason: RegionMigrationTriggerReason::default(),
-    }
+    PersistentContext::new(
+        vec![("greptime".into(), "public".into())],
+        Peer::empty(from),
+        Peer::empty(to),
+        vec![region_id],
+        Duration::from_secs(10),
+        RegionMigrationTriggerReason::default(),
+    )
 }
 
 /// The test suite for region migration procedure.

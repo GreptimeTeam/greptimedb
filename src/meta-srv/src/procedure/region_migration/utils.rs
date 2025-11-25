@@ -177,12 +177,11 @@ pub async fn analyze_region_migration_task(
             continue;
         };
         // Throws error if the table route is not a physical table route.
-        let region_routes =
-            table_route
-                .region_routes()
-                .context(error::UnexpectedLogicalRouteTableSnafu {
-                    err_msg: format!("TableRoute({table_id:?}) is a non-physical TableRouteValue."),
-                })?;
+        let region_routes = table_route.region_routes().with_context(|_| {
+            error::UnexpectedLogicalRouteTableSnafu {
+                err_msg: format!("TableRoute({table_id:?}) is a non-physical TableRouteValue."),
+            }
+        })?;
         for region_route in region_routes
             .iter()
             .filter(|r| region_ids.contains(&r.region.id))

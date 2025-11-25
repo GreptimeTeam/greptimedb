@@ -703,7 +703,7 @@ impl RegionSupervisor {
         tasks: Vec<(RegionMigrationProcedureTask, u32)>,
     ) -> Result<()> {
         if tasks.is_empty() {
-            warn!("No failover tasks to execute");
+            debug!("No failover tasks to execute");
             return Ok(());
         }
         let max_count = tasks.iter().map(|(_, count)| *count).max().unwrap_or(1);

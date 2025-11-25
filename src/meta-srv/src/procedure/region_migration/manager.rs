@@ -472,16 +472,14 @@ impl RegionMigrationManager {
         catalog_and_schema: Vec<(String, String)>,
     ) -> Result<ProcedureId> {
         let procedure = RegionMigrationProcedure::new(
-            PersistentContext {
-                catalog: None,
-                schema: None,
+            PersistentContext::new(
                 catalog_and_schema,
-                region_ids: task.region_ids.clone(),
-                from_peer: task.from_peer.clone(),
-                to_peer: task.to_peer.clone(),
-                timeout: task.timeout,
-                trigger_reason: task.trigger_reason,
-            },
+                task.from_peer.clone(),
+                task.to_peer.clone(),
+                task.region_ids.clone(),
+                task.timeout,
+                task.trigger_reason,
+            ),
             self.context_factory.clone(),
             procedure_guards,
         );
@@ -570,16 +568,14 @@ impl RegionMigrationManager {
             trigger_reason,
         } = task.clone();
         let procedure = RegionMigrationProcedure::new(
-            PersistentContext {
-                catalog: Some(catalog_name),
-                schema: Some(schema_name),
-                catalog_and_schema: vec![],
-                region_ids: vec![region_id],
+            PersistentContext::new(
+                vec![(catalog_name, schema_name)],
                 from_peer,
                 to_peer,
+                vec![region_id],
                 timeout,
                 trigger_reason,
-            },
+            ),
             self.context_factory.clone(),
             vec![guard],
         );
