@@ -968,13 +968,24 @@ mod tests {
         let procedure = RegionMigrationProcedure::new(persistent_context, context, vec![]);
 
         let serialized = procedure.dump().unwrap();
-        let expected = r#"{"persistent_ctx":{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_ids":[4398046511105],"timeout":"10s","trigger_reason":"Unknown"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
+        let expected = r#"{"persistent_ctx":{"catalog_and_schema":[["greptime","public"]],"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_ids":[4398046511105],"timeout":"10s","trigger_reason":"Unknown"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
         assert_eq!(expected, serialized);
     }
 
     #[test]
     fn test_backward_compatibility() {
-        let persistent_ctx = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        let persistent_ctx = PersistentContext {
+            #[allow(deprecated)]
+            catalog: Some("greptime".into()),
+            #[allow(deprecated)]
+            schema: Some("public".into()),
+            catalog_and_schema: vec![],
+            from_peer: Peer::empty(1),
+            to_peer: Peer::empty(2),
+            region_ids: vec![RegionId::new(1024, 1)],
+            timeout: Duration::from_secs(10),
+            trigger_reason: RegionMigrationTriggerReason::default(),
+        };
         // NOTES: Changes it will break backward compatibility.
         let serialized = r#"{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105}"#;
         let deserialized: PersistentContext = serde_json::from_str(serialized).unwrap();
