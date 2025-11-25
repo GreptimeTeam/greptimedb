@@ -20,7 +20,6 @@ mod err_handle;
 mod full_list;
 mod integration;
 mod misc;
-mod retry;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};

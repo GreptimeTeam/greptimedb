@@ -214,7 +214,7 @@ async fn test_gc_candidate_scoring() {
 
     let config = GcSchedulerOptions {
         sst_count_weight: 1.0,
-        file_removed_cnt_weight: 0.5,
+        file_removed_count_weight: 0.5,
         min_region_size_threshold: 100 * 1024 * 1024, // 100MB (default)
         ..Default::default()
     };

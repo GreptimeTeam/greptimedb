@@ -25,11 +25,11 @@ use crate::gc::mock::{MockSchedulerCtx, TestEnv, mock_region_stat, new_candidate
 use crate::gc::{GcScheduler, GcSchedulerOptions};
 
 #[tokio::test]
-async fn test_process_datanodes_concurrently_empty() {
+async fn test_parallel_process_datanodes_empty() {
     let env = TestEnv::new();
     let report = env
         .scheduler
-        .process_datanodes_with_retry(HashMap::new())
+        .parallel_process_datanodes(HashMap::new())
         .await;
 
     assert_eq!(report.per_datanode_reports.len(), 0);
@@ -37,7 +37,7 @@ async fn test_process_datanodes_concurrently_empty() {
 }
 
 #[tokio::test]
-async fn test_process_datanodes_concurrently_with_candidates() {
+async fn test_parallel_process_datanodes_with_candidates() {
     init_default_ut_logging();
 
     let table_id = 1;
@@ -83,7 +83,7 @@ async fn test_process_datanodes_concurrently_with_candidates() {
     )]);
 
     let report = scheduler
-        .process_datanodes_with_retry(datanode_to_candidates)
+        .parallel_process_datanodes(datanode_to_candidates)
         .await;
 
     assert_eq!(report.per_datanode_reports.len(), 1);

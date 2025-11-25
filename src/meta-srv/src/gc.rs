@@ -23,6 +23,8 @@ use store_api::storage::RegionId;
 mod candidate;
 mod ctx;
 mod handler;
+#[cfg(test)]
+mod mock;
 mod options;
 mod procedure;
 mod scheduler;

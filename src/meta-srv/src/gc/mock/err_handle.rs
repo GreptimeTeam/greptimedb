@@ -267,7 +267,7 @@ async fn test_get_table_route_failure() {
 
     // This should handle table route failure gracefully
     let report = scheduler
-        .process_datanodes_with_retry(datanode_to_candidates)
+        .parallel_process_datanodes(datanode_to_candidates)
         .await;
 
     // Should process the datanode but handle route error gracefully
