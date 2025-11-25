@@ -132,12 +132,12 @@ jobs:
           echo "Waiting for GreptimeDB..."
           for i in {1..60}; do
             if curl -sf http://localhost:${{ inputs.http-port }}/health > /dev/null; then
-              echo "GreptimeDB is ready"
+              echo "✅ GreptimeDB is ready"
               exit 0
             fi
             sleep 2
           done
-          echo "GreptimeDB failed to start"
+          echo "❌ GreptimeDB failed to start"
           cat /tmp/greptimedb.log
           exit 1
 
