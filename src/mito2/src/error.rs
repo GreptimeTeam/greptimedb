@@ -104,6 +104,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to serialize manifest, region_id: {}", region_id))]
+    SerializeManifest {
+        region_id: RegionId,
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid scan index, start: {}, end: {}", start, end))]
     InvalidScanIndex {
         start: ManifestVersion,
@@ -232,6 +241,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Manifest missing for region {}", region_id))]
+    MissingManifest {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("File consistency check failed for file {}: {}", file_id, reason))]
     InconsistentFile {
         file_id: FileId,
@@ -252,6 +268,13 @@ pub enum Error {
     NoOldManifests {
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Failed to fetch manifests"))]
+    FetchManifests {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
     },
 
     #[snafu(display("Partition expression missing for region {}", region_id))]
@@ -1172,7 +1195,8 @@ impl ErrorExt for Error {
             | FilesLost { .. }
             | InstallManifestTo { .. }
             | Unexpected { .. }
-            | SerializeColumnMetadata { .. } => StatusCode::Unexpected,
+            | SerializeColumnMetadata { .. }
+            | SerializeManifest { .. } => StatusCode::Unexpected,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
@@ -1190,6 +1214,7 @@ impl ErrorExt for Error {
             | DurationOutOfRange { .. }
             | MissingOldManifest { .. }
             | MissingNewManifest { .. }
+            | MissingManifest { .. }
             | NoOldManifests { .. }
             | MissingPartitionExpr { .. }
             | SerializePartitionExpr { .. } => StatusCode::InvalidArguments,
@@ -1210,6 +1235,8 @@ impl ErrorExt for Error {
             | BuildEntry { .. }
             | Metadata { .. }
             | MitoManifestInfo { .. } => StatusCode::Internal,
+
+            FetchManifests { source, .. } => source.status_code(),
 
             OpenRegion { source, .. } => source.status_code(),
 

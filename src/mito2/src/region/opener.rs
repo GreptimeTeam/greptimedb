@@ -28,7 +28,7 @@ use log_store::kafka::log_store::KafkaLogStore;
 use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::manager::ObjectStoreManagerRef;
-use object_store::util::{join_dir, normalize_dir};
+use object_store::util::normalize_dir;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
@@ -49,8 +49,7 @@ use crate::error::{
     Result, StaleLogEntrySnafu,
 };
 use crate::manifest::action::RegionManifest;
-use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
-use crate::manifest::storage::manifest_compress_type;
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::MemtableBuilderProvider;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
@@ -272,7 +271,7 @@ impl RegionOpener {
         };
         // Create a manifest manager for this region and writes regions to the manifest file.
         let region_manifest_options =
-            Self::manifest_options(config, &options, &region_dir, &self.object_store_manager)?;
+            RegionManifestOptions::new(config, &region_dir, &object_store);
         // For remote WAL, we need to set flushed_entry_id to current topic's latest entry id.
         let flushed_entry_id = provider.initial_flushed_entry_id::<S>(wal.store());
         let manifest_manager = RegionManifestManager::new(
@@ -406,13 +405,9 @@ impl RegionOpener {
     ) -> Result<Option<MitoRegionRef>> {
         let now = Instant::now();
         let mut region_options = self.options.as_ref().unwrap().clone();
-
-        let region_manifest_options = Self::manifest_options(
-            config,
-            &region_options,
-            &self.region_dir(),
-            &self.object_store_manager,
-        )?;
+        let object_storage = get_object_store(&region_options.storage, &self.object_store_manager)?;
+        let region_manifest_options =
+            RegionManifestOptions::new(config, &self.region_dir(), &object_storage);
         let Some(manifest_manager) =
             RegionManifestManager::open(region_manifest_options, &self.stats).await?
         else {
@@ -576,27 +571,6 @@ impl RegionOpener {
 
         Ok(Some(region))
     }
-
-    /// Returns a new manifest options.
-    fn manifest_options(
-        config: &MitoConfig,
-        options: &RegionOptions,
-        region_dir: &str,
-        object_store_manager: &ObjectStoreManagerRef,
-    ) -> Result<RegionManifestOptions> {
-        let object_store = get_object_store(&options.storage, object_store_manager)?;
-        Ok(RegionManifestOptions {
-            manifest_dir: new_manifest_dir(region_dir),
-            object_store,
-            // We don't allow users to set the compression algorithm as we use it as a file suffix.
-            // Currently, the manifest storage doesn't have good support for changing compression algorithms.
-            compress_type: manifest_compress_type(config.compress_manifest),
-            checkpoint_distance: config.manifest_checkpoint_distance,
-            remove_file_options: RemoveFileOptions {
-                enable_gc: config.gc.enable,
-            },
-        })
-    }
 }
 
 /// Creates a version builder from a region manifest.
@@ -648,6 +622,7 @@ pub fn get_object_store(
 }
 
 /// A loader for loading metadata from a region dir.
+#[derive(Debug, Clone)]
 pub struct RegionMetadataLoader {
     config: Arc<MitoConfig>,
     object_store_manager: ObjectStoreManagerRef,
@@ -668,7 +643,9 @@ impl RegionMetadataLoader {
         region_dir: &str,
         region_options: &RegionOptions,
     ) -> Result<Option<RegionMetadataRef>> {
-        let manifest = self.load_manifest(region_dir, region_options).await?;
+        let manifest = self
+            .load_manifest(region_dir, &region_options.storage)
+            .await?;
         Ok(manifest.map(|m| m.metadata.clone()))
     }
 
@@ -676,14 +653,11 @@ impl RegionMetadataLoader {
     pub async fn load_manifest(
         &self,
         region_dir: &str,
-        region_options: &RegionOptions,
+        storage: &Option<String>,
     ) -> Result<Option<Arc<RegionManifest>>> {
-        let region_manifest_options = RegionOpener::manifest_options(
-            &self.config,
-            region_options,
-            region_dir,
-            &self.object_store_manager,
-        )?;
+        let object_store = get_object_store(storage, &self.object_store_manager)?;
+        let region_manifest_options =
+            RegionManifestOptions::new(&self.config, region_dir, &object_store);
         let Some(manifest_manager) =
             RegionManifestManager::open(region_manifest_options, &Default::default()).await?
         else {
@@ -846,11 +820,6 @@ where
         now.elapsed()
     );
     Ok(last_entry_id)
-}
-
-/// Returns the directory to the manifest files.
-pub(crate) fn new_manifest_dir(region_dir: &str) -> String {
-    join_dir(region_dir, "manifest")
 }
 
 /// A task to load and fill the region file cache.

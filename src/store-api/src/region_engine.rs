@@ -693,6 +693,26 @@ impl SyncManifestResponse {
     }
 }
 
+/// Request to remap manifests from old regions to new regions.
+#[derive(Debug, Clone)]
+pub struct RemapManifestsRequest {
+    /// The [`RegionId`] of a staging region used to obtain table directory and storage configuration for the remap operation.
+    pub region_id: RegionId,
+    /// Regions to remap manifests from.
+    pub input_regions: Vec<RegionId>,
+    /// For each old region, which new regions should receive its files
+    pub region_mapping: HashMap<RegionId, Vec<RegionId>>,
+    /// New partition expressions for the new regions.
+    pub new_partition_exprs: HashMap<RegionId, String>,
+}
+
+/// Response to remap manifests from old regions to new regions.
+#[derive(Debug, Clone)]
+pub struct RemapManifestsResponse {
+    /// The new manifests for the new regions.
+    pub new_manifests: HashMap<RegionId, String>,
+}
+
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
     /// Name of this engine
@@ -816,6 +836,12 @@ pub trait RegionEngine: Send + Sync {
         region_id: RegionId,
         manifest_info: RegionManifestInfo,
     ) -> Result<SyncManifestResponse, BoxedError>;
+
+    /// Remaps manifests from old regions to new regions.
+    async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse, BoxedError>;
 
     /// Sets region role state gracefully.
     ///

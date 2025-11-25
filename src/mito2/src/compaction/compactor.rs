@@ -41,11 +41,9 @@ use crate::error::{
     EmptyRegionDirSnafu, InvalidPartitionExprSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
-use crate::manifest::storage::manifest_compress_type;
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::metrics;
 use crate::read::{FlatSource, Source};
-use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
@@ -162,19 +160,9 @@ pub async fn open_compaction_region(
     };
 
     let manifest_manager = {
-        let region_manifest_options = RegionManifestOptions {
-            manifest_dir: new_manifest_dir(&region_dir_from_table_dir(
-                &req.table_dir,
-                req.region_id,
-                req.path_type,
-            )),
-            object_store: object_store.clone(),
-            compress_type: manifest_compress_type(mito_config.compress_manifest),
-            checkpoint_distance: mito_config.manifest_checkpoint_distance,
-            remove_file_options: RemoveFileOptions {
-                enable_gc: mito_config.gc.enable,
-            },
-        };
+        let region_dir = region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type);
+        let region_manifest_options =
+            RegionManifestOptions::new(mito_config, &region_dir, object_store);
 
         RegionManifestManager::open(region_manifest_options, &Default::default())
             .await?

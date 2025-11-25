@@ -1035,6 +1035,24 @@ impl RegionMap {
         Ok(region)
     }
 
+    /// Gets staging region by region id.
+    ///
+    /// Returns error if the region does not exist or is not in staging state.
+    pub(crate) fn staging_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+        let region = self
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+        ensure!(
+            region.is_staging(),
+            RegionStateSnafu {
+                region_id,
+                state: region.state(),
+                expect: RegionRoleState::Leader(RegionLeaderState::Staging),
+            }
+        );
+        Ok(region)
+    }
+
     /// Gets flushable region by region id.
     ///
     /// Returns error if the region does not exist or is not operable.

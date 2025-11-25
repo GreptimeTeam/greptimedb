@@ -25,6 +25,7 @@ mod handle_flush;
 mod handle_manifest;
 mod handle_open;
 mod handle_rebuild_index;
+mod handle_remap;
 mod handle_truncate;
 mod handle_write;
 
@@ -1001,6 +1002,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                             .fail(),
                         );
                     }
+                }
+                WorkerRequest::RemapManifests(req) => {
+                    self.handle_remap_manifests_request(req);
                 }
             }
         }

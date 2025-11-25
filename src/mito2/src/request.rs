@@ -26,6 +26,7 @@ use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value, WriteHint};
 use common_telemetry::info;
 use datatypes::prelude::DataType;
+use partition::expr::PartitionExpr;
 use prometheus::HistogramTimer;
 use prost::Message;
 use smallvec::SmallVec;
@@ -44,9 +45,10 @@ use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::{
     CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
-    FlushRegionSnafu, InvalidRequestSnafu, Result, UnexpectedSnafu,
+    FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, MissingPartitionExprSnafu,
+    Result, UnexpectedSnafu,
 };
-use crate::manifest::action::{RegionEdit, TruncateKind};
+use crate::manifest::action::{RegionEdit, RegionManifest, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
@@ -600,6 +602,9 @@ pub(crate) enum WorkerRequest {
         request: RegionBulkInsertsRequest,
         sender: OptionOutputTx,
     },
+
+    /// Remap manifests request.
+    RemapManifests(RemapManifestsRequest),
 }
 
 impl WorkerRequest {
@@ -760,6 +765,48 @@ impl WorkerRequest {
             }),
             receiver,
         )
+    }
+
+    /// Converts [RemapManifestsRequest] from a [RemapManifestsRequest](store_api::region_engine::RemapManifestsRequest).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the partition expression is invalid or missing.
+    /// Returns an error if the new partition expressions are not found for some regions.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn try_from_remap_manifests_request(
+        store_api::region_engine::RemapManifestsRequest {
+            region_id,
+            input_regions,
+            region_mapping,
+            new_partition_exprs,
+        }: store_api::region_engine::RemapManifestsRequest,
+    ) -> Result<(
+        WorkerRequest,
+        Receiver<Result<HashMap<RegionId, RegionManifest>>>,
+    )> {
+        let (sender, receiver) = oneshot::channel();
+        let new_partition_exprs = new_partition_exprs
+            .into_iter()
+            .map(|(k, v)| {
+                Ok((
+                    k,
+                    PartitionExpr::from_json_str(&v)
+                        .context(InvalidPartitionExprSnafu { expr: v })?
+                        .context(MissingPartitionExprSnafu { region_id: k })?,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+
+        let request = RemapManifestsRequest {
+            region_id,
+            input_regions,
+            region_mapping,
+            new_partition_exprs,
+            sender,
+        };
+
+        Ok((WorkerRequest::RemapManifests(request), receiver))
     }
 }
 
@@ -991,6 +1038,20 @@ pub(crate) struct RegionSyncRequest {
     pub(crate) manifest_version: ManifestVersion,
     /// Returns the latest manifest version and a boolean indicating whether new maniefst is installed.
     pub(crate) sender: Sender<Result<(ManifestVersion, bool)>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RemapManifestsRequest {
+    /// The [`RegionId`] of a staging region used to obtain table directory and storage configuration for the remap operation.
+    pub(crate) region_id: RegionId,
+    /// Regions to remap manifests from.
+    pub(crate) input_regions: Vec<RegionId>,
+    /// For each old region, which new regions should receive its files
+    pub(crate) region_mapping: HashMap<RegionId, Vec<RegionId>>,
+    /// New partition expressions for the new regions.
+    pub(crate) new_partition_exprs: HashMap<RegionId, PartitionExpr>,
+    /// Result sender.
+    pub(crate) sender: Sender<Result<HashMap<RegionId, RegionManifest>>>,
 }
 
 #[cfg(test)]

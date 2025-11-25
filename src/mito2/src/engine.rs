@@ -71,6 +71,9 @@ mod sync_test;
 #[cfg(test)]
 mod truncate_test;
 
+#[cfg(test)]
+mod remap_manifests_test;
+
 mod puffin_index;
 
 use std::any::Any;
@@ -101,7 +104,8 @@ use store_api::metric_engine_consts::{
 };
 use store_api::region_engine::{
     BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
-    RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
+    RegionStatistic, RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    SettableRegionRoleState, SyncManifestResponse,
 };
 use store_api::region_request::{
     AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
@@ -116,7 +120,7 @@ use crate::config::MitoConfig;
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
     InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
-    SerdeJsonSnafu, SerializeColumnMetadataSnafu,
+    SerdeJsonSnafu, SerializeColumnMetadataSnafu, SerializeManifestSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
@@ -1027,6 +1031,28 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)?
     }
 
+    async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse> {
+        let region_id = request.region_id;
+        let (request, receiver) = WorkerRequest::try_from_remap_manifests_request(request)?;
+        self.workers.submit_to_worker(region_id, request).await?;
+        let manifests = receiver.await.context(RecvSnafu)??;
+
+        let new_manifests = manifests
+            .into_iter()
+            .map(|(region_id, manifest)| {
+                Ok((
+                    region_id,
+                    serde_json::to_string(&manifest)
+                        .context(SerializeManifestSnafu { region_id })?,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        Ok(RemapManifestsResponse { new_manifests })
+    }
+
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.workers.get_region(region_id).map(|region| {
             if region.is_follower() {
@@ -1201,6 +1227,16 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)?;
 
         Ok(SyncManifestResponse::Mito { synced })
+    }
+
+    async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse, BoxedError> {
+        self.inner
+            .remap_manifests(request)
+            .await
+            .map_err(BoxedError::new)
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
