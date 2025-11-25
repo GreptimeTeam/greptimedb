@@ -33,6 +33,7 @@ use store_api::ManifestVersion;
 use store_api::storage::RegionId;
 use tokio::sync::Semaphore;
 
+use crate::cache::manifest_cache::ManifestCacheRef;
 use crate::error::{
     ChecksumMismatchSnafu, CompressObjectSnafu, DecompressObjectSnafu, InvalidScanIndexSnafu,
     OpenDalSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
@@ -144,6 +145,8 @@ pub struct ManifestObjectStore {
     /// Stores the size of each manifest file.
     manifest_size_map: Arc<RwLock<HashMap<FileKey, u64>>>,
     total_manifest_size: Arc<AtomicU64>,
+    /// Optional manifest cache for local caching.
+    manifest_cache: Option<ManifestCacheRef>,
 }
 
 impl ManifestObjectStore {
@@ -152,6 +155,16 @@ impl ManifestObjectStore {
         object_store: ObjectStore,
         compress_type: CompressionType,
         total_manifest_size: Arc<AtomicU64>,
+    ) -> Self {
+        Self::new_with_cache(path, object_store, compress_type, total_manifest_size, None)
+    }
+
+    pub fn new_with_cache(
+        path: &str,
+        object_store: ObjectStore,
+        compress_type: CompressionType,
+        total_manifest_size: Arc<AtomicU64>,
+        manifest_cache: Option<ManifestCacheRef>,
     ) -> Self {
         let path = util::normalize_dir(path);
         let staging_path = {
@@ -166,6 +179,7 @@ impl ManifestObjectStore {
             staging_path,
             manifest_size_map: Arc::new(RwLock::new(HashMap::new())),
             total_manifest_size,
+            manifest_cache,
         }
     }
 
@@ -306,6 +320,14 @@ impl ManifestObjectStore {
             // Safety: semaphore must exist.
             let _permit = semaphore.acquire().await.unwrap();
 
+            let cache_key = entry.path();
+
+            // Try to get from cache first
+            if let Some(data) = self.get_from_cache(cache_key).await {
+                return Ok((*v, data));
+            }
+
+            // Fetch from remote object store
             let compress_type = file_compress_type(entry.name());
             let bytes = self
                 .object_store
@@ -319,6 +341,10 @@ impl ManifestObjectStore {
                     compress_type,
                     path: entry.path(),
                 })?;
+
+            // Add to cache
+            self.put_to_cache(cache_key.to_string(), data.clone()).await;
+
             Ok((*v, data))
         });
 
@@ -405,6 +431,11 @@ impl ManifestObjectStore {
             ret, self.path, end, checkpoint_version, paths,
         );
 
+        // Remove from cache first
+        for (entry, _, _) in &del_entries {
+            self.remove_from_cache(entry.path()).await;
+        }
+
         self.object_store
             .delete_iter(paths)
             .await
@@ -440,11 +471,23 @@ impl ManifestObjectStore {
                 path: &path,
             })?;
         let delta_size = data.len();
-        self.object_store
-            .write(&path, data)
-            .await
-            .context(OpenDalSnafu)?;
-        self.set_delta_file_size(version, delta_size as u64);
+
+        // Write to cache if not staging and cache is available
+        if !is_staging {
+            self.object_store
+                .write(&path, data.clone())
+                .await
+                .context(OpenDalSnafu)?;
+            self.set_delta_file_size(version, delta_size as u64);
+            self.put_to_cache(path, data).await;
+        } else {
+            self.object_store
+                .write(&path, data)
+                .await
+                .context(OpenDalSnafu)?;
+            self.set_delta_file_size(version, delta_size as u64);
+        }
+
         Ok(())
     }
 
@@ -718,6 +761,31 @@ impl ManifestObjectStore {
         );
 
         Ok(())
+    }
+
+    /// Gets a manifest file from cache.
+    /// Returns the file data if found in cache, None otherwise.
+    async fn get_from_cache(&self, key: &str) -> Option<Vec<u8>> {
+        let cache = self.manifest_cache.as_ref()?;
+        cache.get_file(key).await
+    }
+
+    /// Puts a manifest file into cache.
+    async fn put_to_cache(&self, key: String, data: Vec<u8>) {
+        let Some(cache) = &self.manifest_cache else {
+            return;
+        };
+
+        cache.put_file(key, data).await;
+    }
+
+    /// Removes a manifest file from cache.
+    async fn remove_from_cache(&self, key: &str) {
+        let Some(cache) = &self.manifest_cache else {
+            return;
+        };
+
+        cache.remove(key).await;
     }
 }
 
