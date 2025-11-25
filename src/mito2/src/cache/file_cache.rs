@@ -56,7 +56,7 @@ pub(crate) const DEFAULT_INDEX_CACHE_PERCENT: u8 = 20;
 const MIN_CACHE_CAPACITY: u64 = 512 * 1024 * 1024;
 
 /// Channel capacity for background download tasks.
-const DOWNLOAD_TASK_CHANNEL_SIZE: usize = 100;
+const DOWNLOAD_TASK_CHANNEL_SIZE: usize = 64;
 
 /// A task to download a file in the background.
 struct DownloadTask {
