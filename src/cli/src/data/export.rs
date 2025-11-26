@@ -28,7 +28,7 @@ use tokio::time::Instant;
 
 use crate::common::{ObjectStoreConfig, new_fs_object_store};
 use crate::data::storage_export::{
-    AzblobBackend, FsBackend, GcsBackend, OssBackend, S3Backend, StorageType,
+    AzblobBackend, FsBackend, GcsBackend, OssBackend, S3Backend, StorageExport, StorageType,
 };
 use crate::data::{COPY_PATH_PLACEHOLDER, default_database};
 use crate::database::{DatabaseClient, parse_proxy_opts};
