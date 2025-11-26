@@ -21,12 +21,14 @@ use axum::Extension;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode as HttpStatusCode};
 use axum::response::IntoResponse;
+use axum_extra::TypedHeader;
 use common_catalog::consts::{PARENT_SPAN_ID_COLUMN, TRACE_TABLE_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::{debug, error, tracing, warn};
+use headers::UserAgent;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value as JsonValue;
 use session::context::{Channel, QueryContext};
@@ -340,6 +342,30 @@ pub struct QueryTraceParams {
     pub end_time: Option<i64>,
     pub min_duration: Option<u64>,
     pub max_duration: Option<u64>,
+
+    // The user agent of the trace query, mainly find traces
+    pub user_agent: TraceUserAgent,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum TraceUserAgent {
+    Grafana,
+    // Jaeger-UI does not actually send user agent
+    // But it's a jaeger API, so let's treat it as jaeger
+    #[default]
+    Jaeger,
+}
+
+impl From<UserAgent> for TraceUserAgent {
+    fn from(value: UserAgent) -> Self {
+        let ua_str = value.as_str().to_lowercase();
+        debug!("received user agent: {}", ua_str);
+        if ua_str.contains("grafana") {
+            Self::Grafana
+        } else {
+            Self::Jaeger
+        }
+    }
 }
 
 /// Handle the GET `/api/services` request.
@@ -476,6 +502,7 @@ pub async fn handle_find_traces(
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
     TraceTableName(table_name): TraceTableName,
+    optional_user_agent: Option<TypedHeader<UserAgent>>,
 ) -> impl IntoResponse {
     debug!(
         "Received Jaeger '/api/traces' request, query_params: {:?}, query_ctx: {:?}",
@@ -492,7 +519,10 @@ pub async fn handle_find_traces(
         .start_timer();
 
     match QueryTraceParams::from_jaeger_query_params(query_params) {
-        Ok(query_params) => {
+        Ok(mut query_params) => {
+            if let Some(TypedHeader(user_agent)) = optional_user_agent {
+                query_params.user_agent = user_agent.into();
+            }
             let output = handler.find_traces(query_ctx, query_params).await;
             match output {
                 Ok(output) => match covert_to_records(output).await {
@@ -1571,6 +1601,7 @@ mod tests {
                         ("http.method".to_string(), JsonValue::String("GET".to_string())),
                         ("http.path".to_string(), JsonValue::String("/api/v1/users".to_string())),
                     ])),
+                    user_agent: TraceUserAgent::Jaeger,
                 },
             ),
         ];
