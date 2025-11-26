@@ -212,7 +212,7 @@ impl SchedulerCtx for MockSchedulerCtx {
     async fn get_file_references(
         &self,
         query_regions: &[RegionId],
-        related_regions: HashMap<RegionId, Vec<RegionId>>,
+        _related_regions: HashMap<RegionId, Vec<RegionId>>,
         region_to_peer: &Region2Peers,
         _timeout: Duration,
     ) -> Result<FileRefsManifest> {
@@ -355,14 +355,6 @@ impl SchedulerCtx for MockSchedulerCtx {
             }
         }
 
-        // Handle error sequence for retry testing (this should override the retry logic)
-        {
-            let mut error_sequence = self.gc_regions_error_sequence.lock().unwrap();
-            if !error_sequence.is_empty() {
-                let error = error_sequence.remove(0);
-                return Err(error);
-            }
-        }
 
         // Return the report with need_retry_regions populated - let the caller handle retry logic
         Ok(final_report)
@@ -411,7 +403,7 @@ impl TestEnv {
 }
 
 fn new_candidate(region_id: RegionId, score: f64) -> GcCandidate {
-    // well pass threshold for gc
+    // will pass threshold for gc
     let region_stat = mock_region_stat(region_id, RegionRole::Leader, 10_000, 10);
 
     GcCandidate {

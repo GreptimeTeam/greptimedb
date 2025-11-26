@@ -103,7 +103,7 @@ async fn test_concurrent_table_processing_limits() {
 }
 
 #[tokio::test]
-async fn test_mixed_success_failure_tables() {
+async fn test_datanode_processes_tables_with_partial_gc_failures() {
     init_default_ut_logging();
 
     let table1 = 1;
@@ -156,7 +156,7 @@ async fn test_mixed_success_failure_tables() {
     let candidates = ctx.candidates.lock().unwrap().clone().unwrap_or_default();
 
     // Convert table-based candidates to datanode-based candidates
-    let peer = Peer::new(1, "");
+
     let datanode_to_candidates = HashMap::from([(
         peer,
         candidates
@@ -281,7 +281,7 @@ async fn test_region_gc_concurrency_limit() {
 }
 
 #[tokio::test]
-async fn test_region_gc_concurrency_with_mixed_results() {
+async fn test_region_gc_concurrency_with_partial_failures() {
     init_default_ut_logging();
 
     let table_id = 1;
@@ -361,12 +361,12 @@ async fn test_region_gc_concurrency_with_mixed_results() {
         last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
     };
 
-    let dn2candidates = HashMap::from([(
+    let datanode_to_candidates = HashMap::from([(
         peer.clone(),
         candidates.into_iter().map(|c| (table_id, c)).collect(),
     )]);
 
-    let report = scheduler.parallel_process_datanodes(dn2candidates).await;
+    let report = scheduler.parallel_process_datanodes(datanode_to_candidates).await;
 
     let report = report.per_datanode_reports.get(&peer.id).unwrap();
 
@@ -485,11 +485,11 @@ async fn test_region_gc_concurrency_with_retryable_errors() {
         last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
     };
 
-    let dn2candidates = HashMap::from([(
+    let datanode_to_candidates = HashMap::from([(
         peer.clone(),
         candidates.into_iter().map(|c| (table_id, c)).collect(),
     )]);
-    let report = scheduler.parallel_process_datanodes(dn2candidates).await;
+    let report = scheduler.parallel_process_datanodes(datanode_to_candidates).await;
 
     let report = report.per_datanode_reports.get(&peer.id).unwrap();
 
