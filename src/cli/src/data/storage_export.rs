@@ -21,6 +21,25 @@ use crate::common::{
     PrefixedAzblobConnection, PrefixedGcsConnection, PrefixedOssConnection, PrefixedS3Connection,
 };
 
+/// Helper function to format root path with leading slash if non-empty.
+fn format_root_path(root: &str) -> String {
+    if root.is_empty() {
+        String::new()
+    } else {
+        format!("/{}", root)
+    }
+}
+
+/// Helper function to mask multiple secrets in a string.
+fn mask_secrets(mut sql: String, secrets: &[&str]) -> String {
+    for secret in secrets {
+        if !secret.is_empty() {
+            sql = sql.replace(secret, "[REDACTED]");
+        }
+    }
+    sql
+}
+
 /// Trait for storage backends that can be used for data export.
 #[async_trait]
 pub trait StorageExport: Send + Sync {
@@ -86,11 +105,7 @@ impl S3Backend {
 impl StorageExport for S3Backend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
         let bucket = &self.config.s3_bucket;
-        let root = if self.config.s3_root.is_empty() {
-            String::new()
-        } else {
-            format!("/{}", self.config.s3_root)
-        };
+        let root = format_root_path(&self.config.s3_root);
 
         let s3_path = format!("s3://{}{}/{}/{}/", bucket, root, catalog, schema);
 
@@ -119,22 +134,18 @@ impl StorageExport for S3Backend {
 
     fn format_output_path(&self, _catalog: &str, file_path: &str) -> String {
         let bucket = &self.config.s3_bucket;
-        let root = if self.config.s3_root.is_empty() {
-            String::new()
-        } else {
-            format!("/{}", self.config.s3_root)
-        };
+        let root = format_root_path(&self.config.s3_root);
         format!("s3://{}{}/{}", bucket, root, file_path)
     }
 
     fn mask_sensitive_info(&self, sql: &str) -> String {
-        let mut masked = sql.to_string();
-        masked = masked.replace(self.config.s3_access_key_id.expose_secret(), "[REDACTED]");
-        masked = masked.replace(
-            self.config.s3_secret_access_key.expose_secret(),
-            "[REDACTED]",
-        );
-        masked
+        mask_secrets(
+            sql.to_string(),
+            &[
+                self.config.s3_access_key_id.expose_secret(),
+                self.config.s3_secret_access_key.expose_secret(),
+            ],
+        )
     }
 }
 
@@ -181,13 +192,13 @@ impl StorageExport for OssBackend {
     }
 
     fn mask_sensitive_info(&self, sql: &str) -> String {
-        let mut masked = sql.to_string();
-        masked = masked.replace(self.config.oss_access_key_id.expose_secret(), "[REDACTED]");
-        masked = masked.replace(
-            self.config.oss_access_key_secret.expose_secret(),
-            "[REDACTED]",
-        );
-        masked
+        mask_secrets(
+            sql.to_string(),
+            &[
+                self.config.oss_access_key_id.expose_secret(),
+                self.config.oss_access_key_secret.expose_secret(),
+            ],
+        )
     }
 }
 
@@ -207,11 +218,7 @@ impl GcsBackend {
 impl StorageExport for GcsBackend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
         let bucket = &self.config.gcs_bucket;
-        let root = if self.config.gcs_root.is_empty() {
-            String::new()
-        } else {
-            format!("/{}", self.config.gcs_root)
-        };
+        let root = format_root_path(&self.config.gcs_root);
 
         let gcs_path = format!("gcs://{}{}/{}/{}/", bucket, root, catalog, schema);
 
@@ -246,26 +253,18 @@ impl StorageExport for GcsBackend {
 
     fn format_output_path(&self, _catalog: &str, file_path: &str) -> String {
         let bucket = &self.config.gcs_bucket;
-        let root = if self.config.gcs_root.is_empty() {
-            String::new()
-        } else {
-            format!("/{}", self.config.gcs_root)
-        };
+        let root = format_root_path(&self.config.gcs_root);
         format!("gcs://{}{}/{}", bucket, root, file_path)
     }
 
     fn mask_sensitive_info(&self, sql: &str) -> String {
-        let mut masked = sql.to_string();
-        if !self.config.gcs_credential_path.expose_secret().is_empty() {
-            masked = masked.replace(
+        mask_secrets(
+            sql.to_string(),
+            &[
                 self.config.gcs_credential_path.expose_secret(),
-                "[REDACTED]",
-            );
-        }
-        if !self.config.gcs_credential.expose_secret().is_empty() {
-            masked = masked.replace(self.config.gcs_credential.expose_secret(), "[REDACTED]");
-        }
-        masked
+                self.config.gcs_credential.expose_secret(),
+            ],
+        )
     }
 }
 
@@ -285,11 +284,7 @@ impl AzblobBackend {
 impl StorageExport for AzblobBackend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
         let container = &self.config.azblob_container;
-        let root = if self.config.azblob_root.is_empty() {
-            String::new()
-        } else {
-            format!("/{}", self.config.azblob_root)
-        };
+        let root = format_root_path(&self.config.azblob_root);
 
         let azblob_path = format!("azblob://{}{}/{}/{}/", container, root, catalog, schema);
 
@@ -318,25 +313,18 @@ impl StorageExport for AzblobBackend {
 
     fn format_output_path(&self, _catalog: &str, file_path: &str) -> String {
         let container = &self.config.azblob_container;
-        let root = if self.config.azblob_root.is_empty() {
-            String::new()
-        } else {
-            format!("/{}", self.config.azblob_root)
-        };
+        let root = format_root_path(&self.config.azblob_root);
         format!("azblob://{}{}/{}", container, root, file_path)
     }
 
     fn mask_sensitive_info(&self, sql: &str) -> String {
-        let mut masked = sql.to_string();
-        masked = masked.replace(
-            self.config.azblob_account_name.expose_secret(),
-            "[REDACTED]",
-        );
-        masked = masked.replace(self.config.azblob_account_key.expose_secret(), "[REDACTED]");
-        if let Some(sas_token) = &self.config.azblob_sas_token {
-            masked = masked.replace(sas_token, "[REDACTED]");
-        }
-        masked
+        mask_secrets(
+            sql.to_string(),
+            &[
+                self.config.azblob_account_name.expose_secret(),
+                self.config.azblob_account_key.expose_secret(),
+            ],
+        )
     }
 }
 
@@ -350,9 +338,9 @@ pub enum StorageType {
     Azblob(AzblobBackend),
 }
 
-impl StorageType {
-    /// Get storage path and connection string.
-    pub fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
+#[async_trait]
+impl StorageExport for StorageType {
+    fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
         match self {
             StorageType::Fs(backend) => backend.get_storage_path(catalog, schema),
             StorageType::S3(backend) => backend.get_storage_path(catalog, schema),
@@ -362,8 +350,7 @@ impl StorageType {
         }
     }
 
-    /// Format output path for logging.
-    pub fn format_output_path(&self, catalog: &str, file_path: &str) -> String {
+    fn format_output_path(&self, catalog: &str, file_path: &str) -> String {
         match self {
             StorageType::Fs(backend) => backend.format_output_path(catalog, file_path),
             StorageType::S3(backend) => backend.format_output_path(catalog, file_path),
@@ -373,12 +360,7 @@ impl StorageType {
         }
     }
 
-    pub fn is_remote_storage(&self) -> bool {
-        !matches!(self, StorageType::Fs(_))
-    }
-
-    /// Mask sensitive information in SQL commands.
-    pub fn mask_sensitive_info(&self, sql: &str) -> String {
+    fn mask_sensitive_info(&self, sql: &str) -> String {
         match self {
             StorageType::Fs(backend) => backend.mask_sensitive_info(sql),
             StorageType::S3(backend) => backend.mask_sensitive_info(sql),
@@ -386,5 +368,12 @@ impl StorageType {
             StorageType::Gcs(backend) => backend.mask_sensitive_info(sql),
             StorageType::Azblob(backend) => backend.mask_sensitive_info(sql),
         }
+    }
+}
+
+impl StorageType {
+    /// Returns true if the storage backend is remote (not local filesystem).
+    pub fn is_remote_storage(&self) -> bool {
+        !matches!(self, StorageType::Fs(_))
     }
 }
