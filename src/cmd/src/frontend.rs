@@ -38,7 +38,6 @@ use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
-use datatypes::extension;
 use frontend::frontend::Frontend;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
@@ -430,7 +429,10 @@ impl StartCommand {
             layered_cache_registry.clone(),
         )
         .with_process_manager(process_manager.clone());
-        let builder = if let Some(factories) = extension.info_schema_factories {
+        let builder = if let Some(factories) = extension
+            .as_ref()
+            .and_then(|e| e.info_schema_factories.clone())
+        {
             builder.with_extra_information_table_factories(factories)
         } else {
             builder
@@ -467,7 +469,9 @@ impl StartCommand {
         .with_local_cache_invalidator(layered_cache_registry);
 
         #[cfg(feature = "enterprise")]
-        let builder = if let Some(trigger_querier) = extension.trigger_querier {
+        let builder = if let Some(trigger_querier) =
+            extension.as_ref().and_then(|e| e.trigger_querier.clone())
+        {
             builder.with_trigger_querier(trigger_querier)
         } else {
             builder
