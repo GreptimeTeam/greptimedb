@@ -18,9 +18,10 @@ use mito2::gc::GcConfig;
 use crate::cluster::GreptimeDbClusterBuilder;
 use crate::tests::test_util::{MockInstanceBuilder, TestContext};
 
-#[tokio::test]
-async fn test_gc_basic() {
-    let builder = GreptimeDbClusterBuilder::new("test_gc_basic")
+async fn distributed_with_gc() -> TestContext {
+    common_telemetry::init_default_ut_logging();
+    let test_name = uuid::Uuid::new_v4().to_string();
+    let builder = GreptimeDbClusterBuilder::new(&test_name)
         .await
         .with_metasrv_gc_config(GcSchedulerOptions {
             enable: true,
@@ -30,5 +31,12 @@ async fn test_gc_basic() {
             enable: true,
             ..Default::default()
         });
-    let mut test_context = TestContext::new(MockInstanceBuilder::Distributed(builder)).await;
+    TestContext::new(MockInstanceBuilder::Distributed(builder)).await
+}
+
+#[tokio::test]
+async fn test_gc_basic() {
+    let mut test_context = distributed_with_gc().await;
+
+    // TODO: write some data, flush, repeat once, run compact_table, trigger_gc and verify data files are deleted.
 }
