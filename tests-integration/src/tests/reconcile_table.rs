@@ -24,8 +24,8 @@ use table::table_reference::TableReference;
 
 use crate::cluster::GreptimeDbClusterBuilder;
 use crate::tests::test_util::{
-    MockInstance, MockInstanceBuilder, RebuildableMockInstance, TestContext, dump_kvbackend,
-    execute_sql, restore_kvbackend, try_execute_sql, wait_procedure,
+    MockInstanceBuilder, RebuildableMockInstance, TestContext, dump_kvbackend, execute_sql,
+    restore_kvbackend, try_execute_sql, wait_procedure,
 };
 
 const CREATE_MONITOR_TABLE_SQL: &str = r#"

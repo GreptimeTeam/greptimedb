@@ -345,11 +345,8 @@ pub(crate) fn create_datanode_opts(
         .region_engine
         .into_iter()
         .map(|mut v| {
-            match &mut v {
-                datanode::config::RegionEngineConfig::Mito(mito_config) => {
-                    mito_config.gc = gc_config.clone();
-                }
-                _ => (),
+            if let datanode::config::RegionEngineConfig::Mito(mito_config) = &mut v {
+                mito_config.gc = gc_config.clone();
             }
             v
         })
