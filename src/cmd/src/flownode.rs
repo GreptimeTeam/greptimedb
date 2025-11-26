@@ -47,7 +47,7 @@ use crate::error::{
     BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu,
     MissingConfigSnafu, OtherSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
-use crate::extension::flownode::{ExtensionContext, ExtensionFactory};
+use crate::extension::flownode::{ExtensionContext, FlownodeExtensionFactoryRef};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
@@ -108,12 +108,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build<E: Debug, F: ExtensionFactory>(
-        &self,
-        opts: FlownodeOptions<E>,
-        extension_factory: F,
-    ) -> Result<Instance> {
-        self.subcmd.build(opts, extension_factory).await
+    pub async fn build<E: Debug>(&self, opts: FlownodeOptions<E>) -> Result<Instance> {
+        self.subcmd.build(opts).await
     }
 
     pub fn load_options<E: Configurable>(
@@ -132,13 +128,9 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build<E: Debug, F: ExtensionFactory>(
-        &self,
-        opts: FlownodeOptions<E>,
-        extension_factory: F,
-    ) -> Result<Instance> {
+    async fn build<E: Debug>(&self, opts: FlownodeOptions<E>) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build(opts, extension_factory).await,
+            SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 }
@@ -261,11 +253,7 @@ impl StartCommand {
         Ok(())
     }
 
-    async fn build<E: Debug, F: ExtensionFactory>(
-        &self,
-        opts: FlownodeOptions<E>,
-        extension_factory: F,
-    ) -> Result<Instance> {
+    async fn build<E: Debug>(&self, opts: FlownodeOptions<E>) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -392,7 +380,7 @@ impl StartCommand {
         let frontend_client = Arc::new(frontend_client);
         let flownode_builder = FlownodeBuilder::new(
             opts.clone(),
-            plugins,
+            plugins.clone(),
             table_metadata_manager,
             catalog_manager.clone(),
             flow_metadata_manager,
@@ -402,20 +390,21 @@ impl StartCommand {
 
         let mut flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
 
-        let context = ExtensionContext {
-            kv_backend: cached_meta_backend.clone(),
-            fe_client: frontend_client.clone(),
-            flownode_id: member_id,
-            catalog_manager: catalog_manager.clone(),
+        let extension = if let Some(f) = plugins.get::<FlownodeExtensionFactoryRef>() {
+            let context = ExtensionContext {
+                kv_backend: cached_meta_backend.clone(),
+                fe_client: frontend_client.clone(),
+                flownode_id: member_id,
+                catalog_manager: catalog_manager.clone(),
+            };
+            Some(f.create(context).await.context(OtherSnafu)?)
+        } else {
+            None
         };
-        let extension = extension_factory
-            .create(context)
-            .await
-            .context(OtherSnafu)?;
 
         let mut builder =
             FlownodeServiceBuilder::grpc_server_builder(&opts, flownode.flownode_server());
-        if let Some(grpc_extension) = extension.grpc {
+        if let Some(grpc_extension) = extension.and_then(|e| e.grpc) {
             grpc_extension
                 .extend_grpc_services(&mut builder)
                 .await

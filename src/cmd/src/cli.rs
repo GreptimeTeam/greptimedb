@@ -108,7 +108,6 @@ mod tests {
     use common_telemetry::logging::LoggingOptions;
 
     use crate::error::Result as CmdResult;
-    use crate::extension::standalone::DefaultExtensionFactory as StandaloneExtensionFactory;
     use crate::options::{EmptyOptions, GlobalOptions};
     use crate::{App, cli, standalone};
 
@@ -126,9 +125,7 @@ mod tests {
         let standalone_opts = standalone
             .load_options::<EmptyOptions>(&GlobalOptions::default())
             .unwrap();
-        let mut instance = standalone
-            .build(standalone_opts, StandaloneExtensionFactory)
-            .await?;
+        let mut instance = standalone.build(standalone_opts).await?;
         instance.start().await?;
 
         let client = Client::with_urls(["127.0.0.1:4001"]);

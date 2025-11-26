@@ -35,12 +35,12 @@ pub struct Extension {
 }
 
 /// Factory trait to create Extension instance.
+#[async_trait::async_trait]
 pub trait ExtensionFactory: InformationSchemaTableFactories + Send + Sync {
-    fn create(
-        &self,
-        ctx: ExtensionContext,
-    ) -> impl Future<Output = Result<Extension, BoxedError>> + Send;
+    async fn create(&self, ctx: ExtensionContext) -> Result<Extension, BoxedError>;
 }
+
+pub type StandaloneExtensionFactoryRef = Arc<dyn ExtensionFactory>;
 
 pub struct ExtensionContext {
     pub kv_backend: KvBackendRef,
@@ -71,23 +71,4 @@ pub type InformationSchemaTableFactoriesRef = Arc<dyn InformationSchemaTableFact
 /// Context for information schema table factory providers.
 pub struct InfoTableFactoryContext {
     pub fe_client: Arc<FrontendClient>,
-}
-
-/// Default no-op implementation of ExtensionFactory.
-pub struct DefaultExtensionFactory;
-
-#[async_trait::async_trait]
-impl InformationSchemaTableFactories for DefaultExtensionFactory {
-    async fn create_factories(
-        &self,
-        _ctx: InfoTableFactoryContext,
-    ) -> Result<HashMap<String, InformationSchemaTableFactoryRef>, BoxedError> {
-        Ok(HashMap::new())
-    }
-}
-
-impl ExtensionFactory for DefaultExtensionFactory {
-    async fn create(&self, _ctx: ExtensionContext) -> Result<Extension, BoxedError> {
-        Ok(Extension::default())
-    }
 }

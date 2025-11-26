@@ -29,12 +29,12 @@ pub struct Extension {
 }
 
 /// Factory trait to create Extension instances.
+#[async_trait::async_trait]
 pub trait ExtensionFactory: Send + Sync {
-    fn create(
-        &self,
-        ctx: ExtensionContext,
-    ) -> impl Future<Output = Result<Extension, BoxedError>> + Send;
+    async fn create(&self, ctx: ExtensionContext) -> Result<Extension, BoxedError>;
 }
+
+pub type FlownodeExtensionFactoryRef = Arc<dyn ExtensionFactory>;
 
 /// Context provided to ExtensionFactory during extension creation.
 pub struct ExtensionContext {
@@ -42,13 +42,4 @@ pub struct ExtensionContext {
     pub fe_client: Arc<FrontendClient>,
     pub flownode_id: FlownodeId,
     pub catalog_manager: CatalogManagerRef,
-}
-
-/// Default no-op implementation of ExtensionFactory.
-pub struct DefaultExtensionFactory;
-
-impl ExtensionFactory for DefaultExtensionFactory {
-    async fn create(&self, _: ExtensionContext) -> Result<Extension, BoxedError> {
-        Ok(Extension::default())
-    }
 }

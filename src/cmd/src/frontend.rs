@@ -50,7 +50,7 @@ use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, OtherSnafu, Result};
-use crate::extension::frontend::{ExtensionContext, ExtensionFactory};
+use crate::extension::frontend::{ExtensionContext, FrontendExtesionFactoryRef};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
@@ -111,12 +111,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build<E: Debug, F: ExtensionFactory>(
-        &self,
-        opts: FrontendOptions<E>,
-        extension_factory: F,
-    ) -> Result<Instance> {
-        self.subcmd.build(opts, extension_factory).await
+    pub async fn build<E: Debug>(&self, opts: FrontendOptions<E>) -> Result<Instance> {
+        self.subcmd.build(opts).await
     }
 
     pub fn load_options<E: Configurable>(
@@ -133,13 +129,9 @@ pub enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build<E: Debug, F: ExtensionFactory>(
-        &self,
-        opts: FrontendOptions<E>,
-        extension_factory: F,
-    ) -> Result<Instance> {
+    async fn build<E: Debug>(&self, opts: FrontendOptions<E>) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build(opts, extension_factory).await,
+            SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
@@ -329,11 +321,7 @@ impl StartCommand {
         Ok(())
     }
 
-    async fn build<E: Debug, F: ExtensionFactory>(
-        &self,
-        opts: FrontendOptions<E>,
-        extension_factory: F,
-    ) -> Result<Instance> {
+    async fn build<E: Debug>(&self, opts: FrontendOptions<E>) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -433,7 +421,9 @@ impl StartCommand {
             Some(meta_client.clone()),
         ));
 
-        let extension = extension_factory
+        let extension = plugins
+            .get::<FrontendExtesionFactoryRef>()
+            .unwrap()
             .create(ExtensionContext {
                 kv_backend: cached_meta_backend.clone(),
                 meta_client: meta_client.clone(),

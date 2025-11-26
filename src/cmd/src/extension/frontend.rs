@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use catalog::information_schema::InformationSchemaTableFactoryRef;
 use common_error::ext::BoxedError;
@@ -30,24 +31,15 @@ pub struct Extension {
 }
 
 /// Factory trait to create Extension instances.
+#[async_trait::async_trait]
 pub trait ExtensionFactory: Send + Sync {
-    fn create(
-        &self,
-        ctx: ExtensionContext,
-    ) -> impl Future<Output = Result<Extension, BoxedError>> + Send;
+    async fn create(&self, ctx: ExtensionContext) -> Result<Extension, BoxedError>;
 }
+
+pub type FrontendExtesionFactoryRef = Arc<dyn ExtensionFactory>;
 
 /// Context provided to ExtensionFactory during extension creation.
 pub struct ExtensionContext {
     pub kv_backend: KvBackendRef,
     pub meta_client: MetaClientRef,
-}
-
-/// Default no-op implementation of ExtensionFactory.
-pub struct DefaultExtensionFactory;
-
-impl ExtensionFactory for DefaultExtensionFactory {
-    async fn create(&self, _: ExtensionContext) -> Result<Extension, BoxedError> {
-        Ok(Extension::default())
-    }
 }
