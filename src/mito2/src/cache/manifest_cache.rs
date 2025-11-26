@@ -40,19 +40,17 @@ const MANIFEST_TYPE: &str = "manifest";
 
 /// A manifest cache manages manifest files on local store and evicts files based
 /// on size.
-#[derive(Debug)]
-pub(crate) struct ManifestCache {
+#[derive(Debug, Clone)]
+pub struct ManifestCache {
     /// Local store to cache files.
     local_store: ObjectStore,
     /// Index to track cached manifest files.
     index: Cache<String, IndexValue>,
 }
 
-pub(crate) type ManifestCacheRef = Arc<ManifestCache>;
-
 impl ManifestCache {
-    /// Creates a new manifest cache.
-    pub(crate) fn new(
+    /// Creates a new manifest cache and recovers the index from local store.
+    pub async fn new(
         local_store: ObjectStore,
         capacity: ReadableSize,
         ttl: Option<Duration>,
@@ -66,7 +64,12 @@ impl ManifestCache {
 
         let index = Self::build_cache(local_store.clone(), total_capacity, ttl);
 
-        ManifestCache { local_store, index }
+        let cache = ManifestCache { local_store, index };
+
+        // Recover the cache index from local store asynchronously
+        cache.recover(false).await;
+
+        cache
     }
 
     /// Builds the cache.
@@ -198,7 +201,7 @@ impl ManifestCache {
     }
 
     /// Recovers the index from local store.
-    pub(crate) async fn recover(self: &Arc<Self>, sync: bool) {
+    pub(crate) async fn recover(&self, sync: bool) {
         // FIXME(yingwen): Adds a task to clean empty directories.
         let moved_self = self.clone();
         let handle = tokio::spawn(async move {
@@ -215,16 +218,6 @@ impl ManifestCache {
     /// Returns the cache file path for the key.
     pub(crate) fn cache_file_path(&self, key: &str) -> String {
         join_path(MANIFEST_DIR, key)
-    }
-
-    /// Returns the local store of the manifest cache.
-    pub(crate) fn local_store(&self) -> ObjectStore {
-        self.local_store.clone()
-    }
-
-    /// Checks if the key is in the manifest cache.
-    pub(crate) fn contains_key(&self, key: &str) -> bool {
-        self.index.contains_key(key)
     }
 
     /// Gets a manifest file from cache.
@@ -286,7 +279,7 @@ mod tests {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
 
-        let cache = ManifestCache::new(local_store.clone(), ReadableSize::mb(10), None);
+        let cache = ManifestCache::new(local_store.clone(), ReadableSize::mb(10), None).await;
         let key = "region_1/manifest/00000000000000000007.json";
         let file_path = cache.cache_file_path(key);
 
@@ -327,7 +320,7 @@ mod tests {
     async fn test_manifest_cache_recover() {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
-        let cache = ManifestCache::new(local_store.clone(), ReadableSize::mb(10), None);
+        let cache = ManifestCache::new(local_store.clone(), ReadableSize::mb(10), None).await;
 
         // Write some manifest files with different paths
         let keys = vec![
@@ -358,14 +351,10 @@ mod tests {
             total_size += content.len();
         }
 
-        // Recover the cache.
-        let cache = Arc::new(ManifestCache::new(
-            local_store.clone(),
-            ReadableSize::mb(10),
-            None,
-        ));
-        // No entry before recovery.
-        assert!(cache.get(keys[0]).await.is_none());
+        // Create a new cache instance which will automatically recover from local store
+        let cache = ManifestCache::new(local_store.clone(), ReadableSize::mb(10), None).await;
+
+        // Wait for recovery to complete synchronously
         cache.recover(true).await;
 
         // Check size.
@@ -380,11 +369,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_cache_file_path() {
+    #[tokio::test]
+    async fn test_cache_file_path() {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
-        let cache = ManifestCache::new(local_store, ReadableSize::mb(10), None);
+        let cache = ManifestCache::new(local_store, ReadableSize::mb(10), None).await;
 
         assert_eq!(
             "cache/object/manifest/region_1/manifest/00000000000000000007.json",

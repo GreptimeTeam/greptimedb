@@ -30,6 +30,7 @@ use crate::access_layer::{
     TempFileCleaner, WriteCachePathProvider, WriteType, new_fs_cache_store,
 };
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
+use crate::cache::manifest_cache::ManifestCache;
 use crate::error::{self, Result};
 use crate::metrics::UPLOAD_BYTES_TOTAL;
 use crate::region::opener::RegionLoadCacheTask;
@@ -53,6 +54,8 @@ pub struct WriteCache {
     intermediate_manager: IntermediateManager,
     /// Sender for region load cache tasks.
     task_sender: UnboundedSender<RegionLoadCacheTask>,
+    /// Optional cache for manifest files.
+    manifest_cache: Option<ManifestCache>,
 }
 
 pub type WriteCacheRef = Arc<WriteCache>;
@@ -67,6 +70,7 @@ impl WriteCache {
         index_cache_percent: Option<u8>,
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
+        manifest_cache: Option<ManifestCache>,
     ) -> Result<Self> {
         let (task_sender, task_receiver) = unbounded_channel();
 
@@ -83,6 +87,7 @@ impl WriteCache {
             puffin_manager_factory,
             intermediate_manager,
             task_sender,
+            manifest_cache,
         })
     }
 
@@ -94,10 +99,23 @@ impl WriteCache {
         index_cache_percent: Option<u8>,
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
+        manifest_cache_capacity: ReadableSize,
+        manifest_cache_ttl: Option<Duration>,
     ) -> Result<Self> {
         info!("Init write cache on {cache_dir}, capacity: {cache_capacity}");
 
         let local_store = new_fs_cache_store(cache_dir).await?;
+
+        // Create manifest cache if capacity is non-zero
+        let manifest_cache = if manifest_cache_capacity.as_bytes() > 0 {
+            Some(
+                ManifestCache::new(local_store.clone(), manifest_cache_capacity, manifest_cache_ttl)
+                    .await,
+            )
+        } else {
+            None
+        };
+
         Self::new(
             local_store,
             cache_capacity,
@@ -105,6 +123,7 @@ impl WriteCache {
             index_cache_percent,
             puffin_manager_factory,
             intermediate_manager,
+            manifest_cache,
         )
         .await
     }
@@ -112,6 +131,11 @@ impl WriteCache {
     /// Returns the file cache of the write cache.
     pub(crate) fn file_cache(&self) -> FileCacheRef {
         self.file_cache.clone()
+    }
+
+    /// Returns the manifest cache if available.
+    pub(crate) fn manifest_cache(&self) -> Option<ManifestCache> {
+        self.manifest_cache.clone()
     }
 
     /// Build the puffin manager

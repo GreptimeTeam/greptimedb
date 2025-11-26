@@ -33,7 +33,7 @@ use store_api::ManifestVersion;
 use store_api::storage::RegionId;
 use tokio::sync::Semaphore;
 
-use crate::cache::manifest_cache::ManifestCacheRef;
+use crate::cache::manifest_cache::ManifestCache;
 use crate::error::{
     ChecksumMismatchSnafu, CompressObjectSnafu, DecompressObjectSnafu, InvalidScanIndexSnafu,
     OpenDalSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
@@ -146,7 +146,7 @@ pub struct ManifestObjectStore {
     manifest_size_map: Arc<RwLock<HashMap<FileKey, u64>>>,
     total_manifest_size: Arc<AtomicU64>,
     /// Optional manifest cache for local caching.
-    manifest_cache: Option<ManifestCacheRef>,
+    manifest_cache: Option<ManifestCache>,
 }
 
 impl ManifestObjectStore {
@@ -164,7 +164,7 @@ impl ManifestObjectStore {
         object_store: ObjectStore,
         compress_type: CompressionType,
         total_manifest_size: Arc<AtomicU64>,
-        manifest_cache: Option<ManifestCacheRef>,
+        manifest_cache: Option<ManifestCache>,
     ) -> Self {
         let path = util::normalize_dir(path);
         let staging_path = {

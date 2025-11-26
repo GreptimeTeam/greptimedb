@@ -455,6 +455,8 @@ pub async fn write_cache_from_config(
         Some(config.index_cache_percent),
         puffin_manager_factory,
         intermediate_manager,
+        config.manifest_cache_size,
+        config.manifest_cache_ttl,
     )
     .await?;
     Ok(Some(Arc::new(cache)))

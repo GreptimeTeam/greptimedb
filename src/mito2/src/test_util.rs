@@ -626,6 +626,7 @@ impl TestEnv {
             compress_type,
             checkpoint_distance,
             remove_file_options: Default::default(),
+            manifest_cache: None,
         };
 
         if let Some(metadata) = initial_metadata {
@@ -656,6 +657,7 @@ impl TestEnv {
             None,
             self.puffin_manager.clone(),
             self.intermediate_manager.clone(),
+            None, // manifest_cache
         )
         .await
         .unwrap();
@@ -676,6 +678,8 @@ impl TestEnv {
             None,
             self.puffin_manager.clone(),
             self.intermediate_manager.clone(),
+            ReadableSize::mb(0), // manifest_cache_capacity
+            None,                // manifest_cache_ttl
         )
         .await
         .unwrap();
