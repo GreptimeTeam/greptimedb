@@ -14,7 +14,7 @@ ARG TARGETARCH
 
 ADD $TARGETARCH/$TARGET_BIN /greptime/bin/
 
-ENV PATH /greptime/bin/:$PATH
+ENV PATH=/greptime/bin/:$PATH
 
 ENV TARGET_BIN=$TARGET_BIN
 
