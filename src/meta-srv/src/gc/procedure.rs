@@ -34,14 +34,13 @@ use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 
 use crate::error::{self, Result, SerializeToJsonSnafu};
 use crate::gc::Region2Peers;
-use crate::gc::ctx::SchedulerCtx;
 use crate::handler::HeartbeatMailbox;
 use crate::service::mailbox::{Channel, MailboxRef};
 
 /// Helper function to send GetFileRefs instruction and wait for reply.
 async fn send_get_file_refs(
     mailbox: &MailboxRef,
-    server_addr: String,
+    server_addr: &str,
     peer: &Peer,
     instruction: GetFileRefs,
     timeout: Duration,
@@ -231,10 +230,10 @@ impl Procedure for GcRegionProcedure {
         serde_json::to_string(&self.data).context(ToJsonSnafu)
     }
 
-    /// Write lock all regions involved in this GC procedure.
+    /// Read lock all regions involved in this GC procedure.
     /// So i.e. region migration won't happen during GC and cause race conditions.
     ///
-    /// only write lock the regions not catatlog/schema because it can run concurrently with other procedures(i.e. drop database/table)
+    /// only read lock the regions not catatlog/schema because it can run concurrently with other procedures(i.e. drop database/table)
     /// TODO:(discord9): integration test to verify this
     fn lock_key(&self) -> LockKey {
         let lock_key: Vec<_> = self
@@ -372,7 +371,7 @@ impl BatchGcProcedure {
 
             let reply = send_get_file_refs(
                 &self.mailbox,
-                self.data.server_addr.clone(),
+                &self.data.server_addr,
                 &peer,
                 instruction,
                 timeout,
@@ -440,8 +439,9 @@ impl BatchGcProcedure {
         for (peer, regions_for_peer) in datanode2regions {
             let gc_regions = GcRegions {
                 regions: regions_for_peer.clone(),
+                // file_refs_manifest can be large; cloning for each datanode is acceptable here since this is an admin-only operation.
                 file_refs_manifest: file_refs.clone(),
-                full_file_listing: false, // TODO: make this configurable
+                full_file_listing: self.data.full_file_listing,
             };
 
             let _report = send_gc_regions(
@@ -515,7 +515,7 @@ impl Procedure for BatchGcProcedure {
         serde_json::to_string(&self.data).context(ToJsonSnafu)
     }
 
-    /// Write lock all regions involved in this GC procedure.
+    /// Read lock all regions involved in this GC procedure.
     /// So i.e. region migration won't happen during GC and cause race conditions.
     fn lock_key(&self) -> LockKey {
         let lock_key: Vec<_> = self

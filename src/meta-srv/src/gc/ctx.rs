@@ -101,7 +101,7 @@ impl DefaultGcSchedulerCtx {
             )
             .context(error::RegisterProcedureLoaderSnafu {
                 type_name: GcRegionProcedure::TYPE_NAME,
-            });
+            })?;
 
         // register a noop loader for `BatchGcProcedure` to avoid error when deserializing procedure when rebooting
 
@@ -120,7 +120,7 @@ impl DefaultGcSchedulerCtx {
             )
             .context(error::RegisterProcedureLoaderSnafu {
                 type_name: BatchGcProcedure::TYPE_NAME,
-            });
+            })?;
 
         Ok(Self {
             table_metadata_manager,
