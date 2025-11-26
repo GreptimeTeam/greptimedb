@@ -81,9 +81,7 @@ impl<'a> MetadataLoader<'a> {
             .await
             .map_err(|e| match unbox_external_error(e) {
                 Ok(os_err) => error::OpenDalSnafu {}.into_error(os_err),
-                Err(parquet_err) => {
-                    error::LoadParquetMetadataSnafu { path }.into_error(parquet_err)
-                }
+                Err(parquet_err) => error::ReadParquetSnafu { path }.into_error(parquet_err),
             })
     }
 }

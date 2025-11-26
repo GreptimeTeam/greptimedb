@@ -180,15 +180,6 @@ pub enum Error {
         error: ArrowError,
     },
 
-    #[snafu(display("Failed to load parquet metadata, path: {}", path))]
-    LoadParquetMetadata {
-        path: String,
-        #[snafu(source)]
-        error: parquet::errors::ParquetError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to read parquet file, path: {}", path))]
     ReadParquet {
         path: String,
@@ -1184,9 +1175,7 @@ impl ErrorExt for Error {
 
         match self {
             DataTypeMismatch { source, .. } => source.status_code(),
-            OpenDal { .. } | ReadParquet { .. } | LoadParquetMetadata { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            OpenDal { .. } | ReadParquet { .. } => StatusCode::StorageUnavailable,
             WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
                 source.status_code()
             }
