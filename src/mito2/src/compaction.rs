@@ -54,8 +54,9 @@ use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
     CompactRegionSnafu, CompactionMemoryExhaustedSnafu, Error, GetSchemaMetadataSnafu,
-    ManualCompactionOverrideSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu,
-    RemoteCompactionSnafu, Result, TimeRangePredicateOverflowSnafu, TimeoutSnafu,
+    ManualCompactionOverrideSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionNotFoundSnafu,
+    RegionTruncatedSnafu, RemoteCompactionSnafu, Result, TimeRangePredicateOverflowSnafu,
+    TimeoutSnafu,
 };
 use crate::metrics::{COMPACTION_MEMORY_WAIT, COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
 use crate::read::projection::ProjectionMapper;
@@ -542,12 +543,17 @@ impl CompactionScheduler {
         // Handle temporary insufficiency based on policy
         match self.memory_policy {
             OnExhaustedPolicy::Wait => {
-                if let Some(status) = self.region_status.get_mut(&region_id) {
-                    status.set_memory_pending(DeferredCompactionTask {
-                        task,
-                        memory_bytes: requested_bytes.max(1),
-                    });
-                }
+                // Store pending task first, fail fast if region is gone
+                let status = self
+                    .region_status
+                    .get_mut(&region_id)
+                    .context(RegionNotFoundSnafu { region_id })?;
+
+                status.set_memory_pending(DeferredCompactionTask {
+                    task,
+                    memory_bytes: requested_bytes.max(1),
+                });
+
                 self.spawn_memory_waiter(region_id, requested_bytes.max(1));
                 info!(
                     "Region {} compaction waits for {} bytes to become available",
@@ -978,6 +984,11 @@ fn get_expired_ssts(
         .collect()
 }
 
+/// Estimates the memory bytes needed for a compaction task.
+///
+/// Returns the sum of uncompressed file sizes for all input files. If
+/// uncompressed size is not available for a file, falls back to the
+/// compressed file size.
 fn estimate_compaction_bytes(picker_output: &PickerOutput) -> u64 {
     picker_output
         .outputs
@@ -1675,34 +1686,6 @@ mod tests {
         assert_eq!(TEST_REQUEST_BYTES, scheduler.memory_manager.used_bytes());
         let status = scheduler.region_status.get(&region_id).unwrap();
         assert!(status.memory_pending.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_memory_guard_try_split() {
-        let manager = CompactionMemoryManager::new(4 * 1024 * 1024); // 4MB
-        let mut guard = manager.try_acquire(3 * 1024 * 1024).unwrap(); // 3MB
-
-        // Split 1MB from the guard
-        let split_guard = guard.try_split(1024 * 1024);
-        assert!(split_guard.is_some());
-        let split = split_guard.unwrap();
-        assert_eq!(split.granted_bytes(), 1024 * 1024);
-        assert_eq!(guard.remaining_bytes(), 2 * 1024 * 1024);
-
-        // Try to split more than remaining - should fail
-        let too_much = guard.try_split(3 * 1024 * 1024);
-        assert!(too_much.is_none());
-
-        // Verify memory accounting
-        assert_eq!(manager.used_bytes(), 3 * 1024 * 1024);
-
-        drop(split);
-        // After dropping split, 1MB should be released
-        assert_eq!(manager.used_bytes(), 2 * 1024 * 1024);
-
-        drop(guard);
-        // All memory should be released
-        assert_eq!(manager.used_bytes(), 0);
     }
 
     #[tokio::test]

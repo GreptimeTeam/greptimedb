@@ -192,26 +192,6 @@ impl CompactionMemoryGuard {
             GuardState::Limited { permits, .. } => permits_to_bytes(*permits),
         }
     }
-
-    /// Returns remaining bytes inside this guard.
-    pub fn remaining_bytes(&self) -> u64 {
-        self.granted_bytes()
-    }
-
-    /// Attempts to split the guard and carve out `bytes`.
-    pub fn try_split(&mut self, bytes: u64) -> Option<CompactionMemoryGuard> {
-        match &mut self.state {
-            GuardState::Unlimited => Some(CompactionMemoryGuard::unlimited()),
-            GuardState::Limited { inner, permits } => {
-                let needed = bytes_to_permits(bytes);
-                if needed == 0 || *permits < needed {
-                    return None;
-                }
-                *permits -= needed;
-                Some(CompactionMemoryGuard::limited(inner.clone(), needed))
-            }
-        }
-    }
 }
 
 impl Drop for CompactionMemoryGuard {
