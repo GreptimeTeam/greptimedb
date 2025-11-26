@@ -57,7 +57,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::instance::Instance;
 
 const DEFAULT_LIMIT: usize = 2000;
-const KEY_RN: &str = "rn";
+const KEY_RN: &str = "greptime_rn";
 
 #[async_trait]
 impl JaegerQueryHandler for Instance {

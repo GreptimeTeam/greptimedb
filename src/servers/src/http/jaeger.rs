@@ -351,21 +351,19 @@ pub struct QueryTraceParams {
 pub enum TraceUserAgent {
     Grafana,
     // Jaeger-UI does not actually send user agent
-    Jaeger,
+    // But it's a jaeger API, so let's treat it as jaeger
     #[default]
-    Unknown,
+    Jaeger,
 }
 
 impl From<UserAgent> for TraceUserAgent {
     fn from(value: UserAgent) -> Self {
         let ua_str = value.as_str().to_lowercase();
+        debug!("received user agent: {}", ua_str);
         if ua_str.contains("grafana") {
             Self::Grafana
-        } else if ua_str.contains("jaeger") {
-            Self::Jaeger
         } else {
-            warn!("Unknown user agent: {}", ua_str);
-            Self::Unknown
+            Self::Jaeger
         }
     }
 }
@@ -1603,7 +1601,7 @@ mod tests {
                         ("http.method".to_string(), JsonValue::String("GET".to_string())),
                         ("http.path".to_string(), JsonValue::String("/api/v1/users".to_string())),
                     ])),
-                    user_agent: TraceUserAgent::Unknown,
+                    user_agent: TraceUserAgent::Jaeger,
                 },
             ),
         ];
