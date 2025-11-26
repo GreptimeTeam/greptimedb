@@ -36,7 +36,7 @@ pub trait ExtensionFactory: Send + Sync {
     async fn create(&self, ctx: ExtensionContext) -> Result<Extension, BoxedError>;
 }
 
-pub type FrontendExtesionFactoryRef = Arc<dyn ExtensionFactory>;
+pub type FrontendExtensionFactoryRef = Arc<dyn ExtensionFactory>;
 
 /// Context provided to ExtensionFactory during extension creation.
 pub struct ExtensionContext {

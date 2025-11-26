@@ -43,6 +43,7 @@ use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
+use plugins::extension::frontend::{ExtensionContext, FrontendExtensionFactoryRef};
 use servers::addrs;
 use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -50,7 +51,6 @@ use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, OtherSnafu, Result};
-use crate::extension::frontend::{ExtensionContext, FrontendExtesionFactoryRef};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
@@ -422,7 +422,7 @@ impl StartCommand {
         ));
 
         let extension = plugins
-            .get::<FrontendExtesionFactoryRef>()
+            .get::<FrontendExtensionFactoryRef>()
             .unwrap()
             .create(ExtensionContext {
                 kv_backend: cached_meta_backend.clone(),

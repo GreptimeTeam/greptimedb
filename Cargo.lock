@@ -9499,7 +9499,9 @@ dependencies = [
 name = "plugins"
 version = "1.0.0-beta.2"
 dependencies = [
+ "async-trait",
  "auth",
+ "catalog",
  "clap 4.5.40",
  "cli",
  "common-base",
@@ -9508,8 +9510,11 @@ dependencies = [
  "datanode",
  "flow",
  "frontend",
+ "meta-client",
  "meta-srv",
+ "operator",
  "serde",
+ "servers",
  "snafu 0.8.6",
  "standalone",
 ]

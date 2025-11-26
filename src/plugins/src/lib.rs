@@ -14,6 +14,7 @@
 
 mod cli;
 mod datanode;
+pub mod extension;
 mod flownode;
 mod frontend;
 mod meta_srv;
