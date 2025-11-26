@@ -210,7 +210,9 @@ impl WorkerGroup {
         } else {
             0
         };
-        let compaction_limit_bytes = config.compaction_memory_limit.resolve(total_memory);
+        let compaction_limit_bytes = config
+            .experimental_compaction_memory_limit
+            .resolve(total_memory);
         let compaction_memory_manager =
             Arc::new(CompactionMemoryManager::new(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
@@ -396,7 +398,9 @@ impl WorkerGroup {
         } else {
             0
         };
-        let compaction_limit_bytes = config.compaction_memory_limit.resolve(total_memory);
+        let compaction_limit_bytes = config
+            .experimental_compaction_memory_limit
+            .resolve(total_memory);
         let compaction_memory_manager =
             Arc::new(CompactionMemoryManager::new(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
@@ -556,7 +560,7 @@ impl<S: LogStore> WorkerStarter<S> {
                 self.listener.clone(),
                 self.plugins.clone(),
                 self.compaction_memory_manager.clone(),
-                self.config.compaction_on_exhausted,
+                self.config.experimental_compaction_on_exhausted,
             ),
             stalled_requests: StalledRequests::default(),
             listener: self.listener,
