@@ -46,7 +46,7 @@ use crate::metasrv::{RegionStatAwareSelectorRef, SelectTarget, SelectorContext, 
 use crate::procedure::region_migration::manager::{
     RegionMigrationManagerRef, RegionMigrationTriggerReason, SubmitRegionMigrationTaskResult,
 };
-use crate::procedure::region_migration::utils::RegionMigrationTask;
+use crate::procedure::region_migration::utils::RegionMigrationTaskBatch;
 use crate::procedure::region_migration::{
     DEFAULT_REGION_MIGRATION_TIMEOUT, RegionMigrationProcedureTask,
 };
@@ -584,11 +584,12 @@ impl RegionSupervisor {
                     }
 
                     for ((from_peer_id, to_peer_id), tasks) in grouped_tasks {
-                        let region_ids = tasks
-                            .iter()
-                            .map(|(task, _)| task.region_id)
-                            .collect::<Vec<_>>();
-                        if let Err(err) = self.do_failover_tasks(tasks).await {
+                        if tasks.is_empty() {
+                            continue;
+                        }
+                        let task = RegionMigrationTaskBatch::from_tasks(tasks);
+                        let region_ids = task.region_ids.clone();
+                        if let Err(err) = self.do_failover_tasks(task).await {
                             error!(err; "Failed to execute region failover for regions: {:?}, from_peer: {}, to_peer: {}", region_ids, from_peer_id, to_peer_id);
                         }
                     }
@@ -698,29 +699,11 @@ impl RegionSupervisor {
         Ok(tasks)
     }
 
-    async fn do_failover_tasks(
-        &mut self,
-        tasks: Vec<(RegionMigrationProcedureTask, u32)>,
-    ) -> Result<()> {
-        if tasks.is_empty() {
-            debug!("No failover tasks to execute");
-            return Ok(());
-        }
-        let max_count = tasks.iter().map(|(_, count)| *count).max().unwrap_or(1);
-        let region_ids = tasks.iter().map(|(r, _)| r.region_id).collect::<Vec<_>>();
-        let from_peer = tasks[0].0.from_peer.clone();
-        let from_peer_id = from_peer.id;
-        let to_peer = tasks[0].0.to_peer.clone();
-        let to_peer_id = to_peer.id;
-        let timeout = DEFAULT_REGION_MIGRATION_TIMEOUT * max_count;
-        let trigger_reason = RegionMigrationTriggerReason::Failover;
-        let task = RegionMigrationTask {
-            region_ids,
-            from_peer,
-            to_peer,
-            timeout,
-            trigger_reason,
-        };
+    async fn do_failover_tasks(&mut self, task: RegionMigrationTaskBatch) -> Result<()> {
+        let from_peer_id = task.from_peer.id;
+        let to_peer_id = task.to_peer.id;
+        let timeout = task.timeout;
+        let trigger_reason = task.trigger_reason;
         let result = self
             .region_migration_manager
             .submit_region_migration_task(task)

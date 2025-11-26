@@ -39,19 +39,19 @@ pub const EVENTS_TABLE_DST_PEER_ADDR_COLUMN_NAME: &str = "region_migration_dst_p
 /// RegionMigrationEvent is the event of region migration.
 #[derive(Debug)]
 pub(crate) struct RegionMigrationEvent {
-    /// The region ids of the region migration.
+    // The region ids of the region migration.
     region_ids: Vec<RegionId>,
-    /// The trigger reason of the region migration.
+    // The trigger reason of the region migration.
     trigger_reason: RegionMigrationTriggerReason,
-    /// The source node id of the region migration.
+    // The source node id of the region migration.
     src_node_id: u64,
-    /// The source peer address of the region migration.
+    // The source peer address of the region migration.
     src_peer_addr: String,
-    /// The destination node id of the region migration.
+    // The destination node id of the region migration.
     dst_node_id: u64,
-    /// The destination peer address of the region migration.
+    // The destination peer address of the region migration.
     dst_peer_addr: String,
-    /// The timeout of the region migration.
+    // The timeout of the region migration.
     timeout: Duration,
 }
 

@@ -24,11 +24,13 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
 
 use crate::error::{self, Result};
-use crate::procedure::region_migration::RegionMigrationTriggerReason;
+use crate::procedure::region_migration::{
+    DEFAULT_REGION_MIGRATION_TIMEOUT, RegionMigrationProcedureTask, RegionMigrationTriggerReason,
+};
 
 /// A migration task describing how regions are intended to move between peers.
 #[derive(Debug, Clone)]
-pub struct RegionMigrationTask {
+pub struct RegionMigrationTaskBatch {
     /// Region ids involved in this migration.
     pub region_ids: Vec<RegionId>,
     /// Source peer where regions currently reside.
@@ -41,7 +43,32 @@ pub struct RegionMigrationTask {
     pub trigger_reason: RegionMigrationTriggerReason,
 }
 
-impl Display for RegionMigrationTask {
+impl RegionMigrationTaskBatch {
+    /// Constructs a [`RegionMigrationTaskBatch`] from a vector of region migration procedure tasks.
+    ///
+    /// Aggregates region IDs, determines source and destination peers, sets an appropriate timeout,
+    /// and assigns the trigger reason for the migration batch.
+    ///
+    /// # Panic
+    /// if the `tasks` are empty.
+    pub fn from_tasks(tasks: Vec<(RegionMigrationProcedureTask, u32)>) -> Self {
+        let max_count = tasks.iter().map(|(_, count)| *count).max().unwrap_or(1);
+        let region_ids = tasks.iter().map(|(r, _)| r.region_id).collect::<Vec<_>>();
+        let from_peer = tasks[0].0.from_peer.clone();
+        let to_peer = tasks[0].0.to_peer.clone();
+        let timeout = DEFAULT_REGION_MIGRATION_TIMEOUT * max_count;
+        let trigger_reason = RegionMigrationTriggerReason::Failover;
+        Self {
+            region_ids,
+            from_peer,
+            to_peer,
+            timeout,
+            trigger_reason,
+        }
+    }
+}
+
+impl Display for RegionMigrationTaskBatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -51,7 +78,7 @@ impl Display for RegionMigrationTask {
     }
 }
 
-impl RegionMigrationTask {
+impl RegionMigrationTaskBatch {
     /// Returns the table regions map.
     ///
     /// The key is the table id, the value is the region ids of the table.
@@ -147,7 +174,7 @@ fn update_result_with_region_route(
 ///
 /// Returns a [`RegionMigrationAnalysis`] describing the migration status.
 pub async fn analyze_region_migration_task(
-    task: &RegionMigrationTask,
+    task: &RegionMigrationTaskBatch,
     table_metadata_manager: &TableMetadataManagerRef,
 ) -> Result<RegionMigrationAnalysis> {
     if task.to_peer.id == task.from_peer.id {
@@ -218,7 +245,7 @@ mod tests {
     use crate::error::Error;
     use crate::procedure::region_migration::RegionMigrationTriggerReason;
     use crate::procedure::region_migration::utils::{
-        RegionMigrationAnalysis, RegionMigrationTask, analyze_region_migration_task,
+        RegionMigrationAnalysis, RegionMigrationTaskBatch, analyze_region_migration_task,
         update_result_with_region_route,
     };
 
@@ -316,7 +343,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_analyze_region_migration_task_invalid_task() {
-        let task = &RegionMigrationTask {
+        let task = &RegionMigrationTaskBatch {
             region_ids: vec![RegionId::new(1, 1)],
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(1),
@@ -333,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_analyze_region_migration_table_not_found() {
-        let task = &RegionMigrationTask {
+        let task = &RegionMigrationTaskBatch {
             region_ids: vec![RegionId::new(1, 1)],
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
@@ -370,7 +397,7 @@ mod tests {
             )
             .unwrap();
         kv_backend.txn(txn).await.unwrap();
-        let task = &RegionMigrationTask {
+        let task = &RegionMigrationTaskBatch {
             region_ids: vec![RegionId::new(1024, 1)],
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
@@ -430,7 +457,7 @@ mod tests {
             .unwrap();
 
         kv_backend.txn(txn).await.unwrap();
-        let task = &RegionMigrationTask {
+        let task = &RegionMigrationTaskBatch {
             region_ids: vec![
                 RegionId::new(1024, 1),
                 RegionId::new(1024, 2),

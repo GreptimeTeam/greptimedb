@@ -32,7 +32,7 @@ use table::table_name::TableName;
 use crate::error::{self, Result};
 use crate::metrics::{METRIC_META_REGION_MIGRATION_DATANODES, METRIC_META_REGION_MIGRATION_FAIL};
 use crate::procedure::region_migration::utils::{
-    RegionMigrationAnalysis, RegionMigrationTask, analyze_region_migration_task,
+    RegionMigrationAnalysis, RegionMigrationTaskBatch, analyze_region_migration_task,
 };
 use crate::procedure::region_migration::{
     DefaultContextFactory, PersistentContext, RegionMigrationProcedure,
@@ -102,6 +102,7 @@ impl Drop for RegionMigrationProcedureGuard {
     }
 }
 
+/// A task of region migration procedure.
 #[derive(Debug, Clone)]
 pub struct RegionMigrationProcedureTask {
     pub(crate) region_id: RegionId,
@@ -360,7 +361,7 @@ impl RegionMigrationManager {
     /// The regions that are already running will be removed from the [`RegionMigrationTask`].
     fn extract_running_regions(
         &self,
-        task: &mut RegionMigrationTask,
+        task: &mut RegionMigrationTaskBatch,
     ) -> (Vec<RegionId>, Vec<RegionMigrationProcedureGuard>) {
         let mut migrating_region_ids = Vec::new();
         let mut procedure_guards = Vec::with_capacity(task.region_ids.len());
@@ -387,7 +388,7 @@ impl RegionMigrationManager {
 
     pub async fn submit_region_migration_task(
         &self,
-        mut task: RegionMigrationTask,
+        mut task: RegionMigrationTaskBatch,
     ) -> Result<SubmitRegionMigrationTaskResult> {
         let (migrating_region_ids, procedure_guards) = self.extract_running_regions(&mut task);
         let RegionMigrationAnalysis {
@@ -467,7 +468,7 @@ impl RegionMigrationManager {
 
     async fn submit_procedure_inner(
         &self,
-        task: RegionMigrationTask,
+        task: RegionMigrationTaskBatch,
         procedure_guards: Vec<RegionMigrationProcedureGuard>,
         catalog_and_schema: Vec<(String, String)>,
     ) -> Result<ProcedureId> {
@@ -834,7 +835,7 @@ mod test {
         let env = TestingEnv::new();
         let context_factory = env.context_factory();
         let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
-        let task = RegionMigrationTask {
+        let task = RegionMigrationTaskBatch {
             region_ids: vec![RegionId::new(1024, 1)],
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(1),
@@ -856,7 +857,7 @@ mod test {
         let context_factory = env.context_factory();
         let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
         let region_id = RegionId::new(1024, 1);
-        let task = RegionMigrationTask {
+        let task = RegionMigrationTaskBatch {
             region_ids: vec![region_id],
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
@@ -888,7 +889,7 @@ mod test {
         let context_factory = env.context_factory();
         let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
         let region_id = RegionId::new(1024, 1);
-        let task = RegionMigrationTask {
+        let task = RegionMigrationTaskBatch {
             region_ids: vec![region_id],
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
@@ -921,7 +922,7 @@ mod test {
         let context_factory = env.context_factory();
         let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
         let region_id = RegionId::new(1024, 1);
-        let task = RegionMigrationTask {
+        let task = RegionMigrationTaskBatch {
             region_ids: vec![region_id],
             from_peer: Peer::empty(3),
             to_peer: Peer::empty(2),
@@ -955,7 +956,7 @@ mod test {
         let context_factory = env.context_factory();
         let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
         let region_id = RegionId::new(1024, 1);
-        let task = RegionMigrationTask {
+        let task = RegionMigrationTaskBatch {
             region_ids: vec![region_id, RegionId::new(1024, 2)],
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
