@@ -344,14 +344,6 @@ impl MitoRegion {
         )
     }
 
-    /// Exits the entering staging state back to writable.
-    pub(crate) fn exit_entering_staging(&self) -> Result<()> {
-        self.compare_exchange_state(
-            RegionLeaderState::EnteringStaging,
-            RegionRoleState::Leader(RegionLeaderState::Writable),
-        )
-    }
-
     /// Exits the staging state back to writable.
     ///
     /// You should call this method in the worker loop.

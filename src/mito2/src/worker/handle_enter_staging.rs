@@ -20,7 +20,7 @@ use store_api::logstore::LogStore;
 use store_api::region_request::EnterStagingRequest;
 use store_api::storage::RegionId;
 
-use crate::error::{RegionNotFoundSnafu, StagingPartitionExprMismatchSnafu};
+use crate::error::{RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionList};
 use crate::region::{MitoRegionRef, RegionLeaderState};
@@ -95,6 +95,46 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.handle_enter_staging(region, partition_expr, sender);
     }
 
+    async fn enter_staging(region: &MitoRegionRef, partition_expr: String) -> Result<()> {
+        let now = Instant::now();
+        // First step: clear all staging manifest files.
+        {
+            let mut manager = region.manifest_ctx.manifest_manager.write().await;
+            manager
+                .clear_staging_manifest_and_dir()
+                .await
+                .inspect_err(|e| {
+                    error!(
+                        e;
+                        "Failed to clear staging manifest files for region {}",
+                        region.region_id
+                    );
+                })?;
+
+            info!(
+                "Cleared all staging manifest files for region {}, elapsed: {:?}",
+                region.region_id,
+                now.elapsed(),
+            );
+        }
+
+        // Sencod step: write new staging manifest.
+        let mut new_meta = (*region.metadata()).clone();
+        new_meta.partition_expr = Some(partition_expr.clone());
+        let sst_format = region.version().options.sst_format.unwrap_or_default();
+        let change = RegionChange {
+            metadata: Arc::new(new_meta),
+            sst_format,
+        };
+        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
+        region
+            .manifest_ctx
+            .update_manifest(RegionLeaderState::EnteringStaging, action_list, true)
+            .await?;
+
+        Ok(())
+    }
+
     fn handle_enter_staging(
         &self,
         region: MitoRegionRef,
@@ -110,47 +150,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let request_sender = self.sender.clone();
         common_runtime::spawn_global(async move {
             let now = Instant::now();
-
-            // First step: clear all staging manifest files.
-            let mut manager = region.manifest_ctx.manifest_manager.write().await;
-            match manager.clear_staging_manifests().await {
-                Ok(_) => {
-                    info!(
-                        "Cleared all staging manifest files for region {}, elapsed: {:?}",
-                        region.region_id,
-                        now.elapsed(),
-                    );
-                }
-                Err(e) => {
-                    error!(
-                        e;
-                        "Failed to clear staging manifest files for region {}",
-                        region.region_id
-                    );
-                    if let Err(e) = region.exit_entering_staging() {
-                        error!(e; "Failed to exit entering staging after failed to clear staging manifest files");
-                    }
-                    sender.send(Err(e));
-                    return;
-                }
-            }
-            // Drop the write lock to avoid dead lock.
-            drop(manager);
-
-            // Second step: write new staging manifest.
-            let mut new_meta = (*region.metadata()).clone();
-            new_meta.partition_expr = Some(partition_expr.clone());
-            let sst_format = region.version().options.sst_format.unwrap_or_default();
-            let change = RegionChange {
-                metadata: Arc::new(new_meta),
-                sst_format,
-            };
-            let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
-            let result = region
-                .manifest_ctx
-                .update_manifest(RegionLeaderState::EnteringStaging, action_list, true)
-                .await
-                .map(|_| ());
+            let result = Self::enter_staging(&region, partition_expr.clone()).await;
             if result.is_ok() {
                 info!(
                     "Created staging manifest for region {}, elapsed: {:?}",
@@ -158,6 +158,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     now.elapsed(),
                 );
             } else if let Err(ref e) = result {
+                // Unset the staging manifest
+                region
+                    .manifest_ctx
+                    .manifest_manager
+                    .write()
+                    .await
+                    .unset_staging_manifest();
                 error!(
                     "Failed to create staging manifest for region {}: {:?}, elapsed: {:?}",
                     region.region_id,

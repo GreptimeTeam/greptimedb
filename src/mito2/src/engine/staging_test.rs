@@ -20,7 +20,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::Rows;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
+use object_store::Buffer;
+use object_store::layers::mock::{
+    Entry, Error as MockError, ErrorKind, List, Lister, Metadata, MockLayerBuilder,
+    Result as MockResult, Write, Writer,
+};
 use store_api::region_engine::{RegionEngine, SettableRegionRoleState};
 use store_api::region_request::{
     EnterStagingRequest, RegionAlterRequest, RegionFlushRequest, RegionRequest,
@@ -653,4 +660,120 @@ async fn test_write_stall_on_enter_staging_with_format(flat_format: bool) {
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_enter_staging_clean_staging_manifest_error() {
+    common_telemetry::init_default_ut_logging();
+    test_enter_staging_clean_staging_manifest_error_with_format(false).await;
+    test_enter_staging_clean_staging_manifest_error_with_format(true).await;
+}
+
+struct MockLister {
+    path: String,
+    inner: Lister,
+}
+
+impl List for MockLister {
+    async fn next(&mut self) -> MockResult<Option<Entry>> {
+        if self.path.contains("staging") {
+            return Err(MockError::new(ErrorKind::Unexpected, "mock error"));
+        }
+        self.inner.next().await
+    }
+}
+
+struct MockWriter {
+    path: String,
+    inner: Writer,
+}
+
+impl Write for MockWriter {
+    async fn write(&mut self, bs: Buffer) -> MockResult<()> {
+        self.inner.write(bs).await
+    }
+
+    async fn close(&mut self) -> MockResult<Metadata> {
+        if self.path.contains("staging") {
+            return Err(MockError::new(ErrorKind::Unexpected, "mock error"));
+        }
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> MockResult<()> {
+        self.inner.abort().await
+    }
+}
+
+async fn test_enter_staging_error(env: &mut TestEnv, flat_format: bool) {
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_expr: PARTITION_EXPR.to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::StorageUnavailable);
+    let region = engine.get_region(region_id).unwrap();
+    assert!(
+        region
+            .manifest_ctx
+            .manifest_manager
+            .read()
+            .await
+            .staging_manifest()
+            .is_none()
+    );
+    let state = region.state();
+    assert_eq!(state, RegionRoleState::Leader(RegionLeaderState::Writable));
+}
+
+async fn test_enter_staging_clean_staging_manifest_error_with_format(flat_format: bool) {
+    let mock_layer = MockLayerBuilder::default()
+        .lister_factory(Arc::new(|path, _args, lister| {
+            Box::new(MockLister {
+                path: path.to_string(),
+                inner: lister,
+            })
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(mock_layer);
+    test_enter_staging_error(&mut env, flat_format).await;
+}
+
+#[tokio::test]
+async fn test_enter_staging_save_staging_manifest_error() {
+    common_telemetry::init_default_ut_logging();
+    test_enter_staging_save_staging_manifest_error_with_format(false).await;
+    test_enter_staging_save_staging_manifest_error_with_format(true).await;
+}
+
+async fn test_enter_staging_save_staging_manifest_error_with_format(flat_format: bool) {
+    let mock_layer = MockLayerBuilder::default()
+        .writer_factory(Arc::new(|path, _args, lister| {
+            Box::new(MockWriter {
+                path: path.to_string(),
+                inner: lister,
+            })
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(mock_layer);
+    test_enter_staging_error(&mut env, flat_format).await;
 }

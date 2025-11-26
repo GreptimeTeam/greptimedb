@@ -39,7 +39,7 @@ use common_meta::cache::{new_schema_cache, new_table_schema_cache};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array};
@@ -50,6 +50,7 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use moka::future::CacheBuilder;
 use object_store::ObjectStore;
+use object_store::layers::mock::MockLayer;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
@@ -228,6 +229,7 @@ pub struct TestEnv {
     file_ref_manager: FileReferenceManagerRef,
     kv_backend: KvBackendRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
+    object_store_mock_layer: Option<MockLayer>,
 }
 
 impl TestEnv {
@@ -264,12 +266,19 @@ impl TestEnv {
             file_ref_manager: Arc::new(FileReferenceManager::new(None)),
             kv_backend,
             partition_expr_fetcher: noop_partition_expr_fetcher(),
+            object_store_mock_layer: None,
         }
     }
 
     /// Overwrites the original `log_store_factory`.
     pub fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
         self.log_store_factory = log_store_factory;
+        self
+    }
+
+    /// Sets the original `object_store_mock_layer`.
+    pub fn with_mock_layer(mut self, mock_layer: MockLayer) -> TestEnv {
+        self.object_store_mock_layer = Some(mock_layer);
         self
     }
 
@@ -569,7 +578,16 @@ impl TestEnv {
         let data_home = self.data_home.path();
         let data_path = data_home.join("data").as_path().display().to_string();
         let builder = Fs::default().root(&data_path);
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+
+        let object_store = if let Some(mock_layer) = self.object_store_mock_layer.as_ref() {
+            debug!("create object store with mock layer");
+            ObjectStore::new(builder)
+                .unwrap()
+                .layer(mock_layer.clone())
+                .finish()
+        } else {
+            ObjectStore::new(builder).unwrap().finish()
+        };
         ObjectStoreManager::new("default", object_store)
     }
 

@@ -8361,6 +8361,7 @@ dependencies = [
  "common-macro",
  "common-telemetry",
  "common-test-util",
+ "derive_builder 0.20.2",
  "futures",
  "humantime-serde",
  "lazy_static",

@@ -740,8 +740,13 @@ impl RegionManifestManager {
         Ok(Some(RegionMetaActionList::new(merged_actions)))
     }
 
+    /// Unsets the staging manifest.
+    pub(crate) fn unset_staging_manifest(&mut self) {
+        self.staging_manifest = None;
+    }
+
     /// Clear all staging manifests.
-    pub(crate) async fn clear_staging_manifests(&mut self) -> Result<()> {
+    pub(crate) async fn clear_staging_manifest_and_dir(&mut self) -> Result<()> {
         self.staging_manifest = None;
         self.store.clear_staging_manifests().await?;
         info!(
