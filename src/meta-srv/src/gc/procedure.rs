@@ -26,7 +26,7 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, info};
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
@@ -496,7 +496,7 @@ impl Procedure for BatchGcProcedure {
                 // Send GC instructions to all datanodes
                 match self.send_gc_instructions().await {
                     Ok(()) => {
-                        debug!(
+                        info!(
                             "Batch GC completed successfully for regions {:?}",
                             self.data.regions
                         );
