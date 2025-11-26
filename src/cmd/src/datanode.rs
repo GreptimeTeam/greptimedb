@@ -43,7 +43,7 @@ use crate::options::{GlobalOptions, GreptimeOptions};
 
 pub const APP_NAME: &str = "greptime-datanode";
 
-type DatanodeOptions<E> = GreptimeOptions<datanode::config::DatanodeOptions, E>;
+type DatanodeOptions = GreptimeOptions<datanode::config::DatanodeOptions>;
 
 pub struct Instance {
     datanode: Datanode,
@@ -99,14 +99,11 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build_with<E: Debug>(&self, builder: InstanceBuilder<E>) -> Result<Instance> {
+    pub async fn build_with(&self, builder: InstanceBuilder) -> Result<Instance> {
         self.subcmd.build_with(builder).await
     }
 
-    pub fn load_options<E: Configurable>(
-        &self,
-        global_options: &GlobalOptions,
-    ) -> Result<DatanodeOptions<E>> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
         match &self.subcmd {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
             SubCommand::Objbench(_) => {
@@ -117,7 +114,6 @@ impl Command {
                 Ok(DatanodeOptions {
                     runtime: Default::default(),
                     plugins: Default::default(),
-                    extension: Default::default(),
                     component: opts,
                 })
             }
@@ -133,7 +129,7 @@ pub enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build_with<E: Debug>(&self, builder: InstanceBuilder<E>) -> Result<Instance> {
+    async fn build_with(&self, builder: InstanceBuilder) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => {
                 info!("Building datanode with {:#?}", cmd);
@@ -193,10 +189,7 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    pub fn load_options<E: Configurable>(
-        &self,
-        global_options: &GlobalOptions,
-    ) -> Result<DatanodeOptions<E>> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
         let mut opts = DatanodeOptions::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
@@ -211,10 +204,10 @@ impl StartCommand {
 
     // The precedence order is: cli > config file > environment variables > default values.
     #[allow(deprecated)]
-    fn merge_with_cli_options<E>(
+    fn merge_with_cli_options(
         &self,
         global_options: &GlobalOptions,
-        opts: &mut DatanodeOptions<E>,
+        opts: &mut DatanodeOptions,
     ) -> Result<()> {
         let opts = &mut opts.component;
 
@@ -341,7 +334,7 @@ mod tests {
     use servers::heartbeat_options::HeartbeatOptions;
 
     use super::*;
-    use crate::options::{EmptyOptions, GlobalOptions};
+    use crate::options::GlobalOptions;
 
     #[test]
     fn test_deprecated_cli_options() {
@@ -365,10 +358,7 @@ mod tests {
             ..Default::default()
         };
 
-        let options = cmd
-            .load_options::<EmptyOptions>(&Default::default())
-            .unwrap()
-            .component;
+        let options = cmd.load_options(&Default::default()).unwrap().component;
         assert_eq!("127.0.0.1:4001".to_string(), options.grpc.bind_addr);
         assert_eq!("192.168.0.1".to_string(), options.grpc.server_addr);
     }
@@ -428,10 +418,7 @@ mod tests {
             ..Default::default()
         };
 
-        let options = cmd
-            .load_options::<EmptyOptions>(&Default::default())
-            .unwrap()
-            .component;
+        let options = cmd.load_options(&Default::default()).unwrap().component;
 
         assert_eq!("127.0.0.1:3001".to_string(), options.grpc.bind_addr);
         assert_eq!(Some(42), options.node_id);
@@ -498,7 +485,7 @@ mod tests {
                 metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
                 ..Default::default()
             })
-            .load_options::<EmptyOptions>(&GlobalOptions::default())
+            .load_options(&GlobalOptions::default())
             .is_err()
         );
 
@@ -508,7 +495,7 @@ mod tests {
                 node_id: Some(42),
                 ..Default::default()
             })
-            .load_options::<EmptyOptions>(&GlobalOptions::default())
+            .load_options(&GlobalOptions::default())
             .is_ok()
         );
     }
@@ -517,7 +504,7 @@ mod tests {
     fn test_load_log_options_from_cli() {
         let mut cmd = StartCommand::default();
 
-        let result = cmd.load_options::<EmptyOptions>(&GlobalOptions {
+        let result = cmd.load_options(&GlobalOptions {
             log_dir: Some("./greptimedb_data/test/logs".to_string()),
             log_level: Some("debug".to_string()),
 
@@ -530,7 +517,7 @@ mod tests {
         cmd.node_id = Some(42);
 
         let options = cmd
-            .load_options::<EmptyOptions>(&GlobalOptions {
+            .load_options(&GlobalOptions {
                 log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -619,10 +606,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let opts = command
-                    .load_options::<EmptyOptions>(&Default::default())
-                    .unwrap()
-                    .component;
+                let opts = command.load_options(&Default::default()).unwrap().component;
 
                 // Should be read from env, env > default values.
                 let DatanodeWalConfig::RaftEngine(raft_engine_config) = opts.wal else {
@@ -650,10 +634,7 @@ mod tests {
                 // Should be default value.
                 assert_eq!(
                     opts.http.addr,
-                    DatanodeOptions::<EmptyOptions>::default()
-                        .component
-                        .http
-                        .addr
+                    DatanodeOptions::default().component.http.addr
                 );
                 assert_eq!(opts.grpc.server_addr, "10.103.174.219");
             },

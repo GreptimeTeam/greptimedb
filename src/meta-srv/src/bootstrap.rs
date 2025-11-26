@@ -42,7 +42,7 @@ use tokio::sync::{Mutex, oneshot};
 use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
-use crate::bootstrap::extension::{ExtensionContext, ExtensionFactory};
+use crate::bootstrap::extension::{ExtensionContext, ExtensionFactoryRef};
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
@@ -249,11 +249,10 @@ pub fn router(metasrv: Arc<Metasrv>) -> Router {
     router.add_service(admin::make_admin_service(metasrv))
 }
 
-pub async fn metasrv_builder<F: ExtensionFactory>(
+pub async fn metasrv_builder(
     opts: &MetasrvOptions,
     plugins: Plugins,
     kv_backend: Option<KvBackendRef>,
-    extension_factory: F,
 ) -> Result<MetasrvBuilder> {
     let (mut kv_backend, election) = match (kv_backend, &opts.backend) {
         (Some(kv_backend), _) => (kv_backend, None),
@@ -411,7 +410,12 @@ pub async fn metasrv_builder<F: ExtensionFactory>(
         kv_backend: kv_backend.clone(),
         meta_peer_client: meta_peer_client.clone(),
     };
-    let extension = extension_factory.create(ctx).await.context(OtherSnafu)?;
+
+    let extension = if let Some(f) = plugins.get::<ExtensionFactoryRef>() {
+        Some(f.create(ctx).await.context(OtherSnafu)?)
+    } else {
+        None
+    };
 
     Ok(MetasrvBuilder::new()
         .options(opts.clone())

@@ -177,8 +177,8 @@ impl MetasrvBuilder {
         self
     }
 
-    pub fn extension(mut self, extension: Extension) -> Self {
-        self.extension = Some(extension);
+    pub fn extension(mut self, extension: Option<Extension>) -> Self {
+        self.extension = extension;
         self
     }
 

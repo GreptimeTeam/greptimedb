@@ -38,28 +38,19 @@ pub struct GlobalOptions {
 /// All the options of GreptimeDB.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct GreptimeOptions<T, E> {
+pub struct GreptimeOptions<T> {
     /// The runtime options.
     pub runtime: RuntimeOptions,
     /// The plugin options.
     pub plugins: Vec<PluginOptions>,
-
-    /// Extension for custom options.
-    #[serde(flatten)]
-    pub extension: E,
 
     /// The options of each component (like Datanode or Standalone) of GreptimeDB.
     #[serde(flatten)]
     pub component: T,
 }
 
-impl<T: Configurable, E: Configurable> Configurable for GreptimeOptions<T, E> {
+impl<T: Configurable> Configurable for GreptimeOptions<T> {
     fn env_list_keys() -> Option<&'static [&'static str]> {
         T::env_list_keys()
     }
 }
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-pub struct EmptyOptions;
-
-impl Configurable for EmptyOptions {}

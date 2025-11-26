@@ -108,7 +108,7 @@ mod tests {
     use common_telemetry::logging::LoggingOptions;
 
     use crate::error::Result as CmdResult;
-    use crate::options::{EmptyOptions, GlobalOptions};
+    use crate::options::GlobalOptions;
     use crate::{App, cli, standalone};
 
     #[tokio::test(flavor = "multi_thread")]
@@ -122,9 +122,7 @@ mod tests {
             &*output_dir.path().to_string_lossy(),
         ]);
 
-        let standalone_opts = standalone
-            .load_options::<EmptyOptions>(&GlobalOptions::default())
-            .unwrap();
+        let standalone_opts = standalone.load_options(&GlobalOptions::default()).unwrap();
         let mut instance = standalone.build(standalone_opts).await?;
         instance.start().await?;
 

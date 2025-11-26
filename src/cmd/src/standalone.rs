@@ -80,17 +80,14 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build<E: Debug>(
-        &self,
-        opts: GreptimeOptions<StandaloneOptions, E>,
-    ) -> Result<Instance> {
+    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options<E: Configurable>(
+    pub fn load_options(
         &self,
         global_options: &GlobalOptions,
-    ) -> Result<GreptimeOptions<StandaloneOptions, E>> {
+    ) -> Result<GreptimeOptions<StandaloneOptions>> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -101,19 +98,16 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build<E: Debug>(
-        &self,
-        opts: GreptimeOptions<StandaloneOptions, E>,
-    ) -> Result<Instance> {
+    async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options<E: Configurable>(
+    fn load_options(
         &self,
         global_options: &GlobalOptions,
-    ) -> Result<GreptimeOptions<StandaloneOptions, E>> {
+    ) -> Result<GreptimeOptions<StandaloneOptions>> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -230,11 +224,11 @@ pub struct StartCommand {
 
 impl StartCommand {
     /// Load the GreptimeDB options from various sources (command line, config file or env).
-    pub fn load_options<E: Configurable>(
+    pub fn load_options(
         &self,
         global_options: &GlobalOptions,
-    ) -> Result<GreptimeOptions<StandaloneOptions, E>> {
-        let mut opts = GreptimeOptions::<StandaloneOptions, E>::load_layered_options(
+    ) -> Result<GreptimeOptions<StandaloneOptions>> {
+        let mut opts = GreptimeOptions::<StandaloneOptions>::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
         )
@@ -328,10 +322,7 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     /// Build GreptimeDB instance with the loaded options.
-    pub async fn build<E: Debug>(
-        &self,
-        opts: GreptimeOptions<StandaloneOptions, E>,
-    ) -> Result<Instance> {
+    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -633,11 +624,10 @@ mod tests {
     use common_wal::config::DatanodeWalConfig;
     use frontend::frontend::FrontendOptions;
     use object_store::config::{FileConfig, GcsConfig};
-    use serde::{Deserialize, Serialize};
     use servers::grpc::GrpcOptions;
 
     use super::*;
-    use crate::options::{EmptyOptions, GlobalOptions};
+    use crate::options::GlobalOptions;
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
@@ -726,7 +716,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options::<EmptyOptions>(&GlobalOptions::default())
+            .load_options(&GlobalOptions::default())
             .unwrap()
             .component;
         let fe_opts = options.frontend_options();
@@ -776,73 +766,6 @@ mod tests {
         assert_eq!("./greptimedb_data/test/logs".to_string(), logging_opts.dir);
     }
 
-    #[derive(Default, Serialize, Deserialize)]
-    pub struct ExtensionOptions {
-        pub trigger: Option<TriggerOptions>,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    pub struct TriggerOptions {
-        pub alert_storage: AlertStorageOptions,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    #[serde(tag = "type")]
-    pub enum AlertStorageOptions {
-        Postgres(PostgresOptions),
-    }
-
-    #[derive(Serialize, Deserialize)]
-    pub struct PostgresOptions {
-        pub addr: String,
-    }
-
-    impl Configurable for ExtensionOptions {}
-
-    #[test]
-    fn test_read_config_file_with_extension() {
-        let mut file = create_named_temp_file();
-        let toml_str = r#"
-            [logging]
-            level = "debug"
-            dir = "./greptimedb_data/test/logs"
-
-            [trigger]
-            [trigger.alert_storage]
-            type = "Postgres"
-            addr = "postgres://localhost:5432/postgres?user=postgres&password=123456"
-        "#;
-        write!(file, "{}", toml_str).unwrap();
-
-        let cmd = StartCommand {
-            config_file: Some(file.path().to_str().unwrap().to_string()),
-            ..Default::default()
-        };
-
-        let options = cmd
-            .load_options::<ExtensionOptions>(&Default::default())
-            .unwrap();
-
-        let component = options.component;
-        assert_eq!("debug", component.logging.level.as_ref().unwrap());
-        assert_eq!(
-            "./greptimedb_data/test/logs".to_string(),
-            component.logging.dir
-        );
-
-        let extension = options.extension;
-        assert!(extension.trigger.is_some());
-        let trigger_opts = extension.trigger.unwrap();
-        match trigger_opts.alert_storage {
-            AlertStorageOptions::Postgres(pg_opts) => {
-                assert_eq!(
-                    "postgres://localhost:5432/postgres?user=postgres&password=123456",
-                    pg_opts.addr
-                );
-            }
-        }
-    }
-
     #[test]
     fn test_load_log_options_from_cli() {
         let cmd = StartCommand {
@@ -854,7 +777,7 @@ mod tests {
         };
 
         let opts = cmd
-            .load_options::<EmptyOptions>(&GlobalOptions {
+            .load_options(&GlobalOptions {
                 log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -924,10 +847,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let opts = command
-                    .load_options::<EmptyOptions>(&Default::default())
-                    .unwrap()
-                    .component;
+                let opts = command.load_options(&Default::default()).unwrap().component;
 
                 // Should be read from env, env > default values.
                 assert_eq!(opts.logging.dir, "/other/log/dir");

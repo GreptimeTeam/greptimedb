@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_error::ext::BoxedError;
 #[cfg(feature = "enterprise")]
 use common_meta::ddl_manager::TriggerDdlManagerRef;
@@ -26,22 +28,14 @@ pub struct Extension {
 }
 
 /// Factory trait to create Extension instances.
+#[async_trait::async_trait]
 pub trait ExtensionFactory: Send + Sync {
-    fn create(
-        &self,
-        ctx: ExtensionContext,
-    ) -> impl Future<Output = Result<Extension, BoxedError>> + Send;
+    async fn create(&self, ctx: ExtensionContext) -> Result<Extension, BoxedError>;
 }
+
+pub type ExtensionFactoryRef = Arc<dyn ExtensionFactory>;
 
 pub struct ExtensionContext {
     pub kv_backend: KvBackendRef,
     pub meta_peer_client: MetaPeerClientRef,
-}
-
-pub struct DefaultExtensionFactory;
-
-impl ExtensionFactory for DefaultExtensionFactory {
-    async fn create(&self, _ctx: ExtensionContext) -> Result<Extension, BoxedError> {
-        Ok(Extension::default())
-    }
 }
