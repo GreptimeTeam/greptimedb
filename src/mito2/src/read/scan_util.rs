@@ -85,6 +85,8 @@ pub(crate) struct ScanMetricsSet {
     // SST related metrics:
     /// Duration to build file ranges.
     build_parts_cost: Duration,
+    /// Duration to scan SST files.
+    file_scan_cost: Duration,
     /// Number of row groups before filtering.
     rg_total: usize,
     /// Number of row groups filtered by fulltext index.
@@ -157,6 +159,7 @@ impl fmt::Debug for ScanMetricsSet {
             num_mem_ranges,
             num_file_ranges,
             build_parts_cost,
+            file_scan_cost,
             rg_total,
             rg_fulltext_filtered,
             rg_inverted_filtered,
@@ -202,6 +205,7 @@ impl fmt::Debug for ScanMetricsSet {
             \"num_mem_ranges\":{num_mem_ranges}, \
             \"num_file_ranges\":{num_file_ranges}, \
             \"build_parts_cost\":\"{build_parts_cost:?}\", \
+            \"file_scan_cost\":\"{file_scan_cost:?}\", \
             \"rg_total\":{rg_total}, \
             \"rows_before_filter\":{rows_before_filter}, \
             \"num_sst_record_batches\":{num_sst_record_batches}, \
@@ -349,12 +353,13 @@ impl ScanMetricsSet {
             num_record_batches,
             num_batches,
             num_rows,
-            scan_cost: _,
+            scan_cost,
             metadata_cache_metrics,
             fetch_metrics,
         } = other;
 
         self.build_parts_cost += *build_cost;
+        self.file_scan_cost += *scan_cost;
 
         self.rg_total += *rg_total;
         self.rg_fulltext_filtered += *rg_fulltext_filtered;
