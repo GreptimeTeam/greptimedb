@@ -13,12 +13,10 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Duration;
 
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::peer::Peer;
-use common_procedure::{ProcedureManagerRef, ProcedureWithId};
+use common_procedure::ProcedureWithId;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
 use futures::TryStreamExt as _;
@@ -30,9 +28,7 @@ use table::metadata::TableId;
 
 use crate::cluster::GreptimeDbClusterBuilder;
 use crate::test_util::{TempDirGuard, get_test_store_config};
-use crate::tests::test_util::{
-    MockInstance as _, MockInstanceBuilder, TestContext, execute_sql, wait_procedure,
-};
+use crate::tests::test_util::{MockInstanceBuilder, TestContext, execute_sql, wait_procedure};
 
 /// Helper function to get table route information for GC procedure
 async fn get_table_route(
