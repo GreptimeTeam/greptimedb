@@ -126,6 +126,11 @@ pub struct MitoConfig {
     /// The remaining capacity is used for data (parquet) files.
     /// Must be between 0 and 100 (exclusive).
     pub index_cache_percent: u8,
+    /// Capacity for manifest cache (default: 0, disabled).
+    pub manifest_cache_size: ReadableSize,
+    /// TTL for manifest cache.
+    #[serde(with = "humantime_serde")]
+    pub manifest_cache_ttl: Option<Duration>,
 
     // Other configs:
     /// Buffer size for SST writing.
@@ -191,6 +196,8 @@ impl Default for MitoConfig {
             write_cache_ttl: None,
             preload_index_cache: true,
             index_cache_percent: DEFAULT_INDEX_CACHE_PERCENT,
+            manifest_cache_size: ReadableSize::mb(256),
+            manifest_cache_ttl: None,
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
