@@ -56,6 +56,9 @@ pub const JAEGER_QUERY_TABLE_NAME_KEY: &str = "jaeger_query_table_name";
 const REF_TYPE_CHILD_OF: &str = "CHILD_OF";
 const SPAN_KIND_TIME_FMTS: [&str; 2] = ["%Y-%m-%d %H:%M:%S%.6f%z", "%Y-%m-%d %H:%M:%S%.9f%z"];
 
+const TRACE_NOT_FOUND_ERROR_CODE: i32 = 404;
+const TRACE_NOT_FOUND_ERROR_MSG: &str = "trace not found";
+
 /// JaegerAPIResponse is the response of Jaeger HTTP API.
 /// The original version is `structuredResponse` which is defined in https://github.com/jaegertracing/jaeger/blob/main/cmd/query/app/http_handler.go.
 #[derive(Default, Debug, Serialize, Deserialize, PartialEq)]
@@ -65,6 +68,22 @@ pub struct JaegerAPIResponse {
     pub limit: usize,
     pub offset: usize,
     pub errors: Vec<JaegerAPIError>,
+}
+
+impl JaegerAPIResponse {
+    pub fn trace_not_found() -> Self {
+        Self {
+            data: None,
+            total: 0,
+            limit: 0,
+            offset: 0,
+            errors: vec![JaegerAPIError {
+                code: TRACE_NOT_FOUND_ERROR_CODE,
+                msg: TRACE_NOT_FOUND_ERROR_MSG.to_string(),
+                trace_id: None,
+            }],
+        }
+    }
 }
 
 /// JaegerData is the query result of Jaeger HTTP API.
@@ -486,7 +505,10 @@ pub async fn handle_get_trace(
                 error_response(err)
             }
         },
-        Ok(None) => (HttpStatusCode::OK, axum::Json(JaegerAPIResponse::default())),
+        Ok(None) => (
+            HttpStatusCode::NOT_FOUND,
+            axum::Json(JaegerAPIResponse::trace_not_found()),
+        ),
         Err(err) => {
             error!("Failed to get trace '{}': {:?}", trace_id, err);
             error_response(err)
