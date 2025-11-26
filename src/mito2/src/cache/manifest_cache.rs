@@ -14,6 +14,7 @@
 
 //! A cache for manifest files.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -150,11 +151,33 @@ impl ManifestCache {
         }
     }
 
+    /// Removes multiple files from the cache in batch.
+    /// This is more efficient than calling `remove` multiple times.
+    pub(crate) async fn remove_batch(&self, keys: &[String]) {
+        if keys.is_empty() {
+            return;
+        }
+
+        // Remove from index
+        for key in keys {
+            self.index.remove(key).await;
+        }
+
+        // Collect file paths to delete
+        let file_paths: Vec<String> = keys.iter().map(|key| self.cache_file_path(key)).collect();
+
+        // Delete files from local store in batch
+        if let Err(e) = self.local_store.delete_iter(file_paths).await {
+            warn!(e; "Failed to delete cached manifest files in batch");
+        }
+    }
+
     async fn recover_inner(&self) -> Result<()> {
         let now = Instant::now();
         let mut lister = self
             .local_store
             .lister_with(MANIFEST_DIR)
+            .recursive(true)
             .await
             .context(OpenDalSnafu)?;
         // Use i64 for total_size to reduce the risk of overflow.
@@ -202,9 +225,11 @@ impl ManifestCache {
 
     /// Recovers the index from local store.
     pub(crate) async fn recover(&self, sync: bool) {
-        // FIXME(yingwen): Adds a task to clean empty directories.
         let moved_self = self.clone();
         let handle = tokio::spawn(async move {
+            // Clean empty directories before recovering
+            moved_self.clean_empty_dirs().await;
+
             if let Err(err) = moved_self.recover_inner().await {
                 common_telemetry::error!(err; "Failed to recover manifest cache.")
             }
@@ -250,6 +275,132 @@ impl ManifestCache {
         // Add to cache index
         let file_size = data.len() as u32;
         self.put(key, IndexValue { file_size }).await;
+    }
+
+    /// Removes empty directories recursively under the manifest cache directory.
+    pub(crate) async fn clean_empty_dirs(&self) {
+        let root = self.local_store.info().root();
+        let manifest_dir = PathBuf::from(root).join(MANIFEST_DIR);
+        let manifest_dir_clone = manifest_dir.clone();
+
+        let result =
+            tokio::task::spawn_blocking(move || Self::clean_empty_dirs_sync(&manifest_dir_clone))
+                .await;
+
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                warn!(e; "Failed to clean empty directories under {}", manifest_dir.display());
+            }
+            Err(e) => {
+                warn!(e; "Failed to spawn blocking task for cleaning empty directories");
+            }
+        }
+    }
+
+    /// Removes all manifest files under the given directory from cache and cleans up empty directories.
+    ///
+    /// This method:
+    /// 1. Lists all files under the specified directory
+    /// 2. Removes each file from the cache (both index and local store) in batch
+    /// 3. Cleans up empty directories under the given directory (including the directory itself)
+    pub(crate) async fn clean_manifests(&self, dir: &str) {
+        // List all files under the directory
+        let cache_dir = join_path(MANIFEST_DIR, dir);
+        let mut lister = match self
+            .local_store
+            .lister_with(&cache_dir)
+            .recursive(true)
+            .await
+        {
+            Ok(lister) => lister,
+            Err(e) => {
+                warn!(e; "Failed to list manifest files under {}", cache_dir);
+                return;
+            }
+        };
+
+        // Collect all file keys to remove
+        let mut keys_to_remove = Vec::new();
+        loop {
+            match lister.try_next().await {
+                Ok(Some(entry)) => {
+                    let meta = entry.metadata();
+                    if meta.is_file() {
+                        // The entry name is relative to MANIFEST_DIR, which is what we use as key
+                        keys_to_remove.push(entry.name().to_string());
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    warn!(e; "Failed to read entry while listing {}", cache_dir);
+                    break;
+                }
+            }
+        }
+
+        // Remove all files from cache in batch
+        self.remove_batch(&keys_to_remove).await;
+
+        // Clean up empty directories under the given dir
+        let root = self.local_store.info().root();
+        let dir_path = PathBuf::from(root).join(&cache_dir);
+        let dir_path_clone = dir_path.clone();
+
+        let result =
+            tokio::task::spawn_blocking(move || Self::clean_empty_dirs_sync(&dir_path_clone))
+                .await;
+
+        match result {
+            Ok(Ok(())) => {
+                info!("Cleaned manifest cache for directory: {}", dir);
+            }
+            Ok(Err(e)) => {
+                warn!(e; "Failed to clean empty directories under {}", dir_path.display());
+            }
+            Err(e) => {
+                warn!(e; "Failed to spawn blocking task for cleaning empty directories");
+            }
+        }
+    }
+
+    /// Synchronously removes empty directories recursively.
+    fn clean_empty_dirs_sync(dir: &PathBuf) -> std::io::Result<()> {
+        Self::remove_empty_dirs_recursive_sync(dir)?;
+        Ok(())
+    }
+
+    /// Recursively removes empty directories using synchronous filesystem APIs.
+    fn remove_empty_dirs_recursive_sync(dir: &PathBuf) -> std::io::Result<bool> {
+        let entries = std::fs::read_dir(dir)?;
+        let mut is_empty = true;
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = std::fs::metadata(&path)?;
+
+            if metadata.is_dir() {
+                // Recursively check subdirectories
+                let subdir_empty = Self::remove_empty_dirs_recursive_sync(&path)?;
+                if subdir_empty {
+                    // Remove the empty subdirectory
+                    if let Err(e) = std::fs::remove_dir(&path) {
+                        warn!(e; "Failed to remove empty directory {}", path.display());
+                        is_empty = false;
+                    } else {
+                        info!("Removed empty directory {}", path.display());
+                    }
+                } else {
+                    is_empty = false;
+                }
+            } else {
+                // Found a file, directory is not empty
+                is_empty = false;
+            }
+        }
+
+        Ok(is_empty)
     }
 }
 

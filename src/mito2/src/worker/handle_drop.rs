@@ -102,13 +102,14 @@ where
         let dropping_regions = self.dropping_regions.clone();
         let listener = self.listener.clone();
         let intm_manager = self.intermediate_manager.clone();
+        let cache_manager = self.cache_manager.clone();
         common_runtime::spawn_global(async move {
             let gc_duration = listener
                 .on_later_drop_begin(region_id)
                 .unwrap_or(Duration::from_secs(GC_TASK_INTERVAL_SEC));
             let removed = later_drop_task(
                 region_id,
-                region_dir,
+                region_dir.clone(),
                 object_store,
                 dropping_regions,
                 gc_duration,
@@ -117,6 +118,14 @@ where
             if let Err(err) = intm_manager.prune_region_dir(&region_id).await {
                 warn!(err; "Failed to prune intermediate region directory, region_id: {}", region_id);
             }
+
+            // Clean manifest cache for the region
+            if let Some(write_cache) = cache_manager.write_cache() {
+                if let Some(manifest_cache) = write_cache.manifest_cache() {
+                    manifest_cache.clean_manifests(&region_dir).await;
+                }
+            }
+
             listener.on_later_drop_end(region_id, removed);
         });
 
