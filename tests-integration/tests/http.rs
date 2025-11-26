@@ -6575,6 +6575,30 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     let expected: Value = serde_json::from_str(expected).unwrap();
     assert_eq!(resp, expected);
 
+    // Test `/api/traces/{trace_id}` API for non-existent trace.
+    let res = client
+        .get("/v1/jaeger/api/traces/0000000000000000000000000000dead")
+        .header("x-greptime-trace-table-name", trace_table_name)
+        .send()
+        .await;
+    assert_eq!(StatusCode::NOT_FOUND, res.status());
+    let expected = r#"{
+  "data": null,
+  "total": 0,
+  "limit": 0,
+  "offset": 0,
+  "errors": [
+    {
+      "code": 404,
+      "msg": "trace not found"
+    }
+  ]
+}
+"#;
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
     // Test `/api/traces` API.
     let res = client
         .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql&start=1738726754492421&end=1738726754642422&tags=%7B%22operation.type%22%3A%22access-mysql%22%7D")

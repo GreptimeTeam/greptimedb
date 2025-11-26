@@ -493,6 +493,10 @@ pub async fn handle_get_trace(
 
     match covert_to_records(output).await {
         Ok(Some(records)) => match traces_from_records(records) {
+            Ok(traces) if traces.is_empty() => (
+                HttpStatusCode::NOT_FOUND,
+                axum::Json(JaegerAPIResponse::trace_not_found()),
+            ),
             Ok(traces) => (
                 HttpStatusCode::OK,
                 axum::Json(JaegerAPIResponse {
