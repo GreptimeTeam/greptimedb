@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use common_telemetry::warn;
 use datafusion::arrow::array::{Array, AsArray, StringArray};
-use datafusion::arrow::compute::{concat_batches, SortOptions};
+use datafusion::arrow::compute::{SortOptions, concat_batches};
 use datafusion::arrow::datatypes::{DataType, Float64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
@@ -468,7 +468,7 @@ pub struct HistogramFoldStream {
 
 #[derive(Debug, Default)]
 struct SafeGroup {
-    normal_values: Vec<Value>,
+    tag_values: Vec<Value>,
     buckets: Vec<f64>,
     counters: Vec<f64>,
 }
@@ -575,10 +575,7 @@ impl HistogramFoldStream {
         self.find_first_complete_bucket(&batch)
     }
 
-    fn find_first_complete_bucket(
-        &self,
-        batch: &RecordBatch,
-    ) -> DataFusionResult<Option<usize>> {
+    fn find_first_complete_bucket(&self, batch: &RecordBatch) -> DataFusionResult<Option<usize>> {
         if batch.num_rows() == 0 {
             return Ok(None);
         }
@@ -587,13 +584,14 @@ impl HistogramFoldStream {
             .map_err(|e| DataFusionError::Execution(e.to_string()))?;
         let le_array = batch.column(self.le_column_index).as_string::<i32>();
 
-        let mut current_group_values = self.collect_normal_values(&vectors, 0);
+        let mut tag_values_buf = Vec::with_capacity(self.normal_indices.len());
+        self.collect_tag_values(&vectors, 0, &mut tag_values_buf);
         let mut group_start = 0usize;
 
         for row in 0..batch.num_rows() {
-            if !self.is_same_group(&vectors, row, &current_group_values) {
+            if !self.is_same_group(&vectors, row, &tag_values_buf) {
                 // new group begins
-                current_group_values = self.collect_normal_values(&vectors, row);
+                self.collect_tag_values(&vectors, row, &mut tag_values_buf);
                 group_start = row;
             }
 
@@ -618,15 +616,16 @@ impl HistogramFoldStream {
         let le_array = le_array.as_string::<i32>();
         let field_array = batch.column(self.field_column_index);
         let field_array = field_array.as_primitive::<Float64Type>();
+        let mut tag_values_buf = Vec::with_capacity(self.normal_indices.len());
 
         while remaining_rows >= bucket_num && self.mode == FoldMode::Optimistic {
-            let normal_values = self.collect_normal_values(&vectors, cursor);
+            self.collect_tag_values(&vectors, cursor, &mut tag_values_buf);
             if !self.validate_optimistic_group(
                 &vectors,
-                &le_array,
+                le_array,
                 cursor,
                 bucket_num,
-                &normal_values,
+                &tag_values_buf,
             ) {
                 let remaining_input_batch = batch.slice(cursor, remaining_rows);
                 self.switch_to_safe_mode(remaining_input_batch)?;
@@ -634,8 +633,8 @@ impl HistogramFoldStream {
             }
 
             // "sample" normal columns
-            for (idx, value) in self.normal_indices.iter().zip(normal_values.iter()) {
-                self.output_buffer[*idx].push_value_ref(&value.as_value_ref());
+            for (idx, value) in self.normal_indices.iter().zip(tag_values_buf.iter()) {
+                self.output_buffer[*idx].push_value_ref(value);
             }
             // "fold" `le` and field columns
             let mut bucket = Vec::with_capacity(bucket_num);
@@ -699,11 +698,17 @@ impl HistogramFoldStream {
         Ok(())
     }
 
-    fn collect_normal_values(&self, vectors: &[VectorRef], row: usize) -> Vec<Value> {
-        self.normal_indices
-            .iter()
-            .map(|idx| vectors[*idx].get(row))
-            .collect()
+    fn collect_tag_values<'a>(
+        &self,
+        vectors: &'a [VectorRef],
+        row: usize,
+        tag_values: &mut Vec<ValueRef<'a>>,
+    ) {
+        tag_values.clear();
+        tag_values.reserve(self.normal_indices.len());
+        for idx in self.normal_indices.iter() {
+            tag_values.push(vectors[*idx].get_ref(row));
+        }
     }
 
     fn validate_optimistic_group(
@@ -712,7 +717,7 @@ impl HistogramFoldStream {
         le_array: &StringArray,
         cursor: usize,
         bucket_num: usize,
-        normal_values: &[Value],
+        tag_values: &[ValueRef<'_>],
     ) -> bool {
         let inf_index = cursor + bucket_num - 1;
         if !Self::is_positive_infinity(le_array, inf_index) {
@@ -721,8 +726,8 @@ impl HistogramFoldStream {
 
         for offset in 1..bucket_num {
             let row = cursor + offset;
-            for (idx, expected) in self.normal_indices.iter().zip(normal_values.iter()) {
-                if vectors[*idx].get(row) != *expected {
+            for (idx, expected) in self.normal_indices.iter().zip(tag_values.iter()) {
+                if vectors[*idx].get_ref(row) != *expected {
                     return false;
                 }
             }
@@ -734,18 +739,18 @@ impl HistogramFoldStream {
         &self,
         vectors: &[VectorRef],
         row: usize,
-        normal_values: &[Value],
+        tag_values: &[ValueRef<'_>],
     ) -> bool {
         self.normal_indices
             .iter()
-            .zip(normal_values.iter())
-            .all(|(idx, expected)| vectors[*idx].get(row) == *expected)
+            .zip(tag_values.iter())
+            .all(|(idx, expected)| vectors[*idx].get_ref(row) == *expected)
     }
 
-    fn push_output_row(&mut self, normal_values: &[Value], result: f64) {
-        debug_assert_eq!(self.normal_indices.len(), normal_values.len());
-        for (idx, value) in self.normal_indices.iter().zip(normal_values.iter()) {
-            self.output_buffer[*idx].push_value_ref(&value.as_value_ref());
+    fn push_output_row(&mut self, tag_values: &[ValueRef<'_>], result: f64) {
+        debug_assert_eq!(self.normal_indices.len(), tag_values.len());
+        for (idx, value) in self.normal_indices.iter().zip(tag_values.iter()) {
+            self.output_buffer[*idx].push_value_ref(value);
         }
         self.output_buffer[self.field_column_index].push_value_ref(&ValueRef::from(result));
         self.output_buffered_rows += 1;
@@ -753,20 +758,24 @@ impl HistogramFoldStream {
 
     fn finalize_safe_group(&mut self) -> DataFusionResult<()> {
         if let Some(group) = self.safe_group.take() {
-            if !group.normal_values.is_empty() {
-                let has_inf = group
-                    .buckets
-                    .last()
-                    .map(|v| v.is_infinite() && v.is_sign_positive())
-                    .unwrap_or(false);
-                let result = if group.buckets.len() < 2 || !has_inf {
-                    f64::NAN
-                } else {
-                    Self::evaluate_row(self.quantile, &group.buckets, &group.counters)
-                        .unwrap_or(f64::NAN)
-                };
-                self.push_output_row(&group.normal_values, result);
+            if group.tag_values.is_empty() {
+                return Ok(());
             }
+
+            let has_inf = group
+                .buckets
+                .last()
+                .map(|v| v.is_infinite() && v.is_sign_positive())
+                .unwrap_or(false);
+            let result = if group.buckets.len() < 2 || !has_inf {
+                f64::NAN
+            } else {
+                Self::evaluate_row(self.quantile, &group.buckets, &group.counters)
+                    .unwrap_or(f64::NAN)
+            };
+            let mut tag_value_refs = Vec::with_capacity(group.tag_values.len());
+            tag_value_refs.extend(group.tag_values.iter().map(|v| v.as_value_ref()));
+            self.push_output_row(&tag_value_refs, result);
         }
         Ok(())
     }
@@ -785,17 +794,18 @@ impl HistogramFoldStream {
         let field_array = batch
             .column(self.field_column_index)
             .as_primitive::<Float64Type>();
+        let mut tag_values_buf = Vec::with_capacity(self.normal_indices.len());
 
         for row in 0..batch.num_rows() {
-            let normal_values = self.collect_normal_values(&vectors, row);
+            self.collect_tag_values(&vectors, row, &mut tag_values_buf);
             let should_start_new_group = self
                 .safe_group
                 .as_ref()
-                .map_or(true, |group| group.normal_values != normal_values);
+                .is_none_or(|group| !Self::tag_values_equal(&group.tag_values, &tag_values_buf));
             if should_start_new_group {
                 self.finalize_safe_group()?;
                 self.safe_group = Some(SafeGroup {
-                    normal_values,
+                    tag_values: tag_values_buf.iter().cloned().map(Value::from).collect(),
                     buckets: Vec::new(),
                     counters: Vec::new(),
                 });
@@ -821,6 +831,14 @@ impl HistogramFoldStream {
         }
 
         Ok(())
+    }
+
+    fn tag_values_equal(group_values: &[Value], current: &[ValueRef<'_>]) -> bool {
+        group_values.len() == current.len()
+            && group_values
+                .iter()
+                .zip(current.iter())
+                .all(|(group, now)| group.as_value_ref() == *now)
     }
 
     /// Compute result from output buffer
@@ -907,10 +925,8 @@ impl HistogramFoldStream {
             return Ok(f64::NAN);
         }
         let counter = {
-            let needs_fix = counter
-                .iter()
-                .any(|v| !v.is_finite())
-                || !counter.windows(2).all(|w| w[0] <= w[1]);
+            let needs_fix =
+                counter.iter().any(|v| !v.is_finite()) || !counter.windows(2).all(|w| w[0] <= w[1]);
             if !needs_fix {
                 Cow::Borrowed(counter)
             } else {
@@ -1204,11 +1220,7 @@ mod test {
     #[tokio::test]
     async fn safe_mode_handles_misaligned_groups() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                "ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                true,
-            ),
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
             Field::new("le", DataType::Utf8, true),
             Field::new("val", DataType::Float64, true),
         ]));
@@ -1223,8 +1235,8 @@ mod test {
         let val_column = Arc::new(Float64Array::from(vec![
             0.0, 0.0, 0.0, 50.0, 70.0, 110.0, 120.0, 10.0, 30.0, 10.0, 20.0, 30.0, 40.0, 50.0,
         ])) as _;
-        let batch = RecordBatch::try_new(schema.clone(), vec![ts_column, le_column, val_column])
-            .unwrap();
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![ts_column, le_column, val_column]).unwrap();
         let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 0);
         let session_context = SessionContext::default();
         let result = datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
@@ -1247,49 +1259,24 @@ mod test {
     #[tokio::test]
     async fn missing_buckets_at_first_timestamp() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                "ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                true,
-            ),
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
             Field::new("le", DataType::Utf8, true),
             Field::new("val", DataType::Float64, true),
         ]));
 
         let ts_column = Arc::new(TimestampMillisecondArray::from(vec![
-            2_900_000,
-            3_000_000,
-            3_000_000,
-            3_000_000,
-            3_000_000,
-            3_005_000,
-            3_005_000,
-            3_010_000,
-            3_010_000,
-            3_010_000,
-            3_010_000,
-            3_010_000,
+            2_900_000, 3_000_000, 3_000_000, 3_000_000, 3_000_000, 3_005_000, 3_005_000, 3_010_000,
+            3_010_000, 3_010_000, 3_010_000, 3_010_000,
         ])) as _;
         let le_column = Arc::new(StringArray::from(vec![
-            "0.1",
-            "0.1",
-            "1",
-            "5",
-            "+Inf",
-            "0.1",
-            "+Inf",
-            "0.1",
-            "1",
-            "3",
-            "5",
-            "+Inf",
+            "0.1", "0.1", "1", "5", "+Inf", "0.1", "+Inf", "0.1", "1", "3", "5", "+Inf",
         ])) as _;
         let val_column = Arc::new(Float64Array::from(vec![
             0.0, 50.0, 70.0, 110.0, 120.0, 10.0, 30.0, 10.0, 20.0, 30.0, 40.0, 50.0,
         ])) as _;
 
-        let batch = RecordBatch::try_new(schema.clone(), vec![ts_column, le_column, val_column])
-            .unwrap();
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![ts_column, le_column, val_column]).unwrap();
         let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 0);
         let session_context = SessionContext::default();
         let result = datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
@@ -1312,11 +1299,7 @@ mod test {
     #[tokio::test]
     async fn missing_inf_in_first_group() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                "ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                true,
-            ),
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
             Field::new("le", DataType::Utf8, true),
             Field::new("val", DataType::Float64, true),
         ]));
@@ -1330,8 +1313,8 @@ mod test {
         let val_column = Arc::new(Float64Array::from(vec![
             0.0, 0.0, 0.0, 10.0, 20.0, 30.0, 30.0,
         ])) as _;
-        let batch = RecordBatch::try_new(schema.clone(), vec![ts_column, le_column, val_column])
-            .unwrap();
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![ts_column, le_column, val_column]).unwrap();
         let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 0);
         let session_context = SessionContext::default();
         let result = datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
