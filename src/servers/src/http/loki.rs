@@ -43,7 +43,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    DecodeOtlpRequestSnafu, InvalidLokiLabelsSnafu, InvalidLokiPayloadSnafu, ParseJsonSnafu,
+    DecodeLokiRequestSnafu, InvalidLokiLabelsSnafu, InvalidLokiPayloadSnafu, ParseJsonSnafu,
     PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
 use crate::http::HttpResponse;
@@ -491,11 +491,8 @@ pub struct LokiPbParser {
 impl LokiPbParser {
     pub fn from_bytes(bytes: Bytes) -> Result<Self> {
         let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
-        let req = loki_proto::logproto::PushRequest::decode(&decompressed[..]).context(
-            DecodeOtlpRequestSnafu {
-                content_type: "application/x-protobuf",
-            },
-        )?;
+        let req = loki_proto::logproto::PushRequest::decode(&decompressed[..])
+            .context(DecodeLokiRequestSnafu)?;
 
         Ok(Self {
             streams: req.streams.into(),

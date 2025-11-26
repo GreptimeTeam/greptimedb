@@ -240,6 +240,14 @@ pub enum Error {
         error: prost::DecodeError,
     },
 
+    #[snafu(display("Failed to decode Loki request: {error}"))]
+    DecodeLokiRequest {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: prost::DecodeError,
+    },
+
     #[snafu(display(
         "Unsupported content type 'application/json'. OTLP endpoint only supports 'application/x-protobuf'. Please configure your OTLP exporter to use protobuf encoding."
     ))]
@@ -689,6 +697,7 @@ impl ErrorExt for Error {
             | InvalidOpentsdbJsonRequest { .. }
             | DecodePromRemoteRequest { .. }
             | DecodeOtlpRequest { .. }
+            | DecodeLokiRequest { .. }
             | UnsupportedJsonContentType { .. }
             | CompressPromRemoteRequest { .. }
             | DecompressSnappyPromRemoteRequest { .. }
