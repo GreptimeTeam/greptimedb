@@ -1212,6 +1212,8 @@ impl RowGroupReaderBuilder {
         row_selection: Option<RowSelection>,
         fetch_metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<ParquetRecordBatchReader> {
+        let fetch_start = Instant::now();
+
         let mut row_group = InMemoryRowGroup::create(
             self.file_handle.region_id(),
             self.file_handle.file_id().file_id(),
@@ -1228,6 +1230,11 @@ impl RowGroupReaderBuilder {
             .context(ReadParquetSnafu {
                 path: &self.file_path,
             })?;
+
+        // Record total fetch elapsed time.
+        if let Some(metrics) = fetch_metrics {
+            metrics.add_total_fetch_elapsed(fetch_start.elapsed().as_micros() as u64);
+        }
 
         // Builds the parquet reader.
         // Now the row selection is None.
