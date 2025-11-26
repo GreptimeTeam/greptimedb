@@ -391,7 +391,8 @@ impl StartCommand {
                 flownode_id: member_id,
                 catalog_manager: catalog_manager.clone(),
             };
-            Some(f.create(context).await.context(OtherSnafu)?)
+            let extension = f.create(context).await.context(OtherSnafu)?;
+            Some(extension)
         } else {
             None
         };

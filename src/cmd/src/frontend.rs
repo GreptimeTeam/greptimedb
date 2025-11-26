@@ -38,6 +38,7 @@ use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
+use datatypes::extension;
 use frontend::frontend::Frontend;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
@@ -412,15 +413,16 @@ impl StartCommand {
             Some(meta_client.clone()),
         ));
 
-        let extension = plugins
-            .get::<FrontendExtensionFactoryRef>()
-            .unwrap()
-            .create(ExtensionContext {
+        let extension = if let Some(f) = plugins.get::<FrontendExtensionFactoryRef>() {
+            let extension = ExtensionContext {
                 kv_backend: cached_meta_backend.clone(),
                 meta_client: meta_client.clone(),
-            })
-            .await
-            .context(OtherSnafu)?;
+            };
+            let extension = f.create(extension).await.context(OtherSnafu)?;
+            Some(extension)
+        } else {
+            None
+        };
 
         let builder = KvBackendCatalogManagerBuilder::new(
             information_extension,
