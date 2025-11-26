@@ -56,6 +56,12 @@ fn is_json_content_type(content_type: Option<&ContentType>) -> bool {
     }
 }
 
+fn content_type_to_string(content_type: Option<&TypedHeader<ContentType>>) -> String {
+    content_type
+        .map(|h| h.0.to_string())
+        .unwrap_or_else(|| "not specified".to_string())
+}
+
 #[derive(Clone)]
 pub struct OtlpState {
     pub with_metric_engine: bool,
@@ -83,10 +89,7 @@ pub async fn metrics(
         .start_timer();
     let request = ExportMetricsServiceRequest::decode(bytes).with_context(|_| {
         error::DecodeOtlpRequestSnafu {
-            content_type: content_type
-                .as_ref()
-                .map(|h| h.0.to_string())
-                .unwrap_or_else(|| "not specified".to_string()),
+            content_type: content_type_to_string(content_type.as_ref()),
         }
     })?;
 
@@ -143,10 +146,7 @@ pub async fn traces(
         .start_timer();
     let request = ExportTraceServiceRequest::decode(bytes).with_context(|_| {
         error::DecodeOtlpRequestSnafu {
-            content_type: content_type
-                .as_ref()
-                .map(|h| h.0.to_string())
-                .unwrap_or_else(|| "not specified".to_string()),
+            content_type: content_type_to_string(content_type.as_ref()),
         }
     })?;
 
@@ -207,10 +207,7 @@ pub async fn logs(
         .start_timer();
     let request = ExportLogsServiceRequest::decode(bytes).with_context(|_| {
         error::DecodeOtlpRequestSnafu {
-            content_type: content_type
-                .as_ref()
-                .map(|h| h.0.to_string())
-                .unwrap_or_else(|| "not specified".to_string()),
+            content_type: content_type_to_string(content_type.as_ref()),
         }
     })?;
 
