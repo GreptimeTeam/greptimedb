@@ -32,6 +32,7 @@ use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, StorageConfig};
 use frontend::instance::Instance;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
+use mito2::gc::GcConfig;
 use object_store::config::{
     AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
 };
@@ -297,6 +298,7 @@ pub fn create_tmp_dir_and_datanode_opts(
     store_provider_types: Vec<StorageType>,
     name: &str,
     wal_config: DatanodeWalConfig,
+    gc_config: GcConfig,
 ) -> (DatanodeOptions, TestGuard) {
     let home_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
@@ -314,7 +316,13 @@ pub fn create_tmp_dir_and_datanode_opts(
         store_providers.push(store);
         storage_guards.push(StorageGuard(data_tmp_dir))
     }
-    let opts = create_datanode_opts(default_store, store_providers, home_dir, wal_config);
+    let opts = create_datanode_opts(
+        default_store,
+        store_providers,
+        home_dir,
+        wal_config,
+        gc_config,
+    );
 
     (
         opts,
@@ -330,7 +338,21 @@ pub(crate) fn create_datanode_opts(
     providers: Vec<ObjectStoreConfig>,
     home_dir: String,
     wal_config: DatanodeWalConfig,
+    gc_config: GcConfig,
 ) -> DatanodeOptions {
+    let region_engine = DatanodeOptions::default()
+        .region_engine
+        .into_iter()
+        .map(|mut v| {
+            match &mut v {
+                datanode::config::RegionEngineConfig::Mito(mito_config) => {
+                    mito_config.gc = gc_config.clone();
+                }
+                _ => (),
+            }
+            v
+        })
+        .collect();
     DatanodeOptions {
         node_id: Some(0),
         require_lease_before_startup: true,
@@ -343,6 +365,7 @@ pub(crate) fn create_datanode_opts(
             .with_bind_addr(PEER_PLACEHOLDER_ADDR)
             .with_server_addr(PEER_PLACEHOLDER_ADDR),
         wal: wal_config,
+        region_engine,
         ..Default::default()
     }
 }

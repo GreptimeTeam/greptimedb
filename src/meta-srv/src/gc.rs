@@ -28,7 +28,7 @@ mod procedure;
 mod scheduler;
 mod tracker;
 
-pub(crate) use options::GcSchedulerOptions;
+pub use options::GcSchedulerOptions;
 pub(crate) use scheduler::{GcScheduler, GcTickerRef};
 
 pub(crate) type Region2Peers = HashMap<RegionId, (Peer, Vec<Peer>)>;
