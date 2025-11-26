@@ -24,6 +24,7 @@ pub(crate) mod open_candidate_region;
 pub mod test_util;
 pub(crate) mod update_metadata;
 pub(crate) mod upgrade_candidate_region;
+pub(crate) mod utils;
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -100,9 +101,16 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistentContext {
     /// The table catalog.
-    pub(crate) catalog: String,
+    #[deprecated(note = "use `catalog_and_schema` instead")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) catalog: Option<String>,
     /// The table schema.
-    pub(crate) schema: String,
+    #[deprecated(note = "use `catalog_and_schema` instead")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) schema: Option<String>,
+    /// The catalog and schema of the regions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) catalog_and_schema: Vec<(String, String)>,
     /// The [Peer] of migration source.
     pub(crate) from_peer: Peer,
     /// The [Peer] of migration destination.
@@ -118,15 +126,47 @@ pub struct PersistentContext {
     pub(crate) trigger_reason: RegionMigrationTriggerReason,
 }
 
+impl PersistentContext {
+    pub fn new(
+        catalog_and_schema: Vec<(String, String)>,
+        from_peer: Peer,
+        to_peer: Peer,
+        region_ids: Vec<RegionId>,
+        timeout: Duration,
+        trigger_reason: RegionMigrationTriggerReason,
+    ) -> Self {
+        #[allow(deprecated)]
+        Self {
+            catalog: None,
+            schema: None,
+            catalog_and_schema,
+            from_peer,
+            to_peer,
+            region_ids,
+            timeout,
+            trigger_reason,
+        }
+    }
+}
+
 fn default_timeout() -> Duration {
     Duration::from_secs(10)
 }
 
 impl PersistentContext {
     pub fn lock_key(&self) -> Vec<StringKey> {
-        let mut lock_keys = Vec::with_capacity(self.region_ids.len() + 2);
-        lock_keys.push(CatalogLock::Read(&self.catalog).into());
-        lock_keys.push(SchemaLock::read(&self.catalog, &self.schema).into());
+        let mut lock_keys =
+            Vec::with_capacity(self.region_ids.len() + 2 + self.catalog_and_schema.len() * 2);
+        #[allow(deprecated)]
+        if let (Some(catalog), Some(schema)) = (&self.catalog, &self.schema) {
+            lock_keys.push(CatalogLock::Read(catalog).into());
+            lock_keys.push(SchemaLock::read(catalog, schema).into());
+        }
+        for (catalog, schema) in self.catalog_and_schema.iter() {
+            lock_keys.push(CatalogLock::Read(catalog).into());
+            lock_keys.push(SchemaLock::read(catalog, schema).into());
+        }
+
         // Sort the region ids to ensure the same order of region ids.
         let mut region_ids = self.region_ids.clone();
         region_ids.sort_unstable();
@@ -928,13 +968,24 @@ mod tests {
         let procedure = RegionMigrationProcedure::new(persistent_context, context, vec![]);
 
         let serialized = procedure.dump().unwrap();
-        let expected = r#"{"persistent_ctx":{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_ids":[4398046511105],"timeout":"10s","trigger_reason":"Unknown"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
+        let expected = r#"{"persistent_ctx":{"catalog_and_schema":[["greptime","public"]],"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_ids":[4398046511105],"timeout":"10s","trigger_reason":"Unknown"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
         assert_eq!(expected, serialized);
     }
 
     #[test]
     fn test_backward_compatibility() {
-        let persistent_ctx = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        let persistent_ctx = PersistentContext {
+            #[allow(deprecated)]
+            catalog: Some("greptime".into()),
+            #[allow(deprecated)]
+            schema: Some("public".into()),
+            catalog_and_schema: vec![],
+            from_peer: Peer::empty(1),
+            to_peer: Peer::empty(2),
+            region_ids: vec![RegionId::new(1024, 1)],
+            timeout: Duration::from_secs(10),
+            trigger_reason: RegionMigrationTriggerReason::default(),
+        };
         // NOTES: Changes it will break backward compatibility.
         let serialized = r#"{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105}"#;
         let deserialized: PersistentContext = serde_json::from_str(serialized).unwrap();
