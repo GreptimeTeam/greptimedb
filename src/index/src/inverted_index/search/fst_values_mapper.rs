@@ -33,12 +33,11 @@ impl<'a> ParallelFstValuesMapper<'a> {
         Self { reader }
     }
 
-    pub async fn map_values_vec<'b>(
+    pub async fn map_values_vec(
         &mut self,
-        value_and_meta_vec: &[(Vec<u64>, &'b InvertedIndexMeta)],
+        value_and_meta_vec: &[(Vec<u64>, &InvertedIndexMeta)],
         metrics: Option<&mut InvertedIndexReadMetrics>,
     ) -> Result<Vec<Bitmap>> {
-        let mut metrics = metrics;
         let groups = value_and_meta_vec
             .iter()
             .map(|(values, _)| values.len())
@@ -66,10 +65,7 @@ impl<'a> ParallelFstValuesMapper<'a> {
         }
 
         common_telemetry::debug!("fetch ranges: {:?}", fetch_ranges);
-        let mut bitmaps = self
-            .reader
-            .bitmap_deque(&fetch_ranges, metrics.as_deref_mut())
-            .await?;
+        let mut bitmaps = self.reader.bitmap_deque(&fetch_ranges, metrics).await?;
         let mut output = Vec::with_capacity(groups.len());
 
         for counter in groups {

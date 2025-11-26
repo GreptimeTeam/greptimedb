@@ -615,10 +615,8 @@ impl IndexSource {
         let (reader, fallbacked) = self.ensure_reader(file_id, file_size_hint).await?;
 
         // Track cache miss if fallbacked to remote
-        if fallbacked {
-            if let Some(m) = metrics {
-                m.blob_cache_miss += 1;
-            }
+        if fallbacked && let Some(m) = metrics {
+            m.blob_cache_miss += 1;
         }
 
         let res = reader.blob(key).await;
@@ -655,10 +653,8 @@ impl IndexSource {
         let (reader, fallbacked) = self.ensure_reader(file_id, file_size_hint).await?;
 
         // Track cache miss if fallbacked to remote
-        if fallbacked {
-            if let Some(m) = &mut metrics {
-                m.blob_cache_miss += 1;
-            }
+        if fallbacked && let Some(m) = &mut metrics {
+            m.blob_cache_miss += 1;
         }
 
         let start = metrics.as_ref().map(|_| Instant::now());
