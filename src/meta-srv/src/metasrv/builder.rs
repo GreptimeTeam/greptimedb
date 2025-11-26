@@ -52,10 +52,10 @@ use snafu::{ResultExt, ensure};
 use store_api::storage::MAX_REGION_SEQ;
 
 use crate::bootstrap::build_default_meta_peer_client;
-use crate::bootstrap::extension::Extension;
+use crate::bootstrap::extension::{ExtensionContext, ExtensionFactoryRef};
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
-use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
+use crate::error::{self, BuildWalOptionsAllocatorSnafu, OtherSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::gc::GcScheduler;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
@@ -101,7 +101,6 @@ pub struct MetasrvBuilder {
     node_manager: Option<NodeManagerRef>,
     plugins: Option<Plugins>,
     table_metadata_allocator: Option<TableMetadataAllocatorRef>,
-    extension: Option<Extension>,
 }
 
 impl MetasrvBuilder {
@@ -117,7 +116,6 @@ impl MetasrvBuilder {
             node_manager: None,
             plugins: None,
             table_metadata_allocator: None,
-            extension: None,
         }
     }
 
@@ -177,11 +175,6 @@ impl MetasrvBuilder {
         self
     }
 
-    pub fn extension(mut self, extension: Option<Extension>) -> Self {
-        self.extension = extension;
-        self
-    }
-
     pub async fn build(self) -> Result<Metasrv> {
         let MetasrvBuilder {
             election,
@@ -194,7 +187,6 @@ impl MetasrvBuilder {
             node_manager,
             plugins,
             table_metadata_allocator,
-            extension,
         } = self;
 
         let options = options.unwrap_or_default();
@@ -412,13 +404,29 @@ impl MetasrvBuilder {
         let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager_c, true)
             .context(error::InitDdlManagerSnafu)?;
 
+        let extension = if let Some(f) = plugins
+            .as_ref()
+            .and_then(|p| p.get::<ExtensionFactoryRef>())
+        {
+            let ctx = ExtensionContext {
+                kv_backend: kv_backend.clone(),
+                meta_peer_client: meta_peer_client.clone(),
+            };
+            Some(f.create(ctx).await.context(OtherSnafu)?)
+        } else {
+            None
+        };
+
         #[cfg(feature = "enterprise")]
-        let ddl_manager =
-            if let Some(trigger_ddl_manager) = extension.and_then(|e| e.trigger_ddl_manager) {
-                ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
+        let ddl_manager = if let Some(e) = extension {
+            if let Some(t) = e.trigger_ddl_manager {
+                ddl_manager.with_trigger_ddl_manager(t)
             } else {
                 ddl_manager
-            };
+            }
+        } else {
+            ddl_manager
+        };
         #[cfg(not(feature = "enterprise"))]
         let _ = extension;
 

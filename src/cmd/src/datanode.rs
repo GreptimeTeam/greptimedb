@@ -16,7 +16,6 @@ pub mod builder;
 #[allow(clippy::print_stdout)]
 mod objbench;
 
-use std::fmt::Debug;
 use std::path::Path;
 use std::time::Duration;
 

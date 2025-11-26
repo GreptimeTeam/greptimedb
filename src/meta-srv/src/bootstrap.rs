@@ -42,12 +42,10 @@ use tokio::sync::{Mutex, oneshot};
 use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
-use crate::bootstrap::extension::{ExtensionContext, ExtensionFactoryRef};
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::election::etcd::EtcdElection;
-use crate::error::OtherSnafu;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{
     BackendImpl, ElectionRef, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
@@ -406,17 +404,6 @@ pub async fn metasrv_builder(
         selector
     };
 
-    let ctx = ExtensionContext {
-        kv_backend: kv_backend.clone(),
-        meta_peer_client: meta_peer_client.clone(),
-    };
-
-    let extension = if let Some(f) = plugins.get::<ExtensionFactoryRef>() {
-        Some(f.create(ctx).await.context(OtherSnafu)?)
-    } else {
-        None
-    };
-
     Ok(MetasrvBuilder::new()
         .options(opts.clone())
         .kv_backend(kv_backend)
@@ -424,8 +411,7 @@ pub async fn metasrv_builder(
         .selector(selector)
         .election(election)
         .meta_peer_client(meta_peer_client)
-        .plugins(plugins)
-        .extension(extension))
+        .plugins(plugins))
 }
 
 pub(crate) fn build_default_meta_peer_client(

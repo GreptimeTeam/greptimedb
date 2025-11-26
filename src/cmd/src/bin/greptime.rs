@@ -113,20 +113,28 @@ async fn start(cli: Command) -> Result<()> {
             datanode::SubCommand::Objbench(ref bench) => bench.run().await,
         },
         SubCommand::Flownode(cmd) => {
-            let opts = cmd.load_options(&cli.global_options)?;
-            cmd.build(opts).await?.run().await
+            cmd.build(cmd.load_options(&cli.global_options)?)
+                .await?
+                .run()
+                .await
         }
         SubCommand::Frontend(cmd) => {
-            let opts = cmd.load_options(&cli.global_options)?;
-            cmd.build(opts).await?.run().await
+            cmd.build(cmd.load_options(&cli.global_options)?)
+                .await?
+                .run()
+                .await
         }
         SubCommand::Metasrv(cmd) => {
-            let opts = cmd.load_options(&cli.global_options)?;
-            cmd.build(opts).await?.run().await
+            cmd.build(cmd.load_options(&cli.global_options)?)
+                .await?
+                .run()
+                .await
         }
         SubCommand::Standalone(cmd) => {
-            let opts = cmd.load_options(&cli.global_options)?;
-            cmd.build(opts).await?.run().await
+            cmd.build(cmd.load_options(&cli.global_options)?)
+                .await?
+                .run()
+                .await
         }
         SubCommand::Cli(cmd) => {
             cmd.build(cmd.load_options(&cli.global_options)?)
