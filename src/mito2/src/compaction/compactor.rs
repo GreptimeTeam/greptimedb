@@ -408,6 +408,7 @@ impl DefaultCompactor {
                 time_range: sst_info.time_range,
                 level: output.output_level,
                 file_size: sst_info.file_size,
+                uncompressed_file_size: sst_info.uncompressed_file_size,
                 available_indexes: sst_info.index_metadata.build_available_indexes(),
                 index_file_size: sst_info.index_metadata.file_size,
                 index_file_id: None,

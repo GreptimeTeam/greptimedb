@@ -28,6 +28,7 @@ use tokio::sync::mpsc::Sender;
 use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::cache::CacheManager;
 use crate::compaction::CompactionScheduler;
+use crate::compaction::memory_manager::{CompactionMemoryManager, OnExhaustedPolicy};
 use crate::config::MitoConfig;
 use crate::error::Result;
 use crate::flush::FlushScheduler;
@@ -100,6 +101,8 @@ impl SchedulerEnv {
             Arc::new(MitoConfig::default()),
             WorkerListener::default(),
             Plugins::new(),
+            Arc::new(CompactionMemoryManager::new(0)),
+            OnExhaustedPolicy::Wait,
         )
     }
 

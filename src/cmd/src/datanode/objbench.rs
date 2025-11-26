@@ -145,6 +145,16 @@ impl ObjbenchCommand {
         let region_meta = extract_region_metadata(&self.source, &parquet_meta)?;
         let num_rows = parquet_meta.file_metadata().num_rows() as u64;
         let num_row_groups = parquet_meta.num_row_groups() as u64;
+        let uncompressed_file_size: u64 = parquet_meta
+            .row_groups()
+            .iter()
+            .map(|rg| {
+                rg.columns()
+                    .iter()
+                    .map(|c| c.uncompressed_size() as u64)
+                    .sum::<u64>()
+            })
+            .sum();
 
         println!(
             "{} Metadata loaded - rows: {}, size: {} bytes",
@@ -160,6 +170,7 @@ impl ObjbenchCommand {
             time_range: Default::default(),
             level: 0,
             file_size,
+            uncompressed_file_size,
             available_indexes: Default::default(),
             index_file_size: 0,
             index_file_id: None,

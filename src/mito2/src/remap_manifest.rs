@@ -425,6 +425,7 @@ mod tests {
             time_range: FileTimeRange::default(),
             level: 0,
             file_size: 1024,
+            uncompressed_file_size: 1024,
             available_indexes: SmallVec::new(),
             index_file_size: 0,
             index_file_id: None,

@@ -74,6 +74,7 @@ pub fn new_file_handle_with_size_and_sequence(
             ),
             level,
             file_size,
+            uncompressed_file_size: file_size,
             available_indexes: Default::default(),
             index_file_size: 0,
             index_file_id: None,

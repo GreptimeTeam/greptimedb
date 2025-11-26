@@ -142,6 +142,8 @@ pub struct FileMeta {
     pub level: Level,
     /// Size of the file.
     pub file_size: u64,
+    /// Uncompressed size of the file. 0 means unknown.
+    pub uncompressed_file_size: u64,
     /// Available indexes of the file.
     pub available_indexes: SmallVec<[IndexType; 4]>,
     /// Size of the index file.
@@ -202,7 +204,11 @@ impl Debug for FileMeta {
                 )
             })
             .field("level", &self.level)
-            .field("file_size", &ReadableSize(self.file_size));
+            .field("file_size", &ReadableSize(self.file_size))
+            .field(
+                "uncompressed_file_size",
+                &ReadableSize(self.uncompressed_file_size),
+            );
         if !self.available_indexes.is_empty() {
             debug_struct
                 .field("available_indexes", &self.available_indexes)
@@ -487,6 +493,7 @@ mod tests {
             time_range: FileTimeRange::default(),
             level,
             file_size: 0,
+            uncompressed_file_size: 0,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
             index_file_size: 0,
             index_file_id: None,
@@ -534,6 +541,7 @@ mod tests {
             time_range: FileTimeRange::default(),
             level: 0,
             file_size: 0,
+            uncompressed_file_size: 0,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
             index_file_size: 0,
             index_file_id: None,

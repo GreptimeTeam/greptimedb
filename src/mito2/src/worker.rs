@@ -38,6 +38,7 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_runtime::JoinHandle;
+use common_stat::get_total_memory_bytes;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
@@ -55,6 +56,7 @@ use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
+use crate::compaction::memory_manager::CompactionMemoryManager;
 use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
@@ -202,6 +204,15 @@ impl WorkerGroup {
                 .build(),
         );
         let time_provider = Arc::new(StdTimeProvider);
+        let total_memory = get_total_memory_bytes();
+        let total_memory = if total_memory > 0 {
+            total_memory as u64
+        } else {
+            0
+        };
+        let compaction_limit_bytes = config.compaction_memory_limit.resolve(total_memory);
+        let compaction_memory_manager =
+            Arc::new(CompactionMemoryManager::new(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
 
         let workers = (0..config.num_workers)
@@ -218,6 +229,7 @@ impl WorkerGroup {
                     purge_scheduler: purge_scheduler.clone(),
                     listener: WorkerListener::default(),
                     cache_manager: cache_manager.clone(),
+                    compaction_memory_manager: compaction_memory_manager.clone(),
                     puffin_manager_factory: puffin_manager_factory.clone(),
                     intermediate_manager: intermediate_manager.clone(),
                     time_provider: time_provider.clone(),
@@ -378,6 +390,15 @@ impl WorkerGroup {
                 .write_cache(write_cache)
                 .build(),
         );
+        let total_memory = get_total_memory_bytes();
+        let total_memory = if total_memory > 0 {
+            total_memory as u64
+        } else {
+            0
+        };
+        let compaction_limit_bytes = config.compaction_memory_limit.resolve(total_memory);
+        let compaction_memory_manager =
+            Arc::new(CompactionMemoryManager::new(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -393,6 +414,7 @@ impl WorkerGroup {
                     purge_scheduler: purge_scheduler.clone(),
                     listener: WorkerListener::new(listener.clone()),
                     cache_manager: cache_manager.clone(),
+                    compaction_memory_manager: compaction_memory_manager.clone(),
                     puffin_manager_factory: puffin_manager_factory.clone(),
                     intermediate_manager: intermediate_manager.clone(),
                     time_provider: time_provider.clone(),
@@ -477,6 +499,7 @@ struct WorkerStarter<S> {
     purge_scheduler: SchedulerRef,
     listener: WorkerListener,
     cache_manager: CacheManagerRef,
+    compaction_memory_manager: Arc<CompactionMemoryManager>,
     puffin_manager_factory: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
     time_provider: TimeProviderRef,
@@ -529,9 +552,11 @@ impl<S: LogStore> WorkerStarter<S> {
                 self.compact_job_pool,
                 sender.clone(),
                 self.cache_manager.clone(),
-                self.config,
+                self.config.clone(),
                 self.listener.clone(),
                 self.plugins.clone(),
+                self.compaction_memory_manager.clone(),
+                self.config.compaction_on_exhausted,
             ),
             stalled_requests: StalledRequests::default(),
             listener: self.listener,
@@ -1103,6 +1128,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_compaction_finished(region_id, req).await
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
+            BackgroundNotify::CompactionRetry => self.handle_compaction_retry(region_id).await,
             BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
             BackgroundNotify::RegionChange(req) => {
                 self.handle_manifest_region_change_result(req).await
