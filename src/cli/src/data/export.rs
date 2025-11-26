@@ -135,23 +135,27 @@ impl ExportCommand {
     pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
         // Determine storage type
         let (storage_type, operator) = if self.storage.enable_s3 {
+            self.storage.validate_s3()?;
             (
-                StorageType::S3(S3Backend::new(self.storage.s3.clone())?),
+                StorageType::S3(S3Backend::new(self.storage.s3.clone())),
                 self.storage.build_s3()?,
             )
         } else if self.storage.enable_oss {
+            self.storage.validate_oss()?;
             (
-                StorageType::Oss(OssBackend::new(self.storage.oss.clone())?),
+                StorageType::Oss(OssBackend::new(self.storage.oss.clone())),
                 self.storage.build_oss()?,
             )
         } else if self.storage.enable_gcs {
+            self.storage.validate_gcs()?;
             (
-                StorageType::Gcs(GcsBackend::new(self.storage.gcs.clone())?),
+                StorageType::Gcs(GcsBackend::new(self.storage.gcs.clone())),
                 self.storage.build_gcs()?,
             )
         } else if self.storage.enable_azblob {
+            self.storage.validate_azblob()?;
             (
-                StorageType::Azblob(AzblobBackend::new(self.storage.azblob.clone())?),
+                StorageType::Azblob(AzblobBackend::new(self.storage.azblob.clone())),
                 self.storage.build_azblob()?,
             )
         } else if let Some(output_dir) = &self.output_dir {
@@ -672,10 +676,13 @@ mod tests {
             "--s3",
             "--s3-bucket",
             "test-bucket",
+            "--s3-root",
+            "test-root",
             "--s3-access-key-id",
             "test-key",
             "--s3-secret-access-key",
             "test-secret",
+            // Optional fields
             "--s3-region",
             "us-west-2",
             "--s3-endpoint",
@@ -694,19 +701,22 @@ mod tests {
             "--addr",
             "127.0.0.1:4000",
             "--s3",
+            "--s3-root",
+            "test-root",
             "--s3-access-key-id",
             "test-key",
             "--s3-secret-access-key",
             "test-secret",
-            "--s3-region",
-            "us-west-2",
         ]);
 
         let result = cmd.build().await;
         assert!(result.is_err());
-        match result {
-            Ok(_) => panic!("Expected error"),
-            Err(e) => assert!(e.to_string().contains("S3 bucket must be set")),
+        if let Err(err) = result {
+            assert!(
+                err.to_string().contains("S3 bucket must be set"),
+                "Actual error: {}",
+                err
+            );
         }
     }
 
@@ -719,6 +729,8 @@ mod tests {
             "--oss",
             "--oss-bucket",
             "test-bucket",
+            "--oss-root",
+            "test-root",
             "--oss-access-key-id",
             "test-key-id",
             "--oss-access-key-secret",
@@ -741,6 +753,8 @@ mod tests {
             "--oss",
             "--oss-bucket",
             "test-bucket",
+            "--oss-root",
+            "test-root",
             "--oss-access-key-id",
             "test-key-id",
             "--oss-access-key-secret",
@@ -749,9 +763,12 @@ mod tests {
 
         let result = cmd.build().await;
         assert!(result.is_err());
-        match result {
-            Ok(_) => panic!("Expected error"),
-            Err(e) => assert!(e.to_string().contains("OSS endpoint must be set")),
+        if let Err(err) = result {
+            assert!(
+                err.to_string().contains("OSS endpoint must be set"),
+                "Actual error: {}",
+                err
+            );
         }
     }
 
@@ -764,8 +781,14 @@ mod tests {
             "--gcs",
             "--gcs-bucket",
             "test-bucket",
+            "--gcs-root",
+            "test-root",
+            "--gcs-scope",
+            "test-scope",
             "--gcs-credential-path",
             "/path/to/credential",
+            "--gcs-credential",
+            "test-credential-content",
             "--gcs-endpoint",
             "https://storage.googleapis.com",
         ]);
@@ -776,6 +799,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_export_command_build_with_gcs_missing_config() {
+        // Missing credentials
         let cmd = ExportCommand::parse_from([
             "export",
             "--addr",
@@ -783,20 +807,24 @@ mod tests {
             "--gcs",
             "--gcs-bucket",
             "test-bucket",
-            // Missing credentials
+            "--gcs-root",
+            "test-root",
+            "--gcs-scope",
+            "test-scope",
+            "--gcs-endpoint",
+            "https://storage.googleapis.com",
         ]);
 
         let result = cmd.build().await;
-        let err = match result {
-            Ok(_) => panic!("Expected error but got Ok"),
-            Err(e) => e,
-        };
-        assert!(
-            err.to_string()
-                .contains("GCS credential path or credential must be set"),
-            "Unexpected error message: {}",
-            err
-        );
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert!(
+                err.to_string()
+                    .contains("GCS credential path, credential must be set"),
+                "Actual error: {}",
+                err
+            );
+        }
     }
 
     #[tokio::test]
@@ -808,6 +836,8 @@ mod tests {
             "--azblob",
             "--azblob-container",
             "test-container",
+            "--azblob-root",
+            "test-root",
             "--azblob-account-name",
             "test-account",
             "--azblob-account-key",
@@ -822,6 +852,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_export_command_build_with_azblob_missing_config() {
+        // Missing account key
         let cmd = ExportCommand::parse_from([
             "export",
             "--addr",
@@ -829,20 +860,35 @@ mod tests {
             "--azblob",
             "--azblob-container",
             "test-container",
+            "--azblob-root",
+            "test-root",
             "--azblob-account-name",
             "test-account",
-            // Missing account key
+            "--azblob-endpoint",
+            "https://account.blob.core.windows.net",
         ]);
 
         let result = cmd.build().await;
         assert!(result.is_err());
-        match result {
-            Ok(_) => panic!("Expected error"),
-            Err(e) => assert!(
-                e.to_string().contains("Azure Blob account key must be set"),
-                "Unexpected error message: {}",
-                e
-            ),
+        if let Err(err) = result {
+            assert!(
+                err.to_string()
+                    .contains("Azure Blob account key must be set"),
+                "Actual error: {}",
+                err
+            );
         }
+    }
+
+    #[test]
+    fn test_export_command_conflict() {
+        // Try to enable both S3 and OSS
+        let result =
+            ExportCommand::try_parse_from(["export", "--addr", "127.0.0.1:4000", "--s3", "--oss"]);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // clap error for conflicting arguments
+        assert!(err.kind() == clap::error::ErrorKind::ArgumentConflict);
     }
 }

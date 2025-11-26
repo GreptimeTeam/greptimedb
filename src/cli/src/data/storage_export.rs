@@ -16,12 +16,10 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use common_base::secrets::ExposeSecret;
-use common_error::ext::BoxedError;
 
 use crate::common::{
     PrefixedAzblobConnection, PrefixedGcsConnection, PrefixedOssConnection, PrefixedS3Connection,
 };
-use crate::error;
 
 /// Trait for storage backends that can be used for data export.
 #[async_trait]
@@ -79,33 +77,8 @@ pub struct S3Backend {
 }
 
 impl S3Backend {
-    pub fn new(config: PrefixedS3Connection) -> Result<Self, BoxedError> {
-        // Validate required fields
-        if config.s3_bucket.is_empty() {
-            return Err(BoxedError::new(
-                error::MissingConfigSnafu {
-                    msg: "S3 bucket must be set when --s3 is enabled",
-                }
-                .build(),
-            ));
-        }
-        if config.s3_access_key_id.expose_secret().is_empty() {
-            return Err(BoxedError::new(
-                error::MissingConfigSnafu {
-                    msg: "S3 access key ID must be set when --s3 is enabled",
-                }
-                .build(),
-            ));
-        }
-        if config.s3_secret_access_key.expose_secret().is_empty() {
-            return Err(BoxedError::new(
-                error::MissingConfigSnafu {
-                    msg: "S3 secret access key must be set when --s3 is enabled",
-                }
-                .build(),
-            ));
-        }
-        Ok(Self { config })
+    pub fn new(config: PrefixedS3Connection) -> Self {
+        Self { config }
     }
 }
 
@@ -172,41 +145,8 @@ pub struct OssBackend {
 }
 
 impl OssBackend {
-    pub fn new(config: PrefixedOssConnection) -> Result<Self, BoxedError> {
-        // Validate required fields
-        if config.oss_bucket.is_empty() {
-            return Err(BoxedError::new(
-                error::MissingConfigSnafu {
-                    msg: "OSS bucket must be set when --oss is enabled",
-                }
-                .build(),
-            ));
-        }
-        if config.oss_endpoint.is_empty() {
-            return Err(BoxedError::new(
-                error::MissingConfigSnafu {
-                    msg: "OSS endpoint must be set when --oss is enabled",
-                }
-                .build(),
-            ));
-        }
-        if config.oss_access_key_id.expose_secret().is_empty() {
-            return Err(BoxedError::new(
-                error::MissingConfigSnafu {
-                    msg: "OSS access key ID must be set when --oss is enabled",
-                }
-                .build(),
-            ));
-        }
-        if config.oss_access_key_secret.expose_secret().is_empty() {
-            return Err(BoxedError::new(
-                error::MissingConfigSnafu {
-                    msg: "OSS access key secret must be set when --oss is enabled",
-                }
-                .build(),
-            ));
-        }
-        Ok(Self { config })
+    pub fn new(config: PrefixedOssConnection) -> Self {
+        Self { config }
     }
 }
 
@@ -258,28 +198,8 @@ pub struct GcsBackend {
 }
 
 impl GcsBackend {
-    pub fn new(config: PrefixedGcsConnection) -> Result<Self, BoxedError> {
-        // Validate required fields
-        if config.gcs_bucket.is_empty() {
-            return Err(BoxedError::new(
-                error::MissingConfigSnafu {
-                    msg: "GCS bucket must be set when --gcs is enabled",
-                }
-                .build(),
-            ));
-        }
-        // At least one of credential_path or credential must be set
-        if config.gcs_credential_path.expose_secret().is_empty()
-            && config.gcs_credential.expose_secret().is_empty()
-        {
-            return Err(BoxedError::new(
-                error::MissingConfigSnafu {
-                    msg: "GCS credential path or credential must be set when --gcs is enabled",
-                }
-                .build(),
-            ));
-        }
-        Ok(Self { config })
+    pub fn new(config: PrefixedGcsConnection) -> Self {
+        Self { config }
     }
 }
 
@@ -356,33 +276,8 @@ pub struct AzblobBackend {
 }
 
 impl AzblobBackend {
-    pub fn new(config: PrefixedAzblobConnection) -> Result<Self, BoxedError> {
-        // Validate required fields
-        if config.azblob_container.is_empty() {
-            return Err(BoxedError::new(
-                error::MissingConfigSnafu {
-                    msg: "Azure Blob container must be set when --azblob is enabled",
-                }
-                .build(),
-            ));
-        }
-        if config.azblob_account_name.expose_secret().is_empty() {
-            return Err(BoxedError::new(
-                error::MissingConfigSnafu {
-                    msg: "Azure Blob account name must be set when --azblob is enabled",
-                }
-                .build(),
-            ));
-        }
-        if config.azblob_account_key.expose_secret().is_empty() {
-            return Err(BoxedError::new(
-                error::MissingConfigSnafu {
-                    msg: "Azure Blob account key must be set when --azblob is enabled",
-                }
-                .build(),
-            ));
-        }
-        Ok(Self { config })
+    pub fn new(config: PrefixedAzblobConnection) -> Self {
+        Self { config }
     }
 }
 
