@@ -359,9 +359,9 @@ pub enum TraceUserAgent {
 impl From<UserAgent> for TraceUserAgent {
     fn from(value: UserAgent) -> Self {
         let ua_str = value.as_str().to_lowercase();
-        if ua_str.starts_with("grafana") {
+        if ua_str.contains("grafana") {
             Self::Grafana
-        } else if ua_str.starts_with("jaeger") {
+        } else if ua_str.contains("jaeger") {
             Self::Jaeger
         } else {
             warn!("Unknown user agent: {}", ua_str);
