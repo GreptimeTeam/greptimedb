@@ -196,7 +196,7 @@ impl FrontendBuilder {
                     kv_backend: kv_backend.clone(),
                 };
                 configurator
-                    .configurate(statement_executor, ctx)
+                    .configure(statement_executor, ctx)
                     .await
                     .context(ExternalSnafu)?
             } else {

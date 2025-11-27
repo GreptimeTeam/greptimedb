@@ -91,7 +91,7 @@ use crate::statement::set::set_allow_query_fallback;
 /// A configurator that customizes or enhances a [`StatementExecutor`].
 #[async_trait::async_trait]
 pub trait StatementExecutorConfigurator: Send + Sync {
-    async fn configurate(
+    async fn configure(
         &self,
         executor: StatementExecutor,
         ctx: ExecutorConfigureContext,

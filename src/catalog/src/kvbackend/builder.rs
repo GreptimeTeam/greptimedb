@@ -36,7 +36,7 @@ use crate::system_schema::pg_catalog::PGCatalogProvider;
 
 /// The configurator that customizes or enhances the [`KvBackendCatalogManagerBuilder`].
 #[async_trait::async_trait]
-pub trait CatalogManagerConfigrator<C>: Send + Sync {
+pub trait CatalogManagerConfigurator<C>: Send + Sync {
     async fn configure(
         &self,
         builder: KvBackendCatalogManagerBuilder,
@@ -44,7 +44,7 @@ pub trait CatalogManagerConfigrator<C>: Send + Sync {
     ) -> std::result::Result<KvBackendCatalogManagerBuilder, BoxedError>;
 }
 
-pub type CatalogManagerConfigratorRef<C> = Arc<dyn CatalogManagerConfigrator<C>>;
+pub type CatalogManagerConfiguratorRef<C> = Arc<dyn CatalogManagerConfigurator<C>>;
 
 pub struct KvBackendCatalogManagerBuilder {
     information_extension: InformationExtensionRef,
