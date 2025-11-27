@@ -28,13 +28,31 @@ use crate::procedure::repartition::plan::RegionDescriptor;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RepartitionStart;
 
+/// Ensures that the partition expression of the region route matches the partition expression of the region descriptor.
+fn ensure_region_route_expr_match(
+    region_route: &RegionRoute,
+    region_descriptor: &RegionDescriptor,
+) -> Result<RegionRoute> {
+    let actual = &region_route.region.partition_expr;
+    let expected = region_descriptor
+        .partition_expr
+        .as_json_str()
+        .context(error::SerializePartitionExprSnafu)?;
+    ensure!(
+        actual == &expected,
+        error::PartitionExprMismatchSnafu {
+            region_id: region_route.region.id,
+            expected,
+            actual,
+        }
+    );
+    Ok(region_route.clone())
+}
+
 impl RepartitionStart {
     /// Ensures that both source and target regions are present in the region routes.
     ///
     /// Both source and target regions must be present in the region routes (target regions should be allocated before repartitioning).
-    ///
-    /// # Panic
-    /// if the `sources` are empty.
     #[allow(dead_code)]
     fn ensure_route_present(
         group_id: GroupId,
@@ -42,7 +60,13 @@ impl RepartitionStart {
         sources: &[RegionDescriptor],
         targets: &[RegionDescriptor],
     ) -> Result<GroupPrepareResult> {
-        // Panics if the sources are empty.
+        ensure!(
+            !sources.is_empty(),
+            error::UnexpectedSnafu {
+                violated: "Sources are empty"
+            }
+        );
+
         let central_region = sources[0].region_id;
         let region_routes_map = region_routes
             .iter()
@@ -57,24 +81,7 @@ impl RepartitionStart {
                         group_id,
                         region_id: s.region_id,
                     })
-                    .and_then(|r| {
-                        let actual = &r.region.partition_expr;
-                        let expected = s
-                            .partition_expr
-                            .as_json_str()
-                            .context(error::SerializePartitionExprSnafu)?;
-
-                        ensure!(
-                            actual == &expected,
-                            error::PartitionExprMismatchSnafu {
-                                region_id: s.region_id,
-                                expected,
-                                actual,
-                            }
-                        );
-                        Ok(r)
-                    })
-                    .map(|r| (*r).clone())
+                    .and_then(|r| ensure_region_route_expr_match(r, s))
             })
             .collect::<Result<Vec<_>>>()?;
         let target_region_routes = targets
@@ -86,24 +93,7 @@ impl RepartitionStart {
                         group_id,
                         region_id: t.region_id,
                     })
-                    .and_then(|r| {
-                        let actual = &r.region.partition_expr;
-                        let expected = t
-                            .partition_expr
-                            .as_json_str()
-                            .context(error::SerializePartitionExprSnafu)?;
-
-                        ensure!(
-                            actual == &expected,
-                            error::PartitionExprMismatchSnafu {
-                                region_id: t.region_id,
-                                expected,
-                                actual,
-                            }
-                        );
-                        Ok(r)
-                    })
-                    .map(|r| (*r).clone())
+                    .and_then(|r| ensure_region_route_expr_match(r, t))
             })
             .collect::<Result<Vec<_>>>()?;
 
