@@ -106,6 +106,17 @@ impl std::fmt::Debug for FulltextIndexApplyMetrics {
                 write!(f, ", ")?;
             }
             write!(f, "\"dir_init_elapsed\":\"{:?}\"", self.dir_init_elapsed)?;
+            first = false;
+        }
+        if !self.apply_elapsed.is_zero() {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(
+                f,
+                "\"bloom_filter_read_metrics\":{:?}",
+                self.bloom_filter_read_metrics
+            )?;
         }
 
         write!(f, "}}")

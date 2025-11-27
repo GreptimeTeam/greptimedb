@@ -79,6 +79,17 @@ impl std::fmt::Debug for InvertedIndexApplyMetrics {
                 write!(f, ", ")?;
             }
             write!(f, "\"blob_read_bytes\":{}", self.blob_read_bytes)?;
+            first = false;
+        }
+        if !self.apply_elapsed.is_zero() {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(
+                f,
+                "\"inverted_index_read_metrics\":{:?}",
+                self.inverted_index_read_metrics
+            )?;
         }
 
         write!(f, "}}")

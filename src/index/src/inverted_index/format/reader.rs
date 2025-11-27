@@ -31,7 +31,7 @@ mod blob;
 mod footer;
 
 /// Metrics for inverted index read operations.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct InvertedIndexReadMetrics {
     /// Total byte size to read.
     pub total_bytes: u64,
@@ -43,6 +43,47 @@ pub struct InvertedIndexReadMetrics {
     pub cache_hit: usize,
     /// Number of cache misses.
     pub cache_miss: usize,
+}
+
+impl std::fmt::Debug for InvertedIndexReadMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{{")?;
+        let mut first = true;
+
+        if self.total_bytes > 0 {
+            write!(f, "\"total_bytes\":{}", self.total_bytes)?;
+            first = false;
+        }
+        if self.total_ranges > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"total_ranges\":{}", self.total_ranges)?;
+            first = false;
+        }
+        if !self.fetch_elapsed.is_zero() {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"fetch_elapsed\":\"{:?}\"", self.fetch_elapsed)?;
+            first = false;
+        }
+        if self.cache_hit > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"cache_hit\":{}", self.cache_hit)?;
+            first = false;
+        }
+        if self.cache_miss > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"cache_miss\":{}", self.cache_miss)?;
+        }
+
+        write!(f, "}}")
+    }
 }
 
 impl InvertedIndexReadMetrics {

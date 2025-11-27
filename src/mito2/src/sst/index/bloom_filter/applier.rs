@@ -84,6 +84,13 @@ impl std::fmt::Debug for BloomFilterIndexApplyMetrics {
                 write!(f, ", ")?;
             }
             write!(f, "\"blob_read_bytes\":{}", self.blob_read_bytes)?;
+            first = false;
+        }
+        if !self.apply_elapsed.is_zero() {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"read_metrics\":{:?}", self.read_metrics)?;
         }
 
         write!(f, "}}")

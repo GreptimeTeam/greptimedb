@@ -49,6 +49,8 @@ pub struct ParquetFetchMetrics {
     pages_to_fetch: std::sync::atomic::AtomicUsize,
     /// Total size in bytes of pages to fetch.
     page_size_to_fetch: std::sync::atomic::AtomicU64,
+    /// Total size in bytes of pages actually returned.
+    page_size_return: std::sync::atomic::AtomicU64,
     /// Elapsed time in microseconds fetching from write cache.
     write_cache_fetch_elapsed: std::sync::atomic::AtomicU64,
     /// Elapsed time in microseconds fetching from object store.
@@ -67,6 +69,7 @@ impl std::fmt::Debug for ParquetFetchMetrics {
         let cache_miss = self.cache_miss();
         let pages_to_fetch = self.pages_to_fetch();
         let page_size_to_fetch = self.page_size_to_fetch();
+        let page_size_return = self.page_size_return();
         let write_cache_elapsed = self.write_cache_fetch_elapsed();
         let store_elapsed = self.store_fetch_elapsed();
         let total_elapsed = self.total_fetch_elapsed();
@@ -101,6 +104,13 @@ impl std::fmt::Debug for ParquetFetchMetrics {
                 write!(f, ", ")?;
             }
             write!(f, "\"page_size_to_fetch\":{}", page_size_to_fetch)?;
+            first = false;
+        }
+        if page_size_return > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"page_size_return\":{}", page_size_return)?;
             first = false;
         }
         if write_cache_elapsed > 0 {
@@ -176,8 +186,7 @@ impl ParquetFetchMetrics {
 
     /// Returns the cache miss count.
     pub fn cache_miss(&self) -> usize {
-        self.cache_miss
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.cache_miss.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns the pages to fetch count.
@@ -189,6 +198,18 @@ impl ParquetFetchMetrics {
     /// Returns the page size to fetch in bytes.
     pub fn page_size_to_fetch(&self) -> u64 {
         self.page_size_to_fetch
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Adds to the page size return counter.
+    pub fn add_page_size_return(&self, size: u64) {
+        self.page_size_return
+            .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns the page size returned in bytes.
+    pub fn page_size_return(&self) -> u64 {
+        self.page_size_return
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -236,14 +257,16 @@ impl ParquetFetchMetrics {
             other.write_cache_hit(),
             std::sync::atomic::Ordering::Relaxed,
         );
-        self.cache_miss.fetch_add(
-            other.cache_miss(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        self.cache_miss
+            .fetch_add(other.cache_miss(), std::sync::atomic::Ordering::Relaxed);
         self.pages_to_fetch
             .fetch_add(other.pages_to_fetch(), std::sync::atomic::Ordering::Relaxed);
         self.page_size_to_fetch.fetch_add(
             other.page_size_to_fetch(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.page_size_return.fetch_add(
+            other.page_size_return(),
             std::sync::atomic::Ordering::Relaxed,
         );
         self.write_cache_fetch_elapsed.fetch_add(
@@ -561,6 +584,12 @@ impl<'a> InMemoryRowGroup<'a> {
                 data
             }
         };
+
+        // Track actual size of returned pages.
+        if let Some(metrics) = metrics {
+            let actual_size: usize = pages.iter().map(|b| b.len()).sum();
+            metrics.add_page_size_return(actual_size as u64);
+        }
 
         // Put pages back to the cache.
         let page_value = PageValue::new(pages.clone(), total_range_size);
