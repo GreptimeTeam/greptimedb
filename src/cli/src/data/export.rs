@@ -26,7 +26,7 @@ use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
-use crate::common::{ObjectStoreConfig, new_fs_object_store};
+use crate::common::{ObjectStoreConfig, new_fs_object_store, validate_fs};
 use crate::data::storage_export::{
     AzblobBackend, FsBackend, GcsBackend, OssBackend, S3Backend, StorageExport, StorageType,
 };
@@ -159,6 +159,7 @@ impl ExportCommand {
                 self.storage.build_azblob()?,
             )
         } else if let Some(output_dir) = &self.output_dir {
+            validate_fs(&self.storage)?;
             (
                 StorageType::Fs(FsBackend::new(output_dir.clone())),
                 new_fs_object_store(output_dir)?,
@@ -694,26 +695,118 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_export_command_build_with_s3_missing_config() {
-        // Missing bucket
+    async fn test_export_command_build_with_s3_empty_access_key() {
+        // Test S3 with empty access key ID (empty string, not missing)
         let cmd = ExportCommand::parse_from([
             "export",
             "--addr",
             "127.0.0.1:4000",
             "--s3",
+            "--s3-bucket",
+            "test-bucket",
             "--s3-root",
             "test-root",
             "--s3-access-key-id",
-            "test-key",
+            "", // Empty string
             "--s3-secret-access-key",
             "test-secret",
+            "--s3-region",
+            "us-west-2",
         ]);
 
         let result = cmd.build().await;
         assert!(result.is_err());
         if let Err(err) = result {
             assert!(
-                err.to_string().contains("S3 bucket must be set"),
+                err.to_string().contains("S3 access key ID must be set"),
+                "Actual error: {}",
+                err
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_export_command_build_with_s3_missing_secret_key() {
+        // Test S3 with empty secret access key
+        let cmd = ExportCommand::parse_from([
+            "export",
+            "--addr",
+            "127.0.0.1:4000",
+            "--s3",
+            "--s3-bucket",
+            "test-bucket",
+            "--s3-root",
+            "test-root",
+            "--s3-access-key-id",
+            "test-key",
+            // Missing --s3-secret-access-key
+            "--s3-region",
+            "us-west-2",
+        ]);
+
+        let result = cmd.build().await;
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert!(
+                err.to_string().contains("S3 secret access key must be set"),
+                "Actual error: {}",
+                err
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_export_command_build_with_s3_empty_root() {
+        // Empty root should be allowed (it's optional path component)
+        let cmd = ExportCommand::parse_from([
+            "export",
+            "--addr",
+            "127.0.0.1:4000",
+            "--s3",
+            "--s3-bucket",
+            "test-bucket",
+            "--s3-root",
+            "", // Empty root is OK
+            "--s3-access-key-id",
+            "test-key",
+            "--s3-secret-access-key",
+            "test-secret",
+            "--s3-region",
+            "us-west-2",
+        ]);
+
+        let result = cmd.build().await;
+        // Should succeed because root is not a required field
+        assert!(
+            result.is_ok(),
+            "Expected success but got: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_export_command_build_with_s3_no_enable_flag() {
+        // Test that providing S3 config without --s3 flag fails
+        let cmd = ExportCommand::parse_from([
+            "export",
+            "--addr",
+            "127.0.0.1:4000",
+            // Note: no --s3 flag
+            "--s3-bucket",
+            "test-bucket",
+            "--s3-access-key-id",
+            "test-key",
+            "--output-dir",
+            "/tmp/test",
+        ]);
+
+        let result = cmd.build().await;
+        // Should fail because S3 config is provided but --s3 is not enabled
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert!(
+                err.to_string()
+                    .contains("S3 configuration is set but --s3 is not enabled"),
                 "Actual error: {}",
                 err
             );
@@ -744,7 +837,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_export_command_build_with_oss_missing_config() {
+    async fn test_export_command_build_with_oss_missing_endpoint() {
         // Missing endpoint
         let cmd = ExportCommand::parse_from([
             "export",
@@ -768,6 +861,37 @@ mod tests {
                 err.to_string().contains("OSS endpoint must be set"),
                 "Actual error: {}",
                 err
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_export_command_build_with_oss_multiple_missing_fields() {
+        // Test OSS with multiple missing required fields
+        let cmd = ExportCommand::parse_from([
+            "export",
+            "--addr",
+            "127.0.0.1:4000",
+            "--oss",
+            "--oss-bucket",
+            "test-bucket",
+            // Missing: root, access_key_id, access_key_secret, endpoint
+        ]);
+
+        let result = cmd.build().await;
+        assert!(result.is_err());
+        if let Err(err) = result {
+            let err_str = err.to_string();
+            // Should mention multiple missing fields
+            assert!(
+                err_str.contains("OSS"),
+                "Error should mention OSS: {}",
+                err_str
+            );
+            assert!(
+                err_str.contains("must be set"),
+                "Error should mention required fields: {}",
+                err_str
             );
         }
     }
@@ -798,7 +922,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_export_command_build_with_gcs_missing_config() {
+    async fn test_export_command_build_with_gcs_missing_credential() {
         // Missing credentials
         let cmd = ExportCommand::parse_from([
             "export",
@@ -821,6 +945,39 @@ mod tests {
             assert!(
                 err.to_string()
                     .contains("GCS credential path, credential must be set"),
+                "Actual error: {}",
+                err
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_export_command_build_with_gcs_empty_root() {
+        // Test GCS when root is missing (should fail as it's required)
+        let cmd = ExportCommand::parse_from([
+            "export",
+            "--addr",
+            "127.0.0.1:4000",
+            "--gcs",
+            "--gcs-bucket",
+            "test-bucket",
+            "--gcs-root",
+            "", // Empty root
+            "--gcs-scope",
+            "test-scope",
+            "--gcs-credential-path",
+            "/path/to/credential",
+            "--gcs-credential",
+            "test-credential",
+            "--gcs-endpoint",
+            "https://storage.googleapis.com",
+        ]);
+
+        let result = cmd.build().await;
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert!(
+                err.to_string().contains("GCS root must be set"),
                 "Actual error: {}",
                 err
             );
@@ -851,7 +1008,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_export_command_build_with_azblob_missing_config() {
+    async fn test_export_command_build_with_azblob_missing_account_key() {
         // Missing account key
         let cmd = ExportCommand::parse_from([
             "export",
@@ -880,8 +1037,34 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_export_command_build_with_azblob_with_sas_token() {
+        // Test Azure Blob with SAS token
+        let cmd = ExportCommand::parse_from([
+            "export",
+            "--addr",
+            "127.0.0.1:4000",
+            "--azblob",
+            "--azblob-container",
+            "test-container",
+            "--azblob-root",
+            "test-root",
+            "--azblob-account-name",
+            "test-account",
+            "--azblob-account-key",
+            "test-key",
+            "--azblob-endpoint",
+            "https://account.blob.core.windows.net",
+            "--azblob-sas-token",
+            "test-sas-token",
+        ]);
+
+        let result = cmd.build().await;
+        assert!(result.is_ok());
+    }
+
     #[test]
-    fn test_export_command_conflict() {
+    fn test_export_command_build_with_conflict() {
         // Try to enable both S3 and OSS
         let result =
             ExportCommand::try_parse_from(["export", "--addr", "127.0.0.1:4000", "--s3", "--oss"]);
