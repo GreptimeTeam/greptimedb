@@ -17,6 +17,6 @@ mod store;
 
 pub use object_store::{
     ObjectStoreConfig, PrefixedAzblobConnection, PrefixedGcsConnection, PrefixedOssConnection,
-    PrefixedS3Connection, new_fs_object_store,
+    PrefixedS3Connection, new_fs_object_store, validate_fs,
 };
 pub use store::StoreConfig;

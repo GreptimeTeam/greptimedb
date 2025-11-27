@@ -15,11 +15,20 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use common_base::secrets::ExposeSecret;
+use common_base::secrets::{ExposeSecret, SecretString};
 
 use crate::common::{
     PrefixedAzblobConnection, PrefixedGcsConnection, PrefixedOssConnection, PrefixedS3Connection,
 };
+
+/// Helper function to extract secret string from Option<SecretString>.
+/// Returns empty string if None.
+fn expose_optional_secret(secret: &Option<SecretString>) -> &str {
+    secret
+        .as_ref()
+        .map(|s| s.expose_secret().as_str())
+        .unwrap_or("")
+}
 
 /// Helper function to format root path with leading slash if non-empty.
 fn format_root_path(root: &str) -> String {
@@ -112,11 +121,11 @@ impl StorageExport for S3Backend {
         let mut connection_options = vec![
             format!(
                 "ACCESS_KEY_ID='{}'",
-                self.config.s3_access_key_id.expose_secret()
+                expose_optional_secret(&self.config.s3_access_key_id)
             ),
             format!(
                 "SECRET_ACCESS_KEY='{}'",
-                self.config.s3_secret_access_key.expose_secret()
+                expose_optional_secret(&self.config.s3_secret_access_key)
             ),
         ];
 
@@ -142,8 +151,8 @@ impl StorageExport for S3Backend {
         mask_secrets(
             sql.to_string(),
             &[
-                self.config.s3_access_key_id.expose_secret(),
-                self.config.s3_secret_access_key.expose_secret(),
+                expose_optional_secret(&self.config.s3_access_key_id),
+                expose_optional_secret(&self.config.s3_secret_access_key),
             ],
         )
     }
@@ -170,11 +179,11 @@ impl StorageExport for OssBackend {
         let mut connection_options = vec![
             format!(
                 "ACCESS_KEY_ID='{}'",
-                self.config.oss_access_key_id.expose_secret()
+                expose_optional_secret(&self.config.oss_access_key_id)
             ),
             format!(
                 "ACCESS_KEY_SECRET='{}'",
-                self.config.oss_access_key_secret.expose_secret()
+                expose_optional_secret(&self.config.oss_access_key_secret)
             ),
         ];
 
@@ -195,8 +204,8 @@ impl StorageExport for OssBackend {
         mask_secrets(
             sql.to_string(),
             &[
-                self.config.oss_access_key_id.expose_secret(),
-                self.config.oss_access_key_secret.expose_secret(),
+                expose_optional_secret(&self.config.oss_access_key_id),
+                expose_optional_secret(&self.config.oss_access_key_secret),
             ],
         )
     }
@@ -224,18 +233,14 @@ impl StorageExport for GcsBackend {
 
         let mut connection_options = Vec::new();
 
-        if !self.config.gcs_credential_path.expose_secret().is_empty() {
-            connection_options.push(format!(
-                "CREDENTIAL_PATH='{}'",
-                self.config.gcs_credential_path.expose_secret()
-            ));
+        let credential_path = expose_optional_secret(&self.config.gcs_credential_path);
+        if !credential_path.is_empty() {
+            connection_options.push(format!("CREDENTIAL_PATH='{}'", credential_path));
         }
 
-        if !self.config.gcs_credential.expose_secret().is_empty() {
-            connection_options.push(format!(
-                "CREDENTIAL='{}'",
-                self.config.gcs_credential.expose_secret()
-            ));
+        let credential = expose_optional_secret(&self.config.gcs_credential);
+        if !credential.is_empty() {
+            connection_options.push(format!("CREDENTIAL='{}'", credential));
         }
 
         if !self.config.gcs_endpoint.is_empty() {
@@ -261,8 +266,8 @@ impl StorageExport for GcsBackend {
         mask_secrets(
             sql.to_string(),
             &[
-                self.config.gcs_credential_path.expose_secret(),
-                self.config.gcs_credential.expose_secret(),
+                expose_optional_secret(&self.config.gcs_credential_path),
+                expose_optional_secret(&self.config.gcs_credential),
             ],
         )
     }
@@ -291,11 +296,11 @@ impl StorageExport for AzblobBackend {
         let mut connection_options = vec![
             format!(
                 "ACCOUNT_NAME='{}'",
-                self.config.azblob_account_name.expose_secret()
+                expose_optional_secret(&self.config.azblob_account_name)
             ),
             format!(
                 "ACCOUNT_KEY='{}'",
-                self.config.azblob_account_key.expose_secret()
+                expose_optional_secret(&self.config.azblob_account_key)
             ),
         ];
 
@@ -321,8 +326,8 @@ impl StorageExport for AzblobBackend {
         mask_secrets(
             sql.to_string(),
             &[
-                self.config.azblob_account_name.expose_secret(),
-                self.config.azblob_account_key.expose_secret(),
+                expose_optional_secret(&self.config.azblob_account_name),
+                expose_optional_secret(&self.config.azblob_account_key),
             ],
         )
     }
