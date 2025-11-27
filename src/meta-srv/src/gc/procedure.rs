@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +26,7 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
@@ -409,8 +409,9 @@ impl BatchGcProcedure {
         })
     }
 
-    /// Send GC instruction to all datanodes that host the regions
-    async fn send_gc_instructions(&self) -> Result<()> {
+    /// Send GC instruction to all datanodes that host the regions,
+    /// returns regions that need retry.
+    async fn send_gc_instructions(&self) -> Result<Vec<RegionId>> {
         let regions = &self.data.regions;
         let region_routes = &self.data.region_routes;
         let file_refs = &self.data.file_refs;
@@ -435,6 +436,7 @@ impl BatchGcProcedure {
             }
         }
 
+        let mut all_need_retry = HashSet::new();
         // Send GC instructions to each datanode
         for (peer, regions_for_peer) in datanode2regions {
             let gc_regions = GcRegions {
@@ -444,7 +446,7 @@ impl BatchGcProcedure {
                 full_file_listing: self.data.full_file_listing,
             };
 
-            let _report = send_gc_regions(
+            let report = send_gc_regions(
                 &self.mailbox,
                 &peer,
                 gc_regions,
@@ -454,14 +456,24 @@ impl BatchGcProcedure {
             )
             .await?;
 
-            // GC successful for this datanode
-            debug!(
-                "GC successful for datanode {} regions {:?}",
-                peer, regions_for_peer
-            );
+            let success = report.deleted_files.keys().collect_vec();
+            let need_retry = report.need_retry_regions.iter().cloned().collect_vec();
+
+            if need_retry.is_empty() {
+                info!(
+                    "GC report from datanode {}: successfully deleted files for regions {:?}",
+                    peer, success
+                );
+            } else {
+                warn!(
+                    "GC report from datanode {}: successfully deleted files for regions {:?}, need retry for regions {:?}",
+                    peer, success, need_retry
+                );
+            }
+            all_need_retry.extend(report.need_retry_regions);
         }
 
-        Ok(())
+        Ok(all_need_retry.into_iter().collect())
     }
 }
 
@@ -494,8 +506,9 @@ impl Procedure for BatchGcProcedure {
             }
             State::Gcing => {
                 // Send GC instructions to all datanodes
+                // TODO(discord9): handle need-retry regions
                 match self.send_gc_instructions().await {
-                    Ok(()) => {
+                    Ok(_) => {
                         info!(
                             "Batch GC completed successfully for regions {:?}",
                             self.data.regions
