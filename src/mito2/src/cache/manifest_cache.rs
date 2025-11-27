@@ -29,7 +29,7 @@ use object_store::util::join_path;
 use snafu::ResultExt;
 
 use crate::error::{OpenDalSnafu, Result};
-use crate::metrics::CACHE_BYTES;
+use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 
 /// Subdirectory of cached manifest files.
 ///
@@ -249,14 +249,21 @@ impl ManifestCache {
     /// Returns the file data if found in cache, None otherwise.
     pub(crate) async fn get_file(&self, key: &str) -> Option<Vec<u8>> {
         // Check if file is in cache index
-        self.get(key).await?;
+        if self.get(key).await.is_none() {
+            CACHE_MISS.with_label_values(&[MANIFEST_TYPE]).inc();
+            return None;
+        }
 
         // Read from local cache store
         let cache_file_path = self.cache_file_path(key);
         match self.local_store.read(&cache_file_path).await {
-            Ok(data) => Some(data.to_vec()),
+            Ok(data) => {
+                CACHE_HIT.with_label_values(&[MANIFEST_TYPE]).inc();
+                Some(data.to_vec())
+            }
             Err(e) => {
                 warn!(e; "Failed to read cached manifest file {}", cache_file_path);
+                CACHE_MISS.with_label_values(&[MANIFEST_TYPE]).inc();
                 None
             }
         }
