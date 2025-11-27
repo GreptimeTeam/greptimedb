@@ -50,10 +50,11 @@ use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
-use crate::configurator::ConfiguratorRef;
+use crate::configurator::HttpConfiguratorRef;
 use crate::elasticsearch;
 use crate::error::{
-    AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu, Result,
+    AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu,
+    OtherSnafu, Result,
 };
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::otlp::OtlpState;
@@ -1205,8 +1206,11 @@ impl Server for HttpServer {
             );
 
             let mut app = self.make_app();
-            if let Some(configurator) = self.plugins.get::<ConfiguratorRef>() {
-                app = configurator.config_http(app);
+            if let Some(configurator) = self.plugins.get::<HttpConfiguratorRef<()>>() {
+                app = configurator
+                    .configure_http(app, ())
+                    .await
+                    .context(OtherSnafu)?;
             }
             let app = self.build(app)?;
             let listener = tokio::net::TcpListener::bind(listening)

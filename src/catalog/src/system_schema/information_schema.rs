@@ -117,7 +117,6 @@ macro_rules! setup_memory_table {
     };
 }
 
-#[cfg(feature = "enterprise")]
 pub struct MakeInformationTableRequest {
     pub catalog_name: String,
     pub catalog_manager: Weak<dyn CatalogManager>,
@@ -128,12 +127,10 @@ pub struct MakeInformationTableRequest {
 ///
 /// This trait allows for extensibility of the information schema by providing
 /// a way to dynamically create custom information schema tables.
-#[cfg(feature = "enterprise")]
 pub trait InformationSchemaTableFactory {
     fn make_information_table(&self, req: MakeInformationTableRequest) -> SystemTableRef;
 }
 
-#[cfg(feature = "enterprise")]
 pub type InformationSchemaTableFactoryRef = Arc<dyn InformationSchemaTableFactory + Send + Sync>;
 
 /// The `information_schema` tables info provider.
@@ -143,9 +140,7 @@ pub struct InformationSchemaProvider {
     process_manager: Option<ProcessManagerRef>,
     flow_metadata_manager: Arc<FlowMetadataManager>,
     tables: HashMap<String, TableRef>,
-    #[allow(dead_code)]
     kv_backend: KvBackendRef,
-    #[cfg(feature = "enterprise")]
     extra_table_factories: HashMap<String, InformationSchemaTableFactoryRef>,
 }
 
@@ -166,7 +161,6 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
     }
 
     fn system_table(&self, name: &str) -> Option<SystemTableRef> {
-        #[cfg(feature = "enterprise")]
         if let Some(factory) = self.extra_table_factories.get(name) {
             let req = MakeInformationTableRequest {
                 catalog_name: self.catalog_name.clone(),
@@ -281,7 +275,6 @@ impl InformationSchemaProvider {
             process_manager,
             tables: HashMap::new(),
             kv_backend,
-            #[cfg(feature = "enterprise")]
             extra_table_factories: HashMap::new(),
         };
 
@@ -290,7 +283,6 @@ impl InformationSchemaProvider {
         provider
     }
 
-    #[cfg(feature = "enterprise")]
     pub(crate) fn with_extra_table_factories(
         mut self,
         factories: HashMap<String, InformationSchemaTableFactoryRef>,
@@ -358,7 +350,6 @@ impl InformationSchemaProvider {
         if let Some(process_list) = self.build_table(PROCESS_LIST) {
             tables.insert(PROCESS_LIST.to_string(), process_list);
         }
-        #[cfg(feature = "enterprise")]
         for name in self.extra_table_factories.keys() {
             tables.insert(name.clone(), self.build_table(name).expect(name));
         }

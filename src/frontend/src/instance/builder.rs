@@ -32,15 +32,18 @@ use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
-use operator::statement::{StatementExecutor, StatementExecutorRef};
+use operator::statement::{
+    ExecutorConfigureContext, StatementExecutor, StatementExecutorConfiguratorRef,
+    StatementExecutorRef,
+};
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
 use query::QueryEngineFactory;
 use query::region_query::RegionQueryHandlerFactoryRef;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, Result};
+use crate::error::{self, ExternalSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
 use crate::instance::Instance;
@@ -187,10 +190,15 @@ impl FrontendBuilder {
             Some(process_manager.clone()),
         );
 
-        #[cfg(feature = "enterprise")]
         let statement_executor =
-            if let Some(factory) = plugins.get::<operator::statement::TriggerQuerierFactoryRef>() {
-                statement_executor.with_trigger_querier(factory.create(kv_backend.clone()))
+            if let Some(configurator) = plugins.get::<StatementExecutorConfiguratorRef>() {
+                let ctx = ExecutorConfigureContext {
+                    kv_backend: kv_backend.clone(),
+                };
+                configurator
+                    .configure(statement_executor, ctx)
+                    .await
+                    .context(ExternalSnafu)?
             } else {
                 statement_executor
             };

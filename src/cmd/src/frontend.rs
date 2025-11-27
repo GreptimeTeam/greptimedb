@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +20,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_extension::DistributedInformationExtension;
-use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, MetaKvBackend};
+use catalog::kvbackend::{
+    CachedKvBackendBuilder, CatalogManagerConfiguratorRef, KvBackendCatalogManagerBuilder,
+    MetaKvBackend,
+};
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::client_manager::NodeClients;
@@ -41,14 +45,14 @@ use frontend::frontend::Frontend;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
-use meta_client::{MetaClientOptions, MetaClientType};
+use meta_client::{MetaClientOptions, MetaClientRef, MetaClientType};
 use servers::addrs;
 use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
-use crate::error::{self, Result};
+use crate::error::{self, OtherSnafu, Result};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
@@ -416,9 +420,16 @@ impl StartCommand {
             layered_cache_registry.clone(),
         )
         .with_process_manager(process_manager.clone());
-        #[cfg(feature = "enterprise")]
-        let builder = if let Some(factories) = plugins.get() {
-            builder.with_extra_information_table_factories(factories)
+        let builder = if let Some(configurator) =
+            plugins.get::<CatalogManagerConfiguratorRef<CatalogManagerConfigureContext>>()
+        {
+            let ctx = CatalogManagerConfigureContext {
+                meta_client: meta_client.clone(),
+            };
+            configurator
+                .configure(builder, ctx)
+                .await
+                .context(OtherSnafu)?
         } else {
             builder
         };
@@ -469,6 +480,11 @@ impl StartCommand {
 
         Ok(Instance::new(frontend, guard))
     }
+}
+
+/// The context for [`CatalogManagerConfigratorRef`] in frontend.
+pub struct CatalogManagerConfigureContext {
+    pub meta_client: MetaClientRef,
 }
 
 #[cfg(test)]

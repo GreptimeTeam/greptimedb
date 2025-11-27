@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use std::{fs, path};
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_schema::InformationExtensionRef;
-use catalog::kvbackend::KvBackendCatalogManagerBuilder;
+use catalog::kvbackend::{CatalogManagerConfiguratorRef, KvBackendCatalogManagerBuilder};
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use common_base::Plugins;
@@ -31,7 +32,7 @@ use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
-use common_meta::ddl_manager::DdlManager;
+use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerConfigureContext};
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -63,7 +64,7 @@ use standalone::StandaloneInformationExtension;
 use standalone::options::StandaloneOptions;
 use tracing_appender::non_blocking::WorkerGuard;
 
-use crate::error::{Result, StartFlownodeSnafu};
+use crate::error::{OtherSnafu, Result, StartFlownodeSnafu};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
@@ -116,33 +117,14 @@ pub struct Instance {
     flownode: FlownodeInstance,
     procedure_manager: ProcedureManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
-
-    // The components of standalone, which make it easier to expand based
-    // on the components.
-    #[cfg(feature = "enterprise")]
-    components: Components,
-
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
-}
-
-#[cfg(feature = "enterprise")]
-pub struct Components {
-    pub plugins: Plugins,
-    pub kv_backend: KvBackendRef,
-    pub frontend_client: Arc<FrontendClient>,
-    pub catalog_manager: catalog::CatalogManagerRef,
 }
 
 impl Instance {
     /// Find the socket addr of a server by its `name`.
     pub fn server_addr(&self, name: &str) -> Option<SocketAddr> {
         self.frontend.server_handlers().addr(name)
-    }
-
-    #[cfg(feature = "enterprise")]
-    pub fn components(&self) -> &Components {
-        &self.components
     }
 }
 
@@ -415,6 +397,13 @@ impl StartCommand {
         plugins.insert::<InformationExtensionRef>(information_extension.clone());
 
         let process_manager = Arc::new(ProcessManager::new(opts.grpc.server_addr.clone(), None));
+
+        // for standalone not use grpc, but get a handler to frontend grpc client without
+        // actually make a connection
+        let (frontend_client, frontend_instance_handler) =
+            FrontendClient::from_empty_grpc_handler(opts.query.clone());
+        let frontend_client = Arc::new(frontend_client);
+
         let builder = KvBackendCatalogManagerBuilder::new(
             information_extension.clone(),
             kv_backend.clone(),
@@ -422,9 +411,16 @@ impl StartCommand {
         )
         .with_procedure_manager(procedure_manager.clone())
         .with_process_manager(process_manager.clone());
-        #[cfg(feature = "enterprise")]
-        let builder = if let Some(factories) = plugins.get() {
-            builder.with_extra_information_table_factories(factories)
+        let builder = if let Some(configurator) =
+            plugins.get::<CatalogManagerConfiguratorRef<CatalogManagerConfigureContext>>()
+        {
+            let ctx = CatalogManagerConfigureContext {
+                fe_client: frontend_client.clone(),
+            };
+            configurator
+                .configure(builder, ctx)
+                .await
+                .context(OtherSnafu)?
         } else {
             builder
         };
@@ -439,11 +435,6 @@ impl StartCommand {
             ..Default::default()
         };
 
-        // for standalone not use grpc, but get a handler to frontend grpc client without
-        // actually make a connection
-        let (frontend_client, frontend_instance_handler) =
-            FrontendClient::from_empty_grpc_handler(opts.query.clone());
-        let frontend_client = Arc::new(frontend_client);
         let flow_builder = FlownodeBuilder::new(
             flownode_options,
             plugins.clone(),
@@ -514,11 +505,17 @@ impl StartCommand {
 
         let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager.clone(), true)
             .context(error::InitDdlManagerSnafu)?;
-        #[cfg(feature = "enterprise")]
-        let ddl_manager = {
-            let trigger_ddl_manager: Option<common_meta::ddl_manager::TriggerDdlManagerRef> =
-                plugins.get();
-            ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
+
+        let ddl_manager = if let Some(configurator) = plugins.get::<DdlManagerConfiguratorRef>() {
+            let ctx = DdlManagerConfigureContext {
+                kv_backend: kv_backend.clone(),
+            };
+            configurator
+                .configure(ddl_manager, ctx)
+                .await
+                .context(OtherSnafu)?
+        } else {
+            ddl_manager
         };
 
         let procedure_executor = Arc::new(LocalProcedureExecutor::new(
@@ -574,22 +571,12 @@ impl StartCommand {
             heartbeat_task: None,
         };
 
-        #[cfg(feature = "enterprise")]
-        let components = Components {
-            plugins,
-            kv_backend,
-            frontend_client,
-            catalog_manager,
-        };
-
         Ok(Instance {
             datanode,
             frontend,
             flownode,
             procedure_manager,
             wal_options_allocator,
-            #[cfg(feature = "enterprise")]
-            components,
             _guard: guard,
         })
     }
@@ -606,6 +593,11 @@ impl StartCommand {
 
         Ok(table_metadata_manager)
     }
+}
+
+/// The context for [`CatalogManagerConfigratorRef`] in standalone.
+pub struct CatalogManagerConfigureContext {
+    pub fe_client: Arc<FrontendClient>,
 }
 
 #[cfg(test)]
