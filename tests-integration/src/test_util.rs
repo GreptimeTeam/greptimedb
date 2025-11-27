@@ -165,7 +165,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
                     scope: env::var("GT_GCS_SCOPE").unwrap(),
                     credential_path: env::var("GT_GCS_CREDENTIAL_PATH").unwrap().into(),
                     credential: env::var("GT_GCS_CREDENTIAL").unwrap().into(),
-                    endpoint: env::var("GT_GCS_ENDPOINT").unwrap(),
+                    endpoint: env::var("GT_GCS_ENDPOINT").unwrap_or_default(),
                 },
                 ..Default::default()
             };
