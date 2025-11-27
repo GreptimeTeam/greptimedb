@@ -701,7 +701,7 @@ impl EncodedBulkPart {
     /// Returns a `SstInfo` instance with information derived from this bulk part's metadata
     pub(crate) fn to_sst_info(&self, file_id: FileId) -> SstInfo {
         let unit = self.metadata.region_metadata.time_index_type().unit();
-        let uncompressed_file_size: u64 = self
+        let max_row_group_uncompressed_size: u64 = self
             .metadata
             .parquet_metadata
             .row_groups()
@@ -712,7 +712,8 @@ impl EncodedBulkPart {
                     .map(|c| c.uncompressed_size() as u64)
                     .sum::<u64>()
             })
-            .sum();
+            .max()
+            .unwrap_or(0);
         SstInfo {
             file_id,
             time_range: (
@@ -720,7 +721,7 @@ impl EncodedBulkPart {
                 Timestamp::new(self.metadata.max_timestamp, unit),
             ),
             file_size: self.data.len() as u64,
-            uncompressed_file_size,
+            max_row_group_uncompressed_size,
             num_rows: self.metadata.num_rows,
             num_row_groups: self.metadata.parquet_metadata.num_row_groups() as u64,
             file_metadata: Some(self.metadata.parquet_metadata.clone()),

@@ -984,11 +984,8 @@ fn get_expired_ssts(
         .collect()
 }
 
-/// Estimates the memory bytes needed for a compaction task.
-///
-/// Returns the sum of uncompressed file sizes for all input files. If
-/// uncompressed size is not available for a file, falls back to the
-/// compressed file size.
+/// Estimates compaction memory as the sum of all input files' maximum row-group
+/// uncompressed sizes.
 fn estimate_compaction_bytes(picker_output: &PickerOutput) -> u64 {
     picker_output
         .outputs
@@ -996,11 +993,7 @@ fn estimate_compaction_bytes(picker_output: &PickerOutput) -> u64 {
         .flat_map(|output| output.inputs.iter())
         .map(|file: &FileHandle| {
             let meta = file.meta_ref();
-            if meta.uncompressed_file_size > 0 {
-                meta.uncompressed_file_size
-            } else {
-                meta.file_size
-            }
+            meta.max_row_group_uncompressed_size
         })
         .sum()
 }

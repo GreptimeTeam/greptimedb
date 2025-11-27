@@ -213,7 +213,7 @@ where
 
             // convert FileMetaData to ParquetMetaData
             let parquet_metadata = parse_parquet_metadata(file_meta)?;
-            let uncompressed_file_size: u64 = parquet_metadata
+            let max_row_group_uncompressed_size: u64 = parquet_metadata
                 .row_groups()
                 .iter()
                 .map(|rg| {
@@ -222,13 +222,14 @@ where
                         .map(|c| c.uncompressed_size() as u64)
                         .sum::<u64>()
                 })
-                .sum();
+                .max()
+                .unwrap_or(0);
             let num_series = stats.series_estimator.finish();
             ssts.push(SstInfo {
                 file_id: self.current_file,
                 time_range,
                 file_size,
-                uncompressed_file_size,
+                max_row_group_uncompressed_size,
                 num_rows: stats.num_rows,
                 num_row_groups: parquet_metadata.num_row_groups() as u64,
                 file_metadata: Some(Arc::new(parquet_metadata)),
