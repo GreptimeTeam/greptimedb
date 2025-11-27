@@ -119,7 +119,7 @@ mod tests {
                     .index_file_path
                     .map(|path| path.replace(&e.file_id, "<file_id>"));
                 e.file_id = "<file_id>".to_string();
-                e.index_file_id = e.index_file_id.map(|_| "<index_file_id>".to_string());
+                e.index_version = 0;
                 format!("\n{:?}", e)
             })
             .sorted()

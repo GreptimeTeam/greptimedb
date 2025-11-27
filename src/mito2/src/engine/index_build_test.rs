@@ -56,9 +56,9 @@ async fn num_of_index_files(engine: &MitoEngine, scanner: &Scanner, region_id: R
     }
     let mut index_files_count: usize = 0;
     for region_file_id in scanner.file_ids() {
-        let index_path = location::index_file_path(
+        let index_path = location::index_file_path_legacy(
             access_layer.table_dir(),
-            region_file_id,
+            region_file_id, // FIXME(discord9): confirm correctness
             access_layer.path_type(),
         );
         if access_layer

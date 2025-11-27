@@ -428,7 +428,7 @@ mod tests {
             available_indexes: SmallVec::new(),
             indexes: Default::default(),
             index_file_size: 0,
-            index_file_id: None,
+            index_version: 0,
             num_rows: 100,
             num_row_groups: 1,
             sequence: NonZeroU64::new(1),

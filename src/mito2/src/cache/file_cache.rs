@@ -71,7 +71,7 @@ impl FileCacheInner {
     fn memory_index(&self, file_type: FileType) -> &Cache<IndexKey, IndexValue> {
         match file_type {
             FileType::Parquet => &self.parquet_index,
-            FileType::Puffin => &self.puffin_index,
+            FileType::Puffin { .. } => &self.puffin_index,
         }
     }
 
@@ -130,7 +130,7 @@ impl FileCacheInner {
             // Track sizes separately for each file type
             match key.file_type {
                 FileType::Parquet => parquet_size += size,
-                FileType::Puffin => puffin_size += size,
+                FileType::Puffin { .. } => puffin_size += size,
             }
         }
         // The metrics is a signed int gauge so we can updates it finally.
@@ -178,7 +178,7 @@ impl FileCacheInner {
         let timer = WRITE_CACHE_DOWNLOAD_ELAPSED
             .with_label_values(&[match file_type {
                 FileType::Parquet => "download_parquet",
-                FileType::Puffin => "download_puffin",
+                FileType::Puffin { .. } => "download_puffin",
             }])
             .start_timer();
 
@@ -618,7 +618,10 @@ pub enum FileType {
     /// Parquet file.
     Parquet,
     /// Puffin file.
-    Puffin,
+    Puffin {
+        /// index version
+        version: u64,
+    },
 }
 
 impl FileType {
@@ -626,7 +629,7 @@ impl FileType {
     fn parse(s: &str) -> Option<FileType> {
         match s {
             "parquet" => Some(FileType::Parquet),
-            "puffin" => Some(FileType::Puffin),
+            "puffin" => Some(FileType::Puffin { version: 0 }),
             _ => None,
         }
     }
@@ -635,7 +638,7 @@ impl FileType {
     fn as_str(&self) -> &'static str {
         match self {
             FileType::Parquet => "parquet",
-            FileType::Puffin => "puffin",
+            FileType::Puffin { .. } => "puffin",
         }
     }
 
@@ -643,7 +646,7 @@ impl FileType {
     fn metric_label(&self) -> &'static str {
         match self {
             FileType::Parquet => FILE_TYPE,
-            FileType::Puffin => INDEX_TYPE,
+            FileType::Puffin { .. } => INDEX_TYPE,
         }
     }
 }

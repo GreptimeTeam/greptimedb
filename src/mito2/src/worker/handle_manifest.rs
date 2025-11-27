@@ -481,12 +481,14 @@ async fn edit_region(
 
             let index_file_index_key = IndexKey::new(
                 region_id,
-                file_meta.index_file_id().file_id(),
-                FileType::Puffin,
+                file_meta.index_id().file_id.file_id(),
+                FileType::Puffin {
+                    version: file_meta.index_version,
+                },
             );
             let index_remote_path = location::index_file_path(
                 layer.table_dir(),
-                file_meta.file_id(),
+                file_meta.index_id(),
                 layer.path_type(),
             );
 

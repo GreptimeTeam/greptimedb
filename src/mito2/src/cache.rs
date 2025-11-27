@@ -44,7 +44,7 @@ use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCache
 use crate::cache::write_cache::WriteCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
-use crate::sst::file::RegionFileId;
+use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::parquet::reader::MetadataCacheMetrics;
 
 /// Metrics type key for sst meta.
@@ -180,7 +180,7 @@ impl CacheStrategy {
     }
 
     /// Calls [CacheManager::evict_puffin_cache()].
-    pub async fn evict_puffin_cache(&self, file_id: RegionFileId) {
+    pub async fn evict_puffin_cache(&self, file_id: RegionIndexId) {
         match self {
             CacheStrategy::EnableAll(cache_manager) => {
                 cache_manager.evict_puffin_cache(file_id).await
@@ -400,7 +400,7 @@ impl CacheManager {
     }
 
     /// Evicts every puffin-related cache entry for the given file.
-    pub async fn evict_puffin_cache(&self, file_id: RegionFileId) {
+    pub async fn evict_puffin_cache(&self, file_id: RegionIndexId) {
         if let Some(cache) = &self.bloom_filter_index_cache {
             cache.invalidate_file(file_id.file_id());
         }
@@ -422,7 +422,9 @@ impl CacheManager {
                 .remove(IndexKey::new(
                     file_id.region_id(),
                     file_id.file_id(),
-                    FileType::Puffin,
+                    FileType::Puffin {
+                        version: file_id.version,
+                    },
                 ))
                 .await;
         }
@@ -949,7 +951,7 @@ mod tests {
         let cache = Arc::new(cache);
 
         let region_id = RegionId::new(1, 1);
-        let region_file_id = RegionFileId::new(region_id, FileId::random());
+        let index_id = RegionIndexId::new(RegionFileId::new(region_id, FileId::random()), 0);
         let column_id: ColumnId = 1;
 
         let bloom_cache = cache.bloom_filter_index_cache().unwrap().clone();
@@ -957,16 +959,13 @@ mod tests {
         let result_cache = cache.index_result_cache().unwrap();
         let puffin_metadata_cache = cache.puffin_metadata_cache().unwrap().clone();
 
-        let bloom_key = (region_file_id.file_id(), column_id, Tag::Skipping);
+        let bloom_key = (index_id.file_id(), column_id, Tag::Skipping);
         bloom_cache.put_metadata(bloom_key, Arc::new(BloomFilterMeta::default()));
-        inverted_cache.put_metadata(
-            region_file_id.file_id(),
-            Arc::new(InvertedIndexMetas::default()),
-        );
+        inverted_cache.put_metadata(index_id.file_id(), Arc::new(InvertedIndexMetas::default()));
         let predicate = PredicateKey::new_bloom(Arc::new(BTreeMap::new()));
         let selection = Arc::new(RowGroupSelection::default());
-        result_cache.put(predicate.clone(), region_file_id.file_id(), selection);
-        let file_id_str = region_file_id.to_string();
+        result_cache.put(predicate.clone(), index_id.file_id(), selection);
+        let file_id_str = index_id.to_string();
         let metadata = Arc::new(FileMetadata {
             blobs: Vec::new(),
             properties: HashMap::new(),
@@ -974,42 +973,23 @@ mod tests {
         puffin_metadata_cache.put_metadata(file_id_str.clone(), metadata);
 
         assert!(bloom_cache.get_metadata(bloom_key).is_some());
-        assert!(
-            inverted_cache
-                .get_metadata(region_file_id.file_id())
-                .is_some()
-        );
-        assert!(
-            result_cache
-                .get(&predicate, region_file_id.file_id())
-                .is_some()
-        );
+        assert!(inverted_cache.get_metadata(index_id.file_id()).is_some());
+        assert!(result_cache.get(&predicate, index_id.file_id()).is_some());
         assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_some());
 
-        cache.evict_puffin_cache(region_file_id).await;
+        cache.evict_puffin_cache(index_id).await;
 
         assert!(bloom_cache.get_metadata(bloom_key).is_none());
-        assert!(
-            inverted_cache
-                .get_metadata(region_file_id.file_id())
-                .is_none()
-        );
-        assert!(
-            result_cache
-                .get(&predicate, region_file_id.file_id())
-                .is_none()
-        );
+        assert!(inverted_cache.get_metadata(index_id.file_id()).is_none());
+        assert!(result_cache.get(&predicate, index_id.file_id()).is_none());
         assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
 
         // Refill caches and evict via CacheStrategy to ensure delegation works.
         bloom_cache.put_metadata(bloom_key, Arc::new(BloomFilterMeta::default()));
-        inverted_cache.put_metadata(
-            region_file_id.file_id(),
-            Arc::new(InvertedIndexMetas::default()),
-        );
+        inverted_cache.put_metadata(index_id.file_id(), Arc::new(InvertedIndexMetas::default()));
         result_cache.put(
             predicate.clone(),
-            region_file_id.file_id(),
+            index_id.file_id(),
             Arc::new(RowGroupSelection::default()),
         );
         puffin_metadata_cache.put_metadata(
@@ -1021,19 +1001,11 @@ mod tests {
         );
 
         let strategy = CacheStrategy::EnableAll(cache.clone());
-        strategy.evict_puffin_cache(region_file_id).await;
+        strategy.evict_puffin_cache(index_id).await;
 
         assert!(bloom_cache.get_metadata(bloom_key).is_none());
-        assert!(
-            inverted_cache
-                .get_metadata(region_file_id.file_id())
-                .is_none()
-        );
-        assert!(
-            result_cache
-                .get(&predicate, region_file_id.file_id())
-                .is_none()
-        );
+        assert!(inverted_cache.get_metadata(index_id.file_id()).is_none());
+        assert!(result_cache.get(&predicate, index_id.file_id()).is_none());
         assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
     }
 }

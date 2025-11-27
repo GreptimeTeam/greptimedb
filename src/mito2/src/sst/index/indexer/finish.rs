@@ -16,7 +16,7 @@ use common_telemetry::{debug, warn};
 use puffin::puffin_manager::{PuffinManager, PuffinWriter};
 use store_api::storage::ColumnId;
 
-use crate::sst::file::RegionFileId;
+use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount};
 use crate::sst::index::{
@@ -56,6 +56,7 @@ impl Indexer {
 
         self.do_prune_intm_sst_dir().await;
         output.file_size = self.do_finish_puffin_writer(writer).await;
+        output.version = self.index_version;
         output
     }
 
@@ -63,7 +64,10 @@ impl Indexer {
         let puffin_manager = self.puffin_manager.take()?;
 
         let err = match puffin_manager
-            .writer(&RegionFileId::new(self.region_id, self.file_id))
+            .writer(&RegionIndexId::new(
+                RegionFileId::new(self.region_id, self.file_id),
+                self.index_version,
+            ))
             .await
         {
             Ok(writer) => return Some(writer),

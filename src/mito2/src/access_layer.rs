@@ -37,7 +37,7 @@ use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::{FlatSource, Source};
 use crate::region::options::IndexOptions;
-use crate::sst::file::{FileHandle, RegionFileId};
+use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
@@ -216,7 +216,7 @@ impl AccessLayer {
     pub(crate) async fn delete_sst(
         &self,
         region_file_id: &RegionFileId,
-        index_file_id: &RegionFileId,
+        index_file_id: &RegionIndexId,
     ) -> Result<()> {
         let path = location::sst_file_path(&self.table_dir, *region_file_id, self.path_type);
         self.object_store
@@ -470,7 +470,8 @@ impl TempFileCleaner {
     /// Removes the SST and index file from the local atomic dir by the file id.
     pub(crate) async fn clean_by_file_id(&self, file_id: FileId) {
         let sst_key = IndexKey::new(self.region_id, file_id, FileType::Parquet).to_string();
-        let index_key = IndexKey::new(self.region_id, file_id, FileType::Puffin).to_string();
+        let index_key =
+            IndexKey::new(self.region_id, file_id, FileType::Puffin { version: 0 }).to_string(); // TODO(discord9): confirm correctness
 
         Self::clean_atomic_dir_files(&self.object_store, &[&sst_key, &index_key]).await;
     }
@@ -553,8 +554,11 @@ async fn clean_dir(dir: &str) -> Result<()> {
 
 /// Path provider for SST file and index file.
 pub trait FilePathProvider: Send + Sync {
-    /// Creates index file path of given file id.
+    /// Creates index file path of given file id. Version default to 0, and not shown in the path.
     fn build_index_file_path(&self, file_id: RegionFileId) -> String;
+
+    /// Creates index file path of given index id (with version support).
+    fn build_index_file_path_with_version(&self, index_id: RegionIndexId) -> String;
 
     /// Creates SST file path of given file id.
     fn build_sst_file_path(&self, file_id: RegionFileId) -> String;
@@ -575,7 +579,22 @@ impl WriteCachePathProvider {
 
 impl FilePathProvider for WriteCachePathProvider {
     fn build_index_file_path(&self, file_id: RegionFileId) -> String {
-        let puffin_key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Puffin);
+        let puffin_key = IndexKey::new(
+            file_id.region_id(),
+            file_id.file_id(),
+            FileType::Puffin { version: 0 },
+        );
+        self.file_cache.cache_file_path(puffin_key)
+    }
+
+    fn build_index_file_path_with_version(&self, index_id: RegionIndexId) -> String {
+        let puffin_key = IndexKey::new(
+            index_id.region_id(),
+            index_id.file_id(),
+            FileType::Puffin {
+                version: index_id.version,
+            },
+        );
         self.file_cache.cache_file_path(puffin_key)
     }
 
@@ -605,7 +624,11 @@ impl RegionFilePathFactory {
 
 impl FilePathProvider for RegionFilePathFactory {
     fn build_index_file_path(&self, file_id: RegionFileId) -> String {
-        location::index_file_path(&self.table_dir, file_id, self.path_type)
+        location::index_file_path_legacy(&self.table_dir, file_id, self.path_type)
+    }
+
+    fn build_index_file_path_with_version(&self, index_id: RegionIndexId) -> String {
+        location::index_file_path(&self.table_dir, index_id, self.path_type)
     }
 
     fn build_sst_file_path(&self, file_id: RegionFileId) -> String {

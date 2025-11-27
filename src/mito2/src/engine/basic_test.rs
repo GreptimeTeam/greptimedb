@@ -945,13 +945,13 @@ async fn test_list_ssts_with_format(
                 .index_file_path
                 .map(|p| p.replace(&e.file_id, "<file_id>"));
             e.file_id = "<file_id>".to_string();
-            e.index_file_id = e.index_file_id.map(|_| "<index_file_id>".to_string());
+            e.index_version = 0; // FIXME(discord9): confirm correctness
             format!("\n{:?}", e)
         })
         .sorted()
         .collect::<Vec<_>>()
         .join("");
-    assert_eq!(debug_format, expected_manifest_ssts,);
+    assert_eq!(debug_format, expected_manifest_ssts);
 
     // list from storage
     let storage_entries = engine

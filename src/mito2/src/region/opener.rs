@@ -867,8 +867,10 @@ impl RegionLoadCacheTask {
                     if file_meta.exists_index() {
                         let puffin_key = IndexKey::new(
                             file_meta.region_id,
-                            file_meta.index_file_id().file_id(),
-                            FileType::Puffin,
+                            file_meta.file_id, // FIXME(discord9): confirm correctness
+                            FileType::Puffin {
+                                version: file_meta.index_version,
+                            },
                         );
 
                         if !file_cache.contains_key(&puffin_key) {
@@ -925,9 +927,10 @@ impl RegionLoadCacheTask {
                 break;
             }
 
-            let index_remote_path = location::index_file_path(
+            let index_remote_path = location::index_file_path_legacy(
                 table_dir,
                 RegionFileId::new(puffin_key.region_id, puffin_key.file_id),
+                // FIXME(discord9): confirm correctness, actually get index_version from somewhere
                 path_type,
             );
 
