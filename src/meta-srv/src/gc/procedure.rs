@@ -135,13 +135,13 @@ async fn send_gc_regions(
                 "Datanode {} reported error during GC for regions {:?}: {}",
                 peer, gc_regions, e
             );
-            Err(error::UnexpectedSnafu {
+            error::UnexpectedSnafu {
                 violated: format!(
                     "Datanode {} reported error during GC for regions {:?}: {}",
                     peer, gc_regions, e
                 ),
             }
-            .fail()?)
+            .fail()
         }
     }
 }
@@ -476,7 +476,7 @@ impl Procedure for BatchGcProcedure {
             State::Start => {
                 // Transition to Acquiring state
                 self.data.state = State::Acquiring;
-                Ok(Status::executing(true))
+                Ok(Status::executing(false))
             }
             State::Acquiring => {
                 // Get file references from all datanodes
@@ -484,7 +484,7 @@ impl Procedure for BatchGcProcedure {
                     Ok(file_refs) => {
                         self.data.file_refs = file_refs;
                         self.data.state = State::Gcing;
-                        Ok(Status::executing(true))
+                        Ok(Status::executing(false))
                     }
                     Err(e) => {
                         error!("Failed to get file references: {}", e);

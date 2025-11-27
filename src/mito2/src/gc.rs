@@ -208,7 +208,6 @@ impl LocalGcWorker {
     }
 
     /// Get tmp ref files for all current regions
-    ///
     pub async fn read_tmp_ref_files(&self) -> Result<HashMap<RegionId, HashSet<FileId>>> {
         let mut tmp_ref_files = HashMap::new();
         for (region_id, file_refs) in &self.file_ref_manifest.file_refs {
