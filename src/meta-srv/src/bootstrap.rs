@@ -31,7 +31,7 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
 use either::Either;
-use servers::configurator::GrpcConfiguratorRef;
+use servers::configurator::GrpcRouterConfiguratorRef;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
@@ -134,9 +134,13 @@ impl MetasrvInstance {
 
         // Start gRPC server with admin services for backward compatibility
         let mut router = router(self.metasrv.clone());
-        if let Some(configurator) = self.metasrv.plugins().get::<GrpcConfiguratorRef<()>>() {
+        if let Some(configurator) = self
+            .metasrv
+            .plugins()
+            .get::<GrpcRouterConfiguratorRef<()>>()
+        {
             router = configurator
-                .config_grpc(router, ())
+                .configure_grpc_router(router, ())
                 .await
                 .context(OtherSnafu)?;
         }

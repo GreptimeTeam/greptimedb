@@ -18,9 +18,14 @@ use axum::Router as HttpRouter;
 use common_error::ext::BoxedError;
 use tonic::transport::server::Router as GrpcRouter;
 
+use crate::grpc::builder::GrpcServerBuilder;
+
+/// A configurator that customizes or enhances an HTTP router during service
+/// initialization.
 #[async_trait::async_trait]
 pub trait HttpConfigurator<C>: Send + Sync {
-    async fn config_http(
+    /// Configures the given HTTP router using the provided context.
+    async fn configure_http(
         &self,
         route: HttpRouter,
         ctx: C,
@@ -29,13 +34,27 @@ pub trait HttpConfigurator<C>: Send + Sync {
 
 pub type HttpConfiguratorRef<C> = Arc<dyn HttpConfigurator<C>>;
 
+/// A configurator that customizes or enhances a gRPC router during service
+/// initialization.
 #[async_trait::async_trait]
-pub trait GrpcConfigurator<C>: Send + Sync {
-    async fn config_grpc(
+pub trait GrpcRouterConfigurator<C>: Send + Sync {
+    /// Configures the given gRPC router using the provided context.
+    async fn configure_grpc_router(
         &self,
         route: GrpcRouter,
         ctx: C,
     ) -> std::result::Result<GrpcRouter, BoxedError>;
 }
 
-pub type GrpcConfiguratorRef<C> = Arc<dyn GrpcConfigurator<C>>;
+pub type GrpcRouterConfiguratorRef<C> = Arc<dyn GrpcRouterConfigurator<C>>;
+
+/// A configurator that customizes or enhances a [`GrpcServerBuilder`] during
+/// service initialization.
+#[async_trait::async_trait]
+pub trait GrpcBuilderConfigurator<C>: Send + Sync {
+    async fn configure(
+        &self,
+        builder: GrpcServerBuilder,
+        ctx: C,
+    ) -> std::result::Result<GrpcServerBuilder, BoxedError>;
+}

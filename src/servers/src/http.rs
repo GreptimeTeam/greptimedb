@@ -1208,7 +1208,7 @@ impl Server for HttpServer {
             let mut app = self.make_app();
             if let Some(configurator) = self.plugins.get::<HttpConfiguratorRef<()>>() {
                 app = configurator
-                    .config_http(app, ())
+                    .configure_http(app, ())
                     .await
                     .context(OtherSnafu)?;
             }

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+use catalog::CatalogManagerRef;
 use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, MetaKvBackend};
 use clap::Parser;
@@ -25,12 +26,14 @@ use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_grpc::channel_manager::ChannelConfig;
+use common_meta::FlownodeId;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
+use common_meta::kv_backend::KvBackendRef;
 use common_stat::ResourceStatImpl;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
@@ -40,7 +43,7 @@ use flow::{
     get_flow_auth_options,
 };
 use meta_client::{MetaClientOptions, MetaClientType};
-use plugins::extension::flownode::{ExtensionContext, FlownodeExtensionFactoryRef};
+use servers::configurator::GrpcBuilderConfigurator;
 use snafu::{OptionExt, ResultExt, ensure};
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -52,6 +55,15 @@ use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-flownode";
+
+pub type GrpcBuilderConfiguratorRef = Arc<dyn GrpcBuilderConfigurator<GrpcBuilderContext>>;
+
+pub struct GrpcBuilderContext {
+    pub kv_backend: KvBackendRef,
+    pub fe_client: Arc<FrontendClient>,
+    pub flownode_id: FlownodeId,
+    pub catalog_manager: CatalogManagerRef,
+}
 
 type FlownodeOptions = GreptimeOptions<flow::FlownodeOptions>;
 
@@ -384,27 +396,22 @@ impl StartCommand {
 
         let mut flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
 
-        let extension = if let Some(f) = plugins.get::<FlownodeExtensionFactoryRef>() {
-            let context = ExtensionContext {
+        let builder =
+            FlownodeServiceBuilder::grpc_server_builder(&opts, flownode.flownode_server());
+        let builder = if let Some(configurator) = plugins.get::<GrpcBuilderConfiguratorRef>() {
+            let context = GrpcBuilderContext {
                 kv_backend: cached_meta_backend.clone(),
                 fe_client: frontend_client.clone(),
                 flownode_id: member_id,
                 catalog_manager: catalog_manager.clone(),
             };
-            let extension = f.create(context).await.context(OtherSnafu)?;
-            Some(extension)
-        } else {
-            None
-        };
-
-        let mut builder =
-            FlownodeServiceBuilder::grpc_server_builder(&opts, flownode.flownode_server());
-        if let Some(grpc_extension) = extension.and_then(|e| e.grpc) {
-            grpc_extension
-                .extend_grpc_services(&mut builder)
+            configurator
+                .configure_grpc_builder(builder, context)
                 .await
                 .context(OtherSnafu)?
-        }
+        } else {
+            builder
+        };
         let grpc_server = builder.build();
 
         let services = FlownodeServiceBuilder::new(&opts)
