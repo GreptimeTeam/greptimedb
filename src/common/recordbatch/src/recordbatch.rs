@@ -20,7 +20,8 @@ use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion_common::arrow::array::ArrayRef;
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::{DataType as ArrowDataType, SchemaRef as ArrowSchemaRef};
-use datatypes::arrow::array::{Array, AsArray, RecordBatchOptions};
+use datatypes::arrow::array::{Array, AsArray, RecordBatchOptions, StructArray, new_null_array};
+use datatypes::extension::json::is_json_extension_type;
 use datatypes::prelude::DataType;
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::{Helper, VectorRef};
@@ -30,8 +31,8 @@ use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::DfRecordBatch;
 use crate::error::{
-    self, ArrowComputeSnafu, ColumnNotExistsSnafu, DataTypesSnafu, ProjectArrowRecordBatchSnafu,
-    Result,
+    self, AlignJsonArraySnafu, ArrowComputeSnafu, ColumnNotExistsSnafu, DataTypesSnafu,
+    NewDfRecordBatchSnafu, ProjectArrowRecordBatchSnafu, Result,
 };
 
 /// A two-dimensional batch of column-oriented data with a defined schema.
@@ -58,6 +59,8 @@ impl RecordBatch {
         // the casting here will be removed in the end.
         // TODO(LFC): Remove the casting here once `Batch` is no longer used.
         let arrow_arrays = Self::cast_view_arrays(schema.arrow_schema(), arrow_arrays)?;
+
+        let arrow_arrays = maybe_align_json_array_with_schema(schema.arrow_schema(), arrow_arrays)?;
 
         let df_record_batch = DfRecordBatch::try_new(schema.arrow_schema().clone(), arrow_arrays)
             .context(error::NewDfRecordBatchSnafu)?;
@@ -327,18 +330,276 @@ pub fn merge_record_batches(schema: SchemaRef, batches: &[RecordBatch]) -> Resul
     Ok(RecordBatch::from_df_record_batch(schema, record_batch))
 }
 
+/// Align a json array `json_array` to the json type `schema_type`. The `schema_type` is often the
+/// "largest" json type after some insertions in the table schema, while the json array previously
+/// written in the SST could be lagged behind it. So it's important to "amend" the json array's
+/// missing fields with null arrays, to align the array's data type with the provided one.
+///
+/// # Panics
+///
+/// - The json array is not an Arrow [StructArray], or the provided data type `schema_type` is not
+///   of Struct type. Both of which shouldn't happen unless we switch our implementation of how
+///   json array is physically stored.
+pub fn align_json_array(json_array: &ArrayRef, schema_type: &ArrowDataType) -> Result<ArrayRef> {
+    let json_type = json_array.data_type();
+    if json_type == schema_type {
+        return Ok(json_array.clone());
+    }
+
+    let json_array = json_array.as_struct();
+    let array_fields = json_array.fields();
+    let array_columns = json_array.columns();
+    let ArrowDataType::Struct(schema_fields) = schema_type else {
+        unreachable!()
+    };
+    let mut aligned = Vec::with_capacity(schema_fields.len());
+
+    // Compare the fields in the json array and the to-be-aligned schema, amending with null arrays
+    // on the way. It's very important to note that fields in the json array and in the json type
+    // are both SORTED.
+
+    let mut i = 0; // point to the schema fields
+    let mut j = 0; // point to the array fields
+    while i < schema_fields.len() && j < array_fields.len() {
+        let schema_field = &schema_fields[i];
+        let array_field = &array_fields[j];
+        if schema_field.name() == array_field.name() {
+            if matches!(schema_field.data_type(), ArrowDataType::Struct(_)) {
+                // A `StructArray`s in a json array must be another json array. (Like a nested json
+                // object in a json value.)
+                aligned.push(align_json_array(
+                    &array_columns[j],
+                    schema_field.data_type(),
+                )?);
+            } else {
+                aligned.push(array_columns[j].clone());
+            }
+            j += 1;
+        } else {
+            aligned.push(new_null_array(schema_field.data_type(), json_array.len()));
+        }
+        i += 1;
+    }
+    if i < schema_fields.len() {
+        for field in &schema_fields[i..] {
+            aligned.push(new_null_array(field.data_type(), json_array.len()));
+        }
+    }
+    ensure!(
+        j == array_fields.len(),
+        AlignJsonArraySnafu {
+            reason: format!(
+                "this json array has more fields {:?}",
+                array_fields[j..]
+                    .iter()
+                    .map(|x| x.name())
+                    .collect::<Vec<_>>(),
+            )
+        }
+    );
+
+    let json_array =
+        StructArray::try_new(schema_fields.clone(), aligned, json_array.nulls().cloned())
+            .context(NewDfRecordBatchSnafu)?;
+    Ok(Arc::new(json_array))
+}
+
+fn maybe_align_json_array_with_schema(
+    schema: &ArrowSchemaRef,
+    arrays: Vec<ArrayRef>,
+) -> Result<Vec<ArrayRef>> {
+    if schema.fields().iter().all(|f| !is_json_extension_type(f)) {
+        return Ok(arrays);
+    }
+
+    let mut aligned = Vec::with_capacity(arrays.len());
+    for (field, array) in schema.fields().iter().zip(arrays.into_iter()) {
+        if !is_json_extension_type(field) {
+            aligned.push(array);
+            continue;
+        }
+
+        let json_array = align_json_array(&array, field.data_type())?;
+        aligned.push(json_array);
+    }
+    Ok(aligned)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::arrow::array::{AsArray, UInt32Array};
-    use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, UInt32Type};
+    use datatypes::arrow::array::{
+        AsArray, BooleanArray, Float64Array, Int64Array, ListArray, UInt32Array,
+    };
+    use datatypes::arrow::datatypes::{
+        DataType, Field, Fields, Int64Type, Schema as ArrowSchema, UInt32Type,
+    };
     use datatypes::arrow_array::StringArray;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
 
     use super::*;
+
+    #[test]
+    fn test_align_json_array() -> Result<()> {
+        struct TestCase {
+            json_array: ArrayRef,
+            schema_type: DataType,
+            expected: std::result::Result<ArrayRef, String>,
+        }
+
+        impl TestCase {
+            fn new(
+                json_array: StructArray,
+                schema_type: Fields,
+                expected: std::result::Result<Vec<ArrayRef>, String>,
+            ) -> Self {
+                Self {
+                    json_array: Arc::new(json_array),
+                    schema_type: DataType::Struct(schema_type.clone()),
+                    expected: expected
+                        .map(|x| Arc::new(StructArray::new(schema_type, x, None)) as ArrayRef),
+                }
+            }
+
+            fn test(self) -> Result<()> {
+                let result = align_json_array(&self.json_array, &self.schema_type);
+                match (result, self.expected) {
+                    (Ok(json_array), Ok(expected)) => assert_eq!(&json_array, &expected),
+                    (Ok(json_array), Err(e)) => {
+                        panic!("expecting error {e} but actually get: {json_array:?}")
+                    }
+                    (Err(e), Err(expected)) => assert_eq!(e.to_string(), expected),
+                    (Err(e), Ok(_)) => return Err(e),
+                }
+                Ok(())
+            }
+        }
+
+        // Test empty json array can be aligned with a complex json type.
+        TestCase::new(
+            StructArray::new_empty_fields(2, None),
+            Fields::from(vec![
+                Field::new("int", DataType::Int64, true),
+                Field::new_struct(
+                    "nested",
+                    vec![Field::new("bool", DataType::Boolean, true)],
+                    true,
+                ),
+                Field::new("string", DataType::Utf8, true),
+            ]),
+            Ok(vec![
+                Arc::new(Int64Array::new_null(2)) as ArrayRef,
+                Arc::new(StructArray::new_null(
+                    Fields::from(vec![Arc::new(Field::new("bool", DataType::Boolean, true))]),
+                    2,
+                )),
+                Arc::new(StringArray::new_null(2)),
+            ]),
+        )
+        .test()?;
+
+        // Test simple json array alignment.
+        TestCase::new(
+            StructArray::from(vec![(
+                Arc::new(Field::new("float", DataType::Float64, true)),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef,
+            )]),
+            Fields::from(vec![
+                Field::new("float", DataType::Float64, true),
+                Field::new("string", DataType::Utf8, true),
+            ]),
+            Ok(vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef,
+                Arc::new(StringArray::new_null(3)),
+            ]),
+        )
+        .test()?;
+
+        // Test complex json array alignment.
+        TestCase::new(
+            StructArray::from(vec![
+                (
+                    Arc::new(Field::new_list(
+                        "list",
+                        Field::new_list_field(DataType::Int64, true),
+                        true,
+                    )),
+                    Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
+                        Some(vec![Some(1)]),
+                        None,
+                        Some(vec![Some(2), Some(3)]),
+                    ])) as ArrayRef,
+                ),
+                (
+                    Arc::new(Field::new_struct(
+                        "nested",
+                        vec![Field::new("int", DataType::Int64, true)],
+                        true,
+                    )),
+                    Arc::new(StructArray::from(vec![(
+                        Arc::new(Field::new("int", DataType::Int64, true)),
+                        Arc::new(Int64Array::from(vec![-1, -2, -3])) as ArrayRef,
+                    )])),
+                ),
+                (
+                    Arc::new(Field::new("string", DataType::Utf8, true)),
+                    Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                ),
+            ]),
+            Fields::from(vec![
+                Field::new("bool", DataType::Boolean, true),
+                Field::new_list("list", Field::new_list_field(DataType::Int64, true), true),
+                Field::new_struct(
+                    "nested",
+                    vec![
+                        Field::new("float", DataType::Float64, true),
+                        Field::new("int", DataType::Int64, true),
+                    ],
+                    true,
+                ),
+                Field::new("string", DataType::Utf8, true),
+            ]),
+            Ok(vec![
+                Arc::new(BooleanArray::new_null(3)) as ArrayRef,
+                Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
+                    Some(vec![Some(1)]),
+                    None,
+                    Some(vec![Some(2), Some(3)]),
+                ])),
+                Arc::new(StructArray::from(vec![
+                    (
+                        Arc::new(Field::new("float", DataType::Float64, true)),
+                        Arc::new(Float64Array::new_null(3)) as ArrayRef,
+                    ),
+                    (
+                        Arc::new(Field::new("int", DataType::Int64, true)),
+                        Arc::new(Int64Array::from(vec![-1, -2, -3])),
+                    ),
+                ])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ]),
+        )
+        .test()?;
+
+        // Test align failed.
+        TestCase::new(
+            StructArray::try_from(vec![
+                ("i", Arc::new(Int64Array::from(vec![1])) as ArrayRef),
+                ("j", Arc::new(Int64Array::from(vec![2])) as ArrayRef),
+            ])
+            .unwrap(),
+            Fields::from(vec![Field::new("i", DataType::Int64, true)]),
+            Err(
+                r#"Failed to align JSON array, reason: this json array has more fields ["j"]"#
+                    .to_string(),
+            ),
+        )
+        .test()?;
+        Ok(())
+    }
 
     #[test]
     fn test_record_batch() {

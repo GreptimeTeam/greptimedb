@@ -20,6 +20,7 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{Result, TryFromValueSnafu, UnsupportedOperationSnafu};
 use crate::json::value::JsonValueRef;
 use crate::prelude::{ValueRef, Vector, VectorRef};
+use crate::types::json_type::JsonNativeType;
 use crate::types::{JsonType, json_type};
 use crate::value::StructValueRef;
 use crate::vectors::{MutableVector, StructVectorBuilder};
@@ -181,9 +182,9 @@ pub(crate) struct JsonVectorBuilder {
 }
 
 impl JsonVectorBuilder {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn new(json_type: JsonNativeType, capacity: usize) -> Self {
         Self {
-            merged_type: JsonType::empty(),
+            merged_type: JsonType::new_native(json_type),
             capacity,
             builders: vec![],
         }
@@ -326,18 +327,18 @@ mod tests {
                 "Failed to merge JSON datatype: datatypes have conflict, this: Number(I64), that: Array[Bool]",
             ),
         ];
-        let mut builder = JsonVectorBuilder::with_capacity(1);
+        let mut builder = JsonVectorBuilder::new(JsonNativeType::Null, 1);
         for (json, result) in jsons.into_iter().zip(results.into_iter()) {
             push(json, &mut builder, result);
         }
         let vector = builder.to_vector();
         let expected = r#"
-+----------------+
-| StructVector   |
-+----------------+
-| {__plain__: 1} |
-| {__plain__: 2} |
-+----------------+"#;
++---------------------+
+| StructVector        |
++---------------------+
+| {__json_plain__: 1} |
+| {__json_plain__: 2} |
++---------------------+"#;
         assert_eq!(pretty_print(vector), expected.trim());
         Ok(())
     }
@@ -386,7 +387,7 @@ mod tests {
             "object": {"timestamp": 1761523203000}
         }"#,
         ];
-        let mut builder = JsonVectorBuilder::with_capacity(1);
+        let mut builder = JsonVectorBuilder::new(JsonNativeType::Null, 1);
         for json in jsons {
             push(json, &mut builder, Ok(()));
         }

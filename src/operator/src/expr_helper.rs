@@ -762,7 +762,8 @@ pub(crate) fn to_alter_table_expr(
             target_type,
         } => {
             let target_type =
-                sql_data_type_to_concrete_data_type(&target_type).context(ParseSqlSnafu)?;
+                sql_data_type_to_concrete_data_type(&target_type, &Default::default())
+                    .context(ParseSqlSnafu)?;
             let (target_type, target_type_extension) = ColumnDataTypeWrapper::try_from(target_type)
                 .map(|w| w.to_parts())
                 .context(ColumnDataTypeSnafu)?;

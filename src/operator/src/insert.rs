@@ -353,10 +353,11 @@ impl Inserter {
         &self,
         insert: &Insert,
         ctx: &QueryContextRef,
+        statement_executor: &StatementExecutor,
     ) -> Result<Output> {
         let (inserts, table_info) =
             StatementToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, ctx)
-                .convert(insert, ctx)
+                .convert(insert, ctx, statement_executor)
                 .await?;
 
         let table_infos =

@@ -18,7 +18,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
-use arrow_schema::Fields;
 use common_base::bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -36,7 +35,7 @@ use crate::vectors::json::builder::JsonVectorBuilder;
 use crate::vectors::{BinaryVectorBuilder, MutableVector};
 
 pub const JSON_TYPE_NAME: &str = "Json";
-const JSON_PLAIN_FIELD_NAME: &str = "__plain__";
+const JSON_PLAIN_FIELD_NAME: &str = "__json_plain__";
 const JSON_PLAIN_FIELD_METADATA_KEY: &str = "is_plain_json";
 
 pub type JsonObjectType = BTreeMap<String, JsonNativeType>;
@@ -59,6 +58,10 @@ pub enum JsonNativeType {
 }
 
 impl JsonNativeType {
+    pub fn is_null(&self) -> bool {
+        matches!(self, JsonNativeType::Null)
+    }
+
     pub fn u64() -> Self {
         Self::Number(JsonNumberType::U64)
     }
@@ -187,7 +190,7 @@ impl JsonType {
         }
     }
 
-    pub(crate) fn empty() -> Self {
+    pub fn null() -> Self {
         Self {
             format: JsonFormat::Native(Box::new(JsonNativeType::Null)),
         }
@@ -208,7 +211,7 @@ impl JsonType {
     }
 
     /// Try to merge this json type with others, error on datatype conflict.
-    pub(crate) fn merge(&mut self, other: &JsonType) -> Result<()> {
+    pub fn merge(&mut self, other: &JsonType) -> Result<()> {
         match (&self.format, &other.format) {
             (JsonFormat::Jsonb, JsonFormat::Jsonb) => Ok(()),
             (JsonFormat::Native(this), JsonFormat::Native(that)) => {
@@ -223,7 +226,8 @@ impl JsonType {
         }
     }
 
-    pub(crate) fn is_mergeable(&self, other: &JsonType) -> bool {
+    /// Check if it can merge with `other` json type.
+    pub fn is_mergeable(&self, other: &JsonType) -> bool {
         match (&self.format, &other.format) {
             (JsonFormat::Jsonb, JsonFormat::Jsonb) => true,
             (JsonFormat::Native(this), JsonFormat::Native(that)) => {
@@ -231,6 +235,43 @@ impl JsonType {
             }
             _ => false,
         }
+    }
+
+    /// Check if it includes all fields in `other` json type.
+    pub fn is_include(&self, other: &JsonType) -> bool {
+        match (&self.format, &other.format) {
+            (JsonFormat::Jsonb, JsonFormat::Jsonb) => true,
+            (JsonFormat::Native(this), JsonFormat::Native(that)) => {
+                is_include(this.as_ref(), that.as_ref())
+            }
+            _ => false,
+        }
+    }
+}
+
+fn is_include(this: &JsonNativeType, that: &JsonNativeType) -> bool {
+    fn is_include_object(this: &JsonObjectType, that: &JsonObjectType) -> bool {
+        for (type_name, that_type) in that {
+            let Some(this_type) = this.get(type_name) else {
+                return false;
+            };
+            if !is_include(this_type, that_type) {
+                return false;
+            }
+        }
+        true
+    }
+
+    match (this, that) {
+        (this, that) if this == that => true,
+        (JsonNativeType::Array(this), JsonNativeType::Array(that)) => {
+            is_include(this.as_ref(), that.as_ref())
+        }
+        (JsonNativeType::Object(this), JsonNativeType::Object(that)) => {
+            is_include_object(this, that)
+        }
+        (_, JsonNativeType::Null) => true,
+        _ => false,
     }
 }
 
@@ -317,14 +358,14 @@ impl DataType for JsonType {
     fn as_arrow_type(&self) -> ArrowDataType {
         match self.format {
             JsonFormat::Jsonb => ArrowDataType::Binary,
-            JsonFormat::Native(_) => ArrowDataType::Struct(Fields::empty()),
+            JsonFormat::Native(_) => self.as_struct_type().as_arrow_type(),
         }
     }
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
-        match self.format {
+        match &self.format {
             JsonFormat::Jsonb => Box::new(BinaryVectorBuilder::with_capacity(capacity)),
-            JsonFormat::Native(_) => Box::new(JsonVectorBuilder::with_capacity(capacity)),
+            JsonFormat::Native(x) => Box::new(JsonVectorBuilder::new(*x.clone(), capacity)),
         }
     }
 
@@ -333,6 +374,12 @@ impl DataType for JsonType {
             Value::Binary(v) => Some(Value::Binary(v)),
             _ => None,
         }
+    }
+}
+
+impl Display for JsonType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
     }
 }
 
@@ -365,6 +412,204 @@ pub fn parse_string_to_jsonb(s: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::json::JsonStructureSettings;
+
+    #[test]
+    fn test_json_type_include() {
+        fn test(this: &JsonNativeType, that: &JsonNativeType, expected: bool) {
+            assert_eq!(is_include(this, that), expected);
+        }
+
+        test(&JsonNativeType::Null, &JsonNativeType::Null, true);
+        test(&JsonNativeType::Null, &JsonNativeType::Bool, false);
+
+        test(&JsonNativeType::Bool, &JsonNativeType::Null, true);
+        test(&JsonNativeType::Bool, &JsonNativeType::Bool, true);
+        test(&JsonNativeType::Bool, &JsonNativeType::u64(), false);
+
+        test(&JsonNativeType::u64(), &JsonNativeType::Null, true);
+        test(&JsonNativeType::u64(), &JsonNativeType::u64(), true);
+        test(&JsonNativeType::u64(), &JsonNativeType::String, false);
+
+        test(&JsonNativeType::String, &JsonNativeType::Null, true);
+        test(&JsonNativeType::String, &JsonNativeType::String, true);
+        test(
+            &JsonNativeType::String,
+            &JsonNativeType::Array(Box::new(JsonNativeType::f64())),
+            false,
+        );
+
+        test(
+            &JsonNativeType::Array(Box::new(JsonNativeType::f64())),
+            &JsonNativeType::Null,
+            true,
+        );
+        test(
+            &JsonNativeType::Array(Box::new(JsonNativeType::f64())),
+            &JsonNativeType::Array(Box::new(JsonNativeType::Null)),
+            true,
+        );
+        test(
+            &JsonNativeType::Array(Box::new(JsonNativeType::f64())),
+            &JsonNativeType::Array(Box::new(JsonNativeType::f64())),
+            true,
+        );
+        test(
+            &JsonNativeType::Array(Box::new(JsonNativeType::f64())),
+            &JsonNativeType::String,
+            false,
+        );
+        test(
+            &JsonNativeType::Array(Box::new(JsonNativeType::f64())),
+            &JsonNativeType::Object(JsonObjectType::new()),
+            false,
+        );
+
+        let simple_json_object = &JsonNativeType::Object(JsonObjectType::from([(
+            "foo".to_string(),
+            JsonNativeType::String,
+        )]));
+        test(simple_json_object, &JsonNativeType::Null, true);
+        test(simple_json_object, simple_json_object, true);
+        test(simple_json_object, &JsonNativeType::i64(), false);
+        test(
+            simple_json_object,
+            &JsonNativeType::Object(JsonObjectType::from([(
+                "bar".to_string(),
+                JsonNativeType::i64(),
+            )])),
+            false,
+        );
+
+        let complex_json_object = &JsonNativeType::Object(JsonObjectType::from([
+            (
+                "nested".to_string(),
+                JsonNativeType::Object(JsonObjectType::from([(
+                    "a".to_string(),
+                    JsonNativeType::Object(JsonObjectType::from([(
+                        "b".to_string(),
+                        JsonNativeType::Object(JsonObjectType::from([(
+                            "c".to_string(),
+                            JsonNativeType::String,
+                        )])),
+                    )])),
+                )])),
+            ),
+            ("bar".to_string(), JsonNativeType::i64()),
+        ]));
+        test(complex_json_object, &JsonNativeType::Null, true);
+        test(complex_json_object, &JsonNativeType::String, false);
+        test(complex_json_object, complex_json_object, true);
+        test(
+            complex_json_object,
+            &JsonNativeType::Object(JsonObjectType::from([(
+                "bar".to_string(),
+                JsonNativeType::i64(),
+            )])),
+            true,
+        );
+        test(
+            complex_json_object,
+            &JsonNativeType::Object(JsonObjectType::from([
+                (
+                    "nested".to_string(),
+                    JsonNativeType::Object(JsonObjectType::from([(
+                        "a".to_string(),
+                        JsonNativeType::Null,
+                    )])),
+                ),
+                ("bar".to_string(), JsonNativeType::i64()),
+            ])),
+            true,
+        );
+        test(
+            complex_json_object,
+            &JsonNativeType::Object(JsonObjectType::from([
+                (
+                    "nested".to_string(),
+                    JsonNativeType::Object(JsonObjectType::from([(
+                        "a".to_string(),
+                        JsonNativeType::String,
+                    )])),
+                ),
+                ("bar".to_string(), JsonNativeType::i64()),
+            ])),
+            false,
+        );
+        test(
+            complex_json_object,
+            &JsonNativeType::Object(JsonObjectType::from([
+                (
+                    "nested".to_string(),
+                    JsonNativeType::Object(JsonObjectType::from([(
+                        "a".to_string(),
+                        JsonNativeType::Object(JsonObjectType::from([(
+                            "b".to_string(),
+                            JsonNativeType::String,
+                        )])),
+                    )])),
+                ),
+                ("bar".to_string(), JsonNativeType::i64()),
+            ])),
+            false,
+        );
+        test(
+            complex_json_object,
+            &JsonNativeType::Object(JsonObjectType::from([
+                (
+                    "nested".to_string(),
+                    JsonNativeType::Object(JsonObjectType::from([(
+                        "a".to_string(),
+                        JsonNativeType::Object(JsonObjectType::from([(
+                            "b".to_string(),
+                            JsonNativeType::Object(JsonObjectType::from([(
+                                "c".to_string(),
+                                JsonNativeType::Null,
+                            )])),
+                        )])),
+                    )])),
+                ),
+                ("bar".to_string(), JsonNativeType::i64()),
+            ])),
+            true,
+        );
+        test(
+            complex_json_object,
+            &JsonNativeType::Object(JsonObjectType::from([
+                (
+                    "nested".to_string(),
+                    JsonNativeType::Object(JsonObjectType::from([(
+                        "a".to_string(),
+                        JsonNativeType::Object(JsonObjectType::from([(
+                            "b".to_string(),
+                            JsonNativeType::Object(JsonObjectType::from([(
+                                "c".to_string(),
+                                JsonNativeType::Bool,
+                            )])),
+                        )])),
+                    )])),
+                ),
+                ("bar".to_string(), JsonNativeType::i64()),
+            ])),
+            false,
+        );
+        test(
+            complex_json_object,
+            &JsonNativeType::Object(JsonObjectType::from([(
+                "nested".to_string(),
+                JsonNativeType::Object(JsonObjectType::from([(
+                    "a".to_string(),
+                    JsonNativeType::Object(JsonObjectType::from([(
+                        "b".to_string(),
+                        JsonNativeType::Object(JsonObjectType::from([(
+                            "c".to_string(),
+                            JsonNativeType::String,
+                        )])),
+                    )])),
+                )])),
+            )])),
+            true,
+        );
+    }
 
     #[test]
     fn test_merge_json_type() -> Result<()> {

@@ -260,12 +260,20 @@ impl JsonValue {
         ConcreteDataType::Json(self.json_type().clone())
     }
 
-    pub(crate) fn json_type(&self) -> &JsonType {
+    pub fn json_type(&self) -> &JsonType {
         self.json_type.get_or_init(|| self.json_variant.json_type())
     }
 
     pub(crate) fn is_null(&self) -> bool {
         matches!(self.json_variant, JsonVariant::Null)
+    }
+
+    /// Check if this JSON value is an empty object.
+    pub fn is_empty_object(&self) -> bool {
+        match &self.json_variant {
+            JsonVariant::Object(object) => object.is_empty(),
+            _ => false,
+        }
     }
 
     pub(crate) fn as_i64(&self) -> Option<i64> {

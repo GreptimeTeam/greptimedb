@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use api::helper::{ColumnDataTypeWrapper, value_to_grpc_value};
+use api::helper::{ColumnDataTypeWrapper, to_grpc_value};
 use api::v1::bulk_wal_entry::Body;
 use api::v1::{ArrowIpc, BulkWalEntry, Mutation, OpType, bulk_wal_entry};
 use bytes::Bytes;
@@ -268,7 +268,7 @@ impl BulkPart {
                 let values = (0..self.batch.num_columns())
                     .map(|col_idx| {
                         if let Some(v) = &vectors[col_idx] {
-                            value_to_grpc_value(v.get(row_idx))
+                            to_grpc_value(v.get(row_idx))
                         } else {
                             api::v1::Value { value_data: None }
                         }
