@@ -43,6 +43,8 @@ pub struct ParquetFetchMetrics {
     page_cache_hit: std::sync::atomic::AtomicUsize,
     /// Number of write cache hits.
     write_cache_hit: std::sync::atomic::AtomicUsize,
+    /// Number of cache misses.
+    cache_miss: std::sync::atomic::AtomicUsize,
     /// Number of pages to fetch.
     pages_to_fetch: std::sync::atomic::AtomicUsize,
     /// Total size in bytes of pages to fetch.
@@ -62,6 +64,7 @@ impl std::fmt::Debug for ParquetFetchMetrics {
 
         let page_cache_hit = self.page_cache_hit();
         let write_cache_hit = self.write_cache_hit();
+        let cache_miss = self.cache_miss();
         let pages_to_fetch = self.pages_to_fetch();
         let page_size_to_fetch = self.page_size_to_fetch();
         let write_cache_elapsed = self.write_cache_fetch_elapsed();
@@ -77,6 +80,13 @@ impl std::fmt::Debug for ParquetFetchMetrics {
                 write!(f, ", ")?;
             }
             write!(f, "\"write_cache_hit\":{}", write_cache_hit)?;
+            first = false;
+        }
+        if cache_miss > 0 {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"cache_miss\":{}", cache_miss)?;
             first = false;
         }
         if pages_to_fetch > 0 {
@@ -134,6 +144,12 @@ impl ParquetFetchMetrics {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Increments cache miss counter.
+    pub fn inc_cache_miss(&self) {
+        self.cache_miss
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Adds to the pages to fetch counter.
     pub fn add_pages_to_fetch(&self, count: usize) {
         self.pages_to_fetch
@@ -155,6 +171,12 @@ impl ParquetFetchMetrics {
     /// Returns the write cache hit count.
     pub fn write_cache_hit(&self) -> usize {
         self.write_cache_hit
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Returns the cache miss count.
+    pub fn cache_miss(&self) -> usize {
+        self.cache_miss
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -212,6 +234,10 @@ impl ParquetFetchMetrics {
             .fetch_add(other.page_cache_hit(), std::sync::atomic::Ordering::Relaxed);
         self.write_cache_hit.fetch_add(
             other.write_cache_hit(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.cache_miss.fetch_add(
+            other.cache_miss(),
             std::sync::atomic::Ordering::Relaxed,
         );
         self.pages_to_fetch
@@ -530,6 +556,7 @@ impl<'a> InMemoryRowGroup<'a> {
                     .map_err(|e| ParquetError::External(Box::new(e)))?;
                 if let Some(metrics) = metrics {
                     metrics.add_store_fetch_elapsed(start.elapsed().as_micros() as u64);
+                    metrics.inc_cache_miss();
                 }
                 data
             }
