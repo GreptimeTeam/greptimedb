@@ -28,7 +28,7 @@ use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocato
 use common_meta::ddl::{
     DdlContext, NoopRegionFailureDetectorControl, RegionFailureDetectorControllerRef,
 };
-use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerContext};
+use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerConfigureContext};
 use common_meta::distributed_time_constants::{self};
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
@@ -407,7 +407,7 @@ impl MetasrvBuilder {
             .as_ref()
             .and_then(|p| p.get::<DdlManagerConfiguratorRef>())
         {
-            let ctx = DdlManagerContext {
+            let ctx = DdlManagerConfigureContext {
                 kv_backend: kv_backend.clone(),
             };
             configurator

@@ -75,13 +75,13 @@ pub trait DdlManagerConfigurator: Send + Sync {
     async fn configure(
         &self,
         ddl_manager: DdlManager,
-        ctx: DdlManagerContext,
+        ctx: DdlManagerConfigureContext,
     ) -> std::result::Result<DdlManager, BoxedError>;
 }
 
 pub type DdlManagerConfiguratorRef = Arc<dyn DdlManagerConfigurator>;
 
-pub struct DdlManagerContext {
+pub struct DdlManagerConfigureContext {
     pub kv_backend: KvBackendRef,
 }
 

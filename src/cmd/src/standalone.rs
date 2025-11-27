@@ -32,7 +32,7 @@ use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
-use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerContext};
+use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerConfigureContext};
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -507,7 +507,7 @@ impl StartCommand {
             .context(error::InitDdlManagerSnafu)?;
 
         let ddl_manager = if let Some(configurator) = plugins.get::<DdlManagerConfiguratorRef>() {
-            let ctx = DdlManagerContext {
+            let ctx = DdlManagerConfigureContext {
                 kv_backend: kv_backend.clone(),
             };
             configurator
