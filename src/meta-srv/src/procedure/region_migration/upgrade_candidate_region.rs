@@ -369,15 +369,14 @@ mod tests {
     };
 
     fn new_persistent_context() -> PersistentContext {
-        PersistentContext {
-            catalog: "greptime".into(),
-            schema: "public".into(),
-            from_peer: Peer::empty(1),
-            to_peer: Peer::empty(2),
-            region_ids: vec![RegionId::new(1024, 1)],
-            timeout: Duration::from_millis(1000),
-            trigger_reason: RegionMigrationTriggerReason::Manual,
-        }
+        PersistentContext::new(
+            vec![("greptime".into(), "public".into())],
+            Peer::empty(1),
+            Peer::empty(2),
+            vec![RegionId::new(1024, 1)],
+            Duration::from_millis(1000),
+            RegionMigrationTriggerReason::Manual,
+        )
     }
 
     async fn prepare_table_metadata(ctx: &Context, wal_options: HashMap<u32, String>) {

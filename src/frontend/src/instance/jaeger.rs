@@ -32,15 +32,16 @@ use common_telemetry::warn;
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionContext;
+use datafusion::functions_window::expr_fn::row_number;
 use datafusion_expr::select_expr::SelectExpr;
-use datafusion_expr::{Expr, SortExpr, col, lit, lit_timestamp_nano, wildcard};
+use datafusion_expr::{Expr, ExprFunctionExt, SortExpr, col, lit, lit_timestamp_nano, wildcard};
 use query::QueryEngineRef;
 use serde_json::Value as JsonValue;
 use servers::error::{
     CatalogSnafu, CollectRecordbatchSnafu, DataFusionSnafu, Result as ServerResult,
     TableNotFoundSnafu,
 };
-use servers::http::jaeger::{JAEGER_QUERY_TABLE_NAME_KEY, QueryTraceParams};
+use servers::http::jaeger::{JAEGER_QUERY_TABLE_NAME_KEY, QueryTraceParams, TraceUserAgent};
 use servers::otlp::trace::{
     DURATION_NANO_COLUMN, KEY_OTEL_STATUS_ERROR_KEY, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN,
     SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_ERROR,
@@ -49,12 +50,14 @@ use servers::otlp::trace::{
 use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use table::TableRef;
 use table::requests::{TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::instance::Instance;
 
 const DEFAULT_LIMIT: usize = 2000;
+const KEY_RN: &str = "greptime_rn";
 
 #[async_trait]
 impl JaegerQueryHandler for Instance {
@@ -259,18 +262,41 @@ impl JaegerQueryHandler for Instance {
             filters.push(col(TIMESTAMP_COLUMN).lt_eq(lit_timestamp_nano(end_time)));
         }
 
-        Ok(query_trace_table(
-            ctx,
-            self.catalog_manager(),
-            self.query_engine(),
-            vec![wildcard()],
-            filters,
-            vec![col(TIMESTAMP_COLUMN).sort(false, false)], // Sort by timestamp in descending order.
-            None,
-            None,
-            vec![],
-        )
-        .await?)
+        match query_params.user_agent {
+            TraceUserAgent::Grafana => {
+                // grafana only use trace id and timestamp
+                // clicking the trace id will invoke the query trace api
+                // so we only need to return 1 span for each trace
+                let table_name = ctx
+                    .extension(JAEGER_QUERY_TABLE_NAME_KEY)
+                    .unwrap_or(TRACE_TABLE_NAME);
+
+                let table = get_table(ctx.clone(), self.catalog_manager(), table_name).await?;
+
+                Ok(find_traces_rank_3(
+                    table,
+                    self.query_engine(),
+                    filters,
+                    vec![col(TIMESTAMP_COLUMN).sort(false, false)], // Sort by timestamp in descending order.
+                )
+                .await?)
+            }
+            _ => {
+                // query all spans
+                Ok(query_trace_table(
+                    ctx,
+                    self.catalog_manager(),
+                    self.query_engine(),
+                    vec![wildcard()],
+                    filters,
+                    vec![col(TIMESTAMP_COLUMN).sort(false, false)], // Sort by timestamp in descending order.
+                    None,
+                    None,
+                    vec![],
+                )
+                .await?)
+            }
+        }
     }
 }
 
@@ -381,6 +407,84 @@ async fn query_trace_table(
     } else {
         dataframe
     };
+
+    // Execute the query and collect the result.
+    let stream = dataframe.execute_stream().await.context(DataFusionSnafu)?;
+
+    let output = Output::new_with_stream(Box::pin(
+        RecordBatchStreamAdapter::try_new(stream).context(CollectRecordbatchSnafu)?,
+    ));
+
+    Ok(output)
+}
+
+async fn get_table(
+    ctx: QueryContextRef,
+    catalog_manager: &CatalogManagerRef,
+    table_name: &str,
+) -> ServerResult<TableRef> {
+    catalog_manager
+        .table(
+            ctx.current_catalog(),
+            &ctx.current_schema(),
+            table_name,
+            Some(&ctx),
+        )
+        .await
+        .context(CatalogSnafu)?
+        .with_context(|| TableNotFoundSnafu {
+            table: table_name,
+            catalog: ctx.current_catalog(),
+            schema: ctx.current_schema(),
+        })
+}
+
+async fn find_traces_rank_3(
+    table: TableRef,
+    query_engine: &QueryEngineRef,
+    filters: Vec<Expr>,
+    sorts: Vec<SortExpr>,
+) -> ServerResult<Output> {
+    let df_context = create_df_context(query_engine)?;
+
+    let dataframe = df_context
+        .read_table(Arc::new(DfTableProviderAdapter::new(table)))
+        .context(DataFusionSnafu)?;
+
+    let dataframe = dataframe
+        .select(vec![wildcard()])
+        .context(DataFusionSnafu)?;
+
+    // Apply all filters.
+    let dataframe = filters.into_iter().try_fold(dataframe, |df, expr| {
+        df.filter(expr).context(DataFusionSnafu)
+    })?;
+
+    // Apply the sorts if needed.
+    let dataframe = if !sorts.is_empty() {
+        dataframe.sort(sorts).context(DataFusionSnafu)?
+    } else {
+        dataframe
+    };
+
+    // create rank column, for each trace, get the earliest 3 spans
+    let trace_id_col = vec![col(TRACE_ID_COLUMN)];
+    let timestamp_asc = vec![col(TIMESTAMP_COLUMN).sort(true, false)];
+
+    let dataframe = dataframe
+        .with_column(
+            KEY_RN,
+            row_number()
+                .partition_by(trace_id_col)
+                .order_by(timestamp_asc)
+                .build()
+                .context(DataFusionSnafu)?,
+        )
+        .context(DataFusionSnafu)?;
+
+    let dataframe = dataframe
+        .filter(col(KEY_RN).lt_eq(lit(3)))
+        .context(DataFusionSnafu)?;
 
     // Execute the query and collect the result.
     let stream = dataframe.execute_stream().await.context(DataFusionSnafu)?;

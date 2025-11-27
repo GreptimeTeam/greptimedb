@@ -215,6 +215,18 @@ jobs:
           image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
 
+  run-multi-lang-tests:
+    name: Run Multi-language SDK Tests
+    if: ${{ inputs.build_linux_amd64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+      build-linux-amd64-artifacts,
+    ]
+    uses: ./.github/workflows/run-multi-lang-tests.yml
+    with:
+      artifact-name: greptime-linux-amd64-${{ needs.allocate-runners.outputs.version }}
+      artifact-is-tarball: true
+
   build-macos-artifacts:
     name: Build macOS artifacts
     strategy:
@@ -303,6 +315,7 @@ jobs:
       allocate-runners,
       build-linux-amd64-artifacts,
       build-linux-arm64-artifacts,
+      run-multi-lang-tests,
     ]
     runs-on: ubuntu-latest
     outputs:
@@ -381,6 +394,7 @@ jobs:
       build-macos-artifacts,
       build-windows-artifacts,
       release-images-to-dockerhub,
+      run-multi-lang-tests,
     ]
     runs-on: ubuntu-latest
     steps:

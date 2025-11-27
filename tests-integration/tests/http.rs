@@ -6065,6 +6065,94 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
                                 }
                             }
                         ]
+                    },
+                    {
+                        "scope": {
+                        "name": "test-jaeger-grafana-ua",
+                        "version": "1.0.0"
+                        },
+                        "spans": [
+                            {
+                                "traceId": "5611dce1bc9ebed65352d99a027b08fb",
+                                "spanId": "ffa03416a7b9ea50",
+                                "name": "access-span-1",
+                                "kind": 2,
+                                "startTimeUnixNano": "1738726754600000000",
+                                "endTimeUnixNano": "1738726754700000000",
+                                "attributes": [
+                                    {
+                                        "key": "operation.type",
+                                        "value": {
+                                        "stringValue": "access-span-1"
+                                        }
+                                    }
+                                ],
+                                "status": {
+                                    "message": "success",
+                                    "code": 0
+                                }
+                            },
+                            {
+                                "traceId": "5611dce1bc9ebed65352d99a027b08fb",
+                                "spanId": "ffa03416a7b9ea51",
+                                "name": "access-span-2",
+                                "kind": 2,
+                                "startTimeUnixNano": "1738726754600001000",
+                                "endTimeUnixNano": "1738726754700001000",
+                                "attributes": [
+                                    {
+                                        "key": "operation.type",
+                                        "value": {
+                                        "stringValue": "access-span-2"
+                                        }
+                                    }
+                                ],
+                                "status": {
+                                    "message": "success",
+                                    "code": 0
+                                }
+                            },
+                            {
+                                "traceId": "5611dce1bc9ebed65352d99a027b08fb",
+                                "spanId": "ffa03416a7b9ea52",
+                                "name": "access-span-3",
+                                "kind": 2,
+                                "startTimeUnixNano": "1738726754600002000",
+                                "endTimeUnixNano": "1738726754700002000",
+                                "attributes": [
+                                    {
+                                        "key": "operation.type",
+                                        "value": {
+                                        "stringValue": "access-span-3"
+                                        }
+                                    }
+                                ],
+                                "status": {
+                                    "message": "success",
+                                    "code": 0
+                                }
+                            },
+                            {
+                                "traceId": "5611dce1bc9ebed65352d99a027b08fb",
+                                "spanId": "ffa03416a7b9ea53",
+                                "name": "access-span-4",
+                                "kind": 2,
+                                "startTimeUnixNano": "1738726754600003000",
+                                "endTimeUnixNano": "1738726754700003000",
+                                "attributes": [
+                                    {
+                                        "key": "operation.type",
+                                        "value": {
+                                        "stringValue": "access-span-4"
+                                        }
+                                    }
+                                ],
+                                "status": {
+                                    "message": "success",
+                                    "code": 0
+                                }
+                            }
+                        ]
                     }
                 ],
                 "schemaUrl": "https://opentelemetry.io/schemas/1.4.0"
@@ -6179,9 +6267,25 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
             {
                 "name": "access-redis",
                 "spanKind": "server"
+            },
+            {
+                "name": "access-span-1",
+                "spanKind": "server"
+            },
+            {
+                "name": "access-span-2",
+                "spanKind": "server"
+            },
+            {
+                "name": "access-span-3",
+                "spanKind": "server"
+            },
+            {
+                "name": "access-span-4",
+                "spanKind": "server"
             }
         ],
-        "total": 3,
+        "total": 7,
         "limit": 0,
         "offset": 0,
         "errors": []
@@ -6203,9 +6307,13 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
         "data": [
             "access-mysql",
             "access-pg",
-            "access-redis"
+            "access-redis",
+            "access-span-1",
+            "access-span-2",
+            "access-span-3",
+            "access-span-4"
         ],
-        "total": 3,
+        "total": 7,
         "limit": 0,
         "offset": 0,
         "errors": []
@@ -6467,6 +6575,30 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     let expected: Value = serde_json::from_str(expected).unwrap();
     assert_eq!(resp, expected);
 
+    // Test `/api/traces/{trace_id}` API for non-existent trace.
+    let res = client
+        .get("/v1/jaeger/api/traces/0000000000000000000000000000dead")
+        .header("x-greptime-trace-table-name", trace_table_name)
+        .send()
+        .await;
+    assert_eq!(StatusCode::NOT_FOUND, res.status());
+    let expected = r#"{
+  "data": null,
+  "total": 0,
+  "limit": 0,
+  "offset": 0,
+  "errors": [
+    {
+      "code": 404,
+      "msg": "trace not found"
+    }
+  ]
+}
+"#;
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
     // Test `/api/traces` API.
     let res = client
         .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql&start=1738726754492421&end=1738726754642422&tags=%7B%22operation.type%22%3A%22access-mysql%22%7D")
@@ -6626,6 +6758,97 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
     let expected: Value = serde_json::from_str(expected).unwrap();
     assert_eq!(resp, expected);
+
+    // Test `/api/traces` API with Grafana User-Agent.
+    // When user agent is Grafana, only return at most 3 spans per trace (earliest by timestamp).
+    // Trace `5611dce1bc9ebed65352d99a027b08fb` has 4 spans, so only 3 should be returned.
+    let res = client
+        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004")
+        .header("x-greptime-trace-table-name", trace_table_name)
+        .header("User-Agent", "Grafana/8.0.0")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    // Verify that the trace has exactly 3 spans (limited by Grafana user agent)
+    let data = resp.get("data").unwrap().as_array().unwrap();
+    assert_eq!(data.len(), 1, "Expected 1 trace");
+    let trace = &data[0];
+    assert_eq!(
+        trace.get("traceID").unwrap().as_str().unwrap(),
+        "5611dce1bc9ebed65352d99a027b08fb"
+    );
+    let spans = trace.get("spans").unwrap().as_array().unwrap();
+    assert_eq!(
+        spans.len(),
+        3,
+        "Expected 3 spans (limited by Grafana user agent), got {}",
+        spans.len()
+    );
+    // Verify that the 3 earliest spans are returned (by timestamp ascending)
+    let span_names: Vec<&str> = spans
+        .iter()
+        .map(|s| s.get("operationName").unwrap().as_str().unwrap())
+        .collect();
+    assert!(
+        span_names.contains(&"access-span-1"),
+        "Expected access-span-1 in spans"
+    );
+    assert!(
+        span_names.contains(&"access-span-2"),
+        "Expected access-span-2 in spans"
+    );
+    assert!(
+        span_names.contains(&"access-span-3"),
+        "Expected access-span-3 in spans"
+    );
+    assert!(
+        !span_names.contains(&"access-span-4"),
+        "access-span-4 should NOT be in spans (4th span)"
+    );
+
+    // Test `/api/traces` API without User-Agent (default behavior).
+    // All 4 spans should be returned for the trace.
+    let res = client
+        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004")
+        .header("x-greptime-trace-table-name", trace_table_name)
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let data = resp.get("data").unwrap().as_array().unwrap();
+    assert_eq!(data.len(), 1, "Expected 1 trace");
+    let trace = &data[0];
+    let spans = trace.get("spans").unwrap().as_array().unwrap();
+    assert_eq!(
+        spans.len(),
+        4,
+        "Expected 4 spans (no user agent limit), got {}",
+        spans.len()
+    );
+
+    // Test `/api/traces` API with Jaeger User-Agent (should return all spans like default).
+    let res = client
+        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004")
+        .header("x-greptime-trace-table-name", trace_table_name)
+        .header("User-Agent", "Jaeger-Query/1.0.0")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let data = resp.get("data").unwrap().as_array().unwrap();
+    assert_eq!(data.len(), 1, "Expected 1 trace");
+    let trace = &data[0];
+    let spans = trace.get("spans").unwrap().as_array().unwrap();
+    assert_eq!(
+        spans.len(),
+        4,
+        "Expected 4 spans (Jaeger user agent, no limit), got {}",
+        spans.len()
+    );
 
     guard.remove_all().await;
 }
