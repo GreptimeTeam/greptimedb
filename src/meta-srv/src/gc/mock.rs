@@ -355,7 +355,6 @@ impl SchedulerCtx for MockSchedulerCtx {
             }
         }
 
-
         // Return the report with need_retry_regions populated - let the caller handle retry logic
         Ok(final_report)
     }

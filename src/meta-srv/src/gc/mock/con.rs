@@ -141,7 +141,7 @@ async fn test_datanode_processes_tables_with_partial_gc_failures() {
         }
         .with_table_routes(HashMap::from([
             (table1, (table1, vec![(region1, peer.clone())])),
-            (table2, (table2, vec![(region2, peer)])),
+            (table2, (table2, vec![(region2, peer.clone())])),
         ])),
     );
 
@@ -366,7 +366,9 @@ async fn test_region_gc_concurrency_with_partial_failures() {
         candidates.into_iter().map(|c| (table_id, c)).collect(),
     )]);
 
-    let report = scheduler.parallel_process_datanodes(datanode_to_candidates).await;
+    let report = scheduler
+        .parallel_process_datanodes(datanode_to_candidates)
+        .await;
 
     let report = report.per_datanode_reports.get(&peer.id).unwrap();
 
@@ -489,7 +491,9 @@ async fn test_region_gc_concurrency_with_retryable_errors() {
         peer.clone(),
         candidates.into_iter().map(|c| (table_id, c)).collect(),
     )]);
-    let report = scheduler.parallel_process_datanodes(datanode_to_candidates).await;
+    let report = scheduler
+        .parallel_process_datanodes(datanode_to_candidates)
+        .await;
 
     let report = report.per_datanode_reports.get(&peer.id).unwrap();
 
