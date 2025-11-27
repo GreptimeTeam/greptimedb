@@ -122,7 +122,12 @@ impl CompactionMemoryManager {
         }
     }
 
-    /// Waits until memory becomes available. This does not reserve memory.
+    /// Waits until the specified amount of memory becomes available.
+    ///
+    /// Note: This method does not reserve the memory. After this method returns,
+    /// you should call `try_acquire` to attempt to reserve the memory. However,
+    /// there is no guarantee the memory will still be available at that point,
+    /// as another task may acquire it concurrently.
     pub async fn wait_for_available(&self, bytes: u64) {
         if self.inner.is_none() || bytes == 0 {
             return;
@@ -130,10 +135,13 @@ impl CompactionMemoryManager {
 
         let inner = self.inner.as_ref().unwrap().clone();
         loop {
+            // Take a notified handle first to avoid missing notifications between
+            // the availability check and awaiting.
+            let notified = inner.notify.notified();
             if inner.available_bytes() >= bytes {
                 return;
             }
-            inner.notify.notified().await;
+            notified.await;
         }
     }
 }

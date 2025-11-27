@@ -820,8 +820,21 @@ impl CompactionStatus {
         }
     }
 
-    fn set_memory_pending(&mut self, pending: DeferredCompactionTask) {
-        self.memory_pending = Some(pending);
+    fn set_memory_pending(&mut self, mut pending: DeferredCompactionTask) {
+        if let Some(mut prev) = self.memory_pending.take() {
+            // If a memory-pending task already exists, merge waiters into the existing task
+            // and keep the larger memory requirement to be safe.
+            let new_waiters = std::mem::take(&mut pending.task.waiters);
+            prev.task.waiters.extend(new_waiters);
+            prev.memory_bytes = prev.memory_bytes.max(pending.memory_bytes);
+            debug!(
+                "Region {} already has memory pending task, merge waiters and keep previous task",
+                self.region_id
+            );
+            self.memory_pending = Some(prev);
+        } else {
+            self.memory_pending = Some(pending);
+        }
     }
 
     fn take_memory_pending(&mut self) -> Option<DeferredCompactionTask> {
