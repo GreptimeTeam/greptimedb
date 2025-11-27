@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_error::ext::BoxedError;
 use common_procedure::{
     BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId, watcher,
 };
@@ -45,6 +46,7 @@ use crate::error::{
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
+use crate::kv_backend::KvBackendRef;
 use crate::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::DdlTask::CreateTrigger;
@@ -65,6 +67,23 @@ use crate::rpc::ddl::{
     SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
 };
 use crate::rpc::router::RegionRoute;
+
+/// A configurator that customizes or enhances a [`DdlManager`] during initialization.
+#[async_trait::async_trait]
+pub trait DdlManagerConfigurator: Send + Sync {
+    /// Configures the given [`DdlManager`] using the provided [`DdlManagerContext`].
+    async fn configure(
+        &self,
+        ddl_manager: DdlManager,
+        ctx: DdlManagerContext,
+    ) -> std::result::Result<DdlManager, BoxedError>;
+}
+
+pub type DdlManagerConfiguratorRef = Arc<dyn DdlManagerConfigurator>;
+
+pub struct DdlManagerContext {
+    pub kv_backend: KvBackendRef,
+}
 
 pub type DdlManagerRef = Arc<DdlManager>;
 

@@ -31,7 +31,7 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
 use either::Either;
-use servers::configurator::ConfiguratorRef;
+use servers::configurator::GrpcConfiguratorRef;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
@@ -46,6 +46,7 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::election::etcd::EtcdElection;
+use crate::error::OtherSnafu;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{
     BackendImpl, ElectionRef, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
@@ -133,8 +134,11 @@ impl MetasrvInstance {
 
         // Start gRPC server with admin services for backward compatibility
         let mut router = router(self.metasrv.clone());
-        if let Some(configurator) = self.metasrv.plugins().get::<ConfiguratorRef>() {
-            router = configurator.config_grpc(router);
+        if let Some(configurator) = self.metasrv.plugins().get::<GrpcConfiguratorRef<()>>() {
+            router = configurator
+                .config_grpc(router, ())
+                .await
+                .context(OtherSnafu)?;
         }
 
         let (serve_state_tx, serve_state_rx) = oneshot::channel();

@@ -15,16 +15,27 @@
 use std::sync::Arc;
 
 use axum::Router as HttpRouter;
+use common_error::ext::BoxedError;
 use tonic::transport::server::Router as GrpcRouter;
 
-pub trait Configurator: Send + Sync {
-    fn config_http(&self, route: HttpRouter) -> HttpRouter {
-        route
-    }
-
-    fn config_grpc(&self, route: GrpcRouter) -> GrpcRouter {
-        route
-    }
+#[async_trait::async_trait]
+pub trait HttpConfigurator<C>: Send + Sync {
+    async fn config_http(
+        &self,
+        route: HttpRouter,
+        ctx: C,
+    ) -> std::result::Result<HttpRouter, BoxedError>;
 }
 
-pub type ConfiguratorRef = Arc<dyn Configurator>;
+pub type HttpConfiguratorRef<C> = Arc<dyn HttpConfigurator<C>>;
+
+#[async_trait::async_trait]
+pub trait GrpcConfigurator<C>: Send + Sync {
+    async fn config_grpc(
+        &self,
+        route: GrpcRouter,
+        ctx: C,
+    ) -> std::result::Result<GrpcRouter, BoxedError>;
+}
+
+pub type GrpcConfiguratorRef<C> = Arc<dyn GrpcConfigurator<C>>;

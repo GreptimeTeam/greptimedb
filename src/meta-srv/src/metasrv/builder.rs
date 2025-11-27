@@ -28,7 +28,7 @@ use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocato
 use common_meta::ddl::{
     DdlContext, NoopRegionFailureDetectorControl, RegionFailureDetectorControllerRef,
 };
-use common_meta::ddl_manager::DdlManager;
+use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerContext};
 use common_meta::distributed_time_constants::{self};
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
@@ -52,7 +52,6 @@ use snafu::{ResultExt, ensure};
 use store_api::storage::MAX_REGION_SEQ;
 
 use crate::bootstrap::build_default_meta_peer_client;
-use crate::bootstrap::extension::{ExtensionContext, ExtensionFactoryRef};
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, OtherSnafu, Result};
@@ -404,28 +403,20 @@ impl MetasrvBuilder {
         let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager_c, true)
             .context(error::InitDdlManagerSnafu)?;
 
-        let extension = if let Some(f) = plugins
+        let ddl_manager = if let Some(configurator) = plugins
             .as_ref()
-            .and_then(|p| p.get::<ExtensionFactoryRef>())
+            .and_then(|p| p.get::<DdlManagerConfiguratorRef>())
         {
-            let ctx = ExtensionContext {
+            let ctx = DdlManagerContext {
                 kv_backend: kv_backend.clone(),
-                meta_peer_client: meta_peer_client.clone(),
             };
-            Some(f.create(ctx).await.context(OtherSnafu)?)
+            configurator
+                .configure(ddl_manager, ctx)
+                .await
+                .context(OtherSnafu)?
         } else {
-            None
+            ddl_manager
         };
-
-        #[cfg(feature = "enterprise")]
-        let ddl_manager =
-            if let Some(trigger_ddl_manager) = extension.and_then(|e| e.trigger_ddl_manager) {
-                ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
-            } else {
-                ddl_manager
-            };
-        #[cfg(not(feature = "enterprise"))]
-        let _ = extension;
 
         let ddl_manager = Arc::new(ddl_manager);
 

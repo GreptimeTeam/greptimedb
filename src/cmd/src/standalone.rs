@@ -32,7 +32,7 @@ use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
-use common_meta::ddl_manager::DdlManager;
+use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerContext};
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -515,12 +515,15 @@ impl StartCommand {
 
         let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager.clone(), true)
             .context(error::InitDdlManagerSnafu)?;
-        #[cfg(feature = "enterprise")]
-        let ddl_manager = if let Some(trigger_ddl_manager) = extension
-            .as_ref()
-            .and_then(|e| e.trigger_ddl_manager.clone())
-        {
-            ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
+
+        let ddl_manager = if let Some(configurator) = plugins.get::<DdlManagerConfiguratorRef>() {
+            let ctx = DdlManagerContext {
+                kv_backend: kv_backend.clone(),
+            };
+            configurator
+                .configure(ddl_manager, ctx)
+                .await
+                .context(OtherSnafu)?
         } else {
             ddl_manager
         };
