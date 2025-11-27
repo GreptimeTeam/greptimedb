@@ -7,13 +7,8 @@ license.workspace = true
 [lints]
 workspace = true
 
-[features]
-enterprise = ["common-meta/enterprise", "operator/enterprise"]
-
 [dependencies]
-async-trait.workspace = true
 auth.workspace = true
-catalog.workspace = true
 clap.workspace = true
 cli.workspace = true
 common-base.workspace = true
@@ -22,10 +17,7 @@ common-meta.workspace = true
 datanode.workspace = true
 flow.workspace = true
 frontend.workspace = true
-meta-client.workspace = true
 meta-srv.workspace = true
-operator.workspace = true
 serde.workspace = true
-servers.workspace = true
 snafu.workspace = true
 standalone.workspace = true

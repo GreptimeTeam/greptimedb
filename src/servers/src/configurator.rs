@@ -20,8 +20,7 @@ use tonic::transport::server::Router as GrpcRouter;
 
 use crate::grpc::builder::GrpcServerBuilder;
 
-/// A configurator that customizes or enhances an HTTP router during service
-/// initialization.
+/// A configurator that customizes or enhances an HTTP router.
 #[async_trait::async_trait]
 pub trait HttpConfigurator<C>: Send + Sync {
     /// Configures the given HTTP router using the provided context.
@@ -34,8 +33,7 @@ pub trait HttpConfigurator<C>: Send + Sync {
 
 pub type HttpConfiguratorRef<C> = Arc<dyn HttpConfigurator<C>>;
 
-/// A configurator that customizes or enhances a gRPC router during service
-/// initialization.
+/// A configurator that customizes or enhances a gRPC router.
 #[async_trait::async_trait]
 pub trait GrpcRouterConfigurator<C>: Send + Sync {
     /// Configures the given gRPC router using the provided context.
@@ -48,8 +46,7 @@ pub trait GrpcRouterConfigurator<C>: Send + Sync {
 
 pub type GrpcRouterConfiguratorRef<C> = Arc<dyn GrpcRouterConfigurator<C>>;
 
-/// A configurator that customizes or enhances a [`GrpcServerBuilder`] during
-/// service initialization.
+/// A configurator that customizes or enhances a [`GrpcServerBuilder`].
 #[async_trait::async_trait]
 pub trait GrpcBuilderConfigurator<C>: Send + Sync {
     async fn configure(
@@ -58,3 +55,5 @@ pub trait GrpcBuilderConfigurator<C>: Send + Sync {
         ctx: C,
     ) -> std::result::Result<GrpcServerBuilder, BoxedError>;
 }
+
+pub type GrpcBuilderConfiguratorRef<C> = Arc<dyn GrpcBuilderConfigurator<C>>;

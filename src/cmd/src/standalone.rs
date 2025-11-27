@@ -21,7 +21,7 @@ use std::{fs, path};
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_schema::InformationExtensionRef;
-use catalog::kvbackend::{CatalogManagerBuilderConfigratorRef, KvBackendCatalogManagerBuilder};
+use catalog::kvbackend::{CatalogManagerConfigratorRef, KvBackendCatalogManagerBuilder};
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use common_base::Plugins;
@@ -412,7 +412,7 @@ impl StartCommand {
         .with_procedure_manager(procedure_manager.clone())
         .with_process_manager(process_manager.clone());
         let builder = if let Some(configurator) =
-            plugins.get::<CatalogManagerBuilderConfigratorRef<CatalogManagerConfigureContext>>()
+            plugins.get::<CatalogManagerConfigratorRef<CatalogManagerConfigureContext>>()
         {
             let ctx = CatalogManagerConfigureContext {
                 fe_client: frontend_client.clone(),
@@ -595,6 +595,7 @@ impl StartCommand {
     }
 }
 
+/// The context for [`CatalogManagerConfigratorRef`] in standalone.
 pub struct CatalogManagerConfigureContext {
     pub fe_client: Arc<FrontendClient>,
 }

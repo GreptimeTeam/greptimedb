@@ -43,7 +43,7 @@ use flow::{
     get_flow_auth_options,
 };
 use meta_client::{MetaClientOptions, MetaClientType};
-use servers::configurator::GrpcBuilderConfigurator;
+use servers::configurator::GrpcBuilderConfiguratorRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -55,15 +55,6 @@ use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-flownode";
-
-pub type GrpcBuilderConfiguratorRef = Arc<dyn GrpcBuilderConfigurator<GrpcBuilderContext>>;
-
-pub struct GrpcBuilderContext {
-    pub kv_backend: KvBackendRef,
-    pub fe_client: Arc<FrontendClient>,
-    pub flownode_id: FlownodeId,
-    pub catalog_manager: CatalogManagerRef,
-}
 
 type FlownodeOptions = GreptimeOptions<flow::FlownodeOptions>;
 
@@ -398,8 +389,10 @@ impl StartCommand {
 
         let builder =
             FlownodeServiceBuilder::grpc_server_builder(&opts, flownode.flownode_server());
-        let builder = if let Some(configurator) = plugins.get::<GrpcBuilderConfiguratorRef>() {
-            let context = GrpcBuilderContext {
+        let builder = if let Some(configurator) =
+            plugins.get::<GrpcBuilderConfiguratorRef<GrpcConfigureContext>>()
+        {
+            let context = GrpcConfigureContext {
                 kv_backend: cached_meta_backend.clone(),
                 fe_client: frontend_client.clone(),
                 flownode_id: member_id,
@@ -441,4 +434,12 @@ impl StartCommand {
 
         Ok(Instance::new(flownode, guard))
     }
+}
+
+/// The context for [`GrpcBuilderConfiguratorRef`] in flownode.
+pub struct GrpcConfigureContext {
+    pub kv_backend: KvBackendRef,
+    pub fe_client: Arc<FrontendClient>,
+    pub flownode_id: FlownodeId,
+    pub catalog_manager: CatalogManagerRef,
 }

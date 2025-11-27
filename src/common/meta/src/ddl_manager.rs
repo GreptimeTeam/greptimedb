@@ -68,7 +68,7 @@ use crate::rpc::ddl::{
 };
 use crate::rpc::router::RegionRoute;
 
-/// A configurator that customizes or enhances a [`DdlManager`] during initialization.
+/// A configurator that customizes or enhances a [`DdlManager`].
 #[async_trait::async_trait]
 pub trait DdlManagerConfigurator: Send + Sync {
     /// Configures the given [`DdlManager`] using the provided [`DdlManagerContext`].

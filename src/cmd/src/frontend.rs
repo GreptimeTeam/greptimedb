@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{
-    CachedKvBackendBuilder, CatalogManagerBuilderConfigratorRef, KvBackendCatalogManagerBuilder,
+    CachedKvBackendBuilder, CatalogManagerConfigratorRef, KvBackendCatalogManagerBuilder,
     MetaKvBackend,
 };
 use catalog::process_manager::ProcessManager;
@@ -421,7 +421,7 @@ impl StartCommand {
         )
         .with_process_manager(process_manager.clone());
         let builder = if let Some(configurator) =
-            plugins.get::<CatalogManagerBuilderConfigratorRef<CatalogManagerConfigureContext>>()
+            plugins.get::<CatalogManagerConfigratorRef<CatalogManagerConfigureContext>>()
         {
             let ctx = CatalogManagerConfigureContext {
                 meta_client: meta_client.clone(),
@@ -482,6 +482,7 @@ impl StartCommand {
     }
 }
 
+/// The context for [`CatalogManagerConfigratorRef`] in frontend.
 pub struct CatalogManagerConfigureContext {
     pub meta_client: MetaClientRef,
 }

@@ -33,7 +33,8 @@ use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
 use operator::statement::{
-    ExecutorContext, StatementExecutor, StatementExecutorConfiguratorRef, StatementExecutorRef,
+    ExecutorConfigureContext, StatementExecutor, StatementExecutorConfiguratorRef,
+    StatementExecutorRef,
 };
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
@@ -191,7 +192,7 @@ impl FrontendBuilder {
 
         let statement_executor =
             if let Some(configurator) = plugins.get::<StatementExecutorConfiguratorRef>() {
-                let ctx = ExecutorContext {
+                let ctx = ExecutorConfigureContext {
                     kv_backend: kv_backend.clone(),
                 };
                 configurator

@@ -18,8 +18,7 @@ mod manager;
 mod table_cache;
 
 pub use builder::{
-    CatalogManagerBuilderConfigrator, CatalogManagerBuilderConfigratorRef,
-    KvBackendCatalogManagerBuilder,
+    CatalogManagerConfigrator, CatalogManagerConfigratorRef, KvBackendCatalogManagerBuilder,
 };
 pub use client::{CachedKvBackend, CachedKvBackendBuilder, MetaKvBackend};
 pub use manager::KvBackendCatalogManager;
