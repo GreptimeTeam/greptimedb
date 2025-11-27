@@ -178,6 +178,7 @@ impl RegionManifestManager {
             options.object_store.clone(),
             options.compress_type,
             stats.total_manifest_size.clone(),
+            options.manifest_cache,
         );
         let manifest_version = stats.manifest_version.clone();
 
@@ -260,6 +261,7 @@ impl RegionManifestManager {
             options.object_store.clone(),
             options.compress_type,
             stats.total_manifest_size.clone(),
+            options.manifest_cache,
         );
         let manifest_version = stats.manifest_version.clone();
 

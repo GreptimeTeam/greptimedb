@@ -155,17 +155,10 @@ impl ManifestObjectStore {
         object_store: ObjectStore,
         compress_type: CompressionType,
         total_manifest_size: Arc<AtomicU64>,
-    ) -> Self {
-        Self::new_with_cache(path, object_store, compress_type, total_manifest_size, None)
-    }
-
-    pub fn new_with_cache(
-        path: &str,
-        object_store: ObjectStore,
-        compress_type: CompressionType,
-        total_manifest_size: Arc<AtomicU64>,
         manifest_cache: Option<ManifestCache>,
     ) -> Self {
+        common_telemetry::info!("Create manifest store, cache: {}", manifest_cache.is_some());
+
         let path = util::normalize_dir(path);
         let staging_path = {
             // Convert "region_dir/manifest/" to "region_dir/staging/manifest/"
@@ -846,6 +839,7 @@ mod tests {
             object_store,
             CompressionType::Uncompressed,
             Default::default(),
+            None,
         )
     }
 
