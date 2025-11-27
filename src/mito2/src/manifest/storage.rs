@@ -786,6 +786,8 @@ impl ManifestObjectStore {
 
     /// Puts a manifest file into cache.
     async fn put_to_cache(&self, key: String, data: Vec<u8>) {
+        common_telemetry::info!("Put manifest to cache, key: {key}");
+
         let Some(cache) = &self.manifest_cache else {
             return;
         };

@@ -248,6 +248,8 @@ impl ManifestCache {
     /// Gets a manifest file from cache.
     /// Returns the file data if found in cache, None otherwise.
     pub(crate) async fn get_file(&self, key: &str) -> Option<Vec<u8>> {
+        common_telemetry::info!("Manifest cache get key: {key}");
+
         // Check if file is in cache index
         if self.get(key).await.is_none() {
             CACHE_MISS.with_label_values(&[MANIFEST_TYPE]).inc();
@@ -355,8 +357,7 @@ impl ManifestCache {
         let dir_path_clone = dir_path.clone();
 
         let result =
-            tokio::task::spawn_blocking(move || Self::clean_empty_dirs_sync(&dir_path_clone))
-                .await;
+            tokio::task::spawn_blocking(move || Self::clean_empty_dirs_sync(&dir_path_clone)).await;
 
         match result {
             Ok(Ok(())) => {
