@@ -388,17 +388,14 @@ impl<S> RegionWorkerLoop<S> {
             let need_fill_missing_columns = region_ctx.version().metadata.schema_version
                 != bulk_req.region_metadata.schema_version;
 
-            // Only fill missing columns if primary key is dense encoded.
-            if need_fill_missing_columns {
-                // todo(hl): support filling default columns
-                bulk_req.sender.send(
-                    InvalidRequestSnafu {
-                        region_id,
-                        reason: "Schema mismatch",
-                    }
-                    .fail(),
-                );
-                return;
+            // Fill missing columns if needed
+            if need_fill_missing_columns
+                && let Err(e) = bulk_req
+                    .request
+                    .fill_missing_columns(&region_ctx.version().metadata)
+            {
+                bulk_req.sender.send(Err(e));
+                continue;
             }
 
             // Collect requests by region.
