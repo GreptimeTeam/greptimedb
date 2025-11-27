@@ -32,17 +32,17 @@ use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
-#[cfg(feature = "enterprise")]
-use operator::statement::TriggerQuerierRef;
-use operator::statement::{StatementExecutor, StatementExecutorRef};
+use operator::statement::{
+    ExecutorContext, StatementExecutor, StatementExecutorConfiguratorRef, StatementExecutorRef,
+};
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
 use query::QueryEngineFactory;
 use query::region_query::RegionQueryHandlerFactoryRef;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, Result};
+use crate::error::{self, ExternalSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
 use crate::instance::Instance;
@@ -60,8 +60,6 @@ pub struct FrontendBuilder {
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
     process_manager: ProcessManagerRef,
-    #[cfg(feature = "enterprise")]
-    trigger_querier: Option<TriggerQuerierRef>,
 }
 
 impl FrontendBuilder {
@@ -85,8 +83,6 @@ impl FrontendBuilder {
             plugins: None,
             procedure_executor,
             process_manager,
-            #[cfg(feature = "enterprise")]
-            trigger_querier: None,
         }
     }
 
@@ -100,14 +96,6 @@ impl FrontendBuilder {
     pub fn with_plugin(self, plugins: Plugins) -> Self {
         Self {
             plugins: Some(plugins),
-            ..self
-        }
-    }
-
-    #[cfg(feature = "enterprise")]
-    pub fn with_trigger_querier(self, trigger_querier: TriggerQuerierRef) -> Self {
-        Self {
-            trigger_querier: Some(trigger_querier),
             ..self
         }
     }
@@ -201,12 +189,18 @@ impl FrontendBuilder {
             Some(process_manager.clone()),
         );
 
-        #[cfg(feature = "enterprise")]
-        let statement_executor = if let Some(trigger_querier) = self.trigger_querier {
-            statement_executor.with_trigger_querier(trigger_querier)
-        } else {
-            statement_executor
-        };
+        let statement_executor =
+            if let Some(configurator) = plugins.get::<StatementExecutorConfiguratorRef>() {
+                let ctx = ExecutorContext {
+                    kv_backend: kv_backend.clone(),
+                };
+                configurator
+                    .configurate(statement_executor, ctx)
+                    .await
+                    .context(ExternalSnafu)?
+            } else {
+                statement_executor
+            };
 
         let statement_executor = Arc::new(statement_executor);
 

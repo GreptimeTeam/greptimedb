@@ -20,7 +20,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_extension::DistributedInformationExtension;
-use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, MetaKvBackend};
+use catalog::kvbackend::{
+    CachedKvBackendBuilder, CatalogManagerBuilderConfigratorRef, KvBackendCatalogManagerBuilder,
+    MetaKvBackend,
+};
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::client_manager::NodeClients;
@@ -42,8 +45,7 @@ use frontend::frontend::Frontend;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
-use meta_client::{MetaClientOptions, MetaClientType};
-use plugins::extension::frontend::{ExtensionContext, FrontendExtensionFactoryRef};
+use meta_client::{MetaClientOptions, MetaClientRef, MetaClientType};
 use servers::addrs;
 use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -412,28 +414,22 @@ impl StartCommand {
             Some(meta_client.clone()),
         ));
 
-        let extension = if let Some(f) = plugins.get::<FrontendExtensionFactoryRef>() {
-            let extension = ExtensionContext {
-                kv_backend: cached_meta_backend.clone(),
-                meta_client: meta_client.clone(),
-            };
-            let extension = f.create(extension).await.context(OtherSnafu)?;
-            Some(extension)
-        } else {
-            None
-        };
-
         let builder = KvBackendCatalogManagerBuilder::new(
             information_extension,
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
         )
         .with_process_manager(process_manager.clone());
-        let builder = if let Some(factories) = extension
-            .as_ref()
-            .and_then(|e| e.info_schema_factories.clone())
+        let builder = if let Some(configurator) =
+            plugins.get::<CatalogManagerBuilderConfigratorRef<CatalogManagerConfigureContext>>()
         {
-            builder.with_extra_information_table_factories(factories)
+            let ctx = CatalogManagerConfigureContext {
+                meta_client: meta_client.clone(),
+            };
+            configurator
+                .configure(builder, ctx)
+                .await
+                .context(OtherSnafu)?
         } else {
             builder
         };
@@ -456,7 +452,7 @@ impl StartCommand {
         );
         let heartbeat_task = Some(heartbeat_task);
 
-        let builder = FrontendBuilder::new(
+        let instance = FrontendBuilder::new(
             opts.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
@@ -466,21 +462,10 @@ impl StartCommand {
             process_manager,
         )
         .with_plugin(plugins.clone())
-        .with_local_cache_invalidator(layered_cache_registry);
-
-        #[cfg(feature = "enterprise")]
-        let builder = if let Some(trigger_querier) =
-            extension.as_ref().and_then(|e| e.trigger_querier.clone())
-        {
-            builder.with_trigger_querier(trigger_querier)
-        } else {
-            builder
-        };
-
-        let instance = builder
-            .try_build()
-            .await
-            .context(error::StartFrontendSnafu)?;
+        .with_local_cache_invalidator(layered_cache_registry)
+        .try_build()
+        .await
+        .context(error::StartFrontendSnafu)?;
         let instance = Arc::new(instance);
 
         let servers = Services::new(opts, instance.clone(), plugins)
@@ -495,6 +480,10 @@ impl StartCommand {
 
         Ok(Instance::new(frontend, guard))
     }
+}
+
+pub struct CatalogManagerConfigureContext {
+    pub meta_client: MetaClientRef,
 }
 
 #[cfg(test)]

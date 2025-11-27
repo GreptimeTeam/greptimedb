@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_error::ext::BoxedError;
 use common_meta::cache::LayeredCacheRegistryRef;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
@@ -32,6 +33,17 @@ use crate::kvbackend::manager::{CATALOG_CACHE_MAX_CAPACITY, SystemCatalog};
 use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::numbers_table_provider::NumbersTableProvider;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
+
+#[async_trait::async_trait]
+pub trait CatalogManagerBuilderConfigrator<C>: Send + Sync {
+    async fn configure(
+        &self,
+        builder: KvBackendCatalogManagerBuilder,
+        ctx: C,
+    ) -> std::result::Result<KvBackendCatalogManagerBuilder, BoxedError>;
+}
+
+pub type CatalogManagerBuilderConfigratorRef<C> = Arc<dyn CatalogManagerBuilderConfigrator<C>>;
 
 pub struct KvBackendCatalogManagerBuilder {
     information_extension: InformationExtensionRef,

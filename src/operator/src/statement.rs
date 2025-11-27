@@ -88,6 +88,23 @@ use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
 use crate::statement::set::set_allow_query_fallback;
 
+/// A configurator that customizes or enhances a [`StatementExecutor`] during service
+/// initialization.
+#[async_trait::async_trait]
+pub trait StatementExecutorConfigurator: Send + Sync {
+    async fn configurate(
+        &self,
+        executor: StatementExecutor,
+        ctx: ExecutorContext,
+    ) -> std::result::Result<StatementExecutor, BoxedError>;
+}
+
+pub type StatementExecutorConfiguratorRef = Arc<dyn StatementExecutorConfigurator>;
+
+pub struct ExecutorContext {
+    pub kv_backend: KvBackendRef,
+}
+
 #[derive(Clone)]
 pub struct StatementExecutor {
     catalog_manager: CatalogManagerRef,
@@ -105,15 +122,6 @@ pub struct StatementExecutor {
 }
 
 pub type StatementExecutorRef = Arc<StatementExecutor>;
-
-/// Trait for creating [`TriggerQuerier`] instance.
-#[cfg(feature = "enterprise")]
-pub trait TriggerQuerierFactory: Send + Sync {
-    fn create(&self, kv_backend: KvBackendRef) -> TriggerQuerierRef;
-}
-
-#[cfg(feature = "enterprise")]
-pub type TriggerQuerierFactoryRef = Arc<dyn TriggerQuerierFactory>;
 
 /// Trait for querying trigger info, such as `SHOW CREATE TRIGGER` etc.
 #[cfg(feature = "enterprise")]

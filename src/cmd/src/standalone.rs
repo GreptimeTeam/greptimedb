@@ -21,7 +21,7 @@ use std::{fs, path};
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_schema::InformationExtensionRef;
-use catalog::kvbackend::KvBackendCatalogManagerBuilder;
+use catalog::kvbackend::{CatalogManagerBuilderConfigratorRef, KvBackendCatalogManagerBuilder};
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use common_base::Plugins;
@@ -58,9 +58,6 @@ use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
-use plugins::extension::standalone::{
-    ExtensionContext, InfoTableFactoryContext, StandaloneExtensionFactoryRef,
-};
 use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
 use standalone::StandaloneInformationExtension;
@@ -400,13 +397,6 @@ impl StartCommand {
         plugins.insert::<InformationExtensionRef>(information_extension.clone());
 
         let process_manager = Arc::new(ProcessManager::new(opts.grpc.server_addr.clone(), None));
-        let builder = KvBackendCatalogManagerBuilder::new(
-            information_extension.clone(),
-            kv_backend.clone(),
-            layered_cache_registry.clone(),
-        )
-        .with_procedure_manager(procedure_manager.clone())
-        .with_process_manager(process_manager.clone());
 
         // for standalone not use grpc, but get a handler to frontend grpc client without
         // actually make a connection
@@ -414,12 +404,23 @@ impl StartCommand {
             FrontendClient::from_empty_grpc_handler(opts.query.clone());
         let frontend_client = Arc::new(frontend_client);
 
-        let builder = if let Some(f) = plugins.get::<StandaloneExtensionFactoryRef>() {
-            let ctx = InfoTableFactoryContext {
+        let builder = KvBackendCatalogManagerBuilder::new(
+            information_extension.clone(),
+            kv_backend.clone(),
+            layered_cache_registry.clone(),
+        )
+        .with_procedure_manager(procedure_manager.clone())
+        .with_process_manager(process_manager.clone());
+        let builder = if let Some(configurator) =
+            plugins.get::<CatalogManagerBuilderConfigratorRef<CatalogManagerConfigureContext>>()
+        {
+            let ctx = CatalogManagerConfigureContext {
                 fe_client: frontend_client.clone(),
             };
-            let info_schema_table_factories = f.create_factories(ctx).await.context(OtherSnafu)?;
-            builder.with_extra_information_table_factories(info_schema_table_factories)
+            configurator
+                .configure(builder, ctx)
+                .await
+                .context(OtherSnafu)?
         } else {
             builder
         };
@@ -490,17 +491,6 @@ impl StartCommand {
             flow_id_sequence,
         ));
 
-        let extension = if let Some(f) = plugins.get::<StandaloneExtensionFactoryRef>() {
-            let context = ExtensionContext {
-                kv_backend: kv_backend.clone(),
-                catalog_manager: catalog_manager.clone(),
-                frontend_client: frontend_client.clone(),
-            };
-            Some(f.create(context).await.context(OtherSnafu)?)
-        } else {
-            None
-        };
-
         let ddl_context = DdlContext {
             node_manager: node_manager.clone(),
             cache_invalidator: layered_cache_registry.clone(),
@@ -533,7 +523,7 @@ impl StartCommand {
             procedure_manager.clone(),
         ));
 
-        let builder = FrontendBuilder::new(
+        let fe_instance = FrontendBuilder::new(
             fe_opts.clone(),
             kv_backend.clone(),
             layered_cache_registry.clone(),
@@ -542,19 +532,10 @@ impl StartCommand {
             procedure_executor.clone(),
             process_manager,
         )
-        .with_plugin(plugins.clone());
-        #[cfg(feature = "enterprise")]
-        let builder = if let Some(trigger_querier) =
-            extension.as_ref().and_then(|e| e.trigger_querier.clone())
-        {
-            builder.with_trigger_querier(trigger_querier)
-        } else {
-            builder
-        };
-        let fe_instance = builder
-            .try_build()
-            .await
-            .context(error::StartFrontendSnafu)?;
+        .with_plugin(plugins.clone())
+        .try_build()
+        .await
+        .context(error::StartFrontendSnafu)?;
         let fe_instance = Arc::new(fe_instance);
 
         // set the frontend client for flownode
@@ -612,6 +593,10 @@ impl StartCommand {
 
         Ok(table_metadata_manager)
     }
+}
+
+pub struct CatalogManagerConfigureContext {
+    pub fe_client: Arc<FrontendClient>,
 }
 
 #[cfg(test)]
