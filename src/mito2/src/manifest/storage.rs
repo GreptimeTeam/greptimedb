@@ -502,10 +502,13 @@ impl ManifestObjectStore {
         let checkpoint_size = data.len();
         let checksum = checkpoint_checksum(bytes);
         self.object_store
-            .write(&path, data)
+            .write(&path, data.clone())
             .await
             .context(OpenDalSnafu)?;
         self.set_checkpoint_file_size(version, checkpoint_size as u64);
+
+        // Cache the checkpoint data (not the last_checkpoint metadata file)
+        self.put_to_cache(path, bytes.to_vec()).await;
 
         // Because last checkpoint file only contain size and version, which is tiny, so we don't compress it.
         let last_checkpoint_path = self.last_checkpoint_path();
