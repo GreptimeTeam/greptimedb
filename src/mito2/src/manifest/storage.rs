@@ -605,17 +605,31 @@ impl ManifestObjectStore {
     /// Return manifest version and the raw [RegionCheckpoint](crate::manifest::action::RegionCheckpoint) content if any
     pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let last_checkpoint_path = self.last_checkpoint_path();
-        let last_checkpoint_data = match self.object_store.read(&last_checkpoint_path).await {
-            Ok(data) => data,
-            Err(e) if e.kind() == ErrorKind::NotFound => {
-                return Ok(None);
-            }
-            Err(e) => {
-                return Err(e).context(OpenDalSnafu)?;
-            }
-        };
 
-        let checkpoint_metadata = CheckpointMetadata::decode(&last_checkpoint_data.to_vec())?;
+        // Try to get from cache first
+        let last_checkpoint_data =
+            if let Some(data) = self.get_from_cache(&last_checkpoint_path).await {
+                data
+            } else {
+                // Fetch from remote object store
+                match self.object_store.read(&last_checkpoint_path).await {
+                    Ok(data) => {
+                        let data_vec = data.to_vec();
+                        // Add to cache
+                        self.put_to_cache(last_checkpoint_path.clone(), data_vec.clone())
+                            .await;
+                        data_vec
+                    }
+                    Err(e) if e.kind() == ErrorKind::NotFound => {
+                        return Ok(None);
+                    }
+                    Err(e) => {
+                        return Err(e).context(OpenDalSnafu)?;
+                    }
+                }
+            };
+
+        let checkpoint_metadata = CheckpointMetadata::decode(&last_checkpoint_data)?;
 
         debug!(
             "Load checkpoint in path: {}, metadata: {:?}",
