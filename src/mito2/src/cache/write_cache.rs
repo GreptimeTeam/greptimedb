@@ -109,8 +109,12 @@ impl WriteCache {
         // Create manifest cache if capacity is non-zero
         let manifest_cache = if manifest_cache_capacity.as_bytes() > 0 {
             Some(
-                ManifestCache::new(local_store.clone(), manifest_cache_capacity, manifest_cache_ttl)
-                    .await,
+                ManifestCache::new(
+                    local_store.clone(),
+                    manifest_cache_capacity,
+                    manifest_cache_ttl,
+                )
+                .await,
             )
         } else {
             None
