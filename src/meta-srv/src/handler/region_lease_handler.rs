@@ -129,27 +129,20 @@ impl HeartbeatHandler for RegionLeaseHandler {
 
 #[cfg(test)]
 mod test {
-    use std::any::Any;
+
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
     use common_meta::datanode::{RegionManifestInfo, RegionStat, Stat};
     use common_meta::distributed_time_constants;
-    use common_meta::error::Result as MetaResult;
     use common_meta::key::TableMetadataManager;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::kv_backend::txn::{Txn, TxnResponse};
-    use common_meta::kv_backend::{KvBackend, TxnService};
+    use common_meta::kv_backend::test_util::MockKvBackendBuilder;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
-    use common_meta::rpc::store::{
-        BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
-        BatchPutRequest, BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
-        PutResponse, RangeRequest, RangeResponse,
-    };
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
@@ -425,63 +418,19 @@ mod test {
         assert_eq!(granted, expected);
     }
 
-    struct MockKvBackend;
-
-    #[async_trait::async_trait]
-    impl TxnService for MockKvBackend {
-        type Error = common_meta::error::Error;
-
-        async fn txn(&self, _txn: Txn) -> MetaResult<TxnResponse> {
-            unimplemented!()
-        }
-
-        fn max_txn_ops(&self) -> usize {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl KvBackend for MockKvBackend {
-        fn name(&self) -> &str {
-            "mock_kv_backend"
-        }
-
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        async fn range(&self, _req: RangeRequest) -> MetaResult<RangeResponse> {
-            unimplemented!()
-        }
-
-        async fn put(&self, _req: PutRequest) -> MetaResult<PutResponse> {
-            unimplemented!()
-        }
-
-        async fn batch_put(&self, _req: BatchPutRequest) -> MetaResult<BatchPutResponse> {
-            unimplemented!()
-        }
-
-        async fn batch_get(&self, _req: BatchGetRequest) -> MetaResult<BatchGetResponse> {
-            common_meta::error::UnexpectedSnafu {
-                err_msg: "mock err",
-            }
-            .fail()
-        }
-
-        async fn delete_range(&self, _req: DeleteRangeRequest) -> MetaResult<DeleteRangeResponse> {
-            unimplemented!()
-        }
-
-        async fn batch_delete(&self, _req: BatchDeleteRequest) -> MetaResult<BatchDeleteResponse> {
-            unimplemented!()
-        }
-    }
-
     #[tokio::test]
     async fn test_handle_renew_region_lease_failure() {
         common_telemetry::init_default_ut_logging();
-        let kvbackend = Arc::new(MockKvBackend);
+        let kv = MockKvBackendBuilder::default()
+            .batch_get_fn(Arc::new(|_| {
+                common_meta::error::UnexpectedSnafu {
+                    err_msg: "mock err",
+                }
+                .fail()
+            }) as _)
+            .build()
+            .unwrap();
+        let kvbackend = Arc::new(kv);
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kvbackend));
 
         let datanode_id = 1;
