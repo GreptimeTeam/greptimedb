@@ -406,7 +406,7 @@ impl StartCommand {
                 catalog_manager: catalog_manager.clone(),
             };
             configurator
-                .configure_grpc_builder(builder, context)
+                .configure(builder, context)
                 .await
                 .context(OtherSnafu)?
         } else {
