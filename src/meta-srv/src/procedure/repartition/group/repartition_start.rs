@@ -22,7 +22,9 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{self, Result};
-use crate::procedure::repartition::group::{Context, GroupId, GroupPrepareResult, State};
+use crate::procedure::repartition::group::{
+    Context, GroupId, GroupPrepareResult, State, region_routes,
+};
 use crate::procedure::repartition::plan::RegionDescriptor;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -67,7 +69,6 @@ impl RepartitionStart {
             }
         );
 
-        let central_region = sources[0].region_id;
         let region_routes_map = region_routes
             .iter()
             .map(|r| (r.region.id, r))
@@ -93,14 +94,26 @@ impl RepartitionStart {
                         group_id,
                         region_id: t.region_id,
                     })
-                    .and_then(|r| ensure_region_route_expr_match(r, t))
+                    .map(|r| (*r).clone())
             })
             .collect::<Result<Vec<_>>>()?;
+        let central_region = sources[0].region_id;
+        let central_region_datanode_id = source_region_routes[0]
+            .leader_peer
+            .as_ref()
+            .context(error::UnexpectedSnafu {
+                violated: format!(
+                    "Leader peer is not set for central region: {}",
+                    central_region
+                ),
+            })?
+            .id;
 
         Ok(GroupPrepareResult {
             source_routes: source_region_routes,
             target_routes: target_region_routes,
             central_region,
+            central_region_datanode_id,
         })
     }
 
@@ -135,14 +148,7 @@ impl State for RepartitionStart {
         let table_id = ctx.persistent_ctx.table_id;
         let group_id = ctx.persistent_ctx.group_id;
         let table_route_value = ctx.get_table_route_value().await?.into_inner();
-        let region_routes = table_route_value.region_routes().with_context(|_| {
-            error::UnexpectedLogicalRouteTableSnafu {
-                err_msg: format!(
-                    "TableRoute({:?}) is a non-physical TableRouteValue.",
-                    table_id
-                ),
-            }
-        })?;
+        let region_routes = region_routes(table_id, &table_route_value)?;
         let group_prepare_result = Self::ensure_route_present(
             group_id,
             region_routes,
@@ -226,43 +232,6 @@ mod tests {
             leader_peer: Some(Peer::empty(1)),
             ..Default::default()
         }];
-        let err = RepartitionStart::ensure_route_present(
-            Uuid::new_v4(),
-            &region_routes,
-            &[source_region],
-            &[target_region],
-        )
-        .unwrap_err();
-        assert_matches!(err, Error::PartitionExprMismatch { .. });
-
-        let source_region = RegionDescriptor {
-            region_id: RegionId::new(1024, 1),
-            partition_expr: range_expr("x", 0, 100),
-        };
-        let target_region = RegionDescriptor {
-            region_id: RegionId::new(1024, 2),
-            partition_expr: range_expr("x", 0, 10),
-        };
-        let region_routes = vec![
-            RegionRoute {
-                region: Region {
-                    id: RegionId::new(1024, 1),
-                    partition_expr: range_expr("x", 0, 100).as_json_str().unwrap(),
-                    ..Default::default()
-                },
-                leader_peer: Some(Peer::empty(1)),
-                ..Default::default()
-            },
-            RegionRoute {
-                region: Region {
-                    id: RegionId::new(1024, 2),
-                    partition_expr: range_expr("x", 0, 5).as_json_str().unwrap(),
-                    ..Default::default()
-                },
-                leader_peer: Some(Peer::empty(1)),
-                ..Default::default()
-            },
-        ];
         let err = RepartitionStart::ensure_route_present(
             Uuid::new_v4(),
             &region_routes,

@@ -13,11 +13,16 @@
 // limitations under the License.
 
 pub(crate) mod repartition_start;
+pub(crate) mod update_metadata;
 
 use std::any::Any;
 use std::fmt::Debug;
 
 use common_error::ext::BoxedError;
+use common_meta::DatanodeId;
+use common_meta::cache_invalidator::CacheInvalidatorRef;
+use common_meta::instruction::CacheIdent;
+use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue, RegionInfo};
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::rpc::router::RegionRoute;
@@ -37,6 +42,8 @@ pub struct RepartitionGroupProcedure {}
 pub struct Context {
     pub persistent_ctx: PersistentContext,
 
+    pub cache_invalidator: CacheInvalidatorRef,
+
     pub table_metadata_manager: TableMetadataManagerRef,
 }
 
@@ -45,6 +52,7 @@ pub struct GroupPrepareResult {
     pub source_routes: Vec<RegionRoute>,
     pub target_routes: Vec<RegionRoute>,
     pub central_region: RegionId,
+    pub central_region_datanode_id: DatanodeId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -91,6 +99,109 @@ impl Context {
 
         Ok(table_route_value)
     }
+
+    /// Returns the `datanode_table_value`
+    ///
+    /// Retry:
+    /// - Failed to retrieve the metadata of datanode table.
+    pub async fn get_datanode_table_value(
+        &self,
+        table_id: TableId,
+        datanode_id: u64,
+    ) -> Result<DatanodeTableValue> {
+        let datanode_table_value = self
+            .table_metadata_manager
+            .datanode_table_manager()
+            .get(&DatanodeTableKey {
+                datanode_id,
+                table_id,
+            })
+            .await
+            .context(error::TableMetadataManagerSnafu)
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: format!("Failed to get DatanodeTable: {table_id}"),
+            })?
+            .context(error::DatanodeTableNotFoundSnafu {
+                table_id,
+                datanode_id,
+            })?;
+        Ok(datanode_table_value)
+    }
+
+    /// Broadcasts the invalidate table cache message.
+    pub async fn invalidate_table_cache(&self) -> Result<()> {
+        let table_id = self.persistent_ctx.table_id;
+        let group_id = self.persistent_ctx.group_id;
+        let subject = format!(
+            "Invalidate table cache for repartition table, group: {}, table: {}",
+            group_id, table_id,
+        );
+        let ctx = common_meta::cache_invalidator::Context {
+            subject: Some(subject),
+        };
+        let _ = self
+            .cache_invalidator
+            .invalidate(&ctx, &[CacheIdent::TableId(table_id)])
+            .await;
+        Ok(())
+    }
+
+    /// Updates the table route.
+    ///
+    /// Retry:
+    /// - Failed to retrieve the metadata of datanode table.
+    ///
+    /// Abort:
+    /// - Table route not found.
+    /// - Failed to update the table route.
+    pub async fn update_table_route(
+        &self,
+        current_table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
+        new_region_routes: Vec<RegionRoute>,
+    ) -> Result<()> {
+        let table_id = self.persistent_ctx.table_id;
+        // Safety: prepare result is set in [RepartitionStart] state.
+        let prepare_result = self.persistent_ctx.group_prepare_result.as_ref().unwrap();
+        let central_region_datanode_table_value = self
+            .get_datanode_table_value(table_id, prepare_result.central_region_datanode_id)
+            .await?;
+        let RegionInfo {
+            region_options,
+            region_wal_options,
+            ..
+        } = &central_region_datanode_table_value.region_info;
+
+        self.table_metadata_manager
+            .update_table_route(
+                table_id,
+                central_region_datanode_table_value.region_info.clone(),
+                current_table_route_value,
+                new_region_routes,
+                region_options,
+                region_wal_options,
+            )
+            .await
+            .context(error::TableMetadataManagerSnafu)
+    }
+}
+
+/// Returns the region routes of the given table route value.
+///
+/// Abort:
+/// - Table route value is not physical.
+pub fn region_routes(
+    table_id: TableId,
+    table_route_value: &TableRouteValue,
+) -> Result<&Vec<RegionRoute>> {
+    table_route_value
+        .region_routes()
+        .with_context(|_| error::UnexpectedLogicalRouteTableSnafu {
+            err_msg: format!(
+                "TableRoute({:?}) is a non-physical TableRouteValue.",
+                table_id
+            ),
+        })
 }
 
 #[async_trait::async_trait]
@@ -149,6 +260,25 @@ mod tests {
         let persistent_context = new_persistent_context(1024, vec![], vec![]);
         let ctx = env.create_context(persistent_context);
         let err = ctx.get_table_route_value().await.unwrap_err();
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn test_get_datanode_table_value_retry_error() {
+        let kv = MockKvBackendBuilder::default()
+            .range_fn(Arc::new(|_| {
+                common_meta::error::UnexpectedSnafu {
+                    err_msg: "mock err",
+                }
+                .fail()
+            }))
+            .build()
+            .unwrap();
+        let mut env = TestingEnv::new();
+        env.table_metadata_manager = Arc::new(TableMetadataManager::new(Arc::new(kv)));
+        let persistent_context = new_persistent_context(1024, vec![], vec![]);
+        let ctx = env.create_context(persistent_context);
+        let err = ctx.get_datanode_table_value(1024, 1).await.unwrap_err();
         assert!(err.is_retryable());
     }
 }

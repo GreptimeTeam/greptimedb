@@ -16,17 +16,22 @@ use std::sync::Arc;
 
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::sequence::SequenceBuilder;
 use datatypes::value::Value;
 use partition::expr::{PartitionExpr, col};
 use store_api::storage::TableId;
 use uuid::Uuid;
 
+use crate::cache_invalidator::MetasrvCacheInvalidator;
+use crate::metasrv::MetasrvInfo;
 use crate::procedure::repartition::group::{Context, PersistentContext};
 use crate::procedure::repartition::plan::RegionDescriptor;
+use crate::procedure::test_util::MailboxContext;
 
 /// `TestingEnv` provides components during the tests.
 pub struct TestingEnv {
     pub table_metadata_manager: TableMetadataManagerRef,
+    pub mailbox_ctx: MailboxContext,
 }
 
 impl Default for TestingEnv {
@@ -39,16 +44,28 @@ impl TestingEnv {
     pub fn new() -> Self {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let mailbox_sequence =
+            SequenceBuilder::new("test_heartbeat_mailbox", kv_backend.clone()).build();
+        let mailbox_ctx = MailboxContext::new(mailbox_sequence);
 
         Self {
             table_metadata_manager,
+            mailbox_ctx,
         }
     }
 
     pub fn create_context(self, persistent_context: PersistentContext) -> Context {
+        let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(
+            self.mailbox_ctx.mailbox().clone(),
+            MetasrvInfo {
+                server_addr: String::new(),
+            },
+        ));
+
         Context {
             persistent_ctx: persistent_context,
             table_metadata_manager: self.table_metadata_manager.clone(),
+            cache_invalidator,
         }
     }
 }
