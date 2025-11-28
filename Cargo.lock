@@ -9475,6 +9475,7 @@ dependencies = [
  "ahash 0.8.12",
  "api",
  "arrow",
+ "arrow-schema",
  "async-trait",
  "catalog",
  "chrono",

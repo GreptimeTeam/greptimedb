@@ -61,7 +61,7 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
     }
 
     Rows {
-        schema: schema_info.schema.clone(),
+        schema: schema_info.column_schemas().unwrap(),
         rows,
     }
 }

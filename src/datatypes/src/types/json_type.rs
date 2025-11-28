@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -134,24 +134,24 @@ impl From<&ConcreteDataType> for JsonNativeType {
 impl Display for JsonNativeType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            JsonNativeType::Null => write!(f, "Null"),
-            JsonNativeType::Bool => write!(f, "Bool"),
-            JsonNativeType::Number(t) => {
-                write!(f, "Number({t:?})")
+            JsonNativeType::Null => write!(f, r#""<Null>""#),
+            JsonNativeType::Bool => write!(f, r#""<Bool>""#),
+            JsonNativeType::Number(_) => {
+                write!(f, r#""<Number>""#)
             }
-            JsonNativeType::String => write!(f, "String"),
+            JsonNativeType::String => write!(f, r#""<String>""#),
             JsonNativeType::Array(item_type) => {
-                write!(f, "Array[{}]", item_type)
+                write!(f, "[{}]", item_type)
             }
             JsonNativeType::Object(object) => {
                 write!(
                     f,
-                    "Object{{{}}}",
+                    "{{{}}}",
                     object
                         .iter()
-                        .map(|(k, v)| format!(r#""{k}": {v}"#))
+                        .map(|(k, v)| format!(r#""{k}":{v}"#))
                         .collect::<Vec<_>>()
-                        .join(", ")
+                        .join(",")
                 )
             }
         }
@@ -183,7 +183,11 @@ impl JsonType {
         }
     }
 
-    pub(crate) fn native_type(&self) -> &JsonNativeType {
+    pub fn is_native_type(&self) -> bool {
+        matches!(self.format, JsonFormat::Native(_))
+    }
+
+    pub fn native_type(&self) -> &JsonNativeType {
         match &self.format {
             JsonFormat::Jsonb => &JsonNativeType::String,
             JsonFormat::Native(x) => x.as_ref(),
@@ -650,15 +654,16 @@ mod tests {
             "list": [1, 2, 3],
             "object": {"a": 1}
         }"#;
-        let expected = r#"Json<Object{"hello": String, "list": Array[Number(I64)], "object": Object{"a": Number(I64)}}>"#;
+        let expected =
+            r#"Json<{"hello":"<String>","list":["<Number>"],"object":{"a":"<Number>"}}>"#;
         test(json, json_type, Ok(expected))?;
 
         // cannot merge with other non-object json values:
         let jsons = [r#""s""#, "1", "[1]"];
         let expects = [
-            r#"Failed to merge JSON datatype: datatypes have conflict, this: Object{"hello": String, "list": Array[Number(I64)], "object": Object{"a": Number(I64)}}, that: String"#,
-            r#"Failed to merge JSON datatype: datatypes have conflict, this: Object{"hello": String, "list": Array[Number(I64)], "object": Object{"a": Number(I64)}}, that: Number(I64)"#,
-            r#"Failed to merge JSON datatype: datatypes have conflict, this: Object{"hello": String, "list": Array[Number(I64)], "object": Object{"a": Number(I64)}}, that: Array[Number(I64)]"#,
+            r#"Failed to merge JSON datatype: datatypes have conflict, this: {"hello":"<String>","list":["<Number>"],"object":{"a":"<Number>"}}, that: "<String>""#,
+            r#"Failed to merge JSON datatype: datatypes have conflict, this: {"hello":"<String>","list":["<Number>"],"object":{"a":"<Number>"}}, that: "<Number>""#,
+            r#"Failed to merge JSON datatype: datatypes have conflict, this: {"hello":"<String>","list":["<Number>"],"object":{"a":"<Number>"}}, that: ["<Number>"]"#,
         ];
         for (json, expect) in jsons.into_iter().zip(expects.into_iter()) {
             test(json, json_type, Err(expect))?;
@@ -670,7 +675,7 @@ mod tests {
             "float": 0.123,
             "no": 42
         }"#;
-        let expected = r#"Failed to merge JSON datatype: datatypes have conflict, this: String, that: Number(I64)"#;
+        let expected = r#"Failed to merge JSON datatype: datatypes have conflict, this: "<String>", that: "<Number>""#;
         test(json, json_type, Err(expected))?;
 
         // can merge with another json object:
@@ -679,7 +684,7 @@ mod tests {
             "float": 0.123,
             "int": 42
         }"#;
-        let expected = r#"Json<Object{"float": Number(F64), "hello": String, "int": Number(I64), "list": Array[Number(I64)], "object": Object{"a": Number(I64)}}>"#;
+        let expected = r#"Json<{"float":"<Number>","hello":"<String>","int":"<Number>","list":["<Number>"],"object":{"a":"<Number>"}}>"#;
         test(json, json_type, Ok(expected))?;
 
         // can merge with some complex nested json object:
@@ -689,7 +694,7 @@ mod tests {
             "float": 0.456,
             "int": 0
         }"#;
-        let expected = r#"Json<Object{"float": Number(F64), "hello": String, "int": Number(I64), "list": Array[Number(I64)], "object": Object{"a": Number(I64), "foo": String, "l": Array[String], "o": Object{"key": String}}}>"#;
+        let expected = r#"Json<{"float":"<Number>","hello":"<String>","int":"<Number>","list":["<Number>"],"object":{"a":"<Number>","foo":"<String>","l":["<String>"],"o":{"key":"<String>"}}}>"#;
         test(json, json_type, Ok(expected))?;
 
         Ok(())
