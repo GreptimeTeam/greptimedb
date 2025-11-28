@@ -481,20 +481,15 @@ impl ObjectStoreConfig {
                 (&self.gcs.gcs_bucket, "bucket"),
                 (&self.gcs.gcs_root, "root"),
                 (&self.gcs.gcs_scope, "scope"),
-                (&self.gcs.gcs_endpoint, "endpoint"),
             ],
             optional: [
+                &self.gcs.gcs_endpoint,
                 &self.gcs.gcs_credential_path,
                 &self.gcs.gcs_credential
-            ],
-            custom_validator: |missing: &mut Vec<&str>| {
-                // At least one of credential_path or credential must be provided
-                if self.gcs.gcs_credential_path.is_empty()
-                    && self.gcs.gcs_credential.is_empty()
-                {
-                    missing.push("credential path or credential");
-                }
-            }
+            ]
+            // No custom_validator needed: GCS supports Application Default Credentials (ADC)
+            // where neither credential_path nor credential is required.
+            // Endpoint is also optional (defaults to https://storage.googleapis.com).
         )
     }
 
