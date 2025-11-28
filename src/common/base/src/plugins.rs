@@ -32,7 +32,12 @@ impl Plugins {
 
     pub fn insert<T: 'static + Send + Sync>(&self, value: T) {
         let last = self.write().insert(value);
-        assert!(last.is_none(), "each type of plugins must be one and only");
+        if let Some(last) = last {
+            panic!(
+                "Plugin of type {} already exists",
+                std::any::type_name::<T>()
+            );
+        }
     }
 
     pub fn get<T: 'static + Send + Sync + Clone>(&self) -> Option<T> {

@@ -513,6 +513,7 @@ impl StartCommand {
             let ctx = DdlManagerConfigureContext {
                 kv_backend: kv_backend.clone(),
                 fe_client: frontend_client.clone(),
+                catalog_manager: catalog_manager.clone(),
             };
             configurator
                 .configure(ddl_manager, ctx)
