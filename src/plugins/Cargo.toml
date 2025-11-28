@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 auth.workspace = true
+catalog.workspace = true
 clap.workspace = true
 cli.workspace = true
 common-base.workspace = true

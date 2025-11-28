@@ -12,9 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
+use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use flow::FlownodeOptions;
+use common_meta::FlownodeId;
+use common_meta::kv_backend::KvBackendRef;
 use flow::error::Result;
+use flow::{FlownodeOptions, FrontendClient};
 
 use crate::options::PluginOptions;
 
@@ -29,4 +34,12 @@ pub async fn setup_flownode_plugins(
 
 pub async fn start_flownode_plugins(_plugins: Plugins) -> Result<()> {
     Ok(())
+}
+
+/// The context for [`GrpcBuilderConfiguratorRef`] in flownode.
+pub struct GrpcConfigureContext {
+    pub kv_backend: KvBackendRef,
+    pub fe_client: Arc<FrontendClient>,
+    pub flownode_id: FlownodeId,
+    pub catalog_manager: CatalogManagerRef,
 }
