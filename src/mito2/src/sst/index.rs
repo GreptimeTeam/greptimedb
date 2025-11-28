@@ -239,7 +239,7 @@ impl Indexer {
 #[async_trait::async_trait]
 pub trait IndexerBuilder {
     /// Builds indexer of given file id to [index_file_path].
-    async fn build(&self, file_id: FileId) -> Indexer;
+    async fn build(&self, file_id: FileId, index_version: u64) -> Indexer;
 }
 #[derive(Clone)]
 pub(crate) struct IndexerBuilderImpl {
@@ -257,10 +257,11 @@ pub(crate) struct IndexerBuilderImpl {
 #[async_trait::async_trait]
 impl IndexerBuilder for IndexerBuilderImpl {
     /// Sanity check for arguments and create a new [Indexer] if arguments are valid.
-    async fn build(&self, file_id: FileId) -> Indexer {
+    async fn build(&self, file_id: FileId, index_version: u64) -> Indexer {
         let mut indexer = Indexer {
             file_id,
             region_id: self.metadata.region_id,
+            index_version,
             ..Default::default()
         };
 
@@ -624,7 +625,10 @@ impl IndexBuildTask {
 
         // Use the same file_id but with new version for index file
         let index_file_id = self.file_meta.file_id;
-        let mut indexer = self.indexer_builder.build(index_file_id).await;
+        let mut indexer = self
+            .indexer_builder
+            .build(index_file_id, new_index_version)
+            .await;
 
         // Check SST file existence before building index to avoid failure of parquet reader.
         if !self.check_sst_file_exists(&version_control).await {
@@ -1280,7 +1284,7 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1313,7 +1317,7 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
@@ -1334,7 +1338,7 @@ mod tests {
             },
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1355,7 +1359,7 @@ mod tests {
                 ..Default::default()
             },
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1385,7 +1389,7 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
@@ -1408,7 +1412,7 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1431,7 +1435,7 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1461,7 +1465,7 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_none());

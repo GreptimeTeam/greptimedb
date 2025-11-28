@@ -160,7 +160,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl IndexerBuilder for NoopIndexBuilder {
-        async fn build(&self, _file_id: FileId) -> Indexer {
+        async fn build(&self, _file_id: FileId, _index_version: u64) -> Indexer {
             Indexer::default()
         }
     }
