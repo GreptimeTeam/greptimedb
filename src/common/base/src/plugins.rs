@@ -32,7 +32,7 @@ impl Plugins {
 
     pub fn insert<T: 'static + Send + Sync>(&self, value: T) {
         let last = self.write().insert(value);
-        if let Some(last) = last {
+        if last.is_some() {
             panic!(
                 "Plugin of type {} already exists",
                 std::any::type_name::<T>()
