@@ -43,18 +43,74 @@ impl IntoField<SecretString> for Option<SecretString> {
     }
 }
 
-/// Check if an `Option<SecretString>` is effectively empty.
-/// Returns `true` if:
-/// - `None` (user didn't provide the argument)
-/// - `Some("")` (user provided an empty string)
-fn is_secret_empty(secret: &Option<SecretString>) -> bool {
-    secret.as_ref().is_none_or(|s| s.expose_secret().is_empty())
+/// Trait for checking if a field is effectively empty or provided.
+///
+/// This trait provides a unified interface for validation across different field types.
+/// It defines two key semantic checks:
+///
+/// 1. **`is_empty()`**: Checks if the field has no meaningful value
+///    - Used when backend is enabled to validate required fields
+///    - `None`, `Some("")`, `false`, or `""` are considered empty
+///
+/// 2. **`is_provided()`**: Checks if user explicitly provided the field
+///    - Used when backend is disabled to detect configuration errors
+///    - Different semantics for different types (see implementations)
+trait FieldValidator {
+    /// Check if the field is empty (has no meaningful value).
+    fn is_empty(&self) -> bool;
+
+    /// Check if the field was explicitly provided by the user.
+    fn is_provided(&self) -> bool;
 }
 
-/// Check if an `Option<SecretString>` is effectively non-empty.
-/// Returns `true` only if user provided a non-empty secret value.
-fn is_secret_provided(secret: &Option<SecretString>) -> bool {
-    !is_secret_empty(secret)
+/// String fields: empty if the string is empty
+impl FieldValidator for String {
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    fn is_provided(&self) -> bool {
+        !self.is_empty()
+    }
+}
+
+/// Bool fields: false is considered "empty", true is "provided"
+impl FieldValidator for bool {
+    fn is_empty(&self) -> bool {
+        !self
+    }
+
+    fn is_provided(&self) -> bool {
+        *self
+    }
+}
+
+/// Option<String> fields: None or empty content is empty
+/// IMPORTANT: is_provided() returns true for Some(_) regardless of content,
+/// to detect when user provided the argument (even if value is empty)
+impl FieldValidator for Option<String> {
+    fn is_empty(&self) -> bool {
+        self.as_ref().is_none_or(|s| s.is_empty())
+    }
+
+    fn is_provided(&self) -> bool {
+        // Key difference: Some("") is considered "provided" (user typed the flag)
+        // even though is_empty() would return true for it
+        self.is_some()
+    }
+}
+
+/// Option<SecretString> fields: None or empty secret is empty
+/// For secrets, Some("") is treated as "not provided" for both checks
+impl FieldValidator for Option<SecretString> {
+    fn is_empty(&self) -> bool {
+        self.as_ref().is_none_or(|s| s.expose_secret().is_empty())
+    }
+
+    fn is_provided(&self) -> bool {
+        // For secrets, empty string is equivalent to None
+        !self.is_empty()
+    }
 }
 
 macro_rules! wrap_with_clap_prefix {
@@ -204,16 +260,6 @@ pub struct ObjectStoreConfig {
 /// hasn't accidentally or incorrectly provided configuration for remote storage backends
 /// (S3, OSS, GCS, or Azure Blob) without enabling them.
 ///
-/// # Validation Rules
-///
-/// For each storage backend (S3, OSS, GCS, Azblob), this function validates:
-/// 1. **When backend is enabled** (e.g., `--s3`): All required fields must be non-empty
-/// 2. **When backend is disabled**: No configuration fields should be provided
-///
-/// The second rule is critical for filesystem usage: if a user provides something like
-/// `--s3-bucket my-bucket` without `--s3`, it likely indicates a configuration error
-/// that should be caught early.
-///
 /// # Examples
 ///
 /// Valid usage with local filesystem:
@@ -233,10 +279,7 @@ pub struct ObjectStoreConfig {
 /// Returns an error if any remote storage configuration is detected without the
 /// corresponding enable flag (--s3, --oss, --gcs, or --azblob).
 pub fn validate_fs(config: &ObjectStoreConfig) -> std::result::Result<(), BoxedError> {
-    config.validate_s3()?;
-    config.validate_oss()?;
-    config.validate_gcs()?;
-    config.validate_azblob()?;
+    config.validate()?;
     Ok(())
 }
 
@@ -272,6 +315,122 @@ macro_rules! gen_object_store_builder {
     };
 }
 
+/// Macro for declarative backend validation.
+///
+/// # Validation Rules
+///
+/// For each storage backend (S3, OSS, GCS, Azblob), this function validates:
+/// 1. **When backend is enabled** (e.g., `--s3`): All required fields must be non-empty
+/// 2. **When backend is disabled**: No configuration fields should be provided
+///
+/// The second rule is critical for filesystem usage: if a user provides something like
+/// `--s3-bucket my-bucket` without `--s3`, it likely indicates a configuration error
+/// that should be caught early.
+///
+/// This macro generates validation logic for storage backends with two main checks:
+/// 1. When enabled: verify all required fields are non-empty
+/// 2. When disabled: verify no configuration fields are provided
+///
+/// # Syntax
+///
+/// ```ignore
+/// validate_backend!(
+///     enable: self.enable_s3,
+///     name: "S3",
+///     required: [field1, field2, ...],
+///     optional: [field3, field4, ...],
+///     custom_validator: |missing| { ... }  // optional
+/// )
+/// ```
+///
+/// # Arguments
+///
+/// - `enable`: Boolean expression indicating if backend is enabled
+/// - `name`: Human-readable backend name for error messages
+/// - `required`: Array of (field_ref, field_name) tuples for required fields
+/// - `optional`: Array of field references that are optional (only checked when disabled)
+/// - `custom_validator`: Optional closure for complex validation logic
+///
+/// # Example
+///
+/// ```ignore
+/// validate_backend!(
+///     enable: self.enable_s3,
+///     name: "S3",
+///     required: [
+///         (&self.s3.s3_bucket, "bucket"),
+///         (&self.s3.s3_access_key_id, "access key ID"),
+///     ],
+///     optional: [
+///         &self.s3.s3_root,
+///         &self.s3.s3_endpoint,
+///     ]
+/// )
+/// ```
+macro_rules! validate_backend {
+    (
+        enable: $enable:expr,
+        name: $backend_name:expr,
+        required: [ $( ($field:expr, $field_name:expr) ),* $(,)? ],
+        optional: [ $( $opt_field:expr ),* $(,)? ]
+        $(, custom_validator: $custom_validator:expr)?
+    ) => {{
+        if $enable {
+            // Check required fields when backend is enabled
+            let mut missing = Vec::new();
+            $(
+                if FieldValidator::is_empty($field) {
+                    missing.push($field_name);
+                }
+            )*
+
+            // Run custom validation if provided
+            $(
+                $custom_validator(&mut missing);
+            )?
+
+            if !missing.is_empty() {
+                return Err(BoxedError::new(
+                    error::MissingConfigSnafu {
+                        msg: format!(
+                            "{} {} must be set when --{} is enabled.",
+                            $backend_name,
+                            missing.join(", "),
+                            $backend_name.to_lowercase().replace(" ", "")
+                        ),
+                    }
+                    .build(),
+                ));
+            }
+        } else {
+            // Check that no configuration is provided when backend is disabled
+            #[allow(unused_assignments)]
+            let mut has_config = false;
+            $(
+                has_config = has_config || FieldValidator::is_provided($field);
+            )*
+            $(
+                has_config = has_config || FieldValidator::is_provided($opt_field);
+            )*
+
+            if has_config {
+                return Err(BoxedError::new(
+                    error::InvalidArgumentsSnafu {
+                        msg: format!(
+                            "{} configuration is set but --{} is not enabled.",
+                            $backend_name,
+                            $backend_name.to_lowercase().replace(" ", "")
+                        ),
+                    }
+                    .build(),
+                ));
+            }
+        }
+
+        Ok(())
+    }};
+}
+
 impl ObjectStoreConfig {
     gen_object_store_builder!(build_s3, s3, S3Connection, S3);
 
@@ -282,218 +441,86 @@ impl ObjectStoreConfig {
     gen_object_store_builder!(build_azblob, azblob, AzblobConnection, Azblob);
 
     pub fn validate_s3(&self) -> Result<(), BoxedError> {
-        let s3 = &self.s3;
-
-        if self.enable_s3 {
-            // Check required fields (root is optional for S3)
-            let mut missing = Vec::new();
-            if s3.s3_bucket.is_empty() {
-                missing.push("bucket");
-            }
-            if is_secret_empty(&s3.s3_access_key_id) {
-                missing.push("access key ID");
-            }
-            if is_secret_empty(&s3.s3_secret_access_key) {
-                missing.push("secret access key");
-            }
-
-            if !missing.is_empty() {
-                return Err(BoxedError::new(
-                    error::MissingConfigSnafu {
-                        msg: format!(
-                            "S3 {} must be set when --s3 is enabled.",
-                            missing.join(", "),
-                        ),
-                    }
-                    .build(),
-                ));
-            }
-        } else {
-            // When disabled, check that no meaningful configuration is provided
-            if !s3.s3_bucket.is_empty()
-                || !s3.s3_root.is_empty()
-                || s3.s3_endpoint.is_some()
-                || s3.s3_region.is_some()
-                || s3.s3_enable_virtual_host_style
-                || is_secret_provided(&s3.s3_access_key_id)
-                || is_secret_provided(&s3.s3_secret_access_key)
-            {
-                return Err(BoxedError::new(
-                    error::InvalidArgumentsSnafu {
-                        msg: "S3 configuration is set but --s3 is not enabled.".to_string(),
-                    }
-                    .build(),
-                ));
-            }
-        }
-
-        Ok(())
+        validate_backend!(
+            enable: self.enable_s3,
+            name: "S3",
+            required: [
+                (&self.s3.s3_bucket, "bucket"),
+                (&self.s3.s3_access_key_id, "access key ID"),
+                (&self.s3.s3_secret_access_key, "secret access key"),
+            ],
+            optional: [
+                &self.s3.s3_root,
+                &self.s3.s3_endpoint,
+                &self.s3.s3_region,
+                &self.s3.s3_enable_virtual_host_style
+            ]
+        )
     }
 
     pub fn validate_oss(&self) -> Result<(), BoxedError> {
-        let oss = &self.oss;
-
-        if self.enable_oss {
-            // Check required fields
-            let mut missing = Vec::new();
-            if oss.oss_bucket.is_empty() {
-                missing.push("bucket");
-            }
-            if oss.oss_root.is_empty() {
-                missing.push("root");
-            }
-            if is_secret_empty(&oss.oss_access_key_id) {
-                missing.push("access key ID");
-            }
-            if is_secret_empty(&oss.oss_access_key_secret) {
-                missing.push("access key secret");
-            }
-            if oss.oss_endpoint.is_empty() {
-                missing.push("endpoint");
-            }
-
-            if !missing.is_empty() {
-                return Err(BoxedError::new(
-                    error::MissingConfigSnafu {
-                        msg: format!(
-                            "OSS {} must be set when --oss is enabled.",
-                            missing.join(", "),
-                        ),
-                    }
-                    .build(),
-                ));
-            }
-        } else {
-            // When disabled, check that no meaningful configuration is provided
-            if !oss.oss_bucket.is_empty()
-                || !oss.oss_root.is_empty()
-                || !oss.oss_endpoint.is_empty()
-                || is_secret_provided(&oss.oss_access_key_id)
-                || is_secret_provided(&oss.oss_access_key_secret)
-            {
-                return Err(BoxedError::new(
-                    error::InvalidArgumentsSnafu {
-                        msg: "OSS configuration is set but --oss is not enabled.".to_string(),
-                    }
-                    .build(),
-                ));
-            }
-        }
-
-        Ok(())
+        validate_backend!(
+            enable: self.enable_oss,
+            name: "OSS",
+            required: [
+                (&self.oss.oss_bucket, "bucket"),
+                (&self.oss.oss_root, "root"),
+                (&self.oss.oss_access_key_id, "access key ID"),
+                (&self.oss.oss_access_key_secret, "access key secret"),
+                (&self.oss.oss_endpoint, "endpoint"),
+            ],
+            optional: []
+        )
     }
 
     pub fn validate_gcs(&self) -> Result<(), BoxedError> {
-        let gcs = &self.gcs;
-
-        if self.enable_gcs {
-            // Check required fields (excluding credentials)
-            let mut missing = Vec::new();
-            if gcs.gcs_bucket.is_empty() {
-                missing.push("bucket");
+        validate_backend!(
+            enable: self.enable_gcs,
+            name: "GCS",
+            required: [
+                (&self.gcs.gcs_bucket, "bucket"),
+                (&self.gcs.gcs_root, "root"),
+                (&self.gcs.gcs_scope, "scope"),
+                (&self.gcs.gcs_endpoint, "endpoint"),
+            ],
+            optional: [
+                &self.gcs.gcs_credential_path,
+                &self.gcs.gcs_credential
+            ],
+            custom_validator: |missing: &mut Vec<&str>| {
+                // At least one of credential_path or credential must be provided
+                if self.gcs.gcs_credential_path.is_empty()
+                    && self.gcs.gcs_credential.is_empty()
+                {
+                    missing.push("credential path or credential");
+                }
             }
-            if gcs.gcs_root.is_empty() {
-                missing.push("root");
-            }
-            if gcs.gcs_scope.is_empty() {
-                missing.push("scope");
-            }
-            if gcs.gcs_endpoint.is_empty() {
-                missing.push("endpoint");
-            }
-
-            // At least one of credential_path or credential must be provided (non-empty)
-            if is_secret_empty(&gcs.gcs_credential_path) && is_secret_empty(&gcs.gcs_credential) {
-                missing.push("credential path, credential");
-            }
-
-            if !missing.is_empty() {
-                return Err(BoxedError::new(
-                    error::MissingConfigSnafu {
-                        msg: format!(
-                            "GCS {} must be set when --gcs is enabled.",
-                            missing.join(", "),
-                        ),
-                    }
-                    .build(),
-                ));
-            }
-        } else {
-            // When disabled, check that no meaningful configuration is provided
-            if !gcs.gcs_bucket.is_empty()
-                || !gcs.gcs_root.is_empty()
-                || !gcs.gcs_scope.is_empty()
-                || !gcs.gcs_endpoint.is_empty()
-                || is_secret_provided(&gcs.gcs_credential_path)
-                || is_secret_provided(&gcs.gcs_credential)
-            {
-                return Err(BoxedError::new(
-                    error::InvalidArgumentsSnafu {
-                        msg: "GCS configuration is set but --gcs is not enabled.".to_string(),
-                    }
-                    .build(),
-                ));
-            }
-        }
-
-        Ok(())
+        )
     }
 
     pub fn validate_azblob(&self) -> Result<(), BoxedError> {
-        let azblob = &self.azblob;
-
-        if self.enable_azblob {
-            // Check required fields
-            let mut missing = Vec::new();
-            if azblob.azblob_container.is_empty() {
-                missing.push("container");
+        validate_backend!(
+            enable: self.enable_azblob,
+            name: "Azure Blob",
+            required: [
+                (&self.azblob.azblob_container, "container"),
+                (&self.azblob.azblob_root, "root"),
+                (&self.azblob.azblob_account_name, "account name"),
+                (&self.azblob.azblob_endpoint, "endpoint"),
+            ],
+            optional: [
+                &self.azblob.azblob_account_key,
+                &self.azblob.azblob_sas_token
+            ],
+            custom_validator: |missing: &mut Vec<&str>| {
+                // account_key is only required if sas_token is not provided
+                if self.azblob.azblob_sas_token.is_none()
+                    && self.azblob.azblob_account_key.is_empty()
+                {
+                    missing.push("account key (when sas_token is not provided)");
+                }
             }
-            if azblob.azblob_root.is_empty() {
-                missing.push("root");
-            }
-            if is_secret_empty(&azblob.azblob_account_name) {
-                missing.push("account name");
-            }
-            if azblob.azblob_endpoint.is_empty() {
-                missing.push("endpoint");
-            }
-
-            // account_key is only required if sas_token is not provided
-            if azblob.azblob_sas_token.is_none() && is_secret_empty(&azblob.azblob_account_key) {
-                missing.push("account key");
-            }
-
-            if !missing.is_empty() {
-                return Err(BoxedError::new(
-                    error::MissingConfigSnafu {
-                        msg: format!(
-                            "Azure Blob {} must be set when --azblob is enabled.",
-                            missing.join(", "),
-                        ),
-                    }
-                    .build(),
-                ));
-            }
-        } else {
-            // When disabled, check that no meaningful configuration is provided
-            if !azblob.azblob_container.is_empty()
-                || !azblob.azblob_root.is_empty()
-                || !azblob.azblob_endpoint.is_empty()
-                || azblob.azblob_sas_token.is_some()
-                || is_secret_provided(&azblob.azblob_account_name)
-                || is_secret_provided(&azblob.azblob_account_key)
-            {
-                return Err(BoxedError::new(
-                    error::InvalidArgumentsSnafu {
-                        msg: "Azure Blob configuration is set but --azblob is not enabled."
-                            .to_string(),
-                    }
-                    .build(),
-                ));
-            }
-        }
-
-        Ok(())
+        )
     }
 
     pub fn validate(&self) -> Result<(), BoxedError> {
