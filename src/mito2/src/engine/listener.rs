@@ -74,6 +74,9 @@ pub trait EventListener: Send + Sync {
     /// Notifies the listener that region starts to send a region change result to worker.
     async fn on_notify_region_change_result_begin(&self, _region_id: RegionId) {}
 
+    /// Notifies the listener that region starts to send a enter staging result to worker.
+    async fn on_enter_staging_result_begin(&self, _region_id: RegionId) {}
+
     /// Notifies the listener that the index build task is executed successfully.
     async fn on_index_build_finish(&self, _region_file_id: RegionFileId) {}
 
@@ -307,6 +310,37 @@ impl EventListener for NotifyRegionChangeResultListener {
             region_id
         );
         self.notify.notified().await;
+        info!(
+            "Continue to sending region change result for region {}",
+            region_id
+        );
+    }
+}
+
+#[derive(Default)]
+pub struct NotifyEnterStagingResultListener {
+    notify: Notify,
+}
+
+impl NotifyEnterStagingResultListener {
+    /// Continue to sending enter staging result.
+    pub fn wake_notify(&self) {
+        self.notify.notify_one();
+    }
+}
+
+#[async_trait]
+impl EventListener for NotifyEnterStagingResultListener {
+    async fn on_enter_staging_result_begin(&self, region_id: RegionId) {
+        info!(
+            "Wait on notify to start notify enter staging result for region {}",
+            region_id
+        );
+        self.notify.notified().await;
+        info!(
+            "Continue to sending enter staging result for region {}",
+            region_id
+        );
     }
 }
 

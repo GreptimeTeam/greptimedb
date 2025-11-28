@@ -35,9 +35,10 @@ use store_api::codec::{PrimaryKeyEncoding, infer_primary_key_encoding_from_hint}
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
-    AffectedRows, RegionAlterRequest, RegionBuildIndexRequest, RegionBulkInsertsRequest,
-    RegionCatchupRequest, RegionCloseRequest, RegionCompactRequest, RegionCreateRequest,
-    RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    AffectedRows, EnterStagingRequest, RegionAlterRequest, RegionBuildIndexRequest,
+    RegionBulkInsertsRequest, RegionCatchupRequest, RegionCloseRequest, RegionCompactRequest,
+    RegionCreateRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
+    RegionTruncateRequest,
 };
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -725,6 +726,11 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Catchup((v, None)),
             }),
+            RegionRequest::EnterStaging(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: sender.into(),
+                request: DdlRequest::EnterStaging(v),
+            }),
             RegionRequest::BulkInserts(region_bulk_inserts_request) => WorkerRequest::BulkInserts {
                 metadata: region_metadata,
                 sender: sender.into(),
@@ -822,6 +828,7 @@ pub(crate) enum DdlRequest {
     BuildIndex(RegionBuildIndexRequest),
     Truncate(RegionTruncateRequest),
     Catchup((RegionCatchupRequest, Option<WalEntryReceiver>)),
+    EnterStaging(EnterStagingRequest),
 }
 
 /// Sender and Ddl request.
@@ -858,6 +865,8 @@ pub(crate) enum BackgroundNotify {
     RegionChange(RegionChangeResult),
     /// Region edit result.
     RegionEdit(RegionEditResult),
+    /// Enter staging result.
+    EnterStaging(EnterStagingResult),
 }
 
 /// Notifies a flush job is finished.
@@ -875,6 +884,8 @@ pub(crate) struct FlushFinished {
     pub(crate) edit: RegionEdit,
     /// Memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
+    /// Whether the region is in staging mode.
+    pub(crate) is_staging: bool,
 }
 
 impl FlushFinished {
@@ -997,6 +1008,19 @@ pub(crate) struct RegionChangeResult {
     pub(crate) need_index: bool,
     /// New options for the region.
     pub(crate) new_options: Option<RegionOptions>,
+}
+
+/// Notifies the region the result of entering staging.
+#[derive(Debug)]
+pub(crate) struct EnterStagingResult {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// The new partition expression to apply.
+    pub(crate) partition_expr: String,
+    /// Result sender.
+    pub(crate) sender: OptionOutputTx,
+    /// Result from the manifest manager.
+    pub(crate) result: Result<()>,
 }
 
 /// Request to edit a region directly.

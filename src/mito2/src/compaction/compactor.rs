@@ -501,7 +501,7 @@ impl Compactor for DefaultCompactor {
         // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
         compaction_region
             .manifest_ctx
-            .update_manifest(RegionLeaderState::Writable, action_list)
+            .update_manifest(RegionLeaderState::Writable, action_list, false)
             .await?;
 
         Ok(edit)

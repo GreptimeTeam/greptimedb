@@ -55,7 +55,7 @@ lazy_static = "1.4"
 log-store = { workspace = true }
 mito-codec.workspace = true
 moka = { workspace = true, features = ["sync", "future"] }
-object-store.workspace = true
+object-store = { workspace = true, features = ["testing"] }
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true
 pin-project.workspace = true

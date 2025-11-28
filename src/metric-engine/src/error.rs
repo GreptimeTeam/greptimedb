@@ -156,6 +156,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Mito enter staging operation fails"))]
+    MitoEnterStagingOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to collect record batch stream"))]
     CollectRecordBatchStream {
         source: common_recordbatch::error::Error,
@@ -360,6 +367,7 @@ impl ErrorExt for Error {
             | MitoWriteOperation { source, .. }
             | MitoFlushOperation { source, .. }
             | MitoSyncOperation { source, .. }
+            | MitoEnterStagingOperation { source, .. }
             | BatchOpenMitoRegion { source, .. }
             | BatchCatchupMitoRegion { source, .. } => source.status_code(),
 

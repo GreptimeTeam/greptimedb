@@ -901,7 +901,7 @@ async fn test_alter_region_ttl_options_with_format(flat_format: bool) {
     check_ttl(&engine, &Duration::from_secs(500));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_write_stall_on_altering() {
     common_telemetry::init_default_ut_logging();
 
@@ -952,6 +952,8 @@ async fn test_write_stall_on_altering_with_format(flat_format: bool) {
             .await
             .unwrap();
     });
+    // Make sure the loop is handling the alter request.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let column_schemas_cloned = column_schemas.clone();
     let engine_cloned = engine.clone();
@@ -962,6 +964,8 @@ async fn test_write_stall_on_altering_with_format(flat_format: bool) {
         };
         put_rows(&engine_cloned, region_id, rows).await;
     });
+    // Make sure the loop is handling the put request.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     listener.wake_notify();
     alter_job.await.unwrap();

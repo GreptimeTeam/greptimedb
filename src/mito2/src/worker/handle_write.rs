@@ -241,6 +241,12 @@ impl<S> RegionWorkerLoop<S> {
                     // No such region.
                     continue;
                 };
+                #[cfg(test)]
+                debug!(
+                    "Handling write request for region {}, state: {:?}",
+                    region_id,
+                    region.state()
+                );
                 match region.state() {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
@@ -256,6 +262,16 @@ impl<S> RegionWorkerLoop<S> {
                     RegionRoleState::Leader(RegionLeaderState::Altering) => {
                         debug!(
                             "Region {} is altering, add request to pending writes",
+                            region.region_id
+                        );
+                        self.stalling_count.add(1);
+                        WRITE_STALL_TOTAL.inc();
+                        self.stalled_requests.push(sender_req);
+                        continue;
+                    }
+                    RegionRoleState::Leader(RegionLeaderState::EnteringStaging) => {
+                        debug!(
+                            "Region {} is entering staging, add request to pending writes",
                             region.region_id
                         );
                         self.stalling_count.add(1);

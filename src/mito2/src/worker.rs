@@ -21,6 +21,7 @@ mod handle_close;
 mod handle_compaction;
 mod handle_create;
 mod handle_drop;
+mod handle_enter_staging;
 mod handle_flush;
 mod handle_manifest;
 mod handle_open;
@@ -1039,8 +1040,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     continue;
                 }
                 DdlRequest::Flush(req) => {
-                    self.handle_flush_request(ddl.region_id, req, ddl.sender)
-                        .await;
+                    self.handle_flush_request(ddl.region_id, req, ddl.sender);
                     continue;
                 }
                 DdlRequest::Compact(req) => {
@@ -1061,6 +1061,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 DdlRequest::Catchup((req, wal_entry_receiver)) => {
                     self.handle_catchup_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
                         .await;
+                    continue;
+                }
+                DdlRequest::EnterStaging(req) => {
+                    self.handle_enter_staging_request(
+                        ddl.region_id,
+                        req.partition_expr,
+                        ddl.sender,
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -1111,6 +1120,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::RegionChange(req) => {
                 self.handle_manifest_region_change_result(req).await
             }
+            BackgroundNotify::EnterStaging(req) => self.handle_enter_staging_result(req).await,
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
         }
     }
@@ -1269,6 +1279,13 @@ impl WorkerListener {
             listener
                 .on_notify_region_change_result_begin(_region_id)
                 .await;
+        }
+    }
+
+    pub(crate) async fn on_enter_staging_result_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_enter_staging_result_begin(_region_id).await;
         }
     }
 

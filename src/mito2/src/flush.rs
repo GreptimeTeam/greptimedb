@@ -208,7 +208,7 @@ impl WriteBufferManager for WriteBufferManagerImpl {
 }
 
 /// Reason of a flush task.
-#[derive(Debug, IntoStaticStr)]
+#[derive(Debug, IntoStaticStr, Clone, Copy, PartialEq, Eq)]
 pub enum FlushReason {
     /// Other reasons.
     Others,
@@ -222,6 +222,8 @@ pub enum FlushReason {
     Periodically,
     /// Flush memtable during downgrading state.
     Downgrading,
+    /// Enter staging mode.
+    EnterStaging,
 }
 
 impl FlushReason {
@@ -253,6 +255,8 @@ pub(crate) struct RegionFlushTask {
     pub(crate) index_options: IndexOptions,
     /// Semaphore to control flush concurrency.
     pub(crate) flush_semaphore: Arc<Semaphore>,
+    /// Whether the region is in staging mode.
+    pub(crate) is_staging: bool,
 }
 
 impl RegionFlushTask {
@@ -316,6 +320,7 @@ impl RegionFlushTask {
                     _timer: timer,
                     edit,
                     memtables_to_remove,
+                    is_staging: self.is_staging,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -398,7 +403,10 @@ impl RegionFlushTask {
             flushed_sequence: Some(version_data.committed_sequence),
             committed_sequence: None,
         };
-        info!("Applying {edit:?} to region {}", self.region_id);
+        info!(
+            "Applying {edit:?} to region {}, is_staging: {}",
+            self.region_id, self.is_staging
+        );
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
 
@@ -417,11 +425,12 @@ impl RegionFlushTask {
         // add a cleanup job to remove them later.
         let version = self
             .manifest_ctx
-            .update_manifest(expected_state, action_list)
+            .update_manifest(expected_state, action_list, self.is_staging)
             .await?;
         info!(
-            "Successfully update manifest version to {version}, region: {}, reason: {}",
+            "Successfully update manifest version to {version}, region: {}, is_staging: {}, reason: {}",
             self.region_id,
+            self.is_staging,
             self.reason.as_str()
         );
 
@@ -1292,6 +1301,7 @@ mod tests {
                 .await,
             index_options: IndexOptions::default(),
             flush_semaphore: Arc::new(Semaphore::new(2)),
+            is_staging: false,
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler
@@ -1334,6 +1344,7 @@ mod tests {
                 manifest_ctx: manifest_ctx.clone(),
                 index_options: IndexOptions::default(),
                 flush_semaphore: Arc::new(Semaphore::new(2)),
+                is_staging: false,
             })
             .collect();
         // Schedule first task.

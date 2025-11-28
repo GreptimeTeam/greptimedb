@@ -13,6 +13,8 @@
 // limitations under the License.
 
 mod lru_cache;
+#[cfg(feature = "testing")]
+pub mod mock;
 
 pub use lru_cache::*;
 pub use opendal::layers::*;

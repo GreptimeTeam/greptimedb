@@ -25,7 +25,6 @@ use crate::manifest::action::{RegionCheckpoint, RegionManifest};
 use crate::manifest::manager::RegionManifestOptions;
 use crate::manifest::storage::ManifestObjectStore;
 use crate::metrics::MANIFEST_OP_ELAPSED;
-use crate::region::{RegionLeaderState, RegionRoleState};
 
 /// [`Checkpointer`] is responsible for doing checkpoint for a region, in an asynchronous way.
 #[derive(Debug)]
@@ -137,20 +136,7 @@ impl Checkpointer {
     /// Check if it's needed to do checkpoint for the region by the checkpoint distance.
     /// If needed, and there's no currently running checkpoint task, it will start a new checkpoint
     /// task running in the background.
-    pub(crate) fn maybe_do_checkpoint(
-        &self,
-        manifest: &RegionManifest,
-        region_state: RegionRoleState,
-    ) {
-        // Skip checkpoint if region is in staging state
-        if region_state == RegionRoleState::Leader(RegionLeaderState::Staging) {
-            info!(
-                "Skipping checkpoint for region {} in staging mode, manifest version: {}",
-                manifest.metadata.region_id, manifest.manifest_version
-            );
-            return;
-        }
-
+    pub(crate) fn maybe_do_checkpoint(&self, manifest: &RegionManifest) {
         if self.manifest_options.checkpoint_distance == 0 {
             return;
         }

@@ -776,6 +776,7 @@ impl IndexBuildTask {
             .update_manifest(
                 RegionLeaderState::Writable,
                 RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone())),
+                false,
             )
             .await?;
         info!(

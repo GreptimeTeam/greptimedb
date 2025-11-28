@@ -23,6 +23,7 @@ mod options;
 mod put;
 mod read;
 mod region_metadata;
+mod staging;
 mod state;
 mod sync;
 
@@ -211,6 +212,13 @@ impl RegionEngine for MetricEngine {
         let mut extension_return_value = HashMap::new();
 
         let result = match request {
+            RegionRequest::EnterStaging(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    self.handle_enter_staging_request(region_id, request).await
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
+            }
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
             RegionRequest::Create(create) => {
                 self.inner
