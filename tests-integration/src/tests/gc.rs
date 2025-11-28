@@ -104,8 +104,20 @@ async fn distributed_with_gc_s3() -> (TestContext, TempDirGuard) {
 }
 
 #[tokio::test]
-async fn test_gc_basic_s3() {
-    let (test_context, _guard) = distributed_with_gc_s3().await;
+async fn test_gc_basic_different_store() {
+    common_telemetry::init_default_ut_logging();
+    let store_type = StorageType::build_storage_types_based_on_env();
+    for store in store_type {
+        if store == StorageType::File {
+            continue; // no point in test gc in fs storage
+        }
+        info!("Running GC test with storage type: {}", store);
+        test_gc_basic(&store).await;
+    }
+}
+
+async fn test_gc_basic(store_type: &StorageType) {
+    let (test_context, _guard) = distributed_with_gc(store_type).await;
     let instance = test_context.frontend();
     let metasrv = test_context.metasrv();
 
