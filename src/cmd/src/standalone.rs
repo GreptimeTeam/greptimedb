@@ -58,6 +58,7 @@ use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
+use plugins::standalone::{CatalogManagerConfigureContext, DdlManagerConfigureContext};
 use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
 use standalone::StandaloneInformationExtension;
@@ -596,17 +597,6 @@ impl StartCommand {
 
         Ok(table_metadata_manager)
     }
-}
-
-/// The context for [`CatalogManagerConfigratorRef`] in standalone.
-pub struct CatalogManagerConfigureContext {
-    pub fe_client: Arc<FrontendClient>,
-}
-
-/// The context for [`DdlManagerConfiguratorRef`].
-pub struct DdlManagerConfigureContext {
-    pub kv_backend: KvBackendRef,
-    pub fe_client: Arc<FrontendClient>,
 }
 
 #[cfg(test)]

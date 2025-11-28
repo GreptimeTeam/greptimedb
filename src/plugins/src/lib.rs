@@ -13,16 +13,16 @@
 // limitations under the License.
 
 mod cli;
-mod datanode;
-mod flownode;
-mod frontend;
+pub mod datanode;
+pub mod flownode;
+pub mod frontend;
 mod meta_srv;
 mod options;
-mod standalone;
+pub mod standalone;
 
 pub use cli::SubCommand;
 pub use datanode::{setup_datanode_plugins, start_datanode_plugins};
-pub use flownode::{GrpcConfigureContext, setup_flownode_plugins, start_flownode_plugins};
+pub use flownode::{setup_flownode_plugins, start_flownode_plugins};
 pub use frontend::{setup_frontend_plugins, start_frontend_plugins};
 pub use meta_srv::{setup_metasrv_plugins, start_metasrv_plugins};
 pub use options::PluginOptions;

@@ -18,6 +18,7 @@ common-meta.workspace = true
 datanode.workspace = true
 flow.workspace = true
 frontend.workspace = true
+meta-client.workspace = true
 meta-srv.workspace = true
 serde.workspace = true
 snafu.workspace = true

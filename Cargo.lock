@@ -9509,6 +9509,7 @@ dependencies = [
  "datanode",
  "flow",
  "frontend",
+ "meta-client",
  "meta-srv",
  "serde",
  "snafu 0.8.6",

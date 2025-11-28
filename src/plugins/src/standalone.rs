@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_base::Plugins;
 use common_meta::kv_backend::KvBackendRef;
+use flow::FrontendClient;
 use standalone::error::Result;
 use standalone::options::StandaloneOptions;
 
@@ -32,4 +35,15 @@ pub async fn setup_standalone_plugins(
 
 pub async fn start_standalone_plugins(_plugins: Plugins) -> Result<()> {
     Ok(())
+}
+
+/// The context for [`common_meta::ddl_manager::DdlManagerConfiguratorRef`] in standalone.
+pub struct DdlManagerConfigureContext {
+    pub kv_backend: KvBackendRef,
+    pub fe_client: Arc<FrontendClient>,
+}
+
+/// The context for [`catalog::kvbackend::CatalogManagerConfigratorRef`] in standalone.
+pub struct CatalogManagerConfigureContext {
+    pub fe_client: Arc<FrontendClient>,
 }

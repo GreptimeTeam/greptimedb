@@ -45,7 +45,8 @@ use frontend::frontend::Frontend;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
-use meta_client::{MetaClientOptions, MetaClientRef, MetaClientType};
+use meta_client::{MetaClientOptions, MetaClientType};
+use plugins::frontend::CatalogManagerConfigureContext;
 use servers::addrs;
 use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -480,11 +481,6 @@ impl StartCommand {
 
         Ok(Instance::new(frontend, guard))
     }
-}
-
-/// The context for [`CatalogManagerConfigratorRef`] in frontend.
-pub struct CatalogManagerConfigureContext {
-    pub meta_client: MetaClientRef,
 }
 
 #[cfg(test)]

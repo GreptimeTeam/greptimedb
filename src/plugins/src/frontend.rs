@@ -16,6 +16,7 @@ use auth::{DefaultPermissionChecker, PermissionCheckerRef, UserProviderRef};
 use common_base::Plugins;
 use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
+use meta_client::MetaClientRef;
 use snafu::ResultExt;
 
 use crate::options::PluginOptions;
@@ -39,4 +40,9 @@ pub async fn setup_frontend_plugins(
 
 pub async fn start_frontend_plugins(_plugins: Plugins) -> Result<()> {
     Ok(())
+}
+
+/// The context for [`catalog::kvbackend::CatalogManagerConfigratorRef`] in frontend.
+pub struct CatalogManagerConfigureContext {
+    pub meta_client: MetaClientRef,
 }
