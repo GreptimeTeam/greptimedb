@@ -151,26 +151,29 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         common_runtime::spawn_global(async move {
             let now = Instant::now();
             let result = Self::enter_staging(&region, partition_expr.clone()).await;
-            if result.is_ok() {
-                info!(
-                    "Created staging manifest for region {}, elapsed: {:?}",
-                    region.region_id,
-                    now.elapsed(),
-                );
-            } else if let Err(ref e) = result {
-                // Unset the staging manifest
-                region
-                    .manifest_ctx
-                    .manifest_manager
-                    .write()
-                    .await
-                    .unset_staging_manifest();
-                error!(
-                    "Failed to create staging manifest for region {}: {:?}, elapsed: {:?}",
-                    region.region_id,
-                    e,
-                    now.elapsed(),
-                );
+            match result {
+                Ok(_) => {
+                    info!(
+                        "Created staging manifest for region {}, elapsed: {:?}",
+                        region.region_id,
+                        now.elapsed(),
+                    );
+                }
+                Err(ref e) => {
+                    // Unset the staging manifest
+                    region
+                        .manifest_ctx
+                        .manifest_manager
+                        .write()
+                        .await
+                        .unset_staging_manifest();
+                    error!(
+                        "Failed to create staging manifest for region {}: {:?}, elapsed: {:?}",
+                        region.region_id,
+                        e,
+                        now.elapsed(),
+                    );
+                }
             }
 
             let notify = WorkerRequest::Background {
