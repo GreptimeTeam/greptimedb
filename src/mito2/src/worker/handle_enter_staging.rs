@@ -118,7 +118,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             );
         }
 
-        // Sencod step: write new staging manifest.
+        // Second step: write new staging manifest.
         let mut new_meta = (*region.metadata()).clone();
         new_meta.partition_expr = Some(partition_expr.clone());
         let sst_format = region.version().options.sst_format.unwrap_or_default();

@@ -393,8 +393,6 @@ impl<S> RegionWorkerLoop<S> {
         let listener = self.listener.clone();
         let request_sender = self.sender.clone();
         let is_staging = region.is_staging();
-        // It's not expected to alter a staging region.
-        debug_assert!(!is_staging);
         // Now the region is in altering state.
         common_runtime::spawn_global(async move {
             let new_meta = change.metadata.clone();
