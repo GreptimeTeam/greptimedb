@@ -867,7 +867,7 @@ impl RegionLoadCacheTask {
                     if file_meta.exists_index() {
                         let puffin_key = IndexKey::new(
                             file_meta.region_id,
-                            file_meta.file_id, // FIXME(discord9): confirm correctness
+                            file_meta.file_id,
                             FileType::Puffin(file_meta.index_version),
                         );
 
