@@ -922,8 +922,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_export_command_build_with_gcs_missing_credential() {
-        // Missing credentials
+    async fn test_export_command_build_with_gcs_adc_success() {
+        // Test GCS with Application Default Credentials (no explicit credentials provided)
         let cmd = ExportCommand::parse_from([
             "export",
             "--addr",
@@ -935,20 +935,12 @@ mod tests {
             "test-root",
             "--gcs-scope",
             "test-scope",
-            "--gcs-endpoint",
-            "https://storage.googleapis.com",
+            // No credential_path or credential
+            // No endpoint (optional)
         ]);
 
         let result = cmd.build().await;
-        assert!(result.is_err());
-        if let Err(err) = result {
-            assert!(
-                err.to_string()
-                    .contains("GCS credential path or credential must be set"),
-                "Actual error: {}",
-                err
-            );
-        }
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
