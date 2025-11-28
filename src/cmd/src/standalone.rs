@@ -32,7 +32,7 @@ use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
-use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerConfigureContext};
+use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef};
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -506,9 +506,12 @@ impl StartCommand {
         let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager.clone(), true)
             .context(error::InitDdlManagerSnafu)?;
 
-        let ddl_manager = if let Some(configurator) = plugins.get::<DdlManagerConfiguratorRef>() {
+        let ddl_manager = if let Some(configurator) =
+            plugins.get::<DdlManagerConfiguratorRef<DdlManagerConfigureContext>>()
+        {
             let ctx = DdlManagerConfigureContext {
                 kv_backend: kv_backend.clone(),
+                fe_client: frontend_client.clone(),
             };
             configurator
                 .configure(ddl_manager, ctx)
@@ -597,6 +600,12 @@ impl StartCommand {
 
 /// The context for [`CatalogManagerConfigratorRef`] in standalone.
 pub struct CatalogManagerConfigureContext {
+    pub fe_client: Arc<FrontendClient>,
+}
+
+/// The context for [`DdlManagerConfiguratorRef`].
+pub struct DdlManagerConfigureContext {
+    pub kv_backend: KvBackendRef,
     pub fe_client: Arc<FrontendClient>,
 }
 
