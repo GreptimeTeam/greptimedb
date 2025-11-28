@@ -944,7 +944,7 @@ mod tests {
         if let Err(err) = result {
             assert!(
                 err.to_string()
-                    .contains("GCS credential path, credential must be set"),
+                    .contains("GCS credential path or credential must be set"),
                 "Actual error: {}",
                 err
             );
@@ -1029,8 +1029,9 @@ mod tests {
         assert!(result.is_err());
         if let Err(err) = result {
             assert!(
-                err.to_string()
-                    .contains("Azure Blob account key must be set"),
+                err.to_string().contains(
+                    "Azure Blob account key (when sas_token is not provided) must be set"
+                ),
                 "Actual error: {}",
                 err
             );
