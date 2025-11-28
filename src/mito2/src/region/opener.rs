@@ -63,7 +63,7 @@ use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::FormatType;
-use crate::sst::file::RegionFileId;
+use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::file_purger::{FilePurgerRef, create_file_purger};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -925,12 +925,17 @@ impl RegionLoadCacheTask {
                 break;
             }
 
-            let index_remote_path = location::index_file_path_legacy(
-                table_dir,
+            let index_version = if let FileType::Puffin(version) = puffin_key.file_type {
+                version
+            } else {
+                unreachable!("`files_to_download` should only contains Puffin files");
+            };
+            let index_id = RegionIndexId::new(
                 RegionFileId::new(puffin_key.region_id, puffin_key.file_id),
-                // FIXME(discord9): confirm correctness, actually get index_version from somewhere
-                path_type,
+                index_version,
             );
+
+            let index_remote_path = location::index_file_path(table_dir, index_id, path_type);
 
             match file_cache
                 .download(puffin_key, &index_remote_path, object_store, file_size)
