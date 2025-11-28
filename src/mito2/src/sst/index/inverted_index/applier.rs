@@ -278,9 +278,7 @@ impl InvertedIndexApplier {
         let index_key = IndexKey::new(
             file_id.region_id(),
             file_id.file_id(),
-            FileType::Puffin {
-                version: file_id.version,
-            },
+            FileType::Puffin(file_id.version),
         );
         if file_cache.get(index_key).await.is_none() {
             return Ok(None);

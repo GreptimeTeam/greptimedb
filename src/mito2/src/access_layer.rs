@@ -470,8 +470,7 @@ impl TempFileCleaner {
     /// Removes the SST and index file from the local atomic dir by the file id.
     pub(crate) async fn clean_by_file_id(&self, file_id: FileId) {
         let sst_key = IndexKey::new(self.region_id, file_id, FileType::Parquet).to_string();
-        let index_key =
-            IndexKey::new(self.region_id, file_id, FileType::Puffin { version: 0 }).to_string(); // TODO(discord9): confirm correctness
+        let index_key = IndexKey::new(self.region_id, file_id, FileType::Puffin(0)).to_string(); // TODO(discord9): confirm correctness
 
         Self::clean_atomic_dir_files(&self.object_store, &[&sst_key, &index_key]).await;
     }
@@ -579,11 +578,7 @@ impl WriteCachePathProvider {
 
 impl FilePathProvider for WriteCachePathProvider {
     fn build_index_file_path(&self, file_id: RegionFileId) -> String {
-        let puffin_key = IndexKey::new(
-            file_id.region_id(),
-            file_id.file_id(),
-            FileType::Puffin { version: 0 },
-        );
+        let puffin_key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Puffin(0));
         self.file_cache.cache_file_path(puffin_key)
     }
 
@@ -591,9 +586,7 @@ impl FilePathProvider for WriteCachePathProvider {
         let puffin_key = IndexKey::new(
             index_id.region_id(),
             index_id.file_id(),
-            FileType::Puffin {
-                version: index_id.version,
-            },
+            FileType::Puffin(index_id.version),
         );
         self.file_cache.cache_file_path(puffin_key)
     }

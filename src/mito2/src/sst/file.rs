@@ -542,9 +542,7 @@ pub async fn delete_files(
                     .remove(IndexKey::new(
                         region_id,
                         *file_id,
-                        FileType::Puffin {
-                            version: *index_version,
-                        },
+                        FileType::Puffin(*index_version),
                     ))
                     .await;
             }

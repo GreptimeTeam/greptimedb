@@ -618,10 +618,7 @@ pub enum FileType {
     /// Parquet file.
     Parquet,
     /// Puffin file.
-    Puffin {
-        /// index version
-        version: u64,
-    },
+    Puffin(u64),
 }
 
 impl FileType {
@@ -629,7 +626,7 @@ impl FileType {
     fn parse(s: &str) -> Option<FileType> {
         match s {
             "parquet" => Some(FileType::Parquet),
-            "puffin" => Some(FileType::Puffin { version: 0 }),
+            "puffin" => Some(FileType::Puffin(0)),
             _ => None,
         }
     }
@@ -638,7 +635,7 @@ impl FileType {
     fn as_str(&self) -> &'static str {
         match self {
             FileType::Parquet => "parquet",
-            FileType::Puffin { .. } => "puffin",
+            FileType::Puffin(_) => "puffin",
         }
     }
 
@@ -646,7 +643,7 @@ impl FileType {
     fn metric_label(&self) -> &'static str {
         match self {
             FileType::Parquet => FILE_TYPE,
-            FileType::Puffin { .. } => INDEX_TYPE,
+            FileType::Puffin(_) => INDEX_TYPE,
         }
     }
 }

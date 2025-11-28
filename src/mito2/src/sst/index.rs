@@ -727,13 +727,8 @@ impl IndexBuildTask {
             let remote_store = self.access_layer.object_store();
             let mut upload_tracker = UploadTracker::new(region_id);
             let mut err = None;
-            let puffin_key = IndexKey::new(
-                region_id,
-                index_file_id,
-                FileType::Puffin {
-                    version: output.version,
-                },
-            );
+            let puffin_key =
+                IndexKey::new(region_id, index_file_id, FileType::Puffin(output.version));
             let index_id = RegionIndexId::new(RegionFileId::new(region_id, file_id), index_version);
             let puffin_path = RegionFilePathFactory::new(
                 self.access_layer.table_dir().to_string(),
@@ -1834,9 +1829,7 @@ mod tests {
         let index_key = IndexKey::new(
             region_id,
             file_meta.file_id,
-            FileType::Puffin {
-                version: sst_info.index_metadata.version,
-            },
+            FileType::Puffin(sst_info.index_metadata.version),
         );
         assert!(write_cache.file_cache().contains_key(&index_key));
     }

@@ -422,9 +422,7 @@ impl CacheManager {
                 .remove(IndexKey::new(
                     file_id.region_id(),
                     file_id.file_id(),
-                    FileType::Puffin {
-                        version: file_id.version,
-                    },
+                    FileType::Puffin(file_id.version),
                 ))
                 .await;
         }
