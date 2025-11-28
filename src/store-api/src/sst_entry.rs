@@ -91,7 +91,7 @@ impl ManifestSstEntry {
             ColumnSchema::new("region_group", Ty::uint8_datatype(), false),
             ColumnSchema::new("region_sequence", Ty::uint32_datatype(), false),
             ColumnSchema::new("file_id", Ty::string_datatype(), false),
-            ColumnSchema::new("index_file_id", Ty::string_datatype(), true),
+            ColumnSchema::new("index_version", Ty::uint64_datatype(), false),
             ColumnSchema::new("level", Ty::uint8_datatype(), false),
             ColumnSchema::new("file_path", Ty::string_datatype(), false),
             ColumnSchema::new("file_size", Ty::uint64_datatype(), false),
