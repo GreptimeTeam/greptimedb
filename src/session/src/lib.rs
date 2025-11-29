@@ -163,7 +163,6 @@ impl Session {
         self.process_id
     }
 
-    /// Get warnings (for MySQL SHOW WARNINGS)
     pub fn warnings(&self) -> Vec<String> {
         self.mutable_inner.read().unwrap().warnings.clone()
     }
@@ -177,7 +176,6 @@ impl Session {
         inner.warnings.push(warning);
     }
 
-    /// Clear all warnings
     pub fn clear_warnings(&self) {
         self.mutable_inner.write().unwrap().warnings.clear();
     }

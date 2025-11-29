@@ -328,9 +328,7 @@ pub(crate) fn check(
 
     // First to check the query is like "select @@variables".
     check_select_variable(query, query_ctx.clone())
-        // Then to check "show variables like ...".
         .or_else(|| check_show_variables(query))
-        // Check for SHOW WARNINGS
         .or_else(|| check_show_warnings(query, &session))
         // Last check
         .or_else(|| check_others(query, query_ctx))

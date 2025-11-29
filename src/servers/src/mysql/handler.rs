@@ -475,7 +475,6 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         p: ParamParser<'a>,
         w: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        // Clear previous warnings at the start of new query (MySQL behavior)
         self.session.clear_warnings();
 
         let query_ctx = self.session.new_query_context();
@@ -503,7 +502,6 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             }
         };
 
-        // Transfer warning from QueryContext to Session for SHOW WARNINGS
         if let Some(warning) = query_ctx.warning() {
             self.session.add_warning(warning);
         }
@@ -527,8 +525,6 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         query: &'a str,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        // Clear previous warnings at the start of new query (MySQL behavior)
-        // But don't clear for SHOW WARNINGS, as it needs to read the warnings
         let is_show_warnings = {
             let q = query.trim().to_uppercase();
             q.starts_with("SHOW WARNINGS") || q.contains("SHOW WARNINGS")
@@ -617,7 +613,6 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         let outputs = self.do_query(query, query_ctx.clone()).await;
 
-        // Transfer warning from QueryContext to Session for SHOW WARNINGS
         if let Some(warning) = query_ctx.warning() {
             self.session.add_warning(warning);
         }
