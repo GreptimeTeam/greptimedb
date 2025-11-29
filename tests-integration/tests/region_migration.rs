@@ -363,7 +363,7 @@ pub async fn test_metric_table_region_migration_by_sql(
     let result = cluster
         .frontend
         .instance
-        .do_query("select * from t1", query_ctx.clone())
+        .do_query("select * from t1 order by host desc", query_ctx.clone())
         .await
         .remove(0);
 
@@ -379,7 +379,7 @@ pub async fn test_metric_table_region_migration_by_sql(
     let result = cluster
         .frontend
         .instance
-        .do_query("select * from t2", query_ctx)
+        .do_query("select * from t2 order by job desc", query_ctx)
         .await
         .remove(0);
 

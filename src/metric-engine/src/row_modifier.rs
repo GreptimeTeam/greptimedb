@@ -191,16 +191,9 @@ impl RowModifier {
 }
 
 /// Tsid generator.
+#[derive(Default)]
 pub struct TsidGenerator {
     hasher: FxHasher,
-}
-
-impl Default for TsidGenerator {
-    fn default() -> Self {
-        Self {
-            hasher: FxHasher::default(),
-        }
-    }
 }
 
 impl TsidGenerator {
@@ -286,7 +279,7 @@ impl IterIndex {
         }
         let num_primary_key_column = primary_key_indices.len() + reserved_indices.len();
         let mut indices = Vec::with_capacity(num_primary_key_column + 2);
-        indices.extend(reserved_indices.into_iter());
+        indices.extend(reserved_indices);
         let mut label_name_hasher = TsidGenerator::default();
         for (pk_name, pk_index) in primary_key_indices {
             // primary_key_indices already sorted.
@@ -614,7 +607,7 @@ mod tests {
                 .iter()
                 .map(|v| {
                     v.map(|s| ValueData::StringValue(s.to_string()).into())
-                        .unwrap_or_else(|| Value { value_data: None })
+                        .unwrap_or(Value { value_data: None })
                 })
                 .collect(),
         }
