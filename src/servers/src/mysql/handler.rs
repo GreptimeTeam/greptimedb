@@ -502,11 +502,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             }
         };
 
-        if let Some(warning) = query_ctx.warning() {
-            self.session.add_warning(warning);
-        }
-
-        writer::write_output(w, query_ctx, outputs).await?;
+        writer::write_output(w, query_ctx, self.session.clone(), outputs).await?;
 
         Ok(())
     }
@@ -533,7 +529,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         // Clear warnings for non SHOW WARNINGS queries
         let query_upcase = query.to_uppercase();
-        if (!query_upcase.starts_with("SHOW WARNINGS")) {
+        if !query_upcase.starts_with("SHOW WARNINGS") {
             self.session.clear_warnings();
         }
 
@@ -545,7 +541,8 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     match prepare_results {
                         Ok(_) => {
                             let outputs = vec![Ok(Output::new_with_affected_rows(0))];
-                            writer::write_output(writer, query_ctx, outputs).await?;
+                            writer::write_output(writer, query_ctx, self.session.clone(), outputs)
+                                .await?;
                             return Ok(());
                         }
                         Err(e) => {
@@ -581,11 +578,8 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                             return Ok(());
                         }
                     };
-                    if let Some(warning) = query_ctx.warning() {
-                        self.session.add_warning(warning);
-                    }
+                    writer::write_output(writer, query_ctx, self.session.clone(), outputs).await?;
 
-                    writer::write_output(writer, query_ctx, outputs).await?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -600,7 +594,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 Ok(stmt_name) => {
                     self.do_close(stmt_name);
                     let outputs = vec![Ok(Output::new_with_affected_rows(0))];
-                    writer::write_output(writer, query_ctx, outputs).await?;
+                    writer::write_output(writer, query_ctx, self.session.clone(), outputs).await?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -613,12 +607,8 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         }
 
         let outputs = self.do_query(query, query_ctx.clone()).await;
+        writer::write_output(writer, query_ctx, self.session.clone(), outputs).await?;
 
-        if let Some(warning) = query_ctx.warning() {
-            self.session.add_warning(warning);
-        }
-
-        writer::write_output(writer, query_ctx, outputs).await?;
         Ok(())
     }
 

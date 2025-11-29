@@ -163,6 +163,10 @@ impl Session {
         self.process_id
     }
 
+    pub fn warnings_count(&self) -> usize {
+        self.mutable_inner.read().unwrap().warnings.len()
+    }
+
     pub fn warnings(&self) -> Vec<String> {
         self.mutable_inner
             .read()
