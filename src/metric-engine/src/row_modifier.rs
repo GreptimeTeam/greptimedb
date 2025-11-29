@@ -573,4 +573,262 @@ mod tests {
         assert_eq!(encoded_table_id, ValueData::U32Value(1025).into());
         assert_eq!(tsid, ValueData::U64Value(2721566936019240841).into());
     }
+
+    /// Helper function to create a schema with multiple label columns
+    fn create_multi_label_schema(labels: &[&str]) -> Vec<ColumnSchema> {
+        labels
+            .iter()
+            .map(|name| ColumnSchema {
+                column_name: name.to_string(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Tag as _,
+                datatype_extension: None,
+                options: None,
+            })
+            .collect()
+    }
+
+    /// Helper function to create a name_to_column_id map
+    fn create_name_to_column_id(labels: &[&str]) -> HashMap<String, ColumnId> {
+        labels
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| (name.to_string(), idx as ColumnId + 1))
+            .collect()
+    }
+
+    /// Helper function to create a row with string values
+    fn create_row_with_values(values: &[&str]) -> Row {
+        Row {
+            values: values
+                .iter()
+                .map(|v| ValueData::StringValue(v.to_string()).into())
+                .collect(),
+        }
+    }
+
+    /// Helper function to create a row with some null values
+    fn create_row_with_nulls(values: &[Option<&str>]) -> Row {
+        Row {
+            values: values
+                .iter()
+                .map(|v| {
+                    v.map(|s| ValueData::StringValue(s.to_string()).into())
+                        .unwrap_or_else(|| Value { value_data: None })
+                })
+                .collect(),
+        }
+    }
+
+    /// Helper function to extract TSID from a row
+    fn extract_tsid(
+        schema: Vec<ColumnSchema>,
+        row: Row,
+        name_to_column_id: &HashMap<String, ColumnId>,
+        table_id: TableId,
+    ) -> u64 {
+        let rows = Rows {
+            schema,
+            rows: vec![row],
+        };
+        let mut rows_iter = RowsIter::new(rows, name_to_column_id);
+        let row_iter = rows_iter.iter_mut().next().unwrap();
+        let (_, tsid_value) = RowModifier::fill_internal_columns(table_id, &row_iter);
+        match tsid_value.value_data {
+            Some(ValueData::U64Value(tsid)) => tsid,
+            _ => panic!("Expected U64Value for TSID"),
+        }
+    }
+
+    #[test]
+    fn test_tsid_same_for_different_label_orders() {
+        // Test that rows with the same label name-value pairs but in different orders
+        // produce the same TSID
+        let table_id = 1025;
+
+        // Schema 1: a, b, c
+        let schema1 = create_multi_label_schema(&["a", "b", "c"]);
+        let name_to_column_id1 = create_name_to_column_id(&["a", "b", "c"]);
+        let row1 = create_row_with_values(&["A", "B", "C"]);
+        let tsid1 = extract_tsid(schema1, row1, &name_to_column_id1, table_id);
+
+        // Schema 2: b, a, c (different order)
+        let schema2 = create_multi_label_schema(&["b", "a", "c"]);
+        let name_to_column_id2 = create_name_to_column_id(&["a", "b", "c"]);
+        let row2 = create_row_with_values(&["B", "A", "C"]);
+        let tsid2 = extract_tsid(schema2, row2, &name_to_column_id2, table_id);
+
+        // Schema 3: c, b, a (another different order)
+        let schema3 = create_multi_label_schema(&["c", "b", "a"]);
+        let name_to_column_id3 = create_name_to_column_id(&["a", "b", "c"]);
+        let row3 = create_row_with_values(&["C", "B", "A"]);
+        let tsid3 = extract_tsid(schema3, row3, &name_to_column_id3, table_id);
+
+        // All should have the same TSID since label names are sorted lexicographically
+        // and we're using the same label name-value pairs
+        assert_eq!(
+            tsid1, tsid2,
+            "TSID should be same for different column orders"
+        );
+        assert_eq!(
+            tsid2, tsid3,
+            "TSID should be same for different column orders"
+        );
+    }
+
+    #[test]
+    fn test_tsid_same_with_null_labels() {
+        // Test that rows that differ only by null label values produce the same TSID
+        let table_id = 1025;
+
+        // Row 1: a=A, b=B (no nulls, fast path)
+        let schema1 = create_multi_label_schema(&["a", "b"]);
+        let name_to_column_id1 = create_name_to_column_id(&["a", "b"]);
+        let row1 = create_row_with_values(&["A", "B"]);
+        let tsid1 = extract_tsid(schema1, row1, &name_to_column_id1, table_id);
+
+        // Row 2: a=A, b=B, c=null (has null, slow path)
+        let schema2 = create_multi_label_schema(&["a", "b", "c"]);
+        let name_to_column_id2 = create_name_to_column_id(&["a", "b", "c"]);
+        let row2 = create_row_with_nulls(&[Some("A"), Some("B"), None]);
+        let tsid2 = extract_tsid(schema2, row2, &name_to_column_id2, table_id);
+
+        // Both should have the same TSID since null labels are ignored
+        assert_eq!(
+            tsid1, tsid2,
+            "TSID should be same when only difference is null label values"
+        );
+    }
+
+    #[test]
+    fn test_tsid_same_with_multiple_null_labels() {
+        // Test with multiple null labels
+        let table_id = 1025;
+
+        // Row 1: a=A, b=B (no nulls)
+        let schema1 = create_multi_label_schema(&["a", "b"]);
+        let name_to_column_id1 = create_name_to_column_id(&["a", "b"]);
+        let row1 = create_row_with_values(&["A", "B"]);
+        let tsid1 = extract_tsid(schema1, row1, &name_to_column_id1, table_id);
+
+        // Row 2: a=A, b=B, c=null, d=null (multiple nulls)
+        let schema2 = create_multi_label_schema(&["a", "b", "c", "d"]);
+        let name_to_column_id2 = create_name_to_column_id(&["a", "b", "c", "d"]);
+        let row2 = create_row_with_nulls(&[Some("A"), Some("B"), None, None]);
+        let tsid2 = extract_tsid(schema2, row2, &name_to_column_id2, table_id);
+
+        assert_eq!(
+            tsid1, tsid2,
+            "TSID should be same when only difference is multiple null label values"
+        );
+    }
+
+    #[test]
+    fn test_tsid_different_with_different_non_null_values() {
+        // Test that rows with different non-null values produce different TSIDs
+        let table_id = 1025;
+
+        // Row 1: a=A, b=B
+        let schema1 = create_multi_label_schema(&["a", "b"]);
+        let name_to_column_id1 = create_name_to_column_id(&["a", "b"]);
+        let row1 = create_row_with_values(&["A", "B"]);
+        let tsid1 = extract_tsid(schema1, row1, &name_to_column_id1, table_id);
+
+        // Row 2: a=A, b=C (different value for b)
+        let schema2 = create_multi_label_schema(&["a", "b"]);
+        let name_to_column_id2 = create_name_to_column_id(&["a", "b"]);
+        let row2 = create_row_with_values(&["A", "C"]);
+        let tsid2 = extract_tsid(schema2, row2, &name_to_column_id2, table_id);
+
+        assert_ne!(
+            tsid1, tsid2,
+            "TSID should be different when label values differ"
+        );
+    }
+
+    #[test]
+    fn test_tsid_fast_path_vs_slow_path_consistency() {
+        // Test that fast path (no nulls) and slow path (with nulls) produce
+        // the same TSID for the same non-null label values
+        let table_id = 1025;
+
+        // Fast path: a=A, b=B (no nulls)
+        let schema_fast = create_multi_label_schema(&["a", "b"]);
+        let name_to_column_id_fast = create_name_to_column_id(&["a", "b"]);
+        let row_fast = create_row_with_values(&["A", "B"]);
+        let tsid_fast = extract_tsid(schema_fast, row_fast, &name_to_column_id_fast, table_id);
+
+        // Slow path: a=A, b=B, c=null (has null, triggers slow path)
+        let schema_slow = create_multi_label_schema(&["a", "b", "c"]);
+        let name_to_column_id_slow = create_name_to_column_id(&["a", "b", "c"]);
+        let row_slow = create_row_with_nulls(&[Some("A"), Some("B"), None]);
+        let tsid_slow = extract_tsid(schema_slow, row_slow, &name_to_column_id_slow, table_id);
+
+        assert_eq!(
+            tsid_fast, tsid_slow,
+            "Fast path and slow path should produce same TSID for same non-null values"
+        );
+    }
+
+    #[test]
+    fn test_tsid_with_null_in_middle() {
+        // Test with null in the middle of labels
+        let table_id = 1025;
+
+        // Row 1: a=A, b=B, c=C
+        let schema1 = create_multi_label_schema(&["a", "b", "c"]);
+        let name_to_column_id1 = create_name_to_column_id(&["a", "b", "c"]);
+        let row1 = create_row_with_values(&["A", "B", "C"]);
+        let tsid1 = extract_tsid(schema1, row1, &name_to_column_id1, table_id);
+
+        // Row 2: a=A, b=null, c=C (null in middle)
+        let schema2 = create_multi_label_schema(&["a", "b", "c"]);
+        let name_to_column_id2 = create_name_to_column_id(&["a", "b", "c"]);
+        let row2 = create_row_with_nulls(&[Some("A"), None, Some("C")]);
+        let tsid2 = extract_tsid(schema2, row2, &name_to_column_id2, table_id);
+
+        // Should be different because b is null in row2 but B in row1
+        // Actually wait, let me reconsider - if b is null, it should be ignored
+        // So row2 should be equivalent to a=A, c=C
+        // But row1 is a=A, b=B, c=C, so they should be different
+        assert_ne!(
+            tsid1, tsid2,
+            "TSID should be different when a non-null value becomes null"
+        );
+
+        // Row 3: a=A, c=C (no b at all, equivalent to row2)
+        let schema3 = create_multi_label_schema(&["a", "c"]);
+        let name_to_column_id3 = create_name_to_column_id(&["a", "c"]);
+        let row3 = create_row_with_values(&["A", "C"]);
+        let tsid3 = extract_tsid(schema3, row3, &name_to_column_id3, table_id);
+
+        // Row2 (a=A, b=null, c=C) should be same as row3 (a=A, c=C)
+        assert_eq!(
+            tsid2, tsid3,
+            "TSID should be same when null label is ignored"
+        );
+    }
+
+    #[test]
+    fn test_tsid_all_null_labels() {
+        // Test with all labels being null
+        let table_id = 1025;
+
+        // Row with all nulls
+        let schema = create_multi_label_schema(&["a", "b", "c"]);
+        let name_to_column_id = create_name_to_column_id(&["a", "b", "c"]);
+        let row = create_row_with_nulls(&[None, None, None]);
+        let tsid = extract_tsid(schema.clone(), row, &name_to_column_id, table_id);
+
+        // Should still produce a TSID (based on label names only when all values are null)
+        // This tests that the slow path handles the case where all values are null
+        // The TSID will be based on the label name hash only
+        // Test that it's consistent - same schema with all nulls should produce same TSID
+        let row2 = create_row_with_nulls(&[None, None, None]);
+        let tsid2 = extract_tsid(schema, row2, &name_to_column_id, table_id);
+        assert_eq!(
+            tsid, tsid2,
+            "TSID should be consistent when all label values are null"
+        );
+    }
 }
