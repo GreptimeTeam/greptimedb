@@ -208,7 +208,10 @@ impl std::hash::Hash for ObjDescriptionFunction {
 
 impl ObjDescriptionFunction {
     fn new(signature: Signature, func_ctx: FunctionContext) -> Self {
-        Self { signature, func_ctx }
+        Self {
+            signature,
+            func_ctx,
+        }
     }
 
     fn signature_static() -> Signature {
@@ -293,9 +296,9 @@ impl datafusion_expr::async_udf::AsyncScalarUDFImpl for ObjDescriptionFunction {
 
         // Look up table by ID
         match catalog_manager.table_info_by_id(oid as TableId).await {
-            Ok(Some(table_info)) => {
-                Ok(ColumnarValue::Scalar(ScalarValue::Utf8(table_info.desc.clone())))
-            }
+            Ok(Some(table_info)) => Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
+                table_info.desc.clone(),
+            ))),
             _ => Ok(ColumnarValue::Scalar(ScalarValue::Utf8(None))),
         }
     }
@@ -324,7 +327,10 @@ impl std::hash::Hash for ColDescriptionFunction {
 
 impl ColDescriptionFunction {
     fn new(signature: Signature, func_ctx: FunctionContext) -> Self {
-        Self { signature, func_ctx }
+        Self {
+            signature,
+            func_ctx,
+        }
     }
 
     fn signature_static() -> Signature {
@@ -492,7 +498,10 @@ impl std::hash::Hash for PgDescribeObjectFunction {
 
 impl PgDescribeObjectFunction {
     fn new(signature: Signature, func_ctx: FunctionContext) -> Self {
-        Self { signature, func_ctx }
+        Self {
+            signature,
+            func_ctx,
+        }
     }
 
     fn signature_static() -> Signature {
@@ -575,7 +584,10 @@ impl datafusion_expr::async_udf::AsyncScalarUDFImpl for PgDescribeObjectFunction
         let catalog_manager = handler.catalog_manager();
 
         // Look up table by ID
-        match catalog_manager.table_info_by_id(object_oid as TableId).await {
+        match catalog_manager
+            .table_info_by_id(object_oid as TableId)
+            .await
+        {
             Ok(Some(table_info)) => {
                 // If sub_object_id > 0, it refers to a column
                 if sub_object_id > 0 {
@@ -813,8 +825,7 @@ mod tests {
     #[tokio::test]
     async fn test_pg_describe_object_async() {
         let ctx = FunctionContext::default();
-        let func =
-            PgDescribeObjectFunction::new(PgDescribeObjectFunction::signature_static(), ctx);
+        let func = PgDescribeObjectFunction::new(PgDescribeObjectFunction::signature_static(), ctx);
 
         // Test with non-pg_class catalog OID - should return NULL
         let args = create_test_args(vec![
