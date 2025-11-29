@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use common_base::secrets::{ExposeSecret, SecretString};
+use common_error::ext::BoxedError;
 
 use crate::common::{
     PrefixedAzblobConnection, PrefixedGcsConnection, PrefixedOssConnection, PrefixedS3Connection,
@@ -105,8 +106,9 @@ pub struct S3Backend {
 }
 
 impl S3Backend {
-    pub fn new(config: PrefixedS3Connection) -> Self {
-        Self { config }
+    pub fn new(config: PrefixedS3Connection) -> Result<Self, BoxedError> {
+        config.validate()?;
+        Ok(Self { config })
     }
 }
 
@@ -165,8 +167,9 @@ pub struct OssBackend {
 }
 
 impl OssBackend {
-    pub fn new(config: PrefixedOssConnection) -> Self {
-        Self { config }
+    pub fn new(config: PrefixedOssConnection) -> Result<Self, BoxedError> {
+        config.validate()?;
+        Ok(Self { config })
     }
 }
 
@@ -176,7 +179,7 @@ impl StorageExport for OssBackend {
         let bucket = &self.config.oss_bucket;
         let oss_path = format!("oss://{}/{}/{}/", bucket, catalog, schema);
 
-        let mut connection_options = vec![
+        let connection_options = [
             format!(
                 "ACCESS_KEY_ID='{}'",
                 expose_optional_secret(&self.config.oss_access_key_id)
@@ -186,10 +189,6 @@ impl StorageExport for OssBackend {
                 expose_optional_secret(&self.config.oss_access_key_secret)
             ),
         ];
-
-        if !self.config.oss_endpoint.is_empty() {
-            connection_options.push(format!("ENDPOINT='{}'", self.config.oss_endpoint));
-        }
 
         let connection_str = format!(" CONNECTION ({})", connection_options.join(", "));
         (oss_path, connection_str)
@@ -218,8 +217,9 @@ pub struct GcsBackend {
 }
 
 impl GcsBackend {
-    pub fn new(config: PrefixedGcsConnection) -> Self {
-        Self { config }
+    pub fn new(config: PrefixedGcsConnection) -> Result<Self, BoxedError> {
+        config.validate()?;
+        Ok(Self { config })
     }
 }
 
@@ -280,8 +280,9 @@ pub struct AzblobBackend {
 }
 
 impl AzblobBackend {
-    pub fn new(config: PrefixedAzblobConnection) -> Self {
-        Self { config }
+    pub fn new(config: PrefixedAzblobConnection) -> Result<Self, BoxedError> {
+        config.validate()?;
+        Ok(Self { config })
     }
 }
 
@@ -303,10 +304,6 @@ impl StorageExport for AzblobBackend {
                 expose_optional_secret(&self.config.azblob_account_key)
             ),
         ];
-
-        if !self.config.azblob_endpoint.is_empty() {
-            connection_options.push(format!("ENDPOINT='{}'", self.config.azblob_endpoint));
-        }
 
         if let Some(sas_token) = &self.config.azblob_sas_token {
             connection_options.push(format!("SAS_TOKEN='{}'", sas_token));
