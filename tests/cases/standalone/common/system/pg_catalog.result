@@ -1006,3 +1006,27 @@ SELECT pg_my_temp_schema();
 | 0                   |
 +---------------------+
 
+-- Issue 7313
+-- SQLNESS REPLACE (\d+\s*) OID
+-- SQLNESS PROTOCOL POSTGRES
+SELECT
+	oid
+	,nspname
+	,nspname = ANY (current_schemas(true)) AS is_on_search_path
+	
+	    ,obj_description(oid, 'pg_namespace') AS comment
+	
+FROM pg_namespace; SELECT
+oid
+,nspname
+FROM pg_namespace
+WHERE oid = pg_my_temp_schema();
+
++-------+--------------------+-------------------+---------+
+| oid   | nspname            | is_on_search_path | comment |
++-------+--------------------+-------------------+---------+
+| OID| greptime_private   | t                 |         |
+| OID| information_schema | t                 |         |
+| OID| public             | t                 |         |
++-------+--------------------+-------------------+---------+
+

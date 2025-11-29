@@ -184,3 +184,20 @@ SELECT shobj_description(1, 'pg_database') IS NULL AS is_null;
 -- pg_my_temp_schema returns 0 (no temp schema support)
 -- SQLNESS PROTOCOL POSTGRES
 SELECT pg_my_temp_schema();
+
+-- Issue 7313
+-- SQLNESS PROTOCOL POSTGRES
+-- SQLNESS REPLACE (\d+\s*) OID
+SELECT
+	oid
+	,nspname
+	,nspname = ANY (current_schemas(true)) AS is_on_search_path
+	
+	    ,obj_description(oid, 'pg_namespace') AS comment
+	
+FROM pg_namespace; SELECT
+oid
+,nspname
+FROM pg_namespace
+WHERE oid = pg_my_temp_schema();
+
