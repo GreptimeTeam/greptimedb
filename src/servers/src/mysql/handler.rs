@@ -525,21 +525,18 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         query: &'a str,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        let is_show_warnings = {
-            let q = query.trim().to_uppercase();
-            q.starts_with("SHOW WARNINGS")
-        };
-        if !is_show_warnings {
-            self.session.clear_warnings();
-        }
-
         let query_ctx = self.session.new_query_context();
         let db = query_ctx.get_db_string();
         let _timer = crate::metrics::METRIC_MYSQL_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_MYSQL_TEXTQUERY, db.as_str()])
             .start_timer();
 
+        // Clear warnings for non SHOW WARNINGS queries
         let query_upcase = query.to_uppercase();
+        if (!query_upcase.starts_with("SHOW WARNINGS")) {
+            self.session.clear_warnings();
+        }
+
         if query_upcase.starts_with("PREPARE ") {
             match ParserContext::parse_mysql_prepare_stmt(query, query_ctx.sql_dialect()) {
                 Ok((stmt_name, stmt)) => {
@@ -584,6 +581,10 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                             return Ok(());
                         }
                     };
+                    if let Some(warning) = query_ctx.warning() {
+                        self.session.add_warning(warning);
+                    }
+
                     writer::write_output(writer, query_ctx, outputs).await?;
                     return Ok(());
                 }

@@ -183,6 +183,10 @@ impl Session {
     }
 
     pub fn clear_warnings(&self) {
-        self.mutable_inner.write().unwrap().warnings.clear();
+        let mut inner = self.mutable_inner.write().unwrap();
+        if inner.warnings.is_empty() {
+            return;
+        }
+        inner.warnings.clear();
     }
 }
