@@ -13,14 +13,14 @@ INSERT INTO test_ttl(ts, val, host) VALUES
 
 Affected Rows: 3
 
-SELECT val, host FROM test_ttl;
+SELECT val, host FROM test_ttl ORDER BY host;
 
 +-----+-------+
 | val | host  |
 +-----+-------+
+| 1.0 | host1 |
 | 2.0 | host2 |
 | 3.0 | host3 |
-| 1.0 | host1 |
 +-----+-------+
 
 -- SQLNESS SLEEP 2s
@@ -74,26 +74,26 @@ ADMIN compact_table('phy');
 +----------------------------+
 
 --- should not be expired --
-SELECT val, host FROM test_ttl;
+SELECT val, host FROM test_ttl ORDER BY host;
 
 +-----+-------+
 | val | host  |
 +-----+-------+
+| 1.0 | host1 |
 | 2.0 | host2 |
 | 3.0 | host3 |
-| 1.0 | host1 |
 +-----+-------+
 
 -- restart the db, ensure everything is ok
 -- SQLNESS ARG restart=true
-SELECT val, host FROM test_ttl;
+SELECT val, host FROM test_ttl ORDER BY host;
 
 +-----+-------+
 | val | host  |
 +-----+-------+
+| 1.0 | host1 |
 | 2.0 | host2 |
 | 3.0 | host3 |
-| 1.0 | host1 |
 +-----+-------+
 
 DROP TABLE test_ttl;
