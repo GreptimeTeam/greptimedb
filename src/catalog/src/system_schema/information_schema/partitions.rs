@@ -211,6 +211,7 @@ struct InformationSchemaPartitionsBuilder {
     partition_names: StringVectorBuilder,
     partition_ordinal_positions: Int64VectorBuilder,
     partition_expressions: StringVectorBuilder,
+    partition_descriptions: StringVectorBuilder,
     create_times: TimestampSecondVectorBuilder,
     partition_ids: UInt64VectorBuilder,
 }
@@ -231,6 +232,7 @@ impl InformationSchemaPartitionsBuilder {
             partition_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             partition_ordinal_positions: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
             partition_expressions: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            partition_descriptions: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             create_times: TimestampSecondVectorBuilder::with_capacity(INIT_CAPACITY),
             partition_ids: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
         }
@@ -330,6 +332,8 @@ impl InformationSchemaPartitionsBuilder {
                 .push(Some((index + 1) as i64));
             let expression = partition.partition_expr.as_ref().map(|e| e.to_string());
             self.partition_expressions.push(expression.as_deref());
+            // Use partition_name as partition_description for MySQL/StarRocks compatibility
+            self.partition_descriptions.push(Some(&partition_name));
             self.create_times.push(Some(TimestampSecond::from(
                 table_info.meta.created_on.timestamp(),
             )));
@@ -369,7 +373,7 @@ impl InformationSchemaPartitionsBuilder {
             null_string_vector.clone(),
             Arc::new(self.partition_expressions.finish()),
             null_string_vector.clone(),
-            null_string_vector.clone(),
+            Arc::new(self.partition_descriptions.finish()),
             // TODO(dennis): rows and index statistics info
             null_i64_vector.clone(),
             null_i64_vector.clone(),
