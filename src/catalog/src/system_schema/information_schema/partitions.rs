@@ -321,6 +321,21 @@ impl InformationSchemaPartitionsBuilder {
             return;
         }
 
+        // Get partition column names (shared by all partitions)
+        // In MySQL, PARTITION_EXPRESSION is the partitioning function expression (e.g., column name)
+        let partition_columns: String = table_info
+            .meta
+            .partition_column_names()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let partition_expr_str = if partition_columns.is_empty() {
+            None
+        } else {
+            Some(partition_columns)
+        };
+
         for (index, partition) in partitions.iter().enumerate() {
             let partition_name = format!("p{index}");
 
@@ -330,10 +345,12 @@ impl InformationSchemaPartitionsBuilder {
             self.partition_names.push(Some(&partition_name));
             self.partition_ordinal_positions
                 .push(Some((index + 1) as i64));
-            let expression = partition.partition_expr.as_ref().map(|e| e.to_string());
-            self.partition_expressions.push(expression.as_deref());
-            // Use partition boundary/expression as partition_description for MySQL/StarRocks compatibility
-            self.partition_descriptions.push(expression.as_deref());
+            // PARTITION_EXPRESSION: partition column names (same for all partitions)
+            self.partition_expressions
+                .push(partition_expr_str.as_deref());
+            // PARTITION_DESCRIPTION: partition boundary expression (different for each partition)
+            let description = partition.partition_expr.as_ref().map(|e| e.to_string());
+            self.partition_descriptions.push(description.as_deref());
             self.create_times.push(Some(TimestampSecond::from(
                 table_info.meta.created_on.timestamp(),
             )));

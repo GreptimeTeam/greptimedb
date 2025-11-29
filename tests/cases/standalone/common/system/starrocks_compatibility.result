@@ -117,8 +117,11 @@ WHERE TABLE_SCHEMA = 'public' AND TABLE_NAME = 'test_partitions'
   AND (PARTITION_METHOD = 'RANGE' or PARTITION_METHOD = 'RANGE COLUMNS')
   AND PARTITION_EXPRESSION IS NOT NULL;
 
-++
-++
++----------------------+
+| partition_expression |
++----------------------+
+| host                 |
++----------------------+
 
 -- Get partitions with modification time (uses IF() function for NULL handling)
 -- StarRocks uses this for cache invalidation
@@ -163,7 +166,7 @@ WHERE TABLE_SCHEMA = 'public' AND TABLE_NAME = 'test_partitions';
 +--------------+-----------------+----------------+------------------+----------------------+-----------------------+-----------------------+
 | table_schema | table_name      | partition_name | partition_method | partition_expression | partition_description | greptime_partition_id |
 +--------------+-----------------+----------------+------------------+----------------------+-----------------------+-----------------------+
-| public       | test_partitions | p0             | RANGE            |                      |                       | REGION_ID         |
+| public       | test_partitions | p0             | RANGE            | host                 |                       | REGION_ID         |
 +--------------+-----------------+----------------+------------------+----------------------+-----------------------+-----------------------+
 
 -- ============================================
