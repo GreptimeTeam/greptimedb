@@ -96,9 +96,9 @@ affected_rows: 0
 -- SQLNESS PROTOCOL MYSQL
 SHOW TABLES;
 
-+---------+
-| Tables  |
-+---------+
-| numbers |
-+---------+
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
++------------------+
 

@@ -73,7 +73,6 @@ use crate::planner::DfLogicalPlanner;
 
 const SCHEMAS_COLUMN: &str = "Database";
 const OPTIONS_COLUMN: &str = "Options";
-const TABLES_COLUMN: &str = "Tables";
 const VIEWS_COLUMN: &str = "Views";
 const FLOWS_COLUMN: &str = "Flows";
 const FIELD_COLUMN: &str = "Field";
@@ -540,15 +539,15 @@ pub async fn show_tables(
         query_ctx.current_schema()
     };
 
-    // (dennis): MySQL rename `table_name` to `Tables_in_{schema}`, but we use `Tables` instead.
-    // I don't want to modify this currently, our dashboard may depend on it.
+    // MySQL renames `table_name` to `Tables_in_{schema}` for protocol compatibility
+    let tables_column = format!("Tables_in_{}", schema_name);
     let projects = if stmt.full {
         vec![
-            (tables::TABLE_NAME, TABLES_COLUMN),
+            (tables::TABLE_NAME, tables_column.as_str()),
             (tables::TABLE_TYPE, TABLE_TYPE_COLUMN),
         ]
     } else {
-        vec![(tables::TABLE_NAME, TABLES_COLUMN)]
+        vec![(tables::TABLE_NAME, tables_column.as_str())]
     };
     let filters = vec![
         col(tables::TABLE_SCHEMA).eq(lit(schema_name.clone())),

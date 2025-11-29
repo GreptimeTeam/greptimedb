@@ -991,11 +991,11 @@ ADMIN FLUSH_FLOW('temp_monitoring');
 -- This table should not exist yet
 SHOW TABLES LIKE 'temp_alerts';
 
-+-------------+
-| Tables      |
-+-------------+
-| temp_alerts |
-+-------------+
++------------------+
+| Tables_in_public |
++------------------+
+| temp_alerts      |
++------------------+
 
 INSERT INTO
     temp_sensor_data
@@ -1015,11 +1015,11 @@ ADMIN FLUSH_FLOW('temp_monitoring');
 
 SHOW TABLES LIKE 'temp_alerts';
 
-+-------------+
-| Tables      |
-+-------------+
-| temp_alerts |
-+-------------+
++------------------+
+| Tables_in_public |
++------------------+
+| temp_alerts      |
++------------------+
 
 SELECT
     sensor_id,
