@@ -478,11 +478,11 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
     check_unordered_output_stream(output, expected).await;
 
     let expected = "\
-+---------+
-| Tables  |
-+---------+
-| numbers |
-+---------+\
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
++------------------+\
 ";
     let output = execute_sql(&instance, "show tables").await;
     check_unordered_output_stream(output, expected).await;
@@ -494,23 +494,23 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(&instance, "show tables").await;
     let expected = "\
-+---------+
-| Tables  |
-+---------+
-| demo    |
-| numbers |
-+---------+\
++------------------+
+| Tables_in_public |
++------------------+
+| demo             |
+| numbers          |
++------------------+\
 ";
     check_unordered_output_stream(output, expected).await;
 
     let output = execute_sql(&instance, "SHOW FULL TABLES WHERE Table_type != 'VIEW'").await;
     let expected = "\
-+---------+-----------------+
-| Tables  | Table_type      |
-+---------+-----------------+
-| demo    | BASE TABLE      |
-| numbers | LOCAL TEMPORARY |
-+---------+-----------------+\
++------------------+-----------------+
+| Tables_in_public | Table_type      |
++------------------+-----------------+
+| demo             | BASE TABLE      |
+| numbers          | LOCAL TEMPORARY |
++------------------+-----------------+\
 ";
     check_unordered_output_stream(output, expected).await;
 
@@ -520,22 +520,22 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
     )
     .await;
     let expected = "\
-+--------+------------+
-| Tables | Table_type |
-+--------+------------+
-| demo   | BASE TABLE |
-+--------+------------+\
++------------------+------------+
+| Tables_in_public | Table_type |
++------------------+------------+
+| demo             | BASE TABLE |
++------------------+------------+\
 ";
     check_unordered_output_stream(output, expected).await;
 
     // show tables like [string]
     let output = execute_sql(&instance, "show tables like 'de%'").await;
     let expected = "\
-+--------+
-| Tables |
-+--------+
-| demo   |
-+--------+\
++------------------+
+| Tables_in_public |
++------------------+
+| demo             |
++------------------+\
 ";
     check_unordered_output_stream(output, expected).await;
 }
@@ -1252,11 +1252,11 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
         .await
         .data;
     let expect = "\
-+------------+
-| Tables     |
-+------------+
-| test_table |
-+------------+";
++--------------+
+| Tables_in_db |
++--------------+
+| test_table   |
++--------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql_with(
@@ -1323,12 +1323,12 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
     assert!(matches!(output, OutputData::AffectedRows(0)));
 
     let expect = "\
-+------------+
-| Tables     |
-+------------+
-| demo       |
-| test_table |
-+------------+";
++--------------+
+| Tables_in_db |
++--------------+
+| demo         |
+| test_table   |
++--------------+";
     let output = execute_sql_with(&instance, "show tables", query_ctx)
         .await
         .data;
@@ -1516,11 +1516,11 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
         .await
         .data;
     let expected = "\
-+--------+
-| Tables |
-+--------+
-| tb1    |
-+--------+";
++---------------+
+| Tables_in_db1 |
++---------------+
+| tb1           |
++---------------+";
     check_output_stream(output, expected).await;
 
     let output = execute_sql_with(
