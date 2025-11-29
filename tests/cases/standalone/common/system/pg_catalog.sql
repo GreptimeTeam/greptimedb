@@ -167,39 +167,20 @@ drop table my_db.foo;
 -- SQLNESS PROTOCOL POSTGRES
 use public;
 
--- ======================================================
--- PostgreSQL description functions for connector compatibility
--- ======================================================
+-- PostgreSQL description functions - placeholder returning NULL for compatibility
 
--- Create a table with comment for testing
 -- SQLNESS PROTOCOL POSTGRES
-CREATE TABLE test_desc_table (
-  ts TIMESTAMP TIME INDEX,
-  val INT COMMENT 'Value column',
-  item_name STRING COMMENT 'Name of the item'
-) COMMENT = 'Test table for description functions';
+SELECT obj_description((SELECT oid FROM pg_class LIMIT 1), 'pg_class') IS NULL AS is_null;
 
--- Test obj_description with table OID
--- Note: We need to get the table_id first. In tests, we can use a subquery approach.
 -- SQLNESS PROTOCOL POSTGRES
--- SQLNESS REPLACE (\d+\s*) OID
-SELECT table_id, table_comment FROM information_schema.tables WHERE table_name = 'test_desc_table';
+SELECT obj_description((SELECT oid FROM pg_class LIMIT 1)) IS NULL AS is_null;
 
--- Test obj_description with non-existent OID (should return NULL)
 -- SQLNESS PROTOCOL POSTGRES
-SELECT obj_description(99999999, 'pg_class') IS NULL AS is_null;
+SELECT col_description((SELECT oid FROM pg_class LIMIT 1), 1) IS NULL AS is_null;
 
--- Test obj_description with non-pg_class catalog (should return NULL)
--- SQLNESS PROTOCOL POSTGRES
-SELECT obj_description(1234, 'pg_namespace') IS NULL AS is_null;
-
--- Test shobj_description (should always return NULL in GreptimeDB)
 -- SQLNESS PROTOCOL POSTGRES
 SELECT shobj_description(1, 'pg_database') IS NULL AS is_null;
 
+-- pg_my_temp_schema returns 0 (no temp schema support)
 -- SQLNESS PROTOCOL POSTGRES
-SELECT shobj_description(1, 'pg_authid') IS NULL AS is_null;
-
--- Clean up test table
--- SQLNESS PROTOCOL POSTGRES
-DROP TABLE test_desc_table;
+SELECT pg_my_temp_schema();
