@@ -7517,13 +7517,13 @@ dependencies = [
  "datafusion",
  "datatypes",
  "futures-util",
+ "fxhash",
  "humantime-serde",
  "itertools 0.14.0",
  "lazy_static",
  "mito-codec",
  "mito2",
  "moka",
- "mur3",
  "object-store",
  "prometheus",
  "serde",
@@ -7763,12 +7763,6 @@ name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
-
-[[package]]
-name = "mur3"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97af489e1e21b68de4c390ecca6703318bc1aa16e9733bcb62c089b73c6fbb1b"
 
 [[package]]
 name = "murmurhash32"

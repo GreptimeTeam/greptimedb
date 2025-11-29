@@ -13,11 +13,12 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashMap};
-use std::hash::Hash;
+use std::hash::Hasher;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
 use datatypes::value::ValueRef;
+use fxhash::FxHasher;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use smallvec::SmallVec;
 use snafu::ResultExt;
@@ -29,9 +30,6 @@ use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
 use store_api::storage::{ColumnId, TableId};
 
 use crate::error::{EncodePrimaryKeySnafu, Result};
-
-// A random number
-const TSID_HASH_SEED: u32 = 846793005;
 
 /// A row modifier modifies [`Rows`].
 ///
@@ -75,6 +73,7 @@ impl RowModifier {
         let num_output_column = num_column - num_primary_key_column + 1;
 
         let mut buffer = vec![];
+
         for mut iter in iter.iter_mut() {
             let (table_id, tsid) = Self::fill_internal_columns(table_id, &iter);
             let mut values = Vec::with_capacity(num_output_column);
@@ -147,47 +146,79 @@ impl RowModifier {
 
     /// Fills internal columns of a row with table name and a hash of tag values.
     pub fn fill_internal_columns(table_id: TableId, iter: &RowIter<'_>) -> (Value, Value) {
-        let mut hasher = TsidGenerator::default();
-        for (name, value) in iter.primary_keys_with_name() {
-            // The type is checked before. So only null is ignored.
-            if let Some(ValueData::StringValue(string)) = &value.value_data {
-                hasher.write_label(name, string);
+        let ts_id = if !iter.has_null() {
+            // No nulls in row -> no null labels in row, we can safely reuse the precomputed label name hash.
+            let mut ts_id_gen = TsidGenerator::new(iter.index.label_name_hash);
+            for (_, value) in iter.primary_keys_with_name() {
+                // The type is checked before. So only null is ignored.
+                if let Some(ValueData::StringValue(string)) = &value.value_data {
+                    ts_id_gen.write_str(string);
+                } else {
+                    unreachable!(
+                        "Should not contain null or non-string value: {:?}, table id: {}",
+                        value, table_id
+                    );
+                }
             }
-        }
-        let hash = hasher.finish();
+            ts_id_gen.finish()
+        } else {
+            // Slow path: row contains null, recompute label hash
+            let mut hasher = TsidGenerator::default();
+            // 1. Find out label names with non-null values and get the hash.
+            for (name, value) in iter.primary_keys_with_name() {
+                // The type is checked before. So only null is ignored.
+                if let Some(ValueData::StringValue(_)) = &value.value_data {
+                    hasher.write_str(name);
+                }
+            }
+            let label_name_hash = hasher.finish();
+
+            // 2. Use label name hash as seed and continue with label values.
+            let mut final_hasher = TsidGenerator::new(label_name_hash);
+            for (_, value) in iter.primary_keys_with_name() {
+                if let Some(ValueData::StringValue(value)) = &value.value_data {
+                    final_hasher.write_str(value);
+                }
+            }
+            final_hasher.finish()
+        };
 
         (
             ValueData::U32Value(table_id).into(),
-            ValueData::U64Value(hash).into(),
+            ValueData::U64Value(ts_id).into(),
         )
     }
 }
 
 /// Tsid generator.
 pub struct TsidGenerator {
-    hasher: mur3::Hasher128,
+    hasher: FxHasher,
 }
 
 impl Default for TsidGenerator {
     fn default() -> Self {
         Self {
-            hasher: mur3::Hasher128::with_seed(TSID_HASH_SEED),
+            hasher: FxHasher::default(),
         }
     }
 }
 
 impl TsidGenerator {
+    pub fn new(label_name_hash: u64) -> Self {
+        let mut hasher = FxHasher::default();
+        hasher.write_u64(label_name_hash);
+        Self { hasher }
+    }
+
     /// Writes a label pair to the generator.
-    pub fn write_label(&mut self, name: &str, value: &str) {
-        name.hash(&mut self.hasher);
-        value.hash(&mut self.hasher);
+    pub fn write_str(&mut self, value: &str) {
+        self.hasher.write(value.as_bytes());
+        self.hasher.write_u8(0xff);
     }
 
     /// Generates a new TSID.
     pub fn finish(&mut self) -> u64 {
-        // TSID is 64 bits, simply truncate the 128 bits hash
-        let (hash, _) = self.hasher.finish128();
-        hash
+        self.hasher.finish()
     }
 }
 
@@ -202,6 +233,8 @@ struct ValueIndex {
 struct IterIndex {
     indices: Vec<ValueIndex>,
     num_primary_key_column: usize,
+    /// Precomputed hash for label names.
+    label_name_hash: u64,
 }
 
 impl IterIndex {
@@ -252,15 +285,22 @@ impl IterIndex {
             }
         }
         let num_primary_key_column = primary_key_indices.len() + reserved_indices.len();
-        let indices = reserved_indices
-            .into_iter()
-            .chain(primary_key_indices.values().cloned())
-            .chain(ts_index)
-            .chain(field_indices)
-            .collect();
+        let mut indices = Vec::with_capacity(num_primary_key_column + 2);
+        indices.extend(reserved_indices.into_iter());
+        let mut label_name_hasher = TsidGenerator::default();
+        for (pk_name, pk_index) in primary_key_indices {
+            // primary_key_indices already sorted.
+            label_name_hasher.write_str(pk_name);
+            indices.push(pk_index);
+        }
+        let label_name_hash = label_name_hasher.finish();
+
+        indices.extend(ts_index);
+        indices.extend(field_indices);
         IterIndex {
             indices,
             num_primary_key_column,
+            label_name_hash,
         }
     }
 }
@@ -312,6 +352,11 @@ impl RowIter<'_> {
                     &self.row.values[idx.index],
                 )
             })
+    }
+
+    /// Returns true if any value in current row is null.
+    fn has_null(&self) -> bool {
+        self.row.values.iter().any(|f| f.value_data.is_none())
     }
 
     /// Returns the primary keys.
