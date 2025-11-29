@@ -523,12 +523,10 @@ impl StatementExecutor {
                 if query_ctx.channel() == Channel::Postgres {
                     set_search_path(set_var.value, query_ctx)?
                 } else {
-                    warn!(
-                        "Unsupported set variable {} for channel {:?}",
-                        var_name,
-                        query_ctx.channel()
-                    );
-                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
+                    return NotSupportedSnafu {
+                        feat: format!("Unsupported set variable {}", var_name),
+                    }
+                    .fail();
                 }
             }
             _ => {
