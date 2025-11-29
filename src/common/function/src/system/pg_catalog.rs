@@ -470,10 +470,11 @@ mod tests {
             1,
         );
         let result = func.invoke_with_args(args).unwrap();
-        if let ColumnarValue::Scalar(ScalarValue::Utf8(v)) = result {
-            assert!(v.is_none());
+        if let ColumnarValue::Array(arr) = result {
+            assert_eq!(1, arr.len());
+            assert!(arr.is_null(0));
         } else {
-            panic!("Expected Scalar Utf8 result");
+            panic!("Expected Array result");
         }
     }
 }
