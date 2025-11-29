@@ -289,6 +289,8 @@ impl ShobjDescriptionFunction {
             signature: Signature::one_of(
                 vec![
                     TypeSignature::Exact(vec![DataType::Int64, DataType::Utf8]),
+                    TypeSignature::Exact(vec![DataType::UInt64, DataType::Utf8]),
+                    TypeSignature::Exact(vec![DataType::Int32, DataType::Utf8]),
                     TypeSignature::Exact(vec![DataType::UInt32, DataType::Utf8]),
                 ],
                 Volatility::Stable,
