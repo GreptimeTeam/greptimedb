@@ -312,9 +312,14 @@ impl Function for ShobjDescriptionFunction {
 
     fn invoke_with_args(
         &self,
-        _args: ScalarFunctionArgs,
+        args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        Ok(ColumnarValue::Scalar(ScalarValue::Utf8(None)))
+        let num_rows = args.number_rows;
+        let mut builder = StringBuilder::with_capacity(num_rows, 0);
+        for _ in 0..num_rows {
+            builder.append_null();
+        }
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 

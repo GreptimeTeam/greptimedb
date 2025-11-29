@@ -106,7 +106,7 @@ ORDER BY PARTITION_DESCRIPTION;
 +------+
 | name |
 +------+
-| p0   |
+|      |
 +------+
 
 -- Get partition columns (StarRocks uses this to identify partition key)
@@ -163,7 +163,7 @@ WHERE TABLE_SCHEMA = 'public' AND TABLE_NAME = 'test_partitions';
 +--------------+-----------------+----------------+------------------+----------------------+-----------------------+-----------------------+
 | table_schema | table_name      | partition_name | partition_method | partition_expression | partition_description | greptime_partition_id |
 +--------------+-----------------+----------------+------------------+----------------------+-----------------------+-----------------------+
-| public       | test_partitions | p0             | RANGE            |                      | p0                    | REGION_ID         |
+| public       | test_partitions | p0             | RANGE            |                      |                       | REGION_ID         |
 +--------------+-----------------+----------------+------------------+----------------------+-----------------------+-----------------------+
 
 -- ============================================

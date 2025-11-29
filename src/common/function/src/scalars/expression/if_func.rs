@@ -15,6 +15,7 @@
 use std::fmt;
 use std::fmt::Display;
 
+use arrow::array::ArrowNativeTypeOp;
 use datafusion::arrow::array::{Array, ArrayRef, AsArray, BooleanArray};
 use datafusion::arrow::compute::kernels::zip::zip;
 use datafusion::arrow::datatypes::DataType;
@@ -149,9 +150,13 @@ fn scalar_to_bool(scalar: &ScalarValue) -> datafusion_common::Result<bool> {
         ScalarValue::UInt16(Some(v)) => Ok(*v != 0),
         ScalarValue::UInt32(Some(v)) => Ok(*v != 0),
         ScalarValue::UInt64(Some(v)) => Ok(*v != 0),
-        ScalarValue::Float16(Some(v)) => Ok(v.to_f32() != 0.0),
-        ScalarValue::Float32(Some(v)) => Ok(*v != 0.0),
-        ScalarValue::Float64(Some(v)) => Ok(*v != 0.0),
+        // For floats, treat NaN as true (MySQL behavior), zero (including -0.0) as false, all else as true
+        ScalarValue::Float16(Some(v)) => {
+            let f = v.to_f32();
+            Ok(f.is_nan() || !f.is_zero())
+        }
+        ScalarValue::Float32(Some(v)) => Ok(v.is_nan() || !v.is_zero()),
+        ScalarValue::Float64(Some(v)) => Ok(v.is_nan() || !v.is_zero()),
         // For other types, if not null, treat as true
         _ => Ok(true),
     }
@@ -221,16 +226,32 @@ fn array_to_bool(array: ArrayRef) -> datafusion_common::Result<BooleanArray> {
                 result.push(!array.is_null(i) && typed_array.value(i) != 0);
             }
         }
+        DataType::Float16 => {
+            let typed_array = array.as_primitive::<arrow::datatypes::Float16Type>();
+            for i in 0..len {
+                result.push(
+                    !array.is_null(i)
+                        && (typed_array.value(i).is_nan()
+                            || !typed_array.value(i).to_f32().is_zero()),
+                );
+            }
+        }
         DataType::Float32 => {
             let typed_array = array.as_primitive::<arrow::datatypes::Float32Type>();
             for i in 0..len {
-                result.push(!array.is_null(i) && typed_array.value(i) != 0.0);
+                result.push(
+                    !array.is_null(i)
+                        && (typed_array.value(i).is_nan() || !typed_array.value(i).is_zero()),
+                );
             }
         }
         DataType::Float64 => {
             let typed_array = array.as_primitive::<arrow::datatypes::Float64Type>();
             for i in 0..len {
-                result.push(!array.is_null(i) && typed_array.value(i) != 0.0);
+                result.push(
+                    !array.is_null(i)
+                        && (typed_array.value(i).is_nan() || !typed_array.value(i).is_zero()),
+                );
             }
         }
         // For other types, treat non-null as true

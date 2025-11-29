@@ -527,7 +527,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     ) -> Result<()> {
         let is_show_warnings = {
             let q = query.trim().to_uppercase();
-            q.starts_with("SHOW WARNINGS") || q.contains("SHOW WARNINGS")
+            q.starts_with("SHOW WARNINGS")
         };
         if !is_show_warnings {
             self.session.clear_warnings();

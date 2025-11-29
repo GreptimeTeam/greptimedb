@@ -332,8 +332,8 @@ impl InformationSchemaPartitionsBuilder {
                 .push(Some((index + 1) as i64));
             let expression = partition.partition_expr.as_ref().map(|e| e.to_string());
             self.partition_expressions.push(expression.as_deref());
-            // Use partition_name as partition_description for MySQL/StarRocks compatibility
-            self.partition_descriptions.push(Some(&partition_name));
+            // Use partition boundary/expression as partition_description for MySQL/StarRocks compatibility
+            self.partition_descriptions.push(expression.as_deref());
             self.create_times.push(Some(TimestampSecond::from(
                 table_info.meta.created_on.timestamp(),
             )));

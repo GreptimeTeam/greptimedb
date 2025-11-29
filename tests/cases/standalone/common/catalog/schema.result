@@ -112,7 +112,11 @@ SHOW TABLES FROM public;
 
 SHOW TABLES FROM public WHERE Tables = 'numbers';
 
-Error: 3001(EngineExecuteQuery), No field named "Tables". Valid fields are "?table?"."Tables_in_public".
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
++------------------+
 
 DROP SCHEMA test_public_schema;
 

@@ -1007,8 +1007,8 @@ SELECT pg_my_temp_schema();
 +---------------------+
 
 -- Issue 7313
--- SQLNESS REPLACE (\d+\s*) OID
 -- SQLNESS PROTOCOL POSTGRES
+-- SQLNESS REPLACE (\d+\s*) OID
 SELECT
 	oid
 	,nspname
