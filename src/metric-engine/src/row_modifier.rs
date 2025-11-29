@@ -146,8 +146,8 @@ impl RowModifier {
 
     /// Fills internal columns of a row with table name and a hash of tag values.
     pub fn fill_internal_columns(table_id: TableId, iter: &RowIter<'_>) -> (Value, Value) {
-        let ts_id = if !iter.has_null() {
-            // No nulls in row -> no null labels in row, we can safely reuse the precomputed label name hash.
+        let ts_id = if !iter.has_null_labels() {
+            // No null labels in row, we can safely reuse the precomputed label name hash.
             let mut ts_id_gen = TsidGenerator::new(iter.index.label_name_hash);
             for (_, value) in iter.primary_keys_with_name() {
                 // The type is checked before. So only null is ignored.
@@ -354,9 +354,11 @@ impl RowIter<'_> {
             })
     }
 
-    /// Returns true if any value in current row is null.
-    fn has_null(&self) -> bool {
-        self.row.values.iter().any(|f| f.value_data.is_none())
+    /// Returns true if any label in current row is null.
+    fn has_null_labels(&self) -> bool {
+        self.index.indices[..self.index.num_primary_key_column]
+            .iter()
+            .any(|idx| self.row.values[idx.index].value_data.is_none())
     }
 
     /// Returns the primary keys.
@@ -444,9 +446,9 @@ mod tests {
         let result = encoder.modify_rows_sparse(rows_iter, table_id).unwrap();
         assert_eq!(result.rows[0].values.len(), 1);
         let encoded_primary_key = vec![
-            128, 0, 0, 4, 1, 0, 0, 4, 1, 128, 0, 0, 3, 1, 131, 9, 166, 190, 173, 37, 39, 240, 0, 0,
-            0, 2, 1, 1, 49, 50, 55, 46, 48, 46, 48, 46, 9, 49, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1,
-            1, 1, 103, 114, 101, 112, 116, 105, 109, 101, 9, 100, 98, 0, 0, 0, 0, 0, 0, 2,
+            128, 0, 0, 4, 1, 0, 0, 4, 1, 128, 0, 0, 3, 1, 37, 196, 242, 181, 117, 224, 7, 137, 0,
+            0, 0, 2, 1, 1, 49, 50, 55, 46, 48, 46, 48, 46, 9, 49, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+            1, 1, 1, 103, 114, 101, 112, 116, 105, 109, 101, 9, 100, 98, 0, 0, 0, 0, 0, 0, 2,
         ];
         assert_eq!(
             result.rows[0].values[0],
@@ -522,7 +524,7 @@ mod tests {
         assert_eq!(result.rows[0].values[2], ValueData::U32Value(1025).into());
         assert_eq!(
             result.rows[0].values[3],
-            ValueData::U64Value(9442261431637846000).into()
+            ValueData::U64Value(2721566936019240841).into()
         );
         assert_eq!(result.schema, expected_dense_schema());
     }
@@ -541,7 +543,7 @@ mod tests {
         let row_iter = rows_iter.iter_mut().next().unwrap();
         let (encoded_table_id, tsid) = RowModifier::fill_internal_columns(table_id, &row_iter);
         assert_eq!(encoded_table_id, ValueData::U32Value(1025).into());
-        assert_eq!(tsid, ValueData::U64Value(9442261431637846000).into());
+        assert_eq!(tsid, ValueData::U64Value(2721566936019240841).into());
 
         // Change the column order
         let schema = vec![
@@ -569,6 +571,6 @@ mod tests {
         let row_iter = rows_iter.iter_mut().next().unwrap();
         let (encoded_table_id, tsid) = RowModifier::fill_internal_columns(table_id, &row_iter);
         assert_eq!(encoded_table_id, ValueData::U32Value(1025).into());
-        assert_eq!(tsid, ValueData::U64Value(9442261431637846000).into());
+        assert_eq!(tsid, ValueData::U64Value(2721566936019240841).into());
     }
 }
