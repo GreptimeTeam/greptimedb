@@ -46,7 +46,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
 use common_query::Output;
-use common_telemetry::{debug, tracing};
+use common_telemetry::{debug, tracing, warn};
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use datafusion_expr::LogicalPlan;
@@ -80,9 +80,9 @@ use self::set::{
     set_bytea_output, set_datestyle, set_search_path, set_timezone, validate_client_encoding,
 };
 use crate::error::{
-    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    PlanStatementSnafu, Result, SchemaNotFoundSnafu, SqlCommonSnafu, TableMetadataManagerSnafu,
-    TableNotFoundSnafu, UnexpectedSnafu, UpgradeCatalogManagerRefSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, PlanStatementSnafu,
+    Result, SchemaNotFoundSnafu, SqlCommonSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnexpectedSnafu, UpgradeCatalogManagerRefSnafu,
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
@@ -487,52 +487,49 @@ impl StatementExecutor {
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
             "@@SESSION.MAX_EXECUTION_TIME" | "MAX_EXECUTION_TIME" => match query_ctx.channel() {
                 Channel::Mysql => set_query_timeout(set_var.value, query_ctx)?,
-                Channel::Postgres => {
-                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name))
-                }
                 _ => {
-                    return NotSupportedSnafu {
-                        feat: format!("Unsupported set variable {}", var_name),
-                    }
-                    .fail();
+                    warn!(
+                        "Unsupported set variable {} for channel {:?}",
+                        var_name,
+                        query_ctx.channel()
+                    );
+                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
                 }
             },
             "STATEMENT_TIMEOUT" => {
                 if query_ctx.channel() == Channel::Postgres {
                     set_query_timeout(set_var.value, query_ctx)?
                 } else {
-                    return NotSupportedSnafu {
-                        feat: format!("Unsupported set variable {}", var_name),
-                    }
-                    .fail();
+                    warn!(
+                        "Unsupported set variable {} for channel {:?}",
+                        var_name,
+                        query_ctx.channel()
+                    );
+                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
                 }
             }
             "SEARCH_PATH" => {
                 if query_ctx.channel() == Channel::Postgres {
                     set_search_path(set_var.value, query_ctx)?
                 } else {
-                    return NotSupportedSnafu {
-                        feat: format!("Unsupported set variable {}", var_name),
-                    }
-                    .fail();
+                    warn!(
+                        "Unsupported set variable {} for channel {:?}",
+                        var_name,
+                        query_ctx.channel()
+                    );
+                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
                 }
             }
             _ => {
-                // for postgres, we give unknown SET statements a warning with
-                //  success, this is prevent the SET call becoming a blocker
-                //  of connection establishment
-                //
-                if query_ctx.channel() == Channel::Postgres {
-                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
-                } else if query_ctx.channel() == Channel::Mysql && var_name.starts_with("@@") {
-                    // Just ignore `SET @@` commands for MySQL
-                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
-                } else {
-                    return NotSupportedSnafu {
-                        feat: format!("Unsupported set variable {}", var_name),
-                    }
-                    .fail();
-                }
+                // For unknown SET statements, we give a warning with success.
+                // This prevents the SET call from becoming a blocker of
+                // connection establishment.
+                warn!(
+                    "Unsupported set variable {} for channel {:?}",
+                    var_name,
+                    query_ctx.channel()
+                );
+                query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
             }
         }
         Ok(Output::new_with_affected_rows(0))

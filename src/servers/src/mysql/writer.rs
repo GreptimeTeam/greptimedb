@@ -131,7 +131,8 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Self::write_query_result(query_result, self.writer, self.query_context).await?;
                 }
                 OutputData::AffectedRows(rows) => {
-                    let next_writer = Self::write_affected_rows(self.writer, rows).await?;
+                    let next_writer =
+                        Self::write_affected_rows(self.writer, rows, &self.query_context).await?;
                     return Ok(Some(MysqlResultWriter::new(
                         next_writer,
                         self.query_context,
@@ -152,10 +153,17 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     async fn write_affected_rows(
         w: QueryResultWriter<'a, W>,
         rows: usize,
+        query_context: &QueryContextRef,
     ) -> Result<QueryResultWriter<'a, W>> {
+        let warnings = if query_context.warning().is_some() {
+            1
+        } else {
+            0
+        };
         let next_writer = w
             .complete_one(OkResponse {
                 affected_rows: rows as u64,
+                warnings,
                 ..Default::default()
             })
             .await?;

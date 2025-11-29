@@ -35,6 +35,9 @@ use derive_more::Debug;
 
 use crate::context::{Channel, ConnInfo, QueryContextRef};
 
+/// Maximum number of warnings to store per session (similar to MySQL's max_error_count)
+const MAX_WARNINGS: usize = 64;
+
 /// Session for persistent connection such as MySQL, PostgreSQL etc.
 #[derive(Debug)]
 pub struct Session {
@@ -58,6 +61,8 @@ pub(crate) struct MutableInner {
     read_preference: ReadPreference,
     #[debug(skip)]
     pub(crate) cursors: HashMap<String, Arc<RecordBatchStreamCursor>>,
+    /// Warning messages for MySQL SHOW WARNINGS support
+    warnings: Vec<String>,
 }
 
 impl Default for MutableInner {
@@ -69,6 +74,7 @@ impl Default for MutableInner {
             query_timeout: None,
             read_preference: ReadPreference::Leader,
             cursors: HashMap::with_capacity(0),
+            warnings: Vec::new(),
         }
     }
 }
@@ -155,5 +161,24 @@ impl Session {
 
     pub fn process_id(&self) -> u32 {
         self.process_id
+    }
+
+    /// Get warnings (for MySQL SHOW WARNINGS)
+    pub fn warnings(&self) -> Vec<String> {
+        self.mutable_inner.read().unwrap().warnings.clone()
+    }
+
+    /// Add a warning message. If the limit is reached, discard the oldest warning.
+    pub fn add_warning(&self, warning: String) {
+        let mut inner = self.mutable_inner.write().unwrap();
+        if inner.warnings.len() >= MAX_WARNINGS {
+            inner.warnings.remove(0);
+        }
+        inner.warnings.push(warning);
+    }
+
+    /// Clear all warnings
+    pub fn clear_warnings(&self) {
+        self.mutable_inner.write().unwrap().warnings.clear();
     }
 }

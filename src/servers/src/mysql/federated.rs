@@ -37,6 +37,8 @@ static SHOW_LOWER_CASE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'lower_case_table_names'(.*))").unwrap());
 static SHOW_VARIABLES_LIKE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES( LIKE (.*))?)").unwrap());
+static SHOW_WARNINGS_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)^(/\\* ApplicationName=.*)?SHOW WARNINGS").unwrap());
 
 // SELECT TIMEDIFF(NOW(), UTC_TIMESTAMP());
 static SELECT_TIME_DIFF_FUNC_PATTERN: Lazy<Regex> =
@@ -85,8 +87,6 @@ static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
         "(?i)^(/\\*!40101 SET(.*) \\*/)$",
 
         // DBeaver.
-        "(?i)^(SHOW WARNINGS)",
-        "(?i)^(/\\* ApplicationName=(.*)SHOW WARNINGS)",
         "(?i)^(/\\* ApplicationName=(.*)SHOW PLUGINS)",
         "(?i)^(/\\* ApplicationName=(.*)SHOW ENGINES)",
         "(?i)^(/\\* ApplicationName=(.*)SELECT @@(.*))",
@@ -252,6 +252,47 @@ fn check_show_variables(query: &str) -> Option<Output> {
     recordbatches.map(Output::new_with_record_batches)
 }
 
+/// Build SHOW WARNINGS result from session's warnings
+fn show_warnings(session: &SessionRef) -> RecordBatches {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("Level", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Code", ConcreteDataType::uint16_datatype(), false),
+        ColumnSchema::new("Message", ConcreteDataType::string_datatype(), false),
+    ]));
+
+    let warnings = session.warnings();
+    let count = warnings.len();
+
+    let columns = if count > 0 {
+        vec![
+            Arc::new(StringVector::from(vec!["Warning"; count])) as _,
+            Arc::new(datatypes::vectors::UInt16Vector::from(vec![
+                Some(1000u16);
+                count
+            ])) as _,
+            Arc::new(StringVector::from(warnings)) as _,
+        ]
+    } else {
+        vec![
+            Arc::new(StringVector::from(Vec::<String>::new())) as _,
+            Arc::new(datatypes::vectors::UInt16Vector::from(
+                Vec::<Option<u16>>::new(),
+            )) as _,
+            Arc::new(StringVector::from(Vec::<String>::new())) as _,
+        ]
+    };
+
+    RecordBatches::try_from_columns(schema, columns).unwrap()
+}
+
+fn check_show_warnings(query: &str, session: &SessionRef) -> Option<Output> {
+    if SHOW_WARNINGS_PATTERN.is_match(query) {
+        Some(Output::new_with_record_batches(show_warnings(session)))
+    } else {
+        None
+    }
+}
+
 // Check for SET or others query, this is the final check of the federated query.
 fn check_others(query: &str, _query_ctx: QueryContextRef) -> Option<Output> {
     if OTHER_NOT_SUPPORTED_STMT.is_match(query.as_bytes()) {
@@ -274,7 +315,7 @@ fn check_others(query: &str, _query_ctx: QueryContextRef) -> Option<Output> {
 pub(crate) fn check(
     query: &str,
     query_ctx: QueryContextRef,
-    _session: SessionRef,
+    session: SessionRef,
 ) -> Option<Output> {
     // INSERT don't need MySQL federated check. We assume the query doesn't contain
     // federated or driver setup command if it starts with a 'INSERT' statement.
@@ -289,6 +330,8 @@ pub(crate) fn check(
     check_select_variable(query, query_ctx.clone())
         // Then to check "show variables like ...".
         .or_else(|| check_show_variables(query))
+        // Check for SHOW WARNINGS
+        .or_else(|| check_show_warnings(query, &session))
         // Last check
         .or_else(|| check_others(query, query_ctx))
 }
@@ -391,5 +434,65 @@ mod test {
 | 00:00:00                         |
 +----------------------------------+";
         test(query, expected);
+    }
+
+    #[test]
+    fn test_show_warnings() {
+        // Test SHOW WARNINGS with no warnings
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        let output = check("SHOW WARNINGS", QueryContext::arc(), session.clone());
+        match output.unwrap().data {
+            OutputData::RecordBatches(r) => {
+                assert_eq!(r.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
+            }
+            _ => unreachable!(),
+        }
+
+        // Test SHOW WARNINGS with a single warning
+        session.add_warning("Test warning message".to_string());
+        let output = check("SHOW WARNINGS", QueryContext::arc(), session.clone());
+        match output.unwrap().data {
+            OutputData::RecordBatches(r) => {
+                let expected = "\
++---------+------+----------------------+
+| Level   | Code | Message              |
++---------+------+----------------------+
+| Warning | 1000 | Test warning message |
++---------+------+----------------------+";
+                assert_eq!(&r.pretty_print().unwrap(), expected);
+            }
+            _ => unreachable!(),
+        }
+
+        // Test SHOW WARNINGS with multiple warnings
+        session.clear_warnings();
+        session.add_warning("First warning".to_string());
+        session.add_warning("Second warning".to_string());
+        let output = check("SHOW WARNINGS", QueryContext::arc(), session.clone());
+        match output.unwrap().data {
+            OutputData::RecordBatches(r) => {
+                let expected = "\
++---------+------+----------------+
+| Level   | Code | Message        |
++---------+------+----------------+
+| Warning | 1000 | First warning  |
+| Warning | 1000 | Second warning |
++---------+------+----------------+";
+                assert_eq!(&r.pretty_print().unwrap(), expected);
+            }
+            _ => unreachable!(),
+        }
+
+        // Test case insensitivity
+        let output = check("show warnings", QueryContext::arc(), session.clone());
+        assert!(output.is_some());
+
+        // Test with DBeaver-style comment prefix
+        let output = check(
+            "/* ApplicationName=DBeaver */SHOW WARNINGS",
+            QueryContext::arc(),
+            session.clone(),
+        );
+        assert!(output.is_some());
     }
 }
