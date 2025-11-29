@@ -166,3 +166,40 @@ drop table my_db.foo;
 
 -- SQLNESS PROTOCOL POSTGRES
 use public;
+
+-- ======================================================
+-- PostgreSQL description functions for connector compatibility
+-- ======================================================
+
+-- Create a table with comment for testing
+-- SQLNESS PROTOCOL POSTGRES
+CREATE TABLE test_desc_table (
+  ts TIMESTAMP TIME INDEX,
+  val INT COMMENT 'Value column',
+  item_name STRING COMMENT 'Name of the item'
+) COMMENT = 'Test table for description functions';
+
+-- Test obj_description with table OID
+-- Note: We need to get the table_id first. In tests, we can use a subquery approach.
+-- SQLNESS PROTOCOL POSTGRES
+-- SQLNESS REPLACE (\d+\s*) OID
+SELECT table_id, table_comment FROM information_schema.tables WHERE table_name = 'test_desc_table';
+
+-- Test obj_description with non-existent OID (should return NULL)
+-- SQLNESS PROTOCOL POSTGRES
+SELECT obj_description(99999999, 'pg_class') IS NULL AS is_null;
+
+-- Test obj_description with non-pg_class catalog (should return NULL)
+-- SQLNESS PROTOCOL POSTGRES
+SELECT obj_description(1234, 'pg_namespace') IS NULL AS is_null;
+
+-- Test shobj_description (should always return NULL in GreptimeDB)
+-- SQLNESS PROTOCOL POSTGRES
+SELECT shobj_description(1, 'pg_database') IS NULL AS is_null;
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT shobj_description(1, 'pg_authid') IS NULL AS is_null;
+
+-- Clean up test table
+-- SQLNESS PROTOCOL POSTGRES
+DROP TABLE test_desc_table;
