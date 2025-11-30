@@ -217,9 +217,45 @@ pub struct StartCommand {
     /// The working home directory of this standalone instance.
     #[clap(long)]
     data_home: Option<String>,
+    /// Run as a daemon (Unix only).
+    #[clap(short = 'd', long)]
+    daemon: bool,
 }
 
 impl StartCommand {
+    /// Daemonize the process (Unix only).
+    #[cfg(unix)]
+    fn daemonize(log_dir: &str, data_home: &str) -> Result<()> {
+        use daemonize::Daemonize;
+        use std::path::PathBuf;
+
+        // Ensure data_home and log_dir exist
+        fs::create_dir_all(data_home).context(error::CreateDirSnafu { dir: data_home })?;
+        fs::create_dir_all(log_dir).context(error::CreateDirSnafu { dir: log_dir })?;
+
+        let stdout_path = PathBuf::from(log_dir).join("greptime.stdout");
+        let stderr_path = PathBuf::from(log_dir).join("greptimedb.stderr");
+
+        let stdout = fs::File::create(&stdout_path)
+            .context(error::FileIoSnafu { path: stdout_path })?;
+        let stderr = fs::File::create(&stderr_path)
+            .context(error::FileIoSnafu { path: stderr_path })?;
+
+        let daemonize = Daemonize::new()
+            .working_directory(data_home)
+            .stdout(stdout)
+            .stderr(stderr);
+
+        daemonize
+            .start()
+            .map_err(|e| error::OtherSnafu {
+                msg: format!("Failed to daemonize: {}", e),
+            }
+            .build())?;
+
+        Ok(())
+    }
+
     /// Load the GreptimeDB options from various sources (command line, config file or env).
     pub fn load_options(
         &self,
@@ -312,6 +348,10 @@ impl StartCommand {
             opts.user_provider = Some(user_provider.clone());
         }
 
+        if self.daemon {
+            opts.daemon = true;
+        }
+
         Ok(())
     }
 
@@ -320,6 +360,12 @@ impl StartCommand {
     #[allow(clippy::diverging_sub_expression)]
     /// Build GreptimeDB instance with the loaded options.
     pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
+        // Handle daemonization before initializing anything else
+        #[cfg(unix)]
+        if opts.component.daemon {
+            Self::daemonize(&opts.component.logging.dir, &opts.component.storage.data_home)?;
+        }
+
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(

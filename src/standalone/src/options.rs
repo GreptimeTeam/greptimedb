@@ -34,6 +34,7 @@ use servers::http::HttpOptions;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct StandaloneOptions {
+    pub daemon: bool,
     pub enable_telemetry: bool,
     pub default_timezone: Option<String>,
     pub default_column_prefix: Option<String>,
@@ -66,6 +67,7 @@ pub struct StandaloneOptions {
 impl Default for StandaloneOptions {
     fn default() -> Self {
         Self {
+            daemon: false,
             enable_telemetry: true,
             default_timezone: None,
             default_column_prefix: None,
