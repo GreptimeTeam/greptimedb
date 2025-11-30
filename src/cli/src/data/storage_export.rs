@@ -64,6 +64,63 @@ pub trait StorageExport: Send + Sync {
     fn mask_sensitive_info(&self, sql: &str) -> String;
 }
 
+macro_rules! define_backend {
+    ($name:ident, $config:ty) => {
+        #[derive(Clone)]
+        pub struct $name {
+            config: $config,
+        }
+
+        impl $name {
+            pub fn new(config: $config) -> Result<Self, BoxedError> {
+                config.validate()?;
+                Ok(Self { config })
+            }
+        }
+    };
+}
+
+macro_rules! define_storage_type {
+    (
+        pub enum $enum_name:ident {
+            $($variant:ident($backend:ty)),* $(,)?
+        }
+    ) => {
+        #[derive(Clone)]
+        pub enum $enum_name {
+            $($variant($backend)),*
+        }
+
+        #[async_trait]
+        impl StorageExport for $enum_name {
+            fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
+                match self {
+                    $(Self::$variant(backend) => backend.get_storage_path(catalog, schema)),*
+                }
+            }
+
+            fn format_output_path(&self, catalog: &str, file_path: &str) -> String {
+                match self {
+                    $(Self::$variant(backend) => backend.format_output_path(catalog, file_path)),*
+                }
+            }
+
+            fn mask_sensitive_info(&self, sql: &str) -> String {
+                match self {
+                    $(Self::$variant(backend) => backend.mask_sensitive_info(sql)),*
+                }
+            }
+        }
+
+        impl $enum_name {
+            /// Returns true if the storage backend is remote (not local filesystem).
+            pub fn is_remote_storage(&self) -> bool {
+                !matches!(self, Self::Fs(_))
+            }
+        }
+    };
+}
+
 /// Local file system storage backend.
 #[derive(Clone)]
 pub struct FsBackend {
@@ -99,18 +156,7 @@ impl StorageExport for FsBackend {
     }
 }
 
-/// S3 storage backend.
-#[derive(Clone)]
-pub struct S3Backend {
-    config: PrefixedS3Connection,
-}
-
-impl S3Backend {
-    pub fn new(config: PrefixedS3Connection) -> Result<Self, BoxedError> {
-        config.validate()?;
-        Ok(Self { config })
-    }
-}
+define_backend!(S3Backend, PrefixedS3Connection);
 
 #[async_trait]
 impl StorageExport for S3Backend {
@@ -159,19 +205,7 @@ impl StorageExport for S3Backend {
         )
     }
 }
-
-/// OSS storage backend.
-#[derive(Clone)]
-pub struct OssBackend {
-    config: PrefixedOssConnection,
-}
-
-impl OssBackend {
-    pub fn new(config: PrefixedOssConnection) -> Result<Self, BoxedError> {
-        config.validate()?;
-        Ok(Self { config })
-    }
-}
+define_backend!(OssBackend, PrefixedOssConnection);
 
 #[async_trait]
 impl StorageExport for OssBackend {
@@ -210,18 +244,7 @@ impl StorageExport for OssBackend {
     }
 }
 
-/// GCS storage backend.
-#[derive(Clone)]
-pub struct GcsBackend {
-    config: PrefixedGcsConnection,
-}
-
-impl GcsBackend {
-    pub fn new(config: PrefixedGcsConnection) -> Result<Self, BoxedError> {
-        config.validate()?;
-        Ok(Self { config })
-    }
-}
+define_backend!(GcsBackend, PrefixedGcsConnection);
 
 #[async_trait]
 impl StorageExport for GcsBackend {
@@ -273,18 +296,7 @@ impl StorageExport for GcsBackend {
     }
 }
 
-/// Azure Blob storage backend.
-#[derive(Clone)]
-pub struct AzblobBackend {
-    config: PrefixedAzblobConnection,
-}
-
-impl AzblobBackend {
-    pub fn new(config: PrefixedAzblobConnection) -> Result<Self, BoxedError> {
-        config.validate()?;
-        Ok(Self { config })
-    }
-}
+define_backend!(AzblobBackend, PrefixedAzblobConnection);
 
 #[async_trait]
 impl StorageExport for AzblobBackend {
@@ -330,52 +342,12 @@ impl StorageExport for AzblobBackend {
     }
 }
 
-/// Enum to represent different storage backend types.
-#[derive(Clone)]
-pub enum StorageType {
-    Fs(FsBackend),
-    S3(S3Backend),
-    Oss(OssBackend),
-    Gcs(GcsBackend),
-    Azblob(AzblobBackend),
-}
-
-#[async_trait]
-impl StorageExport for StorageType {
-    fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
-        match self {
-            StorageType::Fs(backend) => backend.get_storage_path(catalog, schema),
-            StorageType::S3(backend) => backend.get_storage_path(catalog, schema),
-            StorageType::Oss(backend) => backend.get_storage_path(catalog, schema),
-            StorageType::Gcs(backend) => backend.get_storage_path(catalog, schema),
-            StorageType::Azblob(backend) => backend.get_storage_path(catalog, schema),
-        }
+define_storage_type!(
+    pub enum StorageType {
+        Fs(FsBackend),
+        S3(S3Backend),
+        Oss(OssBackend),
+        Gcs(GcsBackend),
+        Azblob(AzblobBackend),
     }
-
-    fn format_output_path(&self, catalog: &str, file_path: &str) -> String {
-        match self {
-            StorageType::Fs(backend) => backend.format_output_path(catalog, file_path),
-            StorageType::S3(backend) => backend.format_output_path(catalog, file_path),
-            StorageType::Oss(backend) => backend.format_output_path(catalog, file_path),
-            StorageType::Gcs(backend) => backend.format_output_path(catalog, file_path),
-            StorageType::Azblob(backend) => backend.format_output_path(catalog, file_path),
-        }
-    }
-
-    fn mask_sensitive_info(&self, sql: &str) -> String {
-        match self {
-            StorageType::Fs(backend) => backend.mask_sensitive_info(sql),
-            StorageType::S3(backend) => backend.mask_sensitive_info(sql),
-            StorageType::Oss(backend) => backend.mask_sensitive_info(sql),
-            StorageType::Gcs(backend) => backend.mask_sensitive_info(sql),
-            StorageType::Azblob(backend) => backend.mask_sensitive_info(sql),
-        }
-    }
-}
-
-impl StorageType {
-    /// Returns true if the storage backend is remote (not local filesystem).
-    pub fn is_remote_storage(&self) -> bool {
-        !matches!(self, StorageType::Fs(_))
-    }
-}
+);
