@@ -551,9 +551,9 @@ impl<'a> InMemoryRowGroup<'a> {
         }
 
         // Calculate total range size for metrics.
-        let total_range_size = compute_total_range_size(ranges);
+        let (total_range_size, unaligned_size) = compute_total_range_size(ranges);
         if let Some(metrics) = metrics {
-            metrics.add_page_size_to_fetch(total_range_size);
+            metrics.add_page_size_to_fetch(unaligned_size);
         }
 
         let key = IndexKey::new(self.region_id, self.file_id, FileType::Parquet);
@@ -614,17 +614,21 @@ impl<'a> InMemoryRowGroup<'a> {
 }
 
 /// Computes the max possible buffer size to read the given `ranges`.
+/// Returns (aligned_size, unaligned_size) where:
+/// - aligned_size: total size aligned to pooled buffer size
+/// - unaligned_size: actual total size without alignment
 // See https://github.com/apache/opendal/blob/v0.54.0/core/src/types/read/reader.rs#L166-L192
-fn compute_total_range_size(ranges: &[Range<u64>]) -> u64 {
+fn compute_total_range_size(ranges: &[Range<u64>]) -> (u64, u64) {
     if ranges.is_empty() {
-        return 0;
+        return (0, 0);
     }
 
     let gap = MERGE_GAP as u64;
     let mut sorted_ranges = ranges.to_vec();
     sorted_ranges.sort_unstable_by(|a, b| a.start.cmp(&b.start));
 
-    let mut total_size = 0;
+    let mut total_size_aligned = 0;
+    let mut total_size_unaligned = 0;
     let mut cur = sorted_ranges[0].clone();
 
     for range in sorted_ranges.into_iter().skip(1) {
@@ -633,15 +637,19 @@ fn compute_total_range_size(ranges: &[Range<u64>]) -> u64 {
             cur.end = cur.end.max(range.end);
         } else {
             // No overlap and the gap is too large, add current range to total and start a new one
-            total_size += align_to_pooled_buf_size(cur.end - cur.start);
+            let range_size = cur.end - cur.start;
+            total_size_aligned += align_to_pooled_buf_size(range_size);
+            total_size_unaligned += range_size;
             cur = range;
         }
     }
 
     // Add the last range
-    total_size += align_to_pooled_buf_size(cur.end - cur.start);
+    let range_size = cur.end - cur.start;
+    total_size_aligned += align_to_pooled_buf_size(range_size);
+    total_size_unaligned += range_size;
 
-    total_size
+    (total_size_aligned, total_size_unaligned)
 }
 
 /// Aligns the given size to the multiple of the pooled buffer size.
