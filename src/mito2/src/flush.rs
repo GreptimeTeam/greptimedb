@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use common_telemetry::{debug, error, info, trace};
+use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
 use either::Either;
 use partition::expr::PartitionExpr;
@@ -157,23 +157,17 @@ impl WriteBufferManager for WriteBufferManagerImpl {
         }
 
         let memory_usage = self.memory_used.load(Ordering::Relaxed);
-        // If the memory exceeds the buffer size, we trigger more aggressive
-        // flush. But if already more than half memory is being flushed,
-        // triggering more flush may not help. We will hold it instead.
+        if mutable_memtable_memory_usage >= self.global_write_buffer_size / 2 {
+            debug!(
+                "Engine should flush (over total limit), memory_usage: {}, global_write_buffer_size: {}, \
+             mutable_usage: {}.",
+                memory_usage, self.global_write_buffer_size, mutable_memtable_memory_usage
+            );
+            return true;
+        }
+
         if memory_usage >= self.global_write_buffer_size {
-            if mutable_memtable_memory_usage >= self.global_write_buffer_size / 2 {
-                debug!(
-                    "Engine should flush (over total limit), memory_usage: {}, global_write_buffer_size: {}, \
-                 mutable_usage: {}.",
-                    memory_usage, self.global_write_buffer_size, mutable_memtable_memory_usage
-                );
-                return true;
-            } else {
-                trace!(
-                    "Engine won't flush, memory_usage: {}, global_write_buffer_size: {}, mutable_usage: {}.",
-                    memory_usage, self.global_write_buffer_size, mutable_memtable_memory_usage
-                );
-            }
+            return true;
         }
 
         false

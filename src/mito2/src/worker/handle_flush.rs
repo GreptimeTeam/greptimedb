@@ -30,16 +30,22 @@ use crate::request::{BuildIndexRequest, FlushFailed, FlushFinished, OnFailure, O
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     /// On region flush job failed.
     pub(crate) async fn handle_flush_failed(&mut self, region_id: RegionId, request: FlushFailed) {
         self.flush_scheduler.on_flush_failed(region_id, request.err);
+        debug!(
+            "Flush failed for region {}, handling stalled requests",
+            region_id
+        );
+        self.handle_stalled_requests().await;
     }
 
     /// Checks whether the engine reaches flush threshold. If so, finds regions in this
     /// worker to flush.
     pub(crate) fn maybe_flush_worker(&mut self) {
         if !self.write_buffer_manager.should_flush_engine() {
+            info!("No need to flush worker");
             // No need to flush worker.
             return;
         }
@@ -56,8 +62,8 @@ impl<S> RegionWorkerLoop<S> {
         let regions = self.regions.list_regions();
         let now = self.time_provider.current_time_millis();
         let min_last_flush_time = now - self.config.auto_flush_interval.as_millis() as i64;
-        let mut max_mutable_size = 0;
-        // Region with max mutable memtable size.
+        let mut max_memtable_size = 0;
+        // Region with max memtable memtable size.
         let mut max_mem_region = None;
 
         for region in &regions {
@@ -67,11 +73,12 @@ impl<S> RegionWorkerLoop<S> {
             }
 
             let version = region.version();
-            let region_mutable_size = version.memtables.mutable_usage();
-            // Tracks region with max mutable memtable size.
-            if region_mutable_size > max_mutable_size {
+            let region_memtable_size =
+                version.memtables.mutable_usage() + version.memtables.immutables_usage();
+            // Tracks region with max memtable size.
+            if region_memtable_size > max_memtable_size {
                 max_mem_region = Some(region);
-                max_mutable_size = region_mutable_size;
+                max_memtable_size = region_memtable_size;
             }
 
             if region.last_flush_millis() < min_last_flush_time {
@@ -91,7 +98,7 @@ impl<S> RegionWorkerLoop<S> {
             }
         }
 
-        // Flush memtable with max mutable memtable.
+        // Flush memtable with max size.
         // TODO(yingwen): Maybe flush more tables to reduce write buffer size.
         if let Some(region) = max_mem_region
             && !self.flush_scheduler.is_flush_requested(region.region_id)
