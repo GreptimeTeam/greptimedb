@@ -333,7 +333,7 @@ impl ManifestObjectStore {
                 })?;
 
             // Add to cache
-            self.put_to_cache(cache_key.to_string(), data.clone()).await;
+            self.put_to_cache(cache_key.to_string(), &data).await;
 
             Ok((*v, data))
         });
@@ -462,12 +462,8 @@ impl ManifestObjectStore {
             })?;
         let delta_size = data.len();
 
-        self.object_store
-            .write(&path, data.clone())
-            .await
-            .context(OpenDalSnafu)?;
+        self.write_and_put_cache(&path, data).await?;
         self.set_delta_file_size(version, delta_size as u64);
-        self.put_to_cache(path, data).await;
 
         Ok(())
     }
@@ -489,14 +485,9 @@ impl ManifestObjectStore {
             })?;
         let checkpoint_size = data.len();
         let checksum = checkpoint_checksum(bytes);
-        self.object_store
-            .write(&path, data.clone())
-            .await
-            .context(OpenDalSnafu)?;
-        self.set_checkpoint_file_size(version, checkpoint_size as u64);
 
-        // Cache the checkpoint data (not the last_checkpoint metadata file)
-        self.put_to_cache(path, bytes.to_vec()).await;
+        self.write_and_put_cache(&path, data).await?;
+        self.set_checkpoint_file_size(version, checkpoint_size as u64);
 
         // Because last checkpoint file only contain size and version, which is tiny, so we don't compress it.
         let last_checkpoint_path = self.last_checkpoint_path();
@@ -552,7 +543,7 @@ impl ManifestObjectStore {
                 // set the checkpoint size
                 self.set_checkpoint_file_size(version, checkpoint_size as u64);
                 // Add to cache
-                self.put_to_cache(path, decompress_data.clone()).await;
+                self.put_to_cache(path, &decompress_data).await;
                 Ok(Some(decompress_data))
             }
             Err(e) => {
@@ -587,8 +578,7 @@ impl ManifestObjectStore {
                                 verify_checksum(&decompress_data, metadata.checksum)?;
                                 self.set_checkpoint_file_size(version, checkpoint_size as u64);
                                 // Add fallback to cache
-                                self.put_to_cache(fall_back_path, decompress_data.clone())
-                                    .await;
+                                self.put_to_cache(fall_back_path, &decompress_data).await;
                                 Ok(Some(decompress_data))
                             }
                             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
@@ -777,12 +767,35 @@ impl ManifestObjectStore {
     }
 
     /// Puts a manifest file into cache.
-    async fn put_to_cache(&self, key: String, data: Vec<u8>) {
+    async fn put_to_cache(&self, key: String, data: &[u8]) {
         let Some(cache) = &self.manifest_cache else {
             return;
         };
 
-        cache.put_file(key, data).await;
+        cache.put_file(key, data.to_vec()).await;
+    }
+
+    /// Writes data to object store and puts it into cache.
+    async fn write_and_put_cache(&self, path: &str, data: Vec<u8>) -> Result<()> {
+        // Clone data for cache before writing, only if cache is enabled
+        let cache_data = if self.manifest_cache.is_some() {
+            Some(data.clone())
+        } else {
+            None
+        };
+
+        // Write to object store
+        self.object_store
+            .write(path, data)
+            .await
+            .context(OpenDalSnafu)?;
+
+        // Put to cache if we cloned the data
+        if let Some(data) = cache_data {
+            self.put_to_cache(path.to_string(), &data).await;
+        }
+
+        Ok(())
     }
 
     /// Removes a manifest file from cache.
