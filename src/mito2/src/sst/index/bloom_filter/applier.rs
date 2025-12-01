@@ -241,7 +241,7 @@ impl BloomFilterIndexApplier {
                     m.blob_read_bytes += blob_size;
                 }
                 let reader = CachedBloomFilterIndexBlobReader::new(
-                    file_id.file_id.file_id(),
+                    file_id.file_id(),
                     *column_id,
                     Tag::Skipping,
                     blob_size,
@@ -337,8 +337,8 @@ impl BloomFilterIndexApplier {
         };
 
         let index_key = IndexKey::new(
-            file_id.file_id.region_id(),
-            file_id.file_id.file_id(),
+            file_id.region_id(),
+            file_id.file_id(),
             FileType::Puffin(file_id.version),
         );
         if file_cache.get(index_key).await.is_none() {
@@ -523,7 +523,7 @@ mod tests {
         let table_dir = "table_dir".to_string();
 
         let mut indexer = BloomFilterIndexer::new(
-            file_id.file_id.file_id(),
+            file_id.file_id(),
             &region_metadata,
             intm_mgr,
             memory_usage_threshold,

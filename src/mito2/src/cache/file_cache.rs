@@ -607,7 +607,7 @@ impl fmt::Display for IndexKey {
             "{}.{}.{}",
             self.region_id.as_u64(),
             self.file_id,
-            self.file_type.as_string()
+            self.file_type
         )
     }
 }
@@ -619,6 +619,15 @@ pub enum FileType {
     Parquet,
     /// Puffin file.
     Puffin(u64),
+}
+
+impl std::fmt::Display for FileType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FileType::Parquet => write!(f, "parquet"),
+            FileType::Puffin(version) => write!(f, "{}.puffin", version),
+        }
+    }
 }
 
 impl FileType {
@@ -636,14 +645,6 @@ impl FileType {
                     None
                 }
             }
-        }
-    }
-
-    /// Converts the file type to string.
-    fn as_string(&self) -> String {
-        match self {
-            FileType::Parquet => "parquet".to_string(),
-            FileType::Puffin(version) => format!("{}.puffin", version),
         }
     }
 

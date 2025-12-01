@@ -366,7 +366,6 @@ impl FileMeta {
     }
 
     /// Returns the RegionIndexId for this file.
-    /// Replaces the old `index_file_id(&self) -> RegionFileId` method.
     pub fn index_id(&self) -> RegionIndexId {
         RegionIndexId::new(self.file_id(), self.index_version)
     }
@@ -406,7 +405,6 @@ impl FileHandle {
     }
 
     /// Returns the RegionIndexId for this file.
-    /// Replaces the old `index_file_id(&self) -> RegionFileId` method.
     pub fn index_id(&self) -> RegionIndexId {
         RegionIndexId::new(self.file_id(), self.inner.meta.index_version)
     }
@@ -493,7 +491,12 @@ impl FileHandleInner {
     }
 }
 
-/// Delete
+/// Delete files for a region.
+/// - `region_id`: Region id.
+/// - `file_ids`: List of (file id, index version) tuples to delete.
+/// - `delete_index`: Whether to delete the index file from the cache.
+/// - `access_layer`: Access layer to delete files.
+/// - `cache_manager`: Cache manager to remove files from cache.
 pub async fn delete_files(
     region_id: RegionId,
     file_ids: &[(FileId, u64)],

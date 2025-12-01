@@ -439,7 +439,7 @@ impl FulltextIndexApplier {
                 .context(MetadataSnafu)?
                 .content_length;
             let reader = CachedBloomFilterIndexBlobReader::new(
-                file_id.file_id.file_id(),
+                file_id.file_id(),
                 column_id,
                 Tag::Fulltext,
                 blob_size,

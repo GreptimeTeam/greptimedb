@@ -947,7 +947,7 @@ async fn test_list_ssts_with_format(
                 .index_file_path
                 .map(|p| p.replace(&e.file_id, "<file_id>"));
             e.file_id = "<file_id>".to_string();
-            e.index_version = 0; // FIXME(discord9): confirm correctness
+            e.index_version = 0;
             format!("\n{:?}", e)
         })
         .sorted()
