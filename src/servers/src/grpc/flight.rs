@@ -249,11 +249,11 @@ impl FlightCraft for GreptimeRequestHandler {
     }
 }
 
-pub(crate) struct PutRecordBatchRequest {
-    pub(crate) table_name: TableName,
-    pub(crate) request_id: i64,
-    pub(crate) data: FlightData,
-    pub(crate) _guard: Option<RequestMemoryGuard>,
+pub struct PutRecordBatchRequest {
+    pub table_name: TableName,
+    pub request_id: i64,
+    pub data: FlightData,
+    pub _guard: Option<RequestMemoryGuard>,
 }
 
 impl PutRecordBatchRequest {
@@ -297,13 +297,13 @@ impl PutRecordBatchRequest {
     }
 }
 
-pub(crate) struct PutRecordBatchRequestStream {
-    flight_data_stream: Streaming<FlightData>,
-    state: PutRecordBatchRequestStreamState,
-    limiter: Option<RequestMemoryLimiter>,
+pub struct PutRecordBatchRequestStream {
+    pub flight_data_stream: Streaming<FlightData>,
+    pub state: PutRecordBatchRequestStreamState,
+    pub limiter: Option<RequestMemoryLimiter>,
 }
 
-enum PutRecordBatchRequestStreamState {
+pub enum PutRecordBatchRequestStreamState {
     Init(String, String),
     Started(TableName),
 }
