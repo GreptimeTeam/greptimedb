@@ -46,7 +46,7 @@ use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
-use plugins::frontend::{
+use plugins::frontend::context::{
     CatalogManagerConfigureContext, DistributedCatalogManagerConfigureContext,
 };
 use servers::addrs;

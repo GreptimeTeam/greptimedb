@@ -40,7 +40,7 @@ use flow::{
     get_flow_auth_options,
 };
 use meta_client::{MetaClientOptions, MetaClientType};
-use plugins::flownode::GrpcConfigureContext;
+use plugins::flownode::context::GrpcConfigureContext;
 use servers::configurator::GrpcBuilderConfiguratorRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use tracing_appender::non_blocking::WorkerGuard;

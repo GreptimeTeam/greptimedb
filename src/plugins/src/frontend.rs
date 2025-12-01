@@ -12,16 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use auth::{DefaultPermissionChecker, PermissionCheckerRef, UserProviderRef};
-use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_meta::kv_backend::KvBackendRef;
-use flow::FrontendClient;
 use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
-use meta_client::MetaClientRef;
 use snafu::ResultExt;
 
 use crate::options::PluginOptions;
@@ -47,23 +41,32 @@ pub async fn start_frontend_plugins(_plugins: Plugins) -> Result<()> {
     Ok(())
 }
 
-/// The context for [`catalog::kvbackend::CatalogManagerConfiguratorRef`] in standalone.
-pub enum CatalogManagerConfigureContext {
-    Distributed(DistributedCatalogManagerConfigureContext),
-    Standalone(StandaloneCatalogManagerConfigureContext),
-}
+pub mod context {
+    use std::sync::Arc;
 
-pub struct DistributedCatalogManagerConfigureContext {
-    pub meta_client: MetaClientRef,
-}
+    use catalog::CatalogManagerRef;
+    use common_meta::kv_backend::KvBackendRef;
+    use flow::FrontendClient;
+    use meta_client::MetaClientRef;
 
-pub struct StandaloneCatalogManagerConfigureContext {
-    pub fe_client: Arc<FrontendClient>,
-}
+    /// The context for [`catalog::kvbackend::CatalogManagerConfiguratorRef`] in standalone.
+    pub enum CatalogManagerConfigureContext {
+        Distributed(DistributedCatalogManagerConfigureContext),
+        Standalone(StandaloneCatalogManagerConfigureContext),
+    }
 
-/// The context for [`common_meta::ddl_manager::DdlManagerConfiguratorRef`] in standalone.
-pub struct DdlManagerConfigureContext {
-    pub kv_backend: KvBackendRef,
-    pub fe_client: Arc<FrontendClient>,
-    pub catalog_manager: CatalogManagerRef,
+    pub struct DistributedCatalogManagerConfigureContext {
+        pub meta_client: MetaClientRef,
+    }
+
+    pub struct StandaloneCatalogManagerConfigureContext {
+        pub fe_client: Arc<FrontendClient>,
+    }
+
+    /// The context for [`common_meta::ddl_manager::DdlManagerConfiguratorRef`] in standalone.
+    pub struct DdlManagerConfigureContext {
+        pub kv_backend: KvBackendRef,
+        pub fe_client: Arc<FrontendClient>,
+        pub catalog_manager: CatalogManagerRef,
+    }
 }
