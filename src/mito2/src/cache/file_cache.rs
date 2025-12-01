@@ -607,7 +607,7 @@ impl fmt::Display for IndexKey {
             "{}.{}.{}",
             self.region_id.as_u64(),
             self.file_id,
-            self.file_type.as_str()
+            self.file_type.to_string()
         )
     }
 }
@@ -627,15 +627,23 @@ impl FileType {
         match s {
             "parquet" => Some(FileType::Parquet),
             "puffin" => Some(FileType::Puffin(0)),
-            _ => None,
+            _ => {
+                // if post-fix with .puffin, try to parse the version
+                if let Some(version_str) = s.strip_suffix(".puffin") {
+                    let version = version_str.parse::<u64>().ok()?;
+                    Some(FileType::Puffin(version))
+                } else {
+                    None
+                }
+            }
         }
     }
 
     /// Converts the file type to string.
-    fn as_str(&self) -> &'static str {
+    fn to_string(&self) -> String {
         match self {
-            FileType::Parquet => "parquet",
-            FileType::Puffin(_) => "puffin",
+            FileType::Parquet => "parquet".to_string(),
+            FileType::Puffin(version) => format!("{}.puffin", version),
         }
     }
 
@@ -920,6 +928,15 @@ mod tests {
         assert_eq!(
             IndexKey::new(region_id, file_id, FileType::Parquet),
             parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parquet").unwrap()
+        );
+        assert_eq!(
+            IndexKey::new(region_id, file_id, FileType::Puffin(0)),
+            parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.puffin").unwrap()
+        );
+        assert_eq!(
+            IndexKey::new(region_id, file_id, FileType::Puffin(42)),
+            parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.42.puffin")
+                .unwrap()
         );
         assert!(parse_index_key("").is_none());
         assert!(parse_index_key(".").is_none());
