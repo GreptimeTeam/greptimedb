@@ -19,7 +19,7 @@ use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 
 use crate::cluster::GreptimeDbClusterBuilder;
 use crate::tests::test_util::{
-    MockInstance, MockInstanceBuilder, RebuildableMockInstance, TestContext, execute_sql,
+    MockInstanceBuilder, RebuildableMockInstance, TestContext, execute_sql,
 };
 
 pub(crate) async fn distributed_with_noop_wal() -> TestContext {

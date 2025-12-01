@@ -13065,6 +13065,7 @@ dependencies = [
  "loki-proto",
  "meta-client",
  "meta-srv",
+ "mito2",
  "moka",
  "mysql_async",
  "object-store",

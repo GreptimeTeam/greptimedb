@@ -84,44 +84,6 @@ impl DefaultGcSchedulerCtx {
         mailbox: MailboxRef,
         server_addr: String,
     ) -> Result<Self> {
-        // register a noop loader for `GcRegionProcedure` to avoid error when deserializing procedure when rebooting
-
-        procedure_manager
-            .register_loader(
-                GcRegionProcedure::TYPE_NAME,
-                Box::new(move |json| {
-                    common_procedure::error::ProcedureLoaderNotImplementedSnafu {
-                        type_name: GcRegionProcedure::TYPE_NAME.to_string(),
-                        reason:
-                            "GC procedure should be retried by scheduler, not reloaded from storage"
-                                .to_string(),
-                    }
-                    .fail()
-                }),
-            )
-            .context(error::RegisterProcedureLoaderSnafu {
-                type_name: GcRegionProcedure::TYPE_NAME,
-            })?;
-
-        // register a noop loader for `BatchGcProcedure` to avoid error when deserializing procedure when rebooting
-
-        procedure_manager
-            .register_loader(
-                BatchGcProcedure::TYPE_NAME,
-                Box::new(move |json| {
-                    common_procedure::error::ProcedureLoaderNotImplementedSnafu {
-                        type_name: BatchGcProcedure::TYPE_NAME.to_string(),
-                        reason:
-                            "Batch GC procedure should not be reloaded from storage, as it doesn't need to be retried if interrupted"
-                                .to_string(),
-                    }
-                    .fail()
-                }),
-            )
-            .context(error::RegisterProcedureLoaderSnafu {
-                type_name: BatchGcProcedure::TYPE_NAME,
-            })?;
-
         Ok(Self {
             table_metadata_manager,
             procedure_manager,
