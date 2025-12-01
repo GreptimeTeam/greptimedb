@@ -296,9 +296,11 @@ impl ManifestObjectStore {
     }
 
     /// Common implementation for fetching manifests from entries in parallel.
+    /// If `is_staging` is true, cache is skipped.
     async fn fetch_manifests_from_entries(
         &self,
         entries: Vec<(ManifestVersion, Entry)>,
+        is_staging: bool,
     ) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
         if entries.is_empty() {
             return Ok(vec![]);
@@ -313,7 +315,7 @@ impl ManifestObjectStore {
 
             let cache_key = entry.path();
             // Try to get from cache first
-            if let Some(data) = self.get_from_cache(cache_key).await {
+            if let Some(data) = self.get_from_cache(cache_key, is_staging).await {
                 return Ok((*v, data));
             }
 
@@ -333,7 +335,8 @@ impl ManifestObjectStore {
                 })?;
 
             // Add to cache
-            self.put_to_cache(cache_key.to_string(), &data).await;
+            self.put_to_cache(cache_key.to_string(), &data, is_staging)
+                .await;
 
             Ok((*v, data))
         });
@@ -351,7 +354,7 @@ impl ManifestObjectStore {
         end_version: ManifestVersion,
     ) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
         let manifests = self.scan(start_version, end_version).await?;
-        self.fetch_manifests_from_entries(manifests).await
+        self.fetch_manifests_from_entries(manifests, false).await
     }
 
     /// Delete manifest files that version < end.
@@ -462,7 +465,7 @@ impl ManifestObjectStore {
             })?;
         let delta_size = data.len();
 
-        self.write_and_put_cache(&path, data).await?;
+        self.write_and_put_cache(&path, data, is_staging).await?;
         self.set_delta_file_size(version, delta_size as u64);
 
         Ok(())
@@ -486,7 +489,7 @@ impl ManifestObjectStore {
         let checkpoint_size = data.len();
         let checksum = checkpoint_checksum(bytes);
 
-        self.write_and_put_cache(&path, data).await?;
+        self.write_and_put_cache(&path, data, false).await?;
         self.set_checkpoint_file_size(version, checkpoint_size as u64);
 
         // Because last checkpoint file only contain size and version, which is tiny, so we don't compress it.
@@ -521,7 +524,7 @@ impl ManifestObjectStore {
         let path = self.checkpoint_file_path(version);
 
         // Try to get from cache first
-        if let Some(data) = self.get_from_cache(&path).await {
+        if let Some(data) = self.get_from_cache(&path, false).await {
             verify_checksum(&data, metadata.checksum)?;
             return Ok(Some((version, data)));
         }
@@ -543,7 +546,7 @@ impl ManifestObjectStore {
                 // set the checkpoint size
                 self.set_checkpoint_file_size(version, checkpoint_size as u64);
                 // Add to cache
-                self.put_to_cache(path, &decompress_data).await;
+                self.put_to_cache(path, &decompress_data, false).await;
                 Ok(Some(decompress_data))
             }
             Err(e) => {
@@ -560,7 +563,7 @@ impl ManifestObjectStore {
                         );
 
                         // Try to get fallback from cache first
-                        if let Some(data) = self.get_from_cache(&fall_back_path).await {
+                        if let Some(data) = self.get_from_cache(&fall_back_path, false).await {
                             verify_checksum(&data, metadata.checksum)?;
                             return Ok(Some((version, data)));
                         }
@@ -578,7 +581,8 @@ impl ManifestObjectStore {
                                 verify_checksum(&decompress_data, metadata.checksum)?;
                                 self.set_checkpoint_file_size(version, checkpoint_size as u64);
                                 // Add fallback to cache
-                                self.put_to_cache(fall_back_path, &decompress_data).await;
+                                self.put_to_cache(fall_back_path, &decompress_data, false)
+                                    .await;
                                 Ok(Some(decompress_data))
                             }
                             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
@@ -741,7 +745,8 @@ impl ManifestObjectStore {
         let mut sorted_entries = manifest_entries;
         Self::sort_manifests(&mut sorted_entries);
 
-        self.fetch_manifests_from_entries(sorted_entries).await
+        self.fetch_manifests_from_entries(sorted_entries, true)
+            .await
     }
 
     /// Clear all staging manifest files.
@@ -761,13 +766,21 @@ impl ManifestObjectStore {
 
     /// Gets a manifest file from cache.
     /// Returns the file data if found in cache, None otherwise.
-    async fn get_from_cache(&self, key: &str) -> Option<Vec<u8>> {
+    /// If `is_staging` is true, always returns None.
+    async fn get_from_cache(&self, key: &str, is_staging: bool) -> Option<Vec<u8>> {
+        if is_staging {
+            return None;
+        }
         let cache = self.manifest_cache.as_ref()?;
         cache.get_file(key).await
     }
 
     /// Puts a manifest file into cache.
-    async fn put_to_cache(&self, key: String, data: &[u8]) {
+    /// If `is_staging` is true, does nothing.
+    async fn put_to_cache(&self, key: String, data: &[u8], is_staging: bool) {
+        if is_staging {
+            return;
+        }
         let Some(cache) = &self.manifest_cache else {
             return;
         };
@@ -776,9 +789,10 @@ impl ManifestObjectStore {
     }
 
     /// Writes data to object store and puts it into cache.
-    async fn write_and_put_cache(&self, path: &str, data: Vec<u8>) -> Result<()> {
-        // Clone data for cache before writing, only if cache is enabled
-        let cache_data = if self.manifest_cache.is_some() {
+    /// If `is_staging` is true, cache is skipped.
+    async fn write_and_put_cache(&self, path: &str, data: Vec<u8>, is_staging: bool) -> Result<()> {
+        // Clone data for cache before writing, only if cache is enabled and not staging
+        let cache_data = if !is_staging && self.manifest_cache.is_some() {
             Some(data.clone())
         } else {
             None
@@ -792,7 +806,7 @@ impl ManifestObjectStore {
 
         // Put to cache if we cloned the data
         if let Some(data) = cache_data {
-            self.put_to_cache(path.to_string(), &data).await;
+            self.put_to_cache(path.to_string(), &data, is_staging).await;
         }
 
         Ok(())

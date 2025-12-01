@@ -841,12 +841,7 @@ mod tests {
         }
 
         // Recover the cache.
-        let cache = FileCache::new(
-            local_store.clone(),
-            ReadableSize::mb(10),
-            None,
-            None,
-        );
+        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None, None);
         // No entry before recovery.
         assert!(
             cache
