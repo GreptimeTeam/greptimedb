@@ -16,10 +16,11 @@ use std::fmt;
 use std::fmt::Display;
 
 use arrow::array::ArrowNativeTypeOp;
-use datafusion::arrow::array::{Array, ArrayRef, AsArray, BooleanArray};
+use arrow::datatypes::ArrowPrimitiveType;
+use datafusion::arrow::array::{Array, ArrayRef, AsArray, BooleanArray, PrimitiveArray};
 use datafusion::arrow::compute::kernels::zip::zip;
 use datafusion::arrow::datatypes::DataType;
-use datafusion_common::{DataFusionError, ScalarValue};
+use datafusion_common::DataFusionError;
 use datafusion_expr::type_coercion::binary::comparison_coercion;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 
@@ -125,144 +126,82 @@ fn to_boolean_array(
     value: &ColumnarValue,
     num_rows: usize,
 ) -> datafusion_common::Result<BooleanArray> {
-    match value {
-        ColumnarValue::Scalar(scalar) => {
-            let bool_val = scalar_to_bool(scalar)?;
-            Ok(BooleanArray::from(vec![bool_val; num_rows]))
-        }
-        ColumnarValue::Array(array) => array_to_bool(array.clone()),
-    }
+    let array = value.to_array(num_rows)?;
+    array_to_bool(array)
 }
 
-/// Convert a ScalarValue to boolean using MySQL truthy rules
-fn scalar_to_bool(scalar: &ScalarValue) -> datafusion_common::Result<bool> {
-    if scalar.is_null() {
-        return Ok(false);
-    }
+/// Convert an integer PrimitiveArray to BooleanArray using MySQL truthy rules:
+/// NULL -> false, 0 -> false, non-zero -> true
+fn int_array_to_bool<T>(array: &PrimitiveArray<T>) -> BooleanArray
+where
+    T: ArrowPrimitiveType,
+    T::Native: ArrowNativeTypeOp,
+{
+    BooleanArray::from_iter(
+        array
+            .iter()
+            .map(|opt| Some(opt.is_some_and(|v| !v.is_zero()))),
+    )
+}
 
-    match scalar {
-        ScalarValue::Boolean(Some(b)) => Ok(*b),
-        ScalarValue::Int8(Some(v)) => Ok(*v != 0),
-        ScalarValue::Int16(Some(v)) => Ok(*v != 0),
-        ScalarValue::Int32(Some(v)) => Ok(*v != 0),
-        ScalarValue::Int64(Some(v)) => Ok(*v != 0),
-        ScalarValue::UInt8(Some(v)) => Ok(*v != 0),
-        ScalarValue::UInt16(Some(v)) => Ok(*v != 0),
-        ScalarValue::UInt32(Some(v)) => Ok(*v != 0),
-        ScalarValue::UInt64(Some(v)) => Ok(*v != 0),
-        // For floats, treat NaN as true (MySQL behavior), zero (including -0.0) as false, all else as true
-        ScalarValue::Float16(Some(v)) => {
-            let f = v.to_f32();
-            Ok(f.is_nan() || !f.is_zero())
-        }
-        ScalarValue::Float32(Some(v)) => Ok(v.is_nan() || !v.is_zero()),
-        ScalarValue::Float64(Some(v)) => Ok(v.is_nan() || !v.is_zero()),
-        // For other types, if not null, treat as true
-        _ => Ok(true),
-    }
+/// Convert a float PrimitiveArray to BooleanArray using MySQL truthy rules:
+/// NULL -> false, 0 (including -0.0) -> false, NaN -> true, other non-zero -> true
+fn float_array_to_bool<T>(array: &PrimitiveArray<T>) -> BooleanArray
+where
+    T: ArrowPrimitiveType,
+    T::Native: ArrowNativeTypeOp + num_traits::Float,
+{
+    use num_traits::Float;
+    BooleanArray::from_iter(
+        array
+            .iter()
+            .map(|opt| Some(opt.is_some_and(|v| v.is_nan() || !v.is_zero()))),
+    )
 }
 
 /// Convert an Array to BooleanArray using MySQL truthy rules
 fn array_to_bool(array: ArrayRef) -> datafusion_common::Result<BooleanArray> {
-    let len = array.len();
-    let mut result = Vec::with_capacity(len);
+    use arrow::datatypes::*;
 
     match array.data_type() {
         DataType::Boolean => {
             let bool_array = array.as_boolean();
-            for i in 0..len {
-                if array.is_null(i) {
-                    result.push(false);
-                } else {
-                    result.push(bool_array.value(i));
-                }
-            }
+            Ok(BooleanArray::from_iter(
+                bool_array.iter().map(|opt| Some(opt.unwrap_or(false))),
+            ))
         }
-        DataType::Int8 => {
-            let typed_array = array.as_primitive::<arrow::datatypes::Int8Type>();
-            for i in 0..len {
-                result.push(!array.is_null(i) && typed_array.value(i) != 0);
-            }
-        }
-        DataType::Int16 => {
-            let typed_array = array.as_primitive::<arrow::datatypes::Int16Type>();
-            for i in 0..len {
-                result.push(!array.is_null(i) && typed_array.value(i) != 0);
-            }
-        }
-        DataType::Int32 => {
-            let typed_array = array.as_primitive::<arrow::datatypes::Int32Type>();
-            for i in 0..len {
-                result.push(!array.is_null(i) && typed_array.value(i) != 0);
-            }
-        }
-        DataType::Int64 => {
-            let typed_array = array.as_primitive::<arrow::datatypes::Int64Type>();
-            for i in 0..len {
-                result.push(!array.is_null(i) && typed_array.value(i) != 0);
-            }
-        }
-        DataType::UInt8 => {
-            let typed_array = array.as_primitive::<arrow::datatypes::UInt8Type>();
-            for i in 0..len {
-                result.push(!array.is_null(i) && typed_array.value(i) != 0);
-            }
-        }
-        DataType::UInt16 => {
-            let typed_array = array.as_primitive::<arrow::datatypes::UInt16Type>();
-            for i in 0..len {
-                result.push(!array.is_null(i) && typed_array.value(i) != 0);
-            }
-        }
-        DataType::UInt32 => {
-            let typed_array = array.as_primitive::<arrow::datatypes::UInt32Type>();
-            for i in 0..len {
-                result.push(!array.is_null(i) && typed_array.value(i) != 0);
-            }
-        }
-        DataType::UInt64 => {
-            let typed_array = array.as_primitive::<arrow::datatypes::UInt64Type>();
-            for i in 0..len {
-                result.push(!array.is_null(i) && typed_array.value(i) != 0);
-            }
-        }
+        DataType::Int8 => Ok(int_array_to_bool(array.as_primitive::<Int8Type>())),
+        DataType::Int16 => Ok(int_array_to_bool(array.as_primitive::<Int16Type>())),
+        DataType::Int32 => Ok(int_array_to_bool(array.as_primitive::<Int32Type>())),
+        DataType::Int64 => Ok(int_array_to_bool(array.as_primitive::<Int64Type>())),
+        DataType::UInt8 => Ok(int_array_to_bool(array.as_primitive::<UInt8Type>())),
+        DataType::UInt16 => Ok(int_array_to_bool(array.as_primitive::<UInt16Type>())),
+        DataType::UInt32 => Ok(int_array_to_bool(array.as_primitive::<UInt32Type>())),
+        DataType::UInt64 => Ok(int_array_to_bool(array.as_primitive::<UInt64Type>())),
+        // Float16 needs special handling since half::f16 doesn't implement num_traits::Float
         DataType::Float16 => {
-            let typed_array = array.as_primitive::<arrow::datatypes::Float16Type>();
-            for i in 0..len {
-                result.push(
-                    !array.is_null(i)
-                        && (typed_array.value(i).is_nan()
-                            || !typed_array.value(i).to_f32().is_zero()),
-                );
-            }
+            let typed_array = array.as_primitive::<Float16Type>();
+            Ok(BooleanArray::from_iter(typed_array.iter().map(|opt| {
+                Some(opt.is_some_and(|v| {
+                    let f = v.to_f32();
+                    f.is_nan() || !f.is_zero()
+                }))
+            })))
         }
-        DataType::Float32 => {
-            let typed_array = array.as_primitive::<arrow::datatypes::Float32Type>();
-            for i in 0..len {
-                result.push(
-                    !array.is_null(i)
-                        && (typed_array.value(i).is_nan() || !typed_array.value(i).is_zero()),
-                );
-            }
-        }
-        DataType::Float64 => {
-            let typed_array = array.as_primitive::<arrow::datatypes::Float64Type>();
-            for i in 0..len {
-                result.push(
-                    !array.is_null(i)
-                        && (typed_array.value(i).is_nan() || !typed_array.value(i).is_zero()),
-                );
-            }
-        }
+        DataType::Float32 => Ok(float_array_to_bool(array.as_primitive::<Float32Type>())),
+        DataType::Float64 => Ok(float_array_to_bool(array.as_primitive::<Float64Type>())),
+        // Null type is always false.
+        // Note: NullArray::is_null() returns false (physical null), so we must handle it explicitly.
+        // See: https://github.com/apache/arrow-rs/issues/4840
+        DataType::Null => Ok(BooleanArray::from(vec![false; array.len()])),
         // For other types, treat non-null as true
         _ => {
-            for i in 0..len {
-                result.push(!array.is_null(i));
-            }
+            let len = array.len();
+            Ok(BooleanArray::from_iter(
+                (0..len).map(|i| Some(!array.is_null(i))),
+            ))
         }
     }
-
-    Ok(BooleanArray::from(result))
 }
 
 #[cfg(test)]
@@ -270,6 +209,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_schema::Field;
+    use datafusion_common::ScalarValue;
     use datafusion_common::arrow::array::{AsArray, Int32Array, StringArray};
 
     use super::*;
@@ -334,10 +274,33 @@ mod tests {
         let if_func = IfFunction::default();
 
         // Test IF(NULL, 'yes', 'no') -> 'no' (NULL is treated as false)
+        // Using Boolean(None) - typed null
         let result = if_func
             .invoke_with_args(ScalarFunctionArgs {
                 args: vec![
                     ColumnarValue::Scalar(ScalarValue::Boolean(None)),
+                    ColumnarValue::Scalar(ScalarValue::Utf8(Some("yes".to_string()))),
+                    ColumnarValue::Scalar(ScalarValue::Utf8(Some("no".to_string()))),
+                ],
+                arg_fields: vec![],
+                number_rows: 1,
+                return_field: Arc::new(Field::new("", DataType::Utf8, true)),
+                config_options: Arc::new(Default::default()),
+            })
+            .unwrap();
+
+        if let ColumnarValue::Array(arr) = result {
+            let str_arr = arr.as_string::<i32>();
+            assert_eq!(str_arr.value(0), "no");
+        } else {
+            panic!("Expected Array result");
+        }
+
+        // Test IF(NULL, 'yes', 'no') -> 'no' using ScalarValue::Null (untyped null from SQL NULL literal)
+        let result = if_func
+            .invoke_with_args(ScalarFunctionArgs {
+                args: vec![
+                    ColumnarValue::Scalar(ScalarValue::Null),
                     ColumnarValue::Scalar(ScalarValue::Utf8(Some("yes".to_string()))),
                     ColumnarValue::Scalar(ScalarValue::Utf8(Some("no".to_string()))),
                 ],
