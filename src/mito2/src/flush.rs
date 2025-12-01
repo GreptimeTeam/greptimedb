@@ -89,6 +89,11 @@ pub trait WriteBufferManager: Send + Sync + std::fmt::Debug {
 
     /// Returns the total memory used by memtables.
     fn memory_usage(&self) -> usize;
+
+    /// Returns the limit for flushing memtables.
+    ///
+    /// The write buffer manager should flush memtables when the memory usage is greater than the flush limit.
+    fn flush_limit(&self) -> usize;
 }
 
 pub type WriteBufferManagerRef = Arc<dyn WriteBufferManager>;
@@ -198,6 +203,10 @@ impl WriteBufferManager for WriteBufferManagerImpl {
 
     fn memory_usage(&self) -> usize {
         self.memory_used.load(Ordering::Relaxed)
+    }
+
+    fn flush_limit(&self) -> usize {
+        self.mutable_limit
     }
 }
 
@@ -997,9 +1006,7 @@ impl FlushScheduler {
         };
 
         // Schedule next flush job.
-        if let Err(e) = self.schedule_next_flush() {
-            error!(e; "Flush of region {} is successful, but failed to schedule next flush", region_id);
-        }
+        self.schedule_next_flush(ScheduleNextFlushReason::Success(region_id));
 
         pending_requests
     }
@@ -1019,9 +1026,7 @@ impl FlushScheduler {
         flush_status.on_failure(err);
 
         // Still tries to schedule a new flush.
-        if let Err(e) = self.schedule_next_flush() {
-            error!(e; "Failed to schedule next flush after region {} flush is failed", region_id);
-        }
+        self.schedule_next_flush(ScheduleNextFlushReason::Failed(region_id));
     }
 
     /// Notifies the scheduler that the region is dropped.
@@ -1094,28 +1099,45 @@ impl FlushScheduler {
     }
 
     /// Schedules a new flush task when the scheduler can submit next task.
-    pub(crate) fn schedule_next_flush(&mut self) -> Result<()> {
+    pub(crate) fn schedule_next_flush(&mut self, reason: ScheduleNextFlushReason) {
         debug_assert!(
             self.region_status
                 .values()
                 .all(|status| status.flushing || status.pending_task.is_some())
         );
 
-        // Get the first region from status map.
-        let Some(flush_status) = self
+        let pending_flush_statuses = self
             .region_status
-            .values_mut()
-            .find(|status| status.pending_task.is_some())
-        else {
-            return Ok(());
-        };
-        debug_assert!(!flush_status.flushing);
-        let task = flush_status.pending_task.take().unwrap();
-        let region_id = flush_status.region_id;
-        let version_control = flush_status.version_control.clone();
-
-        self.schedule_flush(region_id, &version_control, task)
+            .extract_if(|_, status| status.pending_task.is_some())
+            .collect::<Vec<_>>();
+        for (region_id, mut flush_status) in pending_flush_statuses {
+            debug_assert!(!flush_status.flushing);
+            let task = flush_status.pending_task.take().unwrap();
+            let version_control = flush_status.version_control.clone();
+            if let Err(err) = self.schedule_flush(region_id, &version_control, task) {
+                match reason {
+                    ScheduleNextFlushReason::Success(previous_region_id) => {
+                        error!(
+                            err;
+                            "Flush succeeded for region {previous_region_id}, but failed to schedule next flush for region {region_id}."
+                        );
+                    }
+                    ScheduleNextFlushReason::Failed(previous_region_id) => {
+                        error!(
+                            err;
+                            "Flush failed for region {previous_region_id}, and also failed to schedule next flush for region {region_id}."
+                        );
+                    }
+                }
+            }
+        }
     }
+}
+
+/// Reason for scheduling next flush.
+pub(crate) enum ScheduleNextFlushReason {
+    Success(RegionId),
+    Failed(RegionId),
 }
 
 impl Drop for FlushScheduler {

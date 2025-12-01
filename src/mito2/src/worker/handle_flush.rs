@@ -62,9 +62,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let regions = self.regions.list_regions();
         let now = self.time_provider.current_time_millis();
         let min_last_flush_time = now - self.config.auto_flush_interval.as_millis() as i64;
-        let mut max_memtable_size = 0;
-        // Region with max memtable memtable size.
-        let mut max_mem_region = None;
+        let mut pending_regions = vec![];
 
         for region in &regions {
             if self.flush_scheduler.is_flush_requested(region.region_id) || !region.is_writable() {
@@ -75,11 +73,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let version = region.version();
             let region_memtable_size =
                 version.memtables.mutable_usage() + version.memtables.immutables_usage();
-            // Tracks region with max memtable size.
-            if region_memtable_size > max_memtable_size {
-                max_mem_region = Some(region);
-                max_memtable_size = region_memtable_size;
-            }
 
             if region.last_flush_millis() < min_last_flush_time {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
@@ -95,14 +88,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     &region.version_control,
                     task,
                 )?;
+            } else {
+                pending_regions.push((region, region_memtable_size));
             }
         }
+        pending_regions.sort_unstable_by_key(|(_, size)| *size);
+        let flush_limit = self.write_buffer_manager.flush_limit();
+        let mut memory_usage = self.write_buffer_manager.memory_usage();
 
-        // Flush memtable with max size.
-        // TODO(yingwen): Maybe flush more tables to reduce write buffer size.
-        if let Some(region) = max_mem_region
-            && !self.flush_scheduler.is_flush_requested(region.region_id)
-        {
+        // Iterate over pending regions in descending order of their memory size and schedule flush tasks
+        // for each region until the overall memory usage drops below the flush limit.
+        for (region, region_mem_size) in pending_regions.into_iter().rev() {
+            if memory_usage < flush_limit {
+                // Stop flushing regions if memory usage is already below the flush limit
+                break;
+            }
             let task = self.new_flush_task(
                 region,
                 FlushReason::EngineFull,
@@ -110,8 +110,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.config.clone(),
                 region.is_staging(),
             );
+            // Schedule a flush task for the current region
             self.flush_scheduler
                 .schedule_flush(region.region_id, &region.version_control, task)?;
+            // Reduce memory usage by the region's size, ensuring it doesn't go negative
+            memory_usage = memory_usage.saturating_sub(region_mem_size);
         }
 
         Ok(())
