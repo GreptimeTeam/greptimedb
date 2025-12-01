@@ -46,7 +46,6 @@ use crate::error::{
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
-use crate::kv_backend::KvBackendRef;
 use crate::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::DdlTask::CreateTrigger;
@@ -70,20 +69,16 @@ use crate::rpc::router::RegionRoute;
 
 /// A configurator that customizes or enhances a [`DdlManager`].
 #[async_trait::async_trait]
-pub trait DdlManagerConfigurator: Send + Sync {
+pub trait DdlManagerConfigurator<C>: Send + Sync {
     /// Configures the given [`DdlManager`] using the provided [`DdlManagerConfigureContext`].
     async fn configure(
         &self,
         ddl_manager: DdlManager,
-        ctx: DdlManagerConfigureContext,
+        ctx: C,
     ) -> std::result::Result<DdlManager, BoxedError>;
 }
 
-pub type DdlManagerConfiguratorRef = Arc<dyn DdlManagerConfigurator>;
-
-pub struct DdlManagerConfigureContext {
-    pub kv_backend: KvBackendRef,
-}
+pub type DdlManagerConfiguratorRef<C> = Arc<dyn DdlManagerConfigurator<C>>;
 
 pub type DdlManagerRef = Arc<DdlManager>;
 

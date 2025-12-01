@@ -45,7 +45,10 @@ use frontend::frontend::Frontend;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
-use meta_client::{MetaClientOptions, MetaClientRef, MetaClientType};
+use meta_client::{MetaClientOptions, MetaClientType};
+use plugins::frontend::context::{
+    CatalogManagerConfigureContext, DistributedCatalogManagerConfigureContext,
+};
 use servers::addrs;
 use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -423,9 +426,11 @@ impl StartCommand {
         let builder = if let Some(configurator) =
             plugins.get::<CatalogManagerConfiguratorRef<CatalogManagerConfigureContext>>()
         {
-            let ctx = CatalogManagerConfigureContext {
+            let ctx = DistributedCatalogManagerConfigureContext {
                 meta_client: meta_client.clone(),
             };
+            let ctx = CatalogManagerConfigureContext::Distributed(ctx);
+
             configurator
                 .configure(builder, ctx)
                 .await
@@ -480,11 +485,6 @@ impl StartCommand {
 
         Ok(Instance::new(frontend, guard))
     }
-}
-
-/// The context for [`CatalogManagerConfigratorRef`] in frontend.
-pub struct CatalogManagerConfigureContext {
-    pub meta_client: MetaClientRef,
 }
 
 #[cfg(test)]
