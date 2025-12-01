@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::RemovalCause;
@@ -231,7 +231,7 @@ impl ManifestCache {
             moved_self.clean_empty_dirs().await;
 
             if let Err(err) = moved_self.recover_inner().await {
-                common_telemetry::error!(err; "Failed to recover manifest cache.")
+                error!(err; "Failed to recover manifest cache.")
             }
         });
 
@@ -248,8 +248,6 @@ impl ManifestCache {
     /// Gets a manifest file from cache.
     /// Returns the file data if found in cache, None otherwise.
     pub(crate) async fn get_file(&self, key: &str) -> Option<Vec<u8>> {
-        common_telemetry::info!("Manifest cache get key: {key}");
-
         // Check if file is in cache index
         if self.get(key).await.is_none() {
             CACHE_MISS.with_label_values(&[MANIFEST_TYPE]).inc();

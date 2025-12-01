@@ -157,8 +157,6 @@ impl ManifestObjectStore {
         total_manifest_size: Arc<AtomicU64>,
         manifest_cache: Option<ManifestCache>,
     ) -> Self {
-        common_telemetry::info!("Create manifest store, cache: {}", manifest_cache.is_some());
-
         let path = util::normalize_dir(path);
         let staging_path = {
             // Convert "region_dir/manifest/" to "region_dir/staging/manifest/"
@@ -314,7 +312,6 @@ impl ManifestObjectStore {
             let _permit = semaphore.acquire().await.unwrap();
 
             let cache_key = entry.path();
-
             // Try to get from cache first
             if let Some(data) = self.get_from_cache(cache_key).await {
                 return Ok((*v, data));
@@ -465,21 +462,12 @@ impl ManifestObjectStore {
             })?;
         let delta_size = data.len();
 
-        // Write to cache if not staging and cache is available
-        if !is_staging {
-            self.object_store
-                .write(&path, data.clone())
-                .await
-                .context(OpenDalSnafu)?;
-            self.set_delta_file_size(version, delta_size as u64);
-            self.put_to_cache(path, data).await;
-        } else {
-            self.object_store
-                .write(&path, data)
-                .await
-                .context(OpenDalSnafu)?;
-            self.set_delta_file_size(version, delta_size as u64);
-        }
+        self.object_store
+            .write(&path, data.clone())
+            .await
+            .context(OpenDalSnafu)?;
+        self.set_delta_file_size(version, delta_size as u64);
+        self.put_to_cache(path, data).await;
 
         Ok(())
     }
@@ -790,8 +778,6 @@ impl ManifestObjectStore {
 
     /// Puts a manifest file into cache.
     async fn put_to_cache(&self, key: String, data: Vec<u8>) {
-        common_telemetry::info!("Put manifest to cache, key: {key}");
-
         let Some(cache) = &self.manifest_cache else {
             return;
         };
