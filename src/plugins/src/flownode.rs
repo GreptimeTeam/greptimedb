@@ -39,7 +39,7 @@ pub mod context {
     use common_meta::kv_backend::KvBackendRef;
     use flow::FrontendClient;
 
-    /// The context for [`GrpcBuilderConfiguratorRef`] in flownode.
+    /// The context for `GrpcBuilderConfiguratorRef` in flownode.
     pub struct GrpcConfigureContext {
         pub kv_backend: KvBackendRef,
         pub fe_client: Arc<FrontendClient>,

@@ -59,8 +59,7 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use plugins::frontend::context::{
-    CatalogManagerConfigureContext, DdlManagerConfigureContext,
-    StandaloneCatalogManagerConfigureContext,
+    CatalogManagerConfigureContext, StandaloneCatalogManagerConfigureContext,
 };
 use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
