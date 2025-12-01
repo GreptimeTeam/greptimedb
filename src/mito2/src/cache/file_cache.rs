@@ -607,7 +607,7 @@ impl fmt::Display for IndexKey {
             "{}.{}.{}",
             self.region_id.as_u64(),
             self.file_id,
-            self.file_type.to_string()
+            self.file_type.as_string()
         )
     }
 }
@@ -640,7 +640,7 @@ impl FileType {
     }
 
     /// Converts the file type to string.
-    fn to_string(&self) -> String {
+    fn as_string(&self) -> String {
         match self {
             FileType::Parquet => "parquet".to_string(),
             FileType::Puffin(version) => format!("{}.puffin", version),
