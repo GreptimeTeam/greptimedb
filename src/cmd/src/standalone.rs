@@ -236,10 +236,8 @@ impl StartCommand {
         let stdout_path = PathBuf::from(log_dir).join("greptime.stdout");
         let stderr_path = PathBuf::from(log_dir).join("greptimedb.stderr");
 
-        let stdout = fs::File::create(&stdout_path)
-            .context(error::FileIoSnafu { path: stdout_path })?;
-        let stderr = fs::File::create(&stderr_path)
-            .context(error::FileIoSnafu { path: stderr_path })?;
+        let stdout = fs::File::create(&stdout_path).context(error::FileIoSnafu)?;
+        let stderr = fs::File::create(&stderr_path).context(error::FileIoSnafu)?;
 
         let daemonize = Daemonize::new()
             .working_directory(data_home)
@@ -248,10 +246,13 @@ impl StartCommand {
 
         daemonize
             .start()
-            .map_err(|e| error::OtherSnafu {
-                msg: format!("Failed to daemonize: {}", e),
-            }
-            .build())?;
+            .map_err(|e| {
+                common_error::ext::BoxedError::new(common_error::ext::PlainError::new(
+                    format!("Failed to daemonize: {}", e),
+                    common_error::status_code::StatusCode::Internal,
+                ))
+            })
+            .context(error::OtherSnafu)?;
 
         Ok(())
     }
