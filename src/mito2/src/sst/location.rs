@@ -200,17 +200,24 @@ mod tests {
     #[test]
     fn test_parse_index_file_info() {
         // Test legacy format
-        let result = parse_index_file_info("table_dir/1_0000000002/index/123.puffin").unwrap();
-        assert_eq!(result.0.to_string(), "123");
+        let file_id = FileId::random();
+        let result =
+            parse_index_file_info(&format!("table_dir/1_0000000002/index/{file_id}.puffin"))
+                .unwrap();
+        assert_eq!(result.0.to_string(), file_id.to_string());
         assert_eq!(result.1, 0);
 
         // Test versioned format
-        let result = parse_index_file_info("table_dir/1_0000000002/index/123.1.puffin").unwrap();
-        assert_eq!(result.0.to_string(), "123");
+        let result =
+            parse_index_file_info(&format!("table_dir/1_0000000002/index/{file_id}.1.puffin"))
+                .unwrap();
+        assert_eq!(result.0.to_string(), file_id.to_string());
         assert_eq!(result.1, 1);
 
-        let result = parse_index_file_info("table_dir/1_0000000002/index/123.42.puffin").unwrap();
-        assert_eq!(result.0.to_string(), "123");
+        let result =
+            parse_index_file_info(&format!("table_dir/1_0000000002/index/{file_id}.42.puffin"))
+                .unwrap();
+        assert_eq!(result.0.to_string(), file_id.to_string());
         assert_eq!(result.1, 42);
     }
 }
