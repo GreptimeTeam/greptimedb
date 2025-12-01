@@ -25,7 +25,7 @@ Affected Rows: 0
 SHOW TABLES;
 
 +---------------------------------------+
-| Tables                                |
+| Tables_in_information_schema          |
 +---------------------------------------+
 | build_info                            |
 | character_sets                        |
@@ -66,16 +66,16 @@ SHOW TABLES;
 
 SHOW TABLES LIKE 'tables';
 
-+--------+
-| Tables |
-+--------+
-| tables |
-+--------+
++------------------------------+
+| Tables_in_information_schema |
++------------------------------+
+| tables                       |
++------------------------------+
 
 SHOW FULL TABLES;
 
 +---------------------------------------+-----------------+
-| Tables                                | Table_type      |
+| Tables_in_information_schema          | Table_type      |
 +---------------------------------------+-----------------+
 | build_info                            | LOCAL TEMPORARY |
 | character_sets                        | LOCAL TEMPORARY |

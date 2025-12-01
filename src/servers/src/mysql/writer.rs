@@ -36,6 +36,7 @@ use futures::StreamExt;
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
 };
+use session::SessionRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use tokio::io::AsyncWrite;
@@ -47,9 +48,18 @@ use crate::metrics::*;
 pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
     w: QueryResultWriter<'_, W>,
     query_context: QueryContextRef,
+    session: SessionRef,
     outputs: Vec<Result<Output>>,
 ) -> Result<()> {
-    let mut writer = Some(MysqlResultWriter::new(w, query_context.clone()));
+    if let Some(warning) = query_context.warning() {
+        session.add_warning(warning);
+    }
+
+    let mut writer = Some(MysqlResultWriter::new(
+        w,
+        query_context.clone(),
+        session.clone(),
+    ));
     for output in outputs {
         let result_writer = writer.take().context(error::InternalSnafu {
             err_msg: "Sending multiple result set is unsupported",
@@ -94,16 +104,19 @@ struct QueryResult {
 pub struct MysqlResultWriter<'a, W: AsyncWrite + Unpin> {
     writer: QueryResultWriter<'a, W>,
     query_context: QueryContextRef,
+    session: SessionRef,
 }
 
 impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     pub fn new(
         writer: QueryResultWriter<'a, W>,
         query_context: QueryContextRef,
+        session: SessionRef,
     ) -> MysqlResultWriter<'a, W> {
         MysqlResultWriter::<'a, W> {
             writer,
             query_context,
+            session,
         }
     }
 
@@ -131,10 +144,12 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Self::write_query_result(query_result, self.writer, self.query_context).await?;
                 }
                 OutputData::AffectedRows(rows) => {
-                    let next_writer = Self::write_affected_rows(self.writer, rows).await?;
+                    let next_writer =
+                        Self::write_affected_rows(self.writer, rows, &self.session).await?;
                     return Ok(Some(MysqlResultWriter::new(
                         next_writer,
                         self.query_context,
+                        self.session,
                     )));
                 }
             },
@@ -152,10 +167,14 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     async fn write_affected_rows(
         w: QueryResultWriter<'a, W>,
         rows: usize,
+        session: &SessionRef,
     ) -> Result<QueryResultWriter<'a, W>> {
+        let warnings = session.warnings_count() as u16;
+
         let next_writer = w
             .complete_one(OkResponse {
                 affected_rows: rows as u64,
+                warnings,
                 ..Default::default()
             })
             .await?;

@@ -475,6 +475,8 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         p: ParamParser<'a>,
         w: QueryResultWriter<'a, W>,
     ) -> Result<()> {
+        self.session.clear_warnings();
+
         let query_ctx = self.session.new_query_context();
         let db = query_ctx.get_db_string();
         let _timer = crate::metrics::METRIC_MYSQL_QUERY_TIMER
@@ -500,7 +502,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             }
         };
 
-        writer::write_output(w, query_ctx, outputs).await?;
+        writer::write_output(w, query_ctx, self.session.clone(), outputs).await?;
 
         Ok(())
     }
@@ -525,7 +527,12 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             .with_label_values(&[crate::metrics::METRIC_MYSQL_TEXTQUERY, db.as_str()])
             .start_timer();
 
+        // Clear warnings for non SHOW WARNINGS queries
         let query_upcase = query.to_uppercase();
+        if !query_upcase.starts_with("SHOW WARNINGS") {
+            self.session.clear_warnings();
+        }
+
         if query_upcase.starts_with("PREPARE ") {
             match ParserContext::parse_mysql_prepare_stmt(query, query_ctx.sql_dialect()) {
                 Ok((stmt_name, stmt)) => {
@@ -534,7 +541,8 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     match prepare_results {
                         Ok(_) => {
                             let outputs = vec![Ok(Output::new_with_affected_rows(0))];
-                            writer::write_output(writer, query_ctx, outputs).await?;
+                            writer::write_output(writer, query_ctx, self.session.clone(), outputs)
+                                .await?;
                             return Ok(());
                         }
                         Err(e) => {
@@ -570,7 +578,8 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                             return Ok(());
                         }
                     };
-                    writer::write_output(writer, query_ctx, outputs).await?;
+                    writer::write_output(writer, query_ctx, self.session.clone(), outputs).await?;
+
                     return Ok(());
                 }
                 Err(e) => {
@@ -585,7 +594,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 Ok(stmt_name) => {
                     self.do_close(stmt_name);
                     let outputs = vec![Ok(Output::new_with_affected_rows(0))];
-                    writer::write_output(writer, query_ctx, outputs).await?;
+                    writer::write_output(writer, query_ctx, self.session.clone(), outputs).await?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -598,7 +607,8 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         }
 
         let outputs = self.do_query(query, query_ctx.clone()).await;
-        writer::write_output(writer, query_ctx, outputs).await?;
+        writer::write_output(writer, query_ctx, self.session.clone(), outputs).await?;
+
         Ok(())
     }
 

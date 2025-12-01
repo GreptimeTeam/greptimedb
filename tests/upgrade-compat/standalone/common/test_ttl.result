@@ -26,14 +26,14 @@ Affected Rows: 1
 -- SQLNESS ARG version=latest
 SHOW TABLES;
 
-+---------------+
-| Tables        |
-+---------------+
-| numbers       |
-| test_ttl_0s   |
-| test_ttl_1s   |
-| test_ttl_none |
-+---------------+
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
+| test_ttl_0s      |
+| test_ttl_1s      |
+| test_ttl_none    |
++------------------+
 
 SHOW CREATE TABLE test_ttl_1s;
 
