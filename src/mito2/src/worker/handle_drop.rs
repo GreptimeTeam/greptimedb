@@ -51,6 +51,7 @@ where
         // Writes dropping marker
         // We rarely drop a region so we still operate in the worker loop.
         let region_dir = region.access_layer.build_region_dir(region_id);
+        let table_dir = region.access_layer.table_dir().to_string();
         let marker_path = join_path(&region_dir, DROPPING_MARKER_FILE);
         region
             .access_layer
@@ -122,7 +123,9 @@ where
             // Clean manifest cache for the region
             if let Some(write_cache) = cache_manager.write_cache() {
                 if let Some(manifest_cache) = write_cache.manifest_cache() {
-                    manifest_cache.clean_manifests(&region_dir).await;
+                    // We pass the table dir so we can remove the table dir in manifest cache
+                    // when the last region in the same host is dropped.
+                    manifest_cache.clean_manifests(&table_dir).await;
                 }
             }
 

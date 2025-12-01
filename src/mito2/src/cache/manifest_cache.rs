@@ -67,7 +67,7 @@ impl ManifestCache {
 
         let cache = ManifestCache { local_store, index };
 
-        // Recover the cache index from local store asynchronously
+        // Recovers the cache index from local store asynchronously
         cache.recover(false).await;
 
         cache
@@ -82,9 +82,8 @@ impl ManifestCache {
         let cache_store = local_store;
         let mut builder = Cache::builder()
             .eviction_policy(EvictionPolicy::lru())
-            .weigher(|_key: &String, value: &IndexValue| -> u32 {
-                // We only measure space on local store.
-                value.file_size
+            .weigher(|key: &String, value: &IndexValue| -> u32 {
+                key.len() as u32 + value.file_size
             })
             .max_capacity(capacity)
             .async_eviction_listener(move |key: Arc<String>, value: IndexValue, cause| {
@@ -93,12 +92,11 @@ impl ManifestCache {
                 let file_path = join_path(MANIFEST_DIR, &key);
                 async move {
                     if let RemovalCause::Replaced = cause {
-                        // The cache is replaced by another file. This is unexpected, we don't remove the same
+                        // The cache is replaced by another file. We don't remove the same
                         // file but updates the metrics as the file is already replaced by users.
                         CACHE_BYTES
                             .with_label_values(&[MANIFEST_TYPE])
                             .sub(value.file_size.into());
-                        warn!("Replace existing cache {} unexpectedly", file_path);
                         return;
                     }
 
@@ -152,21 +150,17 @@ impl ManifestCache {
     }
 
     /// Removes multiple files from the cache in batch.
-    /// This is more efficient than calling `remove` multiple times.
     pub(crate) async fn remove_batch(&self, keys: &[String]) {
         if keys.is_empty() {
             return;
         }
 
-        // Remove from index
         for key in keys {
             self.index.remove(key).await;
         }
 
-        // Collect file paths to delete
         let file_paths: Vec<String> = keys.iter().map(|key| self.cache_file_path(key)).collect();
 
-        // Delete files from local store in batch
         if let Err(e) = self.local_store.delete_iter(file_paths).await {
             warn!(e; "Failed to delete cached manifest files in batch");
         }
@@ -180,7 +174,6 @@ impl ManifestCache {
             .recursive(true)
             .await
             .context(OpenDalSnafu)?;
-        // Use i64 for total_size to reduce the risk of overflow.
         let (mut total_size, mut total_keys) = (0i64, 0);
         while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
             let meta = entry.metadata();
@@ -194,19 +187,18 @@ impl ManifestCache {
                 .await
                 .context(OpenDalSnafu)?;
             let file_size = meta.content_length() as u32;
-            // Use the file name as the key
-            let key = entry.name().to_string();
+            let key = entry.path().trim_start_matches(MANIFEST_DIR).to_string();
+            common_telemetry::info!("Manifest cache recover {}, size: {}", key, file_size);
             self.index.insert(key, IndexValue { file_size }).await;
             let size = i64::from(file_size);
             total_size += size;
             total_keys += 1;
         }
-        // The metrics is a signed int gauge so we can update it finally.
         CACHE_BYTES
             .with_label_values(&[MANIFEST_TYPE])
             .add(total_size);
 
-        // Run all pending tasks of the moka cache so that the cache size is updated
+        // Runs all pending tasks of the moka cache so that the cache size is updated
         // and the eviction policy is applied.
         self.index.run_pending_tasks().await;
 
@@ -227,12 +219,11 @@ impl ManifestCache {
     pub(crate) async fn recover(&self, sync: bool) {
         let moved_self = self.clone();
         let handle = tokio::spawn(async move {
-            // Clean empty directories before recovering
-            moved_self.clean_empty_dirs().await;
-
             if let Err(err) = moved_self.recover_inner().await {
                 error!(err; "Failed to recover manifest cache.")
             }
+
+            moved_self.clean_empty_dirs().await;
         });
 
         if sync {
@@ -248,13 +239,11 @@ impl ManifestCache {
     /// Gets a manifest file from cache.
     /// Returns the file data if found in cache, None otherwise.
     pub(crate) async fn get_file(&self, key: &str) -> Option<Vec<u8>> {
-        // Check if file is in cache index
         if self.get(key).await.is_none() {
             CACHE_MISS.with_label_values(&[MANIFEST_TYPE]).inc();
             return None;
         }
 
-        // Read from local cache store
         let cache_file_path = self.cache_file_path(key);
         match self.local_store.read(&cache_file_path).await {
             Ok(data) => {
@@ -273,13 +262,11 @@ impl ManifestCache {
     pub(crate) async fn put_file(&self, key: String, data: Vec<u8>) {
         let cache_file_path = self.cache_file_path(&key);
 
-        // Write to local cache store
         if let Err(e) = self.local_store.write(&cache_file_path, data.clone()).await {
             warn!(e; "Failed to write manifest to cache {}", cache_file_path);
             return;
         }
 
-        // Add to cache index
         let file_size = data.len() as u32;
         self.put(key, IndexValue { file_size }).await;
     }
@@ -306,13 +293,7 @@ impl ManifestCache {
     }
 
     /// Removes all manifest files under the given directory from cache and cleans up empty directories.
-    ///
-    /// This method:
-    /// 1. Lists all files under the specified directory
-    /// 2. Removes each file from the cache (both index and local store) in batch
-    /// 3. Cleans up empty directories under the given directory (including the directory itself)
     pub(crate) async fn clean_manifests(&self, dir: &str) {
-        // List all files under the directory
         let cache_dir = join_path(MANIFEST_DIR, dir);
         let mut lister = match self
             .local_store
@@ -327,15 +308,14 @@ impl ManifestCache {
             }
         };
 
-        // Collect all file keys to remove
         let mut keys_to_remove = Vec::new();
         loop {
             match lister.try_next().await {
                 Ok(Some(entry)) => {
                     let meta = entry.metadata();
                     if meta.is_file() {
-                        // The entry name is relative to MANIFEST_DIR, which is what we use as key
-                        keys_to_remove.push(entry.name().to_string());
+                        keys_to_remove
+                            .push(entry.path().trim_start_matches(MANIFEST_DIR).to_string());
                     }
                 }
                 Ok(None) => break,
@@ -346,10 +326,15 @@ impl ManifestCache {
             }
         }
 
-        // Remove all files from cache in batch
+        info!(
+            "Going to remove files from manifest cache, files: {:?}",
+            keys_to_remove
+        );
+
+        // Removes all files from cache in batch
         self.remove_batch(&keys_to_remove).await;
 
-        // Clean up empty directories under the given dir
+        // Cleans up empty directories under the given dir
         let root = self.local_store.info().root();
         let dir_path = PathBuf::from(root).join(&cache_dir);
         let dir_path_clone = dir_path.clone();
@@ -376,7 +361,6 @@ impl ManifestCache {
         Ok(())
     }
 
-    /// Recursively removes empty directories using synchronous filesystem APIs.
     fn remove_empty_dirs_recursive_sync(dir: &PathBuf) -> std::io::Result<bool> {
         let entries = std::fs::read_dir(dir)?;
         let mut is_empty = true;
@@ -387,21 +371,21 @@ impl ManifestCache {
             let metadata = std::fs::metadata(&path)?;
 
             if metadata.is_dir() {
-                // Recursively check subdirectories
                 let subdir_empty = Self::remove_empty_dirs_recursive_sync(&path)?;
                 if subdir_empty {
-                    // Remove the empty subdirectory
                     if let Err(e) = std::fs::remove_dir(&path) {
                         warn!(e; "Failed to remove empty directory {}", path.display());
                         is_empty = false;
                     } else {
-                        info!("Removed empty directory {}", path.display());
+                        info!(
+                            "Removed empty directory {} from manifest cache",
+                            path.display()
+                        );
                     }
                 } else {
                     is_empty = false;
                 }
             } else {
-                // Found a file, directory is not empty
                 is_empty = false;
             }
         }
