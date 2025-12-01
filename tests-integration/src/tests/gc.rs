@@ -27,7 +27,7 @@ use store_api::storage::RegionId;
 use table::metadata::TableId;
 
 use crate::cluster::GreptimeDbClusterBuilder;
-use crate::test_util::{TempDirGuard, get_test_store_config};
+use crate::test_util::{StorageType, TempDirGuard, get_test_store_config};
 use crate::tests::test_util::{MockInstanceBuilder, TestContext, execute_sql, wait_procedure};
 
 /// Helper function to get table route information for GC procedure
@@ -79,10 +79,10 @@ async fn list_sst_files(test_context: &TestContext) -> HashSet<String> {
     sst_files
 }
 
-async fn distributed_with_gc_s3() -> (TestContext, TempDirGuard) {
+async fn distributed_with_gc(store_type: &StorageType) -> (TestContext, TempDirGuard) {
     common_telemetry::init_default_ut_logging();
     let test_name = uuid::Uuid::new_v4().to_string();
-    let (store_config, guard) = get_test_store_config(&crate::test_util::StorageType::S3);
+    let (store_config, guard) = get_test_store_config(store_type);
 
     let builder = GreptimeDbClusterBuilder::new(&test_name)
         .await
