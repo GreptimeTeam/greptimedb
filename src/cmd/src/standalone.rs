@@ -61,6 +61,7 @@ use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use plugins::frontend::context::{
     CatalogManagerConfigureContext, StandaloneCatalogManagerConfigureContext,
 };
+use plugins::standalone::context::DdlManagerConfigureContext;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
 use standalone::StandaloneInformationExtension;
