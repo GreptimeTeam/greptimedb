@@ -145,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "each type of plugins must be one and only")]
+    #[should_panic(expected = "Plugin of type i32 already exists")]
     fn test_plugin_uniqueness() {
         let plugins = Plugins::new();
         plugins.insert(1i32);
