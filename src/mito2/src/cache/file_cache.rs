@@ -94,6 +94,75 @@ impl FileCacheInner {
         index.run_pending_tasks().await;
     }
 
+    /// Recovers the index from local store.
+    async fn recover(&self) -> Result<()> {
+        let now = Instant::now();
+        let mut lister = self
+            .local_store
+            .lister_with(FILE_DIR)
+            .await
+            .context(OpenDalSnafu)?;
+        // Use i64 for total_size to reduce the risk of overflow.
+        // It is possible that the total size of the cache is larger than i32::MAX.
+        let (mut total_size, mut total_keys) = (0i64, 0);
+        let (mut parquet_size, mut puffin_size) = (0i64, 0i64);
+        while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
+            let meta = entry.metadata();
+            if !meta.is_file() {
+                continue;
+            }
+            let Some(key) = parse_index_key(entry.name()) else {
+                continue;
+            };
+
+            let meta = self
+                .local_store
+                .stat(entry.path())
+                .await
+                .context(OpenDalSnafu)?;
+            let file_size = meta.content_length() as u32;
+            let index = self.memory_index(key.file_type);
+            index.insert(key, IndexValue { file_size }).await;
+            let size = i64::from(file_size);
+            total_size += size;
+            total_keys += 1;
+
+            // Track sizes separately for each file type
+            match key.file_type {
+                FileType::Parquet => parquet_size += size,
+                FileType::Puffin => puffin_size += size,
+            }
+        }
+        // The metrics is a signed int gauge so we can updates it finally.
+        CACHE_BYTES
+            .with_label_values(&[FILE_TYPE])
+            .add(parquet_size);
+        CACHE_BYTES
+            .with_label_values(&[INDEX_TYPE])
+            .add(puffin_size);
+
+        // Run all pending tasks of the moka cache so that the cache size is updated
+        // and the eviction policy is applied.
+        self.parquet_index.run_pending_tasks().await;
+        self.puffin_index.run_pending_tasks().await;
+
+        let parquet_weight = self.parquet_index.weighted_size();
+        let parquet_count = self.parquet_index.entry_count();
+        let puffin_weight = self.puffin_index.weighted_size();
+        let puffin_count = self.puffin_index.entry_count();
+        info!(
+            "Recovered file cache, num_keys: {}, num_bytes: {}, parquet(count: {}, weight: {}), puffin(count: {}, weight: {}), cost: {:?}",
+            total_keys,
+            total_size,
+            parquet_count,
+            parquet_weight,
+            puffin_count,
+            puffin_weight,
+            now.elapsed()
+        );
+        Ok(())
+    }
+
     /// Downloads a file without cleaning up on error.
     async fn download_without_cleaning(
         &self,
@@ -186,7 +255,7 @@ impl FileCacheInner {
 
 /// A file cache manages files on local store and evict files based
 /// on size.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct FileCache {
     /// Inner cache state shared with background worker.
     inner: Arc<FileCacheInner>,
@@ -390,100 +459,28 @@ impl FileCache {
         }
     }
 
-    async fn recover_inner(&self) -> Result<()> {
-        let now = Instant::now();
-        let mut lister = self
-            .inner
-            .local_store
-            .lister_with(FILE_DIR)
-            .await
-            .context(OpenDalSnafu)?;
-        // Use i64 for total_size to reduce the risk of overflow.
-        // It is possible that the total size of the cache is larger than i32::MAX.
-        let (mut total_size, mut total_keys) = (0i64, 0);
-        let (mut parquet_size, mut puffin_size) = (0i64, 0i64);
-        while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
-            let meta = entry.metadata();
-            if !meta.is_file() {
-                continue;
-            }
-            let Some(key) = parse_index_key(entry.name()) else {
-                continue;
-            };
-
-            let meta = self
-                .inner
-                .local_store
-                .stat(entry.path())
-                .await
-                .context(OpenDalSnafu)?;
-            let file_size = meta.content_length() as u32;
-            let index = self.inner.memory_index(key.file_type);
-            index.insert(key, IndexValue { file_size }).await;
-            let size = i64::from(file_size);
-            total_size += size;
-            total_keys += 1;
-
-            // Track sizes separately for each file type
-            match key.file_type {
-                FileType::Parquet => parquet_size += size,
-                FileType::Puffin => puffin_size += size,
-            }
-        }
-        // The metrics is a signed int gauge so we can updates it finally.
-        CACHE_BYTES
-            .with_label_values(&[FILE_TYPE])
-            .add(parquet_size);
-        CACHE_BYTES
-            .with_label_values(&[INDEX_TYPE])
-            .add(puffin_size);
-
-        // Run all pending tasks of the moka cache so that the cache size is updated
-        // and the eviction policy is applied.
-        self.inner.parquet_index.run_pending_tasks().await;
-        self.inner.puffin_index.run_pending_tasks().await;
-
-        let parquet_weight = self.inner.parquet_index.weighted_size();
-        let parquet_count = self.inner.parquet_index.entry_count();
-        let puffin_weight = self.inner.puffin_index.weighted_size();
-        let puffin_count = self.inner.puffin_index.entry_count();
-        info!(
-            "Recovered file cache, num_keys: {}, num_bytes: {}, parquet(count: {}, weight: {}), puffin(count: {}, weight: {}), cost: {:?}",
-            total_keys,
-            total_size,
-            parquet_count,
-            parquet_weight,
-            puffin_count,
-            puffin_weight,
-            now.elapsed()
-        );
-        Ok(())
-    }
-
     /// Recovers the index from local store.
     ///
     /// If `task_receiver` is provided, spawns a background task after recovery
     /// to process `RegionLoadCacheTask` messages for loading files into the cache.
     pub(crate) async fn recover(
-        self: &Arc<Self>,
+        &self,
         sync: bool,
         task_receiver: Option<UnboundedReceiver<RegionLoadCacheTask>>,
     ) {
         let moved_self = self.clone();
         let handle = tokio::spawn(async move {
-            if let Err(err) = moved_self.recover_inner().await {
+            if let Err(err) = moved_self.inner.recover().await {
                 error!(err; "Failed to recover file cache.")
             }
 
             // Spawns background task to process region load cache tasks after recovery.
             // So it won't block the recovery when `sync` is true.
             if let Some(mut receiver) = task_receiver {
-                let cache_ref = moved_self.clone();
                 info!("Spawning background task for processing region load cache tasks");
                 tokio::spawn(async move {
                     while let Some(task) = receiver.recv().await {
-                        let file_cache = cache_ref.clone();
-                        task.fill_cache(file_cache).await;
+                        task.fill_cache(&moved_self).await;
                     }
                     info!("Background task for processing region load cache tasks stopped");
                 });
@@ -844,12 +841,12 @@ mod tests {
         }
 
         // Recover the cache.
-        let cache = Arc::new(FileCache::new(
+        let cache = FileCache::new(
             local_store.clone(),
             ReadableSize::mb(10),
             None,
             None,
-        ));
+        );
         // No entry before recovery.
         assert!(
             cache

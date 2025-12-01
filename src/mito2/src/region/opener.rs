@@ -41,7 +41,7 @@ use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
-use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
+use crate::cache::file_cache::{FileCache, FileType, IndexKey};
 use crate::config::MitoConfig;
 use crate::error;
 use crate::error::{
@@ -848,7 +848,7 @@ impl RegionLoadCacheTask {
     }
 
     /// Fills the file cache with index files from the region.
-    pub(crate) async fn fill_cache(&self, file_cache: FileCacheRef) {
+    pub(crate) async fn fill_cache(&self, file_cache: &FileCache) {
         let region_id = self.region.region_id;
         let table_dir = self.region.access_layer.table_dir();
         let path_type = self.region.access_layer.path_type();
