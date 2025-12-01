@@ -138,12 +138,10 @@ impl ManifestCache {
     }
 
     /// Removes a file from the cache explicitly.
-    /// It always tries to remove the file from the local store because we may not have the file
-    /// in the memory index if upload failed.
     pub(crate) async fn remove(&self, key: &str) {
         let file_path = self.cache_file_path(key);
         self.index.remove(key).await;
-        // Always delete the file from the local store.
+        // Always deletes the file from the local store.
         if let Err(e) = self.local_store.delete(&file_path).await {
             warn!(e; "Failed to delete a cached manifest file {}", file_path);
         }
@@ -223,7 +221,7 @@ impl ManifestCache {
                 error!(err; "Failed to recover manifest cache.")
             }
 
-            moved_self.clean_empty_dirs().await;
+            moved_self.clean_empty_dirs(true).await;
         });
 
         if sync {
@@ -272,17 +270,25 @@ impl ManifestCache {
     }
 
     /// Removes empty directories recursively under the manifest cache directory.
-    pub(crate) async fn clean_empty_dirs(&self) {
+    ///
+    /// If `check_mtime` is true, only removes directories that have not been modified
+    /// for at least 1 hour.
+    pub(crate) async fn clean_empty_dirs(&self, check_mtime: bool) {
+        info!("Clean empty dirs start");
+
         let root = self.local_store.info().root();
         let manifest_dir = PathBuf::from(root).join(MANIFEST_DIR);
         let manifest_dir_clone = manifest_dir.clone();
 
-        let result =
-            tokio::task::spawn_blocking(move || Self::clean_empty_dirs_sync(&manifest_dir_clone))
-                .await;
+        let result = tokio::task::spawn_blocking(move || {
+            Self::clean_empty_dirs_sync(&manifest_dir_clone, check_mtime)
+        })
+        .await;
 
         match result {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                info!("Clean empty dirs end");
+            }
             Ok(Err(e)) => {
                 warn!(e; "Failed to clean empty directories under {}", manifest_dir.display());
             }
@@ -294,6 +300,8 @@ impl ManifestCache {
 
     /// Removes all manifest files under the given directory from cache and cleans up empty directories.
     pub(crate) async fn clean_manifests(&self, dir: &str) {
+        info!("Clean manifest cache for directory: {}", dir);
+
         let cache_dir = join_path(MANIFEST_DIR, dir);
         let mut lister = match self
             .local_store
@@ -339,8 +347,10 @@ impl ManifestCache {
         let dir_path = PathBuf::from(root).join(&cache_dir);
         let dir_path_clone = dir_path.clone();
 
-        let result =
-            tokio::task::spawn_blocking(move || Self::clean_empty_dirs_sync(&dir_path_clone)).await;
+        let result = tokio::task::spawn_blocking(move || {
+            Self::clean_empty_dirs_sync(&dir_path_clone, false)
+        })
+        .await;
 
         match result {
             Ok(Ok(())) => {
@@ -356,26 +366,50 @@ impl ManifestCache {
     }
 
     /// Synchronously removes empty directories recursively.
-    fn clean_empty_dirs_sync(dir: &PathBuf) -> std::io::Result<()> {
-        Self::remove_empty_dirs_recursive_sync(dir)?;
+    ///
+    /// If `check_mtime` is true, only removes directories that have not been modified
+    /// for at least 1 hour.
+    fn clean_empty_dirs_sync(dir: &PathBuf, check_mtime: bool) -> std::io::Result<()> {
+        Self::remove_empty_dirs_recursive_sync(dir, check_mtime)?;
         Ok(())
     }
 
-    fn remove_empty_dirs_recursive_sync(dir: &PathBuf) -> std::io::Result<bool> {
-        let entries = std::fs::read_dir(dir)?;
-        let mut is_empty = true;
-
+    fn remove_empty_dirs_recursive_sync(dir: &PathBuf, check_mtime: bool) -> std::io::Result<bool> {
+        common_telemetry::debug!(
+            "Maybe remove empty dir: {:?}, check_mtime: {}",
+            dir,
+            check_mtime
+        );
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Directory doesn't exist, treat as already removed (empty)
+                return Ok(true);
+            }
+            Err(e) => return Err(e),
+        };
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
             let metadata = std::fs::metadata(&path)?;
 
             if metadata.is_dir() {
-                let subdir_empty = Self::remove_empty_dirs_recursive_sync(&path)?;
+                // Checks if we should skip this directory based on modification time
+                if check_mtime
+                    && let Ok(modified) = metadata.modified()
+                    && let Ok(elapsed) = modified.elapsed()
+                    && elapsed < Duration::from_secs(3600)
+                {
+                    common_telemetry::debug!("Skip directory by mtime, elapsed: {:?}", elapsed);
+                    // Only removes if not modified for at least 1 hour
+                    return Ok(false);
+                }
+
+                let subdir_empty = Self::remove_empty_dirs_recursive_sync(&path, check_mtime)?;
                 if subdir_empty {
                     if let Err(e) = std::fs::remove_dir(&path) {
                         warn!(e; "Failed to remove empty directory {}", path.display());
-                        is_empty = false;
+                        return Ok(false);
                     } else {
                         info!(
                             "Removed empty directory {} from manifest cache",
@@ -383,14 +417,14 @@ impl ManifestCache {
                         );
                     }
                 } else {
-                    is_empty = false;
+                    return Ok(false);
                 }
             } else {
-                is_empty = false;
+                return Ok(false);
             }
         }
 
-        Ok(is_empty)
+        Ok(true)
     }
 }
 
@@ -417,6 +451,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_manifest_cache_basic() {
+        common_telemetry::init_default_ut_logging();
+
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
 
@@ -443,10 +479,11 @@ mod tests {
 
         // Get weighted size.
         cache.index.run_pending_tasks().await;
-        assert_eq!(16, cache.index.weighted_size());
+        assert_eq!(59, cache.index.weighted_size());
 
         // Remove the file.
         cache.remove(key).await;
+        cache.index.run_pending_tasks().await;
         assert!(cache.get(key).await.is_none());
 
         // Ensure all pending tasks of the moka cache is done before assertion.
@@ -459,6 +496,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_manifest_cache_recover() {
+        common_telemetry::init_default_ut_logging();
+
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
         let cache = ManifestCache::new(local_store.clone(), ReadableSize::mb(10), None).await;
@@ -489,7 +528,7 @@ mod tests {
                     },
                 )
                 .await;
-            total_size += content.len();
+            total_size += content.len() + key.len();
         }
 
         // Create a new cache instance which will automatically recover from local store
