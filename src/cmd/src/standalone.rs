@@ -58,7 +58,10 @@ use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
-use plugins::standalone::{CatalogManagerConfigureContext, DdlManagerConfigureContext};
+use plugins::frontend::{
+    CatalogManagerConfigureContext, DdlManagerConfigureContext,
+    StandaloneCatalogManagerConfigureContext,
+};
 use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
 use standalone::StandaloneInformationExtension;
@@ -415,9 +418,10 @@ impl StartCommand {
         let builder = if let Some(configurator) =
             plugins.get::<CatalogManagerConfiguratorRef<CatalogManagerConfigureContext>>()
         {
-            let ctx = CatalogManagerConfigureContext {
+            let ctx = StandaloneCatalogManagerConfigureContext {
                 fe_client: frontend_client.clone(),
             };
+            let ctx = CatalogManagerConfigureContext::Standalone(ctx);
             configurator
                 .configure(builder, ctx)
                 .await
