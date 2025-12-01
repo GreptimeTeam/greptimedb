@@ -1247,10 +1247,12 @@ mod tests {
         // Global usage is still 1100.
         manager.schedule_free_mem(200);
         assert!(manager.should_flush_engine());
+        assert!(manager.should_stall());
 
-        // More than global limit, but mutable (1100-200-450=450) is not enough (< 500).
+        // More than global limit, mutable (1100-200-450=450) is less than mutable limit (< 500).
         manager.schedule_free_mem(450);
-        assert!(!manager.should_flush_engine());
+        assert!(manager.should_flush_engine());
+        assert!(manager.should_stall());
 
         // Now mutable is enough.
         manager.reserve_mem(50);
