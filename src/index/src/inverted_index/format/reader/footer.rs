@@ -57,9 +57,9 @@ impl<R> InvertedIndexFooterReader<R> {
 }
 
 impl<R: RangeReader> InvertedIndexFooterReader<R> {
-    pub async fn metadata<'a>(
+    pub async fn metadata(
         &mut self,
-        mut metrics: Option<&'a mut InvertedIndexReadMetrics>,
+        mut metrics: Option<&mut InvertedIndexReadMetrics>,
     ) -> Result<InvertedIndexMetas> {
         ensure!(
             self.blob_size >= FOOTER_PAYLOAD_SIZE_SIZE,

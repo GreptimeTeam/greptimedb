@@ -139,8 +139,7 @@ pub trait InvertedIndexReader: Send + Sync {
         ranges: &[Range<u64>],
         metrics: Option<&'a mut InvertedIndexReadMetrics>,
     ) -> Result<Vec<FstMap>> {
-        let mut metrics = metrics;
-        self.read_vec(ranges, metrics.as_deref_mut())
+        self.read_vec(ranges, metrics)
             .await?
             .into_iter()
             .map(|bytes| FstMap::new(bytes.to_vec()).context(DecodeFstSnafu))
@@ -168,9 +167,8 @@ pub trait InvertedIndexReader: Send + Sync {
         ranges: &[(Range<u64>, BitmapType)],
         metrics: Option<&'a mut InvertedIndexReadMetrics>,
     ) -> Result<VecDeque<Bitmap>> {
-        let mut metrics = metrics;
         let (ranges, types): (Vec<_>, Vec<_>) = ranges.iter().cloned().unzip();
-        let bytes = self.read_vec(&ranges, metrics.as_deref_mut()).await?;
+        let bytes = self.read_vec(&ranges, metrics).await?;
         bytes
             .into_iter()
             .zip(types)
