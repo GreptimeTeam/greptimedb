@@ -136,6 +136,18 @@ impl ObjectStorePuffinFileAccessor {
             path_provider,
         }
     }
+
+    /// Cleans the puffin file identified by the given `index_id`.
+    pub async fn clean_by_index_id(&self, index_id: &RegionIndexId) -> PuffinResult<()> {
+        let file_path = self
+            .path_provider
+            .build_index_file_path_with_version(*index_id);
+        self.object_store
+            .remove(&file_path)
+            .await
+            .map_err(BoxedError::new)
+            .context(puffin_error::ExternalSnafu)
+    }
 }
 
 #[async_trait]

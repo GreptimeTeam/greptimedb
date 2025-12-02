@@ -226,13 +226,20 @@ impl AccessLayer {
                 file_id: region_file_id.file_id(),
             })?;
 
-        let path = location::index_file_path(&self.table_dir, *index_file_id, self.path_type);
-        self.object_store
-            .delete(&path)
-            .await
-            .context(DeleteIndexSnafu {
-                file_id: region_file_id.file_id(),
-            })?;
+        // Delete all versions of the index file.
+        for version in 0..=index_file_id.version {
+            let path = location::index_file_path(
+                &self.table_dir,
+                RegionIndexId::new(index_file_id.file_id, version),
+                self.path_type,
+            );
+            self.object_store
+                .delete(&path)
+                .await
+                .context(DeleteIndexSnafu {
+                    file_id: region_file_id.file_id(),
+                })?;
+        }
 
         Ok(())
     }

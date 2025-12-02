@@ -61,7 +61,7 @@ impl Indexer {
     }
 
     async fn build_puffin_writer(&mut self) -> Option<SstPuffinWriter> {
-        let puffin_manager = self.puffin_manager.take()?;
+        let puffin_manager = self.puffin_manager.clone()?;
 
         let err = match puffin_manager
             .writer(&RegionIndexId::new(

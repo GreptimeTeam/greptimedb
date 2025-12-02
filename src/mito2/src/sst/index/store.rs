@@ -145,6 +145,10 @@ impl InstrumentedStore {
             .await
             .context(OpenDalSnafu)
     }
+
+    pub async fn remove(&self, path: &str) -> Result<()> {
+        self.object_store.delete(path).await.context(OpenDalSnafu)
+    }
 }
 
 /// A wrapper around [`AsyncRead`] that adds instrumentation for monitoring
