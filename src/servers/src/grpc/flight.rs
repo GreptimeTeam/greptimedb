@@ -26,7 +26,7 @@ use arrow_flight::{
 };
 use async_trait::async_trait;
 use bytes;
-use bytes::Bytes as ProstBytes;
+use bytes::Bytes;
 use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_query::{Output, OutputData};
@@ -242,7 +242,7 @@ impl FlightCraft for GreptimeRequestHandler {
                     serde_json::to_vec(&response)
                         .context(ToJsonSnafu)
                         .map(|x| PutResult {
-                            app_metadata: ProstBytes::from(x),
+                            app_metadata: Bytes::from(x),
                         })
                         .map_err(Into::into)
                 })
@@ -256,7 +256,7 @@ pub struct PutRecordBatchRequest {
     pub table_name: TableName,
     pub request_id: i64,
     pub record_batch: DfRecordBatch,
-    pub schema_bytes: bytes::Bytes,
+    pub schema_bytes: Bytes,
     pub body_size: usize,
     pub(crate) _guard: Option<RequestMemoryGuard>,
 }
