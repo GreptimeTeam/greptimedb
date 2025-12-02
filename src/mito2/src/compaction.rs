@@ -514,7 +514,7 @@ impl CompactionScheduler {
         let limit_bytes = self.memory_manager.limit_bytes();
 
         // Check if request exceeds total capacity
-        if limit_bytes > 0 && requested_bytes > limit_bytes
+        if limit_bytes > 0 && requested_bytes > limit_bytes {
             warn!(
                 "Region {} compaction requires {} bytes but total limit is {} bytes; \
                  request exceeds capacity, policy: {:?}",
@@ -549,16 +549,18 @@ impl CompactionScheduler {
                     .get_mut(&region_id)
                     .context(RegionNotFoundSnafu { region_id })?;
 
-                status.set_memory_pending(DeferredCompactionTask {
+                let is_new_pending = status.set_memory_pending(DeferredCompactionTask {
                     task,
                     memory_bytes: requested_bytes.max(1),
                 });
 
-                self.spawn_memory_waiter(region_id, requested_bytes.max(1));
-                info!(
-                    "Region {} compaction waits for {} bytes to become available",
-                    region_id, requested_bytes
-                );
+                if is_new_pending {
+                    self.spawn_memory_waiter(region_id, requested_bytes.max(1));
+                    info!(
+                        "Region {} compaction waits for {} bytes to become available",
+                        region_id, requested_bytes
+                    );
+                }
                 Ok(())
             }
             OnExhaustedPolicy::Skip => {
@@ -658,11 +660,6 @@ impl CompactionScheduler {
         if let Some(status) = self.region_status.remove(&region_id) {
             status.on_failure(failure);
         }
-    }
-
-    fn exceeds_memory_limit(&self, bytes: u64) -> bool {
-        let limit = self.memory_manager.limit_bytes();
-        limit > 0 && bytes > limit
     }
 
     fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
@@ -820,7 +817,7 @@ impl CompactionStatus {
         }
     }
 
-    fn set_memory_pending(&mut self, mut pending: DeferredCompactionTask) {
+    fn set_memory_pending(&mut self, mut pending: DeferredCompactionTask) -> bool {
         if let Some(mut prev) = self.memory_pending.take() {
             // If a memory-pending task already exists, merge waiters into the existing task
             // and keep the larger memory requirement to be safe.
@@ -832,8 +829,10 @@ impl CompactionStatus {
                 self.region_id
             );
             self.memory_pending = Some(prev);
+            false
         } else {
             self.memory_pending = Some(pending);
+            true
         }
     }
 
