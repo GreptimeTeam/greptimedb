@@ -679,7 +679,6 @@ impl TestEnv {
             self.puffin_manager.clone(),
             self.intermediate_manager.clone(),
             ReadableSize::mb(0), // manifest_cache_capacity
-            None,                // manifest_cache_ttl
         )
         .await
         .unwrap();

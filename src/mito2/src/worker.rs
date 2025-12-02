@@ -458,7 +458,6 @@ pub async fn write_cache_from_config(
         intermediate_manager,
         // TODO(yingwen): Enable manifest cache after removing read cache.
         ReadableSize(0),
-        None,
     )
     .await?;
     Ok(Some(Arc::new(cache)))
