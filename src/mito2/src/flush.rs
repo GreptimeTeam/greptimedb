@@ -883,6 +883,46 @@ impl FlushScheduler {
         self.region_status.contains_key(&region_id)
     }
 
+    /// Schedules the pending task for the region.
+    ///
+    /// # Panics
+    /// Panic if the flush status is not set.
+    /// Panic if the pending task is not set.
+    pub(crate) fn schedule_pending_task(&mut self, region_id: RegionId) -> Result<()> {
+        debug!("Scheduling pending flush task for region {}", region_id);
+        let flush_status = self.region_status.get_mut(&region_id).unwrap();
+        let task = flush_status.pending_task.take().unwrap();
+        let version_control = flush_status.version_control.clone();
+        self.schedule_flush_task(&version_control, task)?;
+
+        Ok(())
+    }
+
+    fn schedule_flush_task(
+        &mut self,
+        version_control: &VersionControlRef,
+        task: RegionFlushTask,
+    ) -> Result<()> {
+        let region_id = task.region_id;
+
+        // If current region doesn't have flush status, we can flush the region directly.
+        if let Err(e) = version_control.freeze_mutable() {
+            error!(e; "Failed to freeze the mutable memtable for region {}", region_id);
+
+            return Err(e);
+        }
+        // Submit a flush job.
+        let job = task.into_flush_job(version_control);
+        if let Err(e) = self.scheduler.schedule(job) {
+            // If scheduler returns error, senders in the job will be dropped and waiters
+            // can get recv errors.
+            error!(e; "Failed to schedule flush job for region {}", region_id);
+
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Schedules a flush `task` for specific `region`.
     pub(crate) fn schedule_flush(
         &mut self,
@@ -905,46 +945,21 @@ impl FlushScheduler {
             .with_label_values(&[task.reason.as_str()])
             .inc();
 
+        // If current region has flush status, merge the task.
+        if let Some(flush_status) = self.region_status.get_mut(&region_id) {
+            // Checks whether we can flush the region now.
+            debug!("Merging flush task for region {}", region_id);
+            flush_status.merge_task(task);
+            return Ok(());
+        }
+
+        self.schedule_flush_task(version_control, task)?;
+
         // Add this region to status map.
-        let flush_status = self
-            .region_status
-            .entry(region_id)
-            .or_insert_with(|| FlushStatus::new(region_id, version_control.clone()));
-        // Checks whether we can flush the region now.
-        if flush_status.flushing {
-            // There is already a flush job running.
-            flush_status.merge_task(task);
-            return Ok(());
-        }
-
-        // TODO(yingwen): We can merge with pending and execute directly.
-        // If there are pending tasks, then we should push it to pending list.
-        if flush_status.pending_task.is_some() {
-            flush_status.merge_task(task);
-            return Ok(());
-        }
-
-        // Now we can flush the region directly.
-        if let Err(e) = version_control.freeze_mutable() {
-            error!(e; "Failed to freeze the mutable memtable for region {}", region_id);
-
-            // Remove from region status if we can't freeze the mutable memtable.
-            self.region_status.remove(&region_id);
-            return Err(e);
-        }
-        // Submit a flush job.
-        let job = task.into_flush_job(version_control);
-        if let Err(e) = self.scheduler.schedule(job) {
-            // If scheduler returns error, senders in the job will be dropped and waiters
-            // can get recv errors.
-            error!(e; "Failed to schedule flush job for region {}", region_id);
-
-            // Remove from region status if we can't submit the task.
-            self.region_status.remove(&region_id);
-            return Err(e);
-        }
-
-        flush_status.flushing = true;
+        let _ = self.region_status.insert(
+            region_id,
+            FlushStatus::new(region_id, version_control.clone()),
+        );
 
         Ok(())
     }
@@ -961,46 +976,54 @@ impl FlushScheduler {
         Vec<SenderBulkRequest>,
     )> {
         let flush_status = self.region_status.get_mut(&region_id)?;
-
-        // This region doesn't have running flush job.
-        flush_status.flushing = false;
-
-        let pending_requests = if flush_status.pending_task.is_none() {
+        // If region doesn't have any pending flush task, we need to remove it from the status.
+        if flush_status.pending_task.is_none() {
             // The region doesn't have any pending flush task.
             // Safety: The flush status must exist.
+            debug!(
+                "Region {} doesn't have any pending flush task, removing it from the status",
+                region_id
+            );
             let flush_status = self.region_status.remove(&region_id).unwrap();
-            Some((
+            return Some((
                 flush_status.pending_ddls,
                 flush_status.pending_writes,
                 flush_status.pending_bulk_writes,
-            ))
-        } else {
-            let version_data = flush_status.version_control.current();
-            if version_data.version.memtables.is_empty() {
-                // The region has nothing to flush, we also need to remove it from the status.
-                // Safety: The pending task is not None.
-                let task = flush_status.pending_task.take().unwrap();
-                // The region has nothing to flush. We can notify pending task.
-                task.on_success();
-                // `schedule_next_flush()` may pick up the same region to flush, so we must remove
-                // it from the status to avoid leaking pending requests.
-                // Safety: The flush status must exist.
-                let flush_status = self.region_status.remove(&region_id).unwrap();
-                Some((
-                    flush_status.pending_ddls,
-                    flush_status.pending_writes,
-                    flush_status.pending_bulk_writes,
-                ))
-            } else {
-                // We can flush the region again, keep it in the region status.
-                None
-            }
-        };
+            ));
+        }
 
-        // Schedule pending flush tasks.
-        self.schedule_pending_flush_tasks(ScheduleFlushReason::Success(region_id));
+        // If region has pending task, but has nothing to flush, we need to remove it from the status.
+        let version_data = flush_status.version_control.current();
+        if version_data.version.memtables.is_empty() {
+            // The region has nothing to flush, we also need to remove it from the status.
+            // Safety: The pending task is not None.
+            let task = flush_status.pending_task.take().unwrap();
+            // The region has nothing to flush. We can notify pending task.
+            task.on_success();
+            // `schedule_next_flush()` may pick up the same region to flush, so we must remove
+            // it from the status to avoid leaking pending requests.
+            // Safety: The flush status must exist.
+            debug!(
+                "Region {} has nothing to flush, removing it from the status",
+                region_id
+            );
+            let flush_status = self.region_status.remove(&region_id).unwrap();
+            return Some((
+                flush_status.pending_ddls,
+                flush_status.pending_writes,
+                flush_status.pending_bulk_writes,
+            ));
+        }
 
-        pending_requests
+        // If region has pending task and has something to flush, we need to schedule it.
+        if let Err(err) = self.schedule_pending_task(region_id) {
+            error!(
+                err;
+                "Flush succeeded for region {region_id}, but failed to schedule next flush for it."
+            );
+        }
+        // We can flush the region again, keep it in the region status.
+        None
     }
 
     /// Notifies the scheduler that the flush job is failed.
@@ -1016,9 +1039,6 @@ impl FlushScheduler {
 
         // Fast fail: cancels all pending tasks and sends error to their waiters.
         flush_status.on_failure(err);
-
-        // Still tries to schedule pending flush tasks.
-        self.schedule_pending_flush_tasks(ScheduleFlushReason::Failed(region_id));
     }
 
     /// Notifies the scheduler that the region is dropped.
@@ -1089,55 +1109,6 @@ impl FlushScheduler {
             .map(|status| !status.pending_ddls.is_empty())
             .unwrap_or(false)
     }
-
-    /// Schedules pending flush tasks.
-    pub(crate) fn schedule_pending_flush_tasks(&mut self, reason: ScheduleFlushReason) {
-        debug_assert!(
-            self.region_status
-                .values()
-                .all(|status| status.flushing || status.pending_task.is_some())
-        );
-
-        let tasks = self
-            .region_status
-            .iter_mut()
-            .filter_map(|(_, status)| match status.pending_task.take() {
-                Some(pending_task) => {
-                    debug_assert!(!status.flushing);
-                    Some((pending_task, status.version_control.clone()))
-                }
-                None => None,
-            })
-            .collect::<Vec<_>>();
-
-        for (task, version_control) in tasks {
-            let region_id = task.region_id;
-            if let Err(err) = self.schedule_flush(region_id, &version_control, task) {
-                match reason {
-                    ScheduleFlushReason::Success(previous_region_id) => {
-                        error!(
-                            err;
-                            "Flush succeeded for region {previous_region_id}, but failed to schedule next flush for region {region_id}."
-                        );
-                    }
-                    ScheduleFlushReason::Failed(previous_region_id) => {
-                        error!(
-                            err;
-                            "Flush failed for region {previous_region_id}, and also failed to schedule next flush for region {region_id}."
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Reason for scheduling flush tasks.
-pub(crate) enum ScheduleFlushReason {
-    /// The previous flush task succeeded.
-    Success(RegionId),
-    /// The previous flush task failed.
-    Failed(RegionId),
 }
 
 impl Drop for FlushScheduler {
@@ -1157,11 +1128,6 @@ struct FlushStatus {
     region_id: RegionId,
     /// Version control of the region.
     version_control: VersionControlRef,
-    /// There is a flush task running.
-    ///
-    /// It is possible that a region is not flushing but has pending task if the scheduler
-    /// doesn't schedules this region.
-    flushing: bool,
     /// Task waiting for next flush.
     pending_task: Option<RegionFlushTask>,
     /// Pending ddl requests.
@@ -1177,7 +1143,6 @@ impl FlushStatus {
         FlushStatus {
             region_id,
             version_control,
-            flushing: false,
             pending_task: None,
             pending_ddls: Vec::new(),
             pending_writes: Vec::new(),
@@ -1520,5 +1485,93 @@ mod tests {
             }
             assert_eq!(2, total_rows, "append_mode should preserve duplicates");
         }
+    }
+
+    #[tokio::test]
+    async fn test_schedule_pending_request_on_flush_success() {
+        common_telemetry::init_default_ut_logging();
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_flush_scheduler();
+        let mut builder = VersionControlBuilder::new();
+        // Overwrites the empty memtable builder.
+        builder.set_memtable_builder(Arc::new(TimeSeriesMemtableBuilder::default()));
+        let version_control = Arc::new(builder.build());
+        // Writes data to the memtable so it is not empty.
+        let version_data = version_control.current();
+        write_rows_to_version(&version_data.version, "host0", 0, 10);
+        let manifest_ctx = env
+            .mock_manifest_context(version_data.version.metadata.clone())
+            .await;
+        // Creates 2 tasks.
+        let mut tasks: Vec<_> = (0..2)
+            .map(|_| RegionFlushTask {
+                region_id: builder.region_id(),
+                reason: FlushReason::Others,
+                senders: Vec::new(),
+                request_sender: tx.clone(),
+                access_layer: env.access_layer.clone(),
+                listener: WorkerListener::default(),
+                engine_config: Arc::new(MitoConfig::default()),
+                row_group_size: None,
+                cache_manager: Arc::new(CacheManager::default()),
+                manifest_ctx: manifest_ctx.clone(),
+                index_options: IndexOptions::default(),
+                flush_semaphore: Arc::new(Semaphore::new(2)),
+                is_staging: false,
+            })
+            .collect();
+        // Schedule first task.
+        let task = tasks.pop().unwrap();
+        scheduler
+            .schedule_flush(builder.region_id(), &version_control, task)
+            .unwrap();
+        // Should schedule 1 flush.
+        assert_eq!(1, scheduler.region_status.len());
+        assert_eq!(1, job_scheduler.num_jobs());
+        // Schedule second task.
+        let task = tasks.pop().unwrap();
+        scheduler
+            .schedule_flush(builder.region_id(), &version_control, task)
+            .unwrap();
+        assert!(
+            scheduler
+                .region_status
+                .get(&builder.region_id())
+                .unwrap()
+                .pending_task
+                .is_some()
+        );
+
+        // Check the new version.
+        let version_data = version_control.current();
+        assert_eq!(0, version_data.version.memtables.immutables()[0].id());
+        // Assumes the flush job is finished.
+        version_control.apply_edit(
+            Some(RegionEdit {
+                files_to_add: Vec::new(),
+                files_to_remove: Vec::new(),
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            }),
+            &[0],
+            builder.file_purger(),
+        );
+        write_rows_to_version(&version_data.version, "host1", 0, 10);
+        scheduler.on_flush_success(builder.region_id());
+        assert_eq!(2, job_scheduler.num_jobs());
+        // The pending task is cleared.
+        assert!(
+            scheduler
+                .region_status
+                .get(&builder.region_id())
+                .unwrap()
+                .pending_task
+                .is_none()
+        );
     }
 }

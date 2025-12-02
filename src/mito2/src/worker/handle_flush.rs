@@ -38,6 +38,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             "Flush failed for region {}, handling stalled requests",
             region_id
         );
+        // Maybe flush worker again.
+        self.maybe_flush_worker();
+
+        // Handle stalled requests.
         self.handle_stalled_requests().await;
     }
 
@@ -303,6 +307,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.handle_write_requests(&mut write_requests, &mut bulk_writes, false)
                 .await;
         }
+
+        // Maybe flush worker again.
+        self.maybe_flush_worker();
 
         // Handle stalled requests.
         self.handle_stalled_requests().await;
