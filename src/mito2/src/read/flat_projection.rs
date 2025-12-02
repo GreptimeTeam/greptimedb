@@ -39,7 +39,6 @@ use crate::sst::{
 ///
 /// This mapper support duplicate and unsorted projection indices.
 /// The output schema is determined by the projection indices.
-#[allow(dead_code)]
 pub struct FlatProjectionMapper {
     /// Metadata of the region.
     metadata: RegionMetadataRef,

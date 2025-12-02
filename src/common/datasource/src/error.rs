@@ -194,12 +194,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Buffered writer closed"))]
-    BufferedWriterClosed {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to write parquet file, path: {}", path))]
     WriteParquet {
         path: String,
@@ -207,6 +201,14 @@ pub enum Error {
         location: Location,
         #[snafu(source)]
         error: parquet::errors::ParquetError,
+    },
+
+    #[snafu(display("Failed to build file stream"))]
+    BuildFileStream {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
     },
 }
 
@@ -239,7 +241,7 @@ impl ErrorExt for Error {
             | ReadRecordBatch { .. }
             | WriteRecordBatch { .. }
             | EncodeRecordBatch { .. }
-            | BufferedWriterClosed { .. }
+            | BuildFileStream { .. }
             | OrcReader { .. } => StatusCode::Unexpected,
         }
     }

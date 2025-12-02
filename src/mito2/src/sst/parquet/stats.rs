@@ -18,6 +18,7 @@ use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use api::v1::SemanticType;
 use datafusion_common::pruning::PruningStatistics;
 use datafusion_common::{Column, ScalarValue};
 use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
@@ -38,6 +39,8 @@ pub(crate) struct RowGroupPruningStats<'a, T> {
     /// of the metadata in the SST to get the column id of a column as the SST may have
     /// different columns.
     expected_metadata: Option<RegionMetadataRef>,
+    /// If true, skip columns with Field semantic type during pruning.
+    skip_fields: bool,
 }
 
 impl<'a, T> RowGroupPruningStats<'a, T> {
@@ -46,22 +49,32 @@ impl<'a, T> RowGroupPruningStats<'a, T> {
         row_groups: &'a [T],
         read_format: &'a ReadFormat,
         expected_metadata: Option<RegionMetadataRef>,
+        skip_fields: bool,
     ) -> Self {
         Self {
             row_groups,
             read_format,
             expected_metadata,
+            skip_fields,
         }
     }
 
     /// Returns the column id of specific column name if we need to read it.
     /// Prefers the column id in the expected metadata if it exists.
+    /// Returns None if skip_fields is true and the column is a Field.
     fn column_id_to_prune(&self, name: &str) -> Option<ColumnId> {
         let metadata = self
             .expected_metadata
             .as_ref()
             .unwrap_or_else(|| self.read_format.metadata());
-        metadata.column_by_name(name).map(|col| col.column_id)
+        let col = metadata.column_by_name(name)?;
+
+        // Skip field columns when skip_fields is enabled
+        if self.skip_fields && col.semantic_type == SemanticType::Field {
+            return None;
+        }
+
+        Some(col.column_id)
     }
 
     /// Returns the default value of all row groups for `column` according to the metadata.

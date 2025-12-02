@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +31,7 @@ use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHand
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
+use common_stat::ResourceStatImpl;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_version::{short_version, verbose_version};
@@ -38,12 +40,14 @@ use flow::{
     get_flow_auth_options,
 };
 use meta_client::{MetaClientOptions, MetaClientType};
+use plugins::flownode::context::GrpcConfigureContext;
+use servers::configurator::GrpcBuilderConfiguratorRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
     BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu,
-    MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
+    MissingConfigSnafu, OtherSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
@@ -54,33 +58,14 @@ type FlownodeOptions = GreptimeOptions<flow::FlownodeOptions>;
 
 pub struct Instance {
     flownode: FlownodeInstance,
-
-    // The components of flownode, which make it easier to expand based
-    // on the components.
-    #[cfg(feature = "enterprise")]
-    components: Components,
-
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
 }
 
-#[cfg(feature = "enterprise")]
-pub struct Components {
-    pub catalog_manager: catalog::CatalogManagerRef,
-    pub fe_client: Arc<FrontendClient>,
-    pub kv_backend: common_meta::kv_backend::KvBackendRef,
-}
-
 impl Instance {
-    pub fn new(
-        flownode: FlownodeInstance,
-        #[cfg(feature = "enterprise")] components: Components,
-        guard: Vec<WorkerGuard>,
-    ) -> Self {
+    pub fn new(flownode: FlownodeInstance, guard: Vec<WorkerGuard>) -> Self {
         Self {
             flownode,
-            #[cfg(feature = "enterprise")]
-            components,
             _guard: guard,
         }
     }
@@ -92,11 +77,6 @@ impl Instance {
     /// allow customizing flownode for downstream projects
     pub fn flownode_mut(&mut self) -> &mut FlownodeInstance {
         &mut self.flownode
-    }
-
-    #[cfg(feature = "enterprise")]
-    pub fn components(&self) -> &Components {
-        &self.components
     }
 }
 
@@ -372,11 +352,15 @@ impl StartCommand {
             Arc::new(InvalidateCacheHandler::new(layered_cache_registry.clone())),
         ]);
 
+        let mut resource_stat = ResourceStatImpl::default();
+        resource_stat.start_collect_cpu_usage();
+
         let heartbeat_task = flow::heartbeat::HeartbeatTask::new(
             &opts,
             meta_client.clone(),
             opts.heartbeat.clone(),
             Arc::new(executor),
+            Arc::new(resource_stat),
         );
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(cached_meta_backend.clone()));
@@ -391,7 +375,7 @@ impl StartCommand {
         let frontend_client = Arc::new(frontend_client);
         let flownode_builder = FlownodeBuilder::new(
             opts.clone(),
-            plugins,
+            plugins.clone(),
             table_metadata_manager,
             catalog_manager.clone(),
             flow_metadata_manager,
@@ -400,8 +384,29 @@ impl StartCommand {
         .with_heartbeat_task(heartbeat_task);
 
         let mut flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
+
+        let builder =
+            FlownodeServiceBuilder::grpc_server_builder(&opts, flownode.flownode_server());
+        let builder = if let Some(configurator) =
+            plugins.get::<GrpcBuilderConfiguratorRef<GrpcConfigureContext>>()
+        {
+            let context = GrpcConfigureContext {
+                kv_backend: cached_meta_backend.clone(),
+                fe_client: frontend_client.clone(),
+                flownode_id: member_id,
+                catalog_manager: catalog_manager.clone(),
+            };
+            configurator
+                .configure(builder, context)
+                .await
+                .context(OtherSnafu)?
+        } else {
+            builder
+        };
+        let grpc_server = builder.build();
+
         let services = FlownodeServiceBuilder::new(&opts)
-            .with_default_grpc_server(flownode.flownode_server())
+            .with_grpc_server(grpc_server)
             .enable_http_service()
             .build()
             .context(StartFlownodeSnafu)?;
@@ -425,16 +430,6 @@ impl StartCommand {
             .set_frontend_invoker(invoker)
             .await;
 
-        #[cfg(feature = "enterprise")]
-        let components = Components {
-            catalog_manager: catalog_manager.clone(),
-            fe_client: frontend_client,
-            kv_backend: cached_meta_backend,
-        };
-
-        #[cfg(not(feature = "enterprise"))]
-        return Ok(Instance::new(flownode, guard));
-        #[cfg(feature = "enterprise")]
-        Ok(Instance::new(flownode, components, guard))
+        Ok(Instance::new(flownode, guard))
     }
 }

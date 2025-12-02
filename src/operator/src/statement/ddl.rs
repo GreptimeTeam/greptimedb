@@ -26,13 +26,13 @@ use api::v1::{
 };
 use catalog::CatalogManagerRef;
 use chrono::Utc;
+use common_base::regex_pattern::NAME_PATTERN_REG;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_readonly_schema};
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::instruction::CacheIdent;
-use common_meta::key::NAME_PATTERN;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
@@ -52,14 +52,12 @@ use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{RawSchema, Schema};
 use datatypes::value::Value;
-use lazy_static::lazy_static;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::multi_dim::MultiDimPartitionRule;
 use query::parser::QueryStatement;
 use query::plan::extract_and_rewrite_full_table_names;
 use query::query_engine::DefaultSerializer;
 use query::sql::create_table_stmt;
-use regex::Regex;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -95,10 +93,6 @@ use crate::error::{
 use crate::expr_helper;
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
-
-lazy_static! {
-    pub static ref NAME_PATTERN_REG: Regex = Regex::new(&format!("^{NAME_PATTERN}$")).unwrap();
-}
 
 impl StatementExecutor {
     pub fn catalog_manager(&self) -> CatalogManagerRef {
@@ -222,13 +216,13 @@ impl StatementExecutor {
                 .table_options
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
+            if let Some(partitions) = partitions.as_ref()
+                && !partitions.exprs.is_empty()
+            {
+                self.validate_logical_table_partition_rule(create_table, partitions, &query_ctx)
+                    .await?;
+            }
             // Create logical tables
-            ensure!(
-                partitions.is_none(),
-                InvalidPartitionRuleSnafu {
-                    reason: "logical table in metric engine should not have partition rule, it will be inherited from physical table",
-                }
-            );
             self.create_logical_tables(std::slice::from_ref(create_table), query_ctx)
                 .await?
                 .into_iter()
@@ -403,6 +397,73 @@ impl StatementExecutor {
             .into_iter()
             .map(|x| DistTable::table(Arc::new(x)))
             .collect())
+    }
+
+    async fn validate_logical_table_partition_rule(
+        &self,
+        create_table: &CreateTableExpr,
+        partitions: &Partitions,
+        query_ctx: &QueryContextRef,
+    ) -> Result<()> {
+        let (_, mut logical_partition_exprs) =
+            parse_partitions_for_logical_validation(create_table, partitions, query_ctx)?;
+
+        let physical_table_name = create_table
+            .table_options
+            .get(LOGICAL_TABLE_METADATA_KEY)
+            .with_context(|| CreateLogicalTablesSnafu {
+                reason: format!(
+                    "expect `{LOGICAL_TABLE_METADATA_KEY}` option on creating logical table"
+                ),
+            })?;
+
+        let physical_table = self
+            .catalog_manager
+            .table(
+                &create_table.catalog_name,
+                &create_table.schema_name,
+                physical_table_name,
+                Some(query_ctx),
+            )
+            .await
+            .context(CatalogSnafu)?
+            .context(TableNotFoundSnafu {
+                table_name: physical_table_name.clone(),
+            })?;
+
+        let physical_table_info = physical_table.table_info();
+        let partition_rule = self
+            .partition_manager
+            .find_table_partition_rule(&physical_table_info)
+            .await
+            .context(error::FindTablePartitionRuleSnafu {
+                table_name: physical_table_name.clone(),
+            })?;
+
+        let multi_dim_rule = partition_rule
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MultiDimPartitionRule>()
+            .context(InvalidPartitionRuleSnafu {
+                reason: "physical table partition rule is not range-based",
+            })?;
+
+        // TODO(ruihang): project physical partition exprs to logical partition column
+        let mut physical_partition_exprs = multi_dim_rule.exprs().to_vec();
+        logical_partition_exprs.sort_unstable();
+        physical_partition_exprs.sort_unstable();
+
+        ensure!(
+            physical_partition_exprs == logical_partition_exprs,
+            InvalidPartitionRuleSnafu {
+                reason: format!(
+                    "logical table partition rule must match the corresponding physical table's\n logical table partition exprs:\t\t {:?}\n physical table partition exprs:\t {:?}",
+                    logical_partition_exprs, physical_partition_exprs
+                ),
+            }
+        );
+
+        Ok(())
     }
 
     #[cfg(feature = "enterprise")]
@@ -1614,6 +1675,51 @@ pub fn parse_partitions(
         .context(InvalidPartitionSnafu)?;
 
     Ok((partition_exprs, partition_columns))
+}
+
+fn parse_partitions_for_logical_validation(
+    create_table: &CreateTableExpr,
+    partitions: &Partitions,
+    query_ctx: &QueryContextRef,
+) -> Result<(Vec<String>, Vec<PartitionExpr>)> {
+    let partition_columns = partitions
+        .column_list
+        .iter()
+        .map(|ident| ident.value.clone())
+        .collect::<Vec<_>>();
+
+    let column_name_and_type = partition_columns
+        .iter()
+        .map(|pc| {
+            let column = create_table
+                .column_defs
+                .iter()
+                .find(|c| &c.name == pc)
+                .context(ColumnNotFoundSnafu { msg: pc.clone() })?;
+            let column_name = &column.name;
+            let data_type = ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension.clone())
+                    .context(ColumnDataTypeSnafu)?,
+            );
+            Ok((column_name, data_type))
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
+
+    let mut partition_exprs = Vec::with_capacity(partitions.exprs.len());
+    for expr in &partitions.exprs {
+        let partition_expr = convert_one_expr(expr, &column_name_and_type, &query_ctx.timezone())?;
+        partition_exprs.push(partition_expr);
+    }
+
+    MultiDimPartitionRule::try_new(
+        partition_columns.clone(),
+        vec![],
+        partition_exprs.clone(),
+        true,
+    )
+    .context(InvalidPartitionSnafu)?;
+
+    Ok((partition_columns, partition_exprs))
 }
 
 /// Verifies an alter and returns whether it is necessary to perform the alter.

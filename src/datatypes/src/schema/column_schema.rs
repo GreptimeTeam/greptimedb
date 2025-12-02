@@ -17,12 +17,17 @@ use std::fmt;
 use std::str::FromStr;
 
 use arrow::datatypes::Field;
+use arrow_schema::extension::{
+    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+};
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::data_type::{ConcreteDataType, DataType};
-use crate::error::{self, Error, InvalidFulltextOptionSnafu, ParseExtendedTypeSnafu, Result};
+use crate::error::{
+    self, ArrowMetadataSnafu, Error, InvalidFulltextOptionSnafu, ParseExtendedTypeSnafu, Result,
+};
 use crate::schema::TYPE_KEY;
 use crate::schema::constraint::ColumnDefaultConstraint;
 use crate::value::Value;
@@ -390,6 +395,45 @@ impl ColumnSchema {
     pub fn unset_skipping_options(&mut self) -> Result<()> {
         self.metadata.remove(SKIPPING_INDEX_KEY);
         Ok(())
+    }
+
+    pub fn extension_type<E>(&self) -> Result<Option<E>>
+    where
+        E: ExtensionType,
+    {
+        let extension_type_name = self.metadata.get(EXTENSION_TYPE_NAME_KEY);
+
+        if extension_type_name.map(|s| s.as_str()) == Some(E::NAME) {
+            let extension_metadata = self.metadata.get(EXTENSION_TYPE_METADATA_KEY);
+            let extension_metadata =
+                E::deserialize_metadata(extension_metadata.map(|s| s.as_str()))
+                    .context(ArrowMetadataSnafu)?;
+
+            let extension = E::try_new(&self.data_type.as_arrow_type(), extension_metadata)
+                .context(ArrowMetadataSnafu)?;
+            Ok(Some(extension))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn with_extension_type<E>(&mut self, extension_type: &E) -> Result<()>
+    where
+        E: ExtensionType,
+    {
+        self.metadata
+            .insert(EXTENSION_TYPE_NAME_KEY.to_string(), E::NAME.to_string());
+
+        if let Some(extension_metadata) = extension_type.serialize_metadata() {
+            self.metadata
+                .insert(EXTENSION_TYPE_METADATA_KEY.to_string(), extension_metadata);
+        }
+
+        Ok(())
+    }
+
+    pub fn is_indexed(&self) -> bool {
+        self.is_inverted_indexed() || self.is_fulltext_indexed() || self.is_skipping_indexed()
     }
 }
 

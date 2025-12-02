@@ -18,7 +18,7 @@ use std::time::Duration;
 use chrono::NaiveDate;
 use common_query::prelude::ScalarValue;
 use common_sql::convert::sql_value_to_value;
-use common_time::Timestamp;
+use common_time::{Date, Timestamp};
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
@@ -210,7 +210,8 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
                 }
             }
             ConcreteDataType::Binary(_) => Ok(ScalarValue::Binary(Some(b.to_vec()))),
-            ConcreteDataType::Timestamp(ts_type) => covert_bytes_to_timestamp(b, ts_type),
+            ConcreteDataType::Timestamp(ts_type) => convert_bytes_to_timestamp(b, ts_type),
+            ConcreteDataType::Date(_) => convert_bytes_to_date(b),
             _ => error::PreparedStmtTypeMismatchSnafu {
                 expected: t,
                 actual: param.coltype,
@@ -285,7 +286,7 @@ pub fn convert_expr_to_scalar_value(param: &Expr, t: &ConcreteDataType) -> Resul
     }
 }
 
-fn covert_bytes_to_timestamp(bytes: &[u8], ts_type: &TimestampType) -> Result<ScalarValue> {
+fn convert_bytes_to_timestamp(bytes: &[u8], ts_type: &TimestampType) -> Result<ScalarValue> {
     let ts = Timestamp::from_str_utc(&String::from_utf8_lossy(bytes))
         .map_err(|e| {
             error::MysqlValueConversionSnafu {
@@ -312,6 +313,17 @@ fn covert_bytes_to_timestamp(bytes: &[u8], ts_type: &TimestampType) -> Result<Sc
         }
         TimestampType::Second(_) => Ok(ScalarValue::TimestampSecond(Some(ts.value()), None)),
     }
+}
+
+fn convert_bytes_to_date(bytes: &[u8]) -> Result<ScalarValue> {
+    let date = Date::from_str_utc(&String::from_utf8_lossy(bytes)).map_err(|e| {
+        error::MysqlValueConversionSnafu {
+            err_msg: e.to_string(),
+        }
+        .build()
+    })?;
+
+    Ok(ScalarValue::Date32(Some(date.val())))
 }
 
 #[cfg(test)]
@@ -512,8 +524,28 @@ mod tests {
         ];
 
         for (input, ts_type, expected) in test_cases {
-            let result = covert_bytes_to_timestamp(input.as_bytes(), &ts_type).unwrap();
+            let result = convert_bytes_to_timestamp(input.as_bytes(), &ts_type).unwrap();
             assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn test_convert_bytes_to_date() {
+        let test_cases = vec![
+            // Standard date format: YYYY-MM-DD
+            ("1970-01-01", ScalarValue::Date32(Some(0))),
+            ("1969-12-31", ScalarValue::Date32(Some(-1))),
+            ("2024-02-29", ScalarValue::Date32(Some(19782))),
+            ("2024-01-01", ScalarValue::Date32(Some(19723))),
+            ("2024-12-31", ScalarValue::Date32(Some(20088))),
+            ("2001-01-02", ScalarValue::Date32(Some(11324))),
+            ("2050-06-14", ScalarValue::Date32(Some(29384))),
+            ("2020-03-15", ScalarValue::Date32(Some(18336))),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = convert_bytes_to_date(input.as_bytes()).unwrap();
+            assert_eq!(result, expected, "Failed for input: {}", input);
         }
     }
 }

@@ -4,10 +4,11 @@ name: GreptimeDB Development Build
 on:
   workflow_dispatch: # Allows you to run this workflow manually.
     inputs:
-      repository:
-        description: The public repository to build
+      large-page-size:
+        description: Build GreptimeDB with large page size (65536).
+        type: boolean
         required: false
-        default: GreptimeTeam/greptimedb
+        default: false
       commit: # Note: We only pull the source code and use the current workflow to build the artifacts.
         description: The commit to build
         required: true
@@ -181,6 +182,7 @@ jobs:
           working-dir: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
           image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
+          large-page-size: ${{ inputs.large-page-size }}
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
@@ -214,6 +216,7 @@ jobs:
           working-dir: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
           image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
+          large-page-size: ${{ inputs.large-page-size }}
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub

@@ -20,7 +20,6 @@ use std::time::Duration;
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use api::v1::meta::{DatanodeWorkloads, HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
 use common_base::Plugins;
-use common_config::utils::ResourceSpec;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::datanode::REGION_STATISTIC_KEY;
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
@@ -31,19 +30,20 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
+use common_stat::ResourceStatRef;
 use common_telemetry::{debug, error, info, trace, warn};
 use common_workload::DatanodeWorkloadType;
 use meta_client::MetaClientRef;
 use meta_client::client::{HeartbeatSender, MetaClient};
 use servers::addrs;
-use snafu::ResultExt;
+use snafu::{OptionExt as _, ResultExt};
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
 use self::handler::RegionHeartbeatResponseHandler;
 use crate::alive_keeper::{CountdownTaskHandlerExtRef, RegionAliveKeeper};
 use crate::config::DatanodeOptions;
-use crate::error::{self, MetaClientInitSnafu, Result};
+use crate::error::{self, MetaClientInitSnafu, RegionEngineNotFoundSnafu, Result};
 use crate::event_listener::RegionServerEventReceiver;
 use crate::metrics::{self, HEARTBEAT_RECV_COUNT, HEARTBEAT_SENT_COUNT};
 use crate::region_server::RegionServer;
@@ -63,7 +63,7 @@ pub struct HeartbeatTask {
     interval: u64,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     region_alive_keeper: Arc<RegionAliveKeeper>,
-    resource_spec: ResourceSpec,
+    resource_stat: ResourceStatRef,
 }
 
 impl Drop for HeartbeatTask {
@@ -80,6 +80,7 @@ impl HeartbeatTask {
         meta_client: MetaClientRef,
         cache_invalidator: CacheInvalidatorRef,
         plugins: Plugins,
+        resource_stat: ResourceStatRef,
     ) -> Result<Self> {
         let countdown_task_handler_ext = plugins.get::<CountdownTaskHandlerExtRef>();
         let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
@@ -109,7 +110,7 @@ impl HeartbeatTask {
             interval: opts.heartbeat.interval.as_millis() as u64,
             resp_handler_executor,
             region_alive_keeper,
-            resource_spec: Default::default(),
+            resource_stat,
         })
     }
 
@@ -186,6 +187,7 @@ impl HeartbeatTask {
             .context(error::HandleHeartbeatResponseSnafu)
     }
 
+    #[allow(deprecated)]
     /// Start heartbeat task, spawn background task.
     pub async fn start(
         &self,
@@ -237,14 +239,21 @@ impl HeartbeatTask {
 
         self.region_alive_keeper.start(Some(event_receiver)).await?;
         let mut last_sent = Instant::now();
-        let cpus = self.resource_spec.cpus as u32;
-        let memory_bytes = self.resource_spec.memory.unwrap_or_default().as_bytes();
+        let total_cpu_millicores = self.resource_stat.get_total_cpu_millicores();
+        let total_memory_bytes = self.resource_stat.get_total_memory_bytes();
+        let resource_stat = self.resource_stat.clone();
+        let gc_limiter = self
+            .region_server
+            .mito_engine()
+            .context(RegionEngineNotFoundSnafu { name: "mito" })?
+            .gc_limiter();
 
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
 
             let build_info = common_version::build_info();
+
             let heartbeat_request = HeartbeatRequest {
                 peer: self_peer,
                 node_epoch,
@@ -252,8 +261,13 @@ impl HeartbeatTask {
                     version: build_info.version.to_string(),
                     git_commit: build_info.commit_short.to_string(),
                     start_time_ms: node_epoch,
-                    cpus,
-                    memory_bytes,
+                    total_cpu_millicores,
+                    total_memory_bytes,
+                    cpu_usage_millicores: 0,
+                    memory_usage_bytes: 0,
+                    // TODO(zyy17): Remove these deprecated fields when the deprecated fields are removed from the proto.
+                    cpus: total_cpu_millicores as u32,
+                    memory_bytes: total_memory_bytes as u64,
                     hostname: hostname::get()
                         .unwrap_or_default()
                         .to_string_lossy()
@@ -275,8 +289,13 @@ impl HeartbeatTask {
                         if let Some(message) = message {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
+                                    let mut extensions = heartbeat_request.extensions.clone();
+                                    let gc_stat = gc_limiter.gc_stat();
+                                    gc_stat.into_extensions(&mut extensions);
+
                                     let req = HeartbeatRequest {
                                         mailbox_message: Some(message),
+                                        extensions,
                                         ..heartbeat_request.clone()
                                     };
                                     HEARTBEAT_RECV_COUNT.with_label_values(&["success"]).inc();
@@ -297,12 +316,24 @@ impl HeartbeatTask {
                         let topic_stats = region_server_clone.topic_stats();
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
-                        let req = HeartbeatRequest {
+
+                        let mut extensions = heartbeat_request.extensions.clone();
+                        let gc_stat = gc_limiter.gc_stat();
+                        gc_stat.into_extensions(&mut extensions);
+
+                        let mut req = HeartbeatRequest {
                             region_stats,
                             topic_stats,
                             duration_since_epoch,
+                            extensions,
                             ..heartbeat_request.clone()
                         };
+
+                        if let Some(info) = req.info.as_mut() {
+                            info.cpu_usage_millicores = resource_stat.get_cpu_usage_millicores();
+                            info.memory_usage_bytes = resource_stat.get_memory_usage_bytes();
+                        }
+
                         sleep.as_mut().reset(now + Duration::from_millis(interval));
                         Some(req)
                     }

@@ -48,7 +48,7 @@ use crate::config::{DEFAULT_MAX_CONCURRENT_SCAN_FILES, DEFAULT_SCAN_CHANNEL_SIZE
 use crate::error::{InvalidPartitionExprSnafu, Result};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
-use crate::memtable::MemtableRange;
+use crate::memtable::{MemtableRange, RangesOptions};
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, CompatBatch, FlatCompatBatch, PrimaryKeyCompatBatch};
 use crate::read::projection::ProjectionMapper;
@@ -60,6 +60,7 @@ use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, BoxedRecordBatchStream, RecordBatch, Source};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
+use crate::sst::FormatType;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierBuilder, BloomFilterIndexApplierRef,
@@ -68,6 +69,7 @@ use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
+use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Parallel scan channel size for flat format.
@@ -220,8 +222,6 @@ pub(crate) struct ScanRegion {
     /// Whether to filter out the deleted rows.
     /// Usually true for normal read, and false for scan for compaction.
     filter_deleted: bool,
-    /// Whether to use flat format.
-    flat_format: bool,
     #[cfg(feature = "enterprise")]
     extension_range_provider: Option<BoxedExtensionRangeProvider>,
 }
@@ -246,7 +246,6 @@ impl ScanRegion {
             ignore_bloom_filter: false,
             start_time: None,
             filter_deleted: true,
-            flat_format: false,
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
@@ -301,13 +300,6 @@ impl ScanRegion {
 
     pub(crate) fn set_filter_deleted(&mut self, filter_deleted: bool) {
         self.filter_deleted = filter_deleted;
-    }
-
-    /// Sets whether to use flat format.
-    #[must_use]
-    pub(crate) fn with_flat_format(mut self, flat_format: bool) -> Self {
-        self.flat_format = flat_format;
-        self
     }
 
     #[cfg(feature = "enterprise")]
@@ -384,18 +376,24 @@ impl ScanRegion {
         self.request.distribution == Some(TimeSeriesDistribution::PerSeries)
     }
 
+    /// Returns true if the region use flat format.
+    fn use_flat_format(&self) -> bool {
+        self.version.options.sst_format.unwrap_or_default() == FormatType::Flat
+    }
+
     /// Creates a scan input.
     async fn scan_input(mut self) -> Result<ScanInput> {
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
+        let flat_format = self.use_flat_format();
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
             Some(p) => {
-                ProjectionMapper::new(&self.version.metadata, p.iter().copied(), self.flat_format)?
+                ProjectionMapper::new(&self.version.metadata, p.iter().copied(), flat_format)?
             }
-            None => ProjectionMapper::all(&self.version.metadata, self.flat_format)?,
+            None => ProjectionMapper::all(&self.version.metadata, flat_format)?,
         };
 
         let ssts = &self.version.ssts;
@@ -426,6 +424,10 @@ impl ScanRegion {
         let memtables = self.version.memtables.list_memtables();
         // Skip empty memtables and memtables out of time range.
         let mut mem_range_builders = Vec::new();
+        let filter_mode = pre_filter_mode(
+            self.version.options.append_mode,
+            self.version.options.merge_mode(),
+        );
 
         for m in memtables {
             // check if memtable is empty by reading stats.
@@ -439,12 +441,13 @@ impl ScanRegion {
             }
             let ranges_in_memtable = m.ranges(
                 Some(mapper.column_ids()),
-                predicate.clone(),
-                SequenceRange::new(
-                    self.request.memtable_min_sequence,
-                    self.request.memtable_max_sequence,
-                ),
-                false,
+                RangesOptions::default()
+                    .with_predicate(predicate.clone())
+                    .with_sequence(SequenceRange::new(
+                        self.request.memtable_min_sequence,
+                        self.request.memtable_max_sequence,
+                    ))
+                    .with_pre_filter_mode(filter_mode),
             )?;
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
                 // todo: we should add stats to MemtableRange
@@ -457,24 +460,32 @@ impl ScanRegion {
 
         let region_id = self.region_id();
         debug!(
-            "Scan region {}, request: {:?}, time range: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}",
+            "Scan region {}, request: {:?}, time range: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}, flat_format: {}",
             region_id,
             self.request,
             time_range,
             mem_range_builders.len(),
             files.len(),
             self.version.options.append_mode,
+            flat_format,
         );
 
-        // Remove field filters for LastNonNull mode after logging the request.
-        self.maybe_remove_field_filters();
-
-        let inverted_index_applier = self.build_invereted_index_applier();
-        let bloom_filter_applier = self.build_bloom_filter_applier();
-        let fulltext_index_applier = self.build_fulltext_index_applier();
+        let (non_field_filters, field_filters) = self.partition_by_field_filters();
+        let inverted_index_appliers = [
+            self.build_invereted_index_applier(&non_field_filters),
+            self.build_invereted_index_applier(&field_filters),
+        ];
+        let bloom_filter_appliers = [
+            self.build_bloom_filter_applier(&non_field_filters),
+            self.build_bloom_filter_applier(&field_filters),
+        ];
+        let fulltext_index_appliers = [
+            self.build_fulltext_index_applier(&non_field_filters),
+            self.build_fulltext_index_applier(&field_filters),
+        ];
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
-        if self.flat_format {
+        if flat_format {
             // The batch is already large enough so we use a small channel size here.
             self.parallel_scan_channel_size = FLAT_SCAN_CHANNEL_SIZE;
         }
@@ -485,9 +496,9 @@ impl ScanRegion {
             .with_memtables(mem_range_builders)
             .with_files(files)
             .with_cache(self.cache_strategy)
-            .with_inverted_index_applier(inverted_index_applier)
-            .with_bloom_filter_index_applier(bloom_filter_applier)
-            .with_fulltext_index_applier(fulltext_index_applier)
+            .with_inverted_index_appliers(inverted_index_appliers)
+            .with_bloom_filter_index_appliers(bloom_filter_appliers)
+            .with_fulltext_index_appliers(fulltext_index_appliers)
             .with_parallel_scan_channel_size(self.parallel_scan_channel_size)
             .with_max_concurrent_scan_files(self.max_concurrent_scan_files)
             .with_start_time(self.start_time)
@@ -496,7 +507,7 @@ impl ScanRegion {
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
             .with_distribution(self.request.distribution)
-            .with_flat_format(self.flat_format);
+            .with_flat_format(flat_format);
 
         #[cfg(feature = "enterprise")]
         let input = if let Some(provider) = self.extension_range_provider {
@@ -527,40 +538,34 @@ impl ScanRegion {
         build_time_range_predicate(&time_index.column_schema.name, unit, &self.request.filters)
     }
 
-    /// Remove field filters if the merge mode is [MergeMode::LastNonNull].
-    fn maybe_remove_field_filters(&mut self) {
-        if self.version.options.merge_mode() != MergeMode::LastNonNull {
-            return;
-        }
-
-        // TODO(yingwen): We can ignore field filters only when there are multiple sources in the same time window.
+    /// Partitions filters into two groups: non-field filters and field filters.
+    /// Returns `(non_field_filters, field_filters)`.
+    fn partition_by_field_filters(&self) -> (Vec<Expr>, Vec<Expr>) {
         let field_columns = self
             .version
             .metadata
             .field_columns()
             .map(|col| &col.column_schema.name)
             .collect::<HashSet<_>>();
-        // Columns in the expr.
+
         let mut columns = HashSet::new();
 
-        self.request.filters.retain(|expr| {
+        self.request.filters.iter().cloned().partition(|expr| {
             columns.clear();
             // `expr_to_columns` won't return error.
             if expr_to_columns(expr, &mut columns).is_err() {
-                return false;
+                // If we can't extract columns, treat it as non-field filter
+                return true;
             }
-            for column in &columns {
-                if field_columns.contains(&column.name) {
-                    // This expr uses the field column.
-                    return false;
-                }
-            }
-            true
-        });
+            // Return true for non-field filters (partition puts true cases in first vec)
+            !columns
+                .iter()
+                .any(|column| field_columns.contains(&column.name))
+        })
     }
 
     /// Use the latest schema to build the inverted index applier.
-    fn build_invereted_index_applier(&self) -> Option<InvertedIndexApplierRef> {
+    fn build_invereted_index_applier(&self, filters: &[Expr]) -> Option<InvertedIndexApplierRef> {
         if self.ignore_inverted_index {
             return None;
         }
@@ -588,7 +593,7 @@ impl ScanRegion {
         .with_file_cache(file_cache)
         .with_inverted_index_cache(inverted_index_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
-        .build(&self.request.filters)
+        .build(filters)
         .inspect_err(|err| warn!(err; "Failed to build invereted index applier"))
         .ok()
         .flatten()
@@ -596,7 +601,7 @@ impl ScanRegion {
     }
 
     /// Use the latest schema to build the bloom filter index applier.
-    fn build_bloom_filter_applier(&self) -> Option<BloomFilterIndexApplierRef> {
+    fn build_bloom_filter_applier(&self, filters: &[Expr]) -> Option<BloomFilterIndexApplierRef> {
         if self.ignore_bloom_filter {
             return None;
         }
@@ -615,7 +620,7 @@ impl ScanRegion {
         .with_file_cache(file_cache)
         .with_bloom_filter_index_cache(bloom_filter_index_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
-        .build(&self.request.filters)
+        .build(filters)
         .inspect_err(|err| warn!(err; "Failed to build bloom filter index applier"))
         .ok()
         .flatten()
@@ -623,7 +628,7 @@ impl ScanRegion {
     }
 
     /// Use the latest schema to build the fulltext index applier.
-    fn build_fulltext_index_applier(&self) -> Option<FulltextIndexApplierRef> {
+    fn build_fulltext_index_applier(&self, filters: &[Expr]) -> Option<FulltextIndexApplierRef> {
         if self.ignore_fulltext_index {
             return None;
         }
@@ -641,7 +646,7 @@ impl ScanRegion {
         .with_file_cache(file_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
         .with_bloom_filter_cache(bloom_filter_index_cache)
-        .build(&self.request.filters)
+        .build(filters)
         .inspect_err(|err| warn!(err; "Failed to build fulltext index applier"))
         .ok()
         .flatten()
@@ -685,9 +690,9 @@ pub struct ScanInput {
     /// Maximum number of SST files to scan concurrently.
     pub(crate) max_concurrent_scan_files: usize,
     /// Index appliers.
-    inverted_index_applier: Option<InvertedIndexApplierRef>,
-    bloom_filter_index_applier: Option<BloomFilterIndexApplierRef>,
-    fulltext_index_applier: Option<FulltextIndexApplierRef>,
+    inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
+    bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
+    fulltext_index_appliers: [Option<FulltextIndexApplierRef>; 2],
     /// Start time of the query.
     pub(crate) query_start: Option<Instant>,
     /// The region is using append mode.
@@ -724,9 +729,9 @@ impl ScanInput {
             ignore_file_not_found: false,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
-            inverted_index_applier: None,
-            bloom_filter_index_applier: None,
-            fulltext_index_applier: None,
+            inverted_index_appliers: [None, None],
+            bloom_filter_index_appliers: [None, None],
+            fulltext_index_appliers: [None, None],
             query_start: None,
             append_mode: false,
             filter_deleted: true,
@@ -803,33 +808,33 @@ impl ScanInput {
         self
     }
 
-    /// Sets invereted index applier.
+    /// Sets inverted index appliers.
     #[must_use]
-    pub(crate) fn with_inverted_index_applier(
+    pub(crate) fn with_inverted_index_appliers(
         mut self,
-        applier: Option<InvertedIndexApplierRef>,
+        appliers: [Option<InvertedIndexApplierRef>; 2],
     ) -> Self {
-        self.inverted_index_applier = applier;
+        self.inverted_index_appliers = appliers;
         self
     }
 
-    /// Sets bloom filter applier.
+    /// Sets bloom filter appliers.
     #[must_use]
-    pub(crate) fn with_bloom_filter_index_applier(
+    pub(crate) fn with_bloom_filter_index_appliers(
         mut self,
-        applier: Option<BloomFilterIndexApplierRef>,
+        appliers: [Option<BloomFilterIndexApplierRef>; 2],
     ) -> Self {
-        self.bloom_filter_index_applier = applier;
+        self.bloom_filter_index_appliers = appliers;
         self
     }
 
-    /// Sets fulltext index applier.
+    /// Sets fulltext index appliers.
     #[must_use]
-    pub(crate) fn with_fulltext_index_applier(
+    pub(crate) fn with_fulltext_index_appliers(
         mut self,
-        applier: Option<FulltextIndexApplierRef>,
+        appliers: [Option<FulltextIndexApplierRef>; 2],
     ) -> Self {
-        self.fulltext_index_applier = applier;
+        self.fulltext_index_appliers = appliers;
         self
     }
 
@@ -952,18 +957,20 @@ impl ScanInput {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
+        let filter_mode = pre_filter_mode(self.append_mode, self.merge_mode);
         let res = self
             .access_layer
             .read_sst(file.clone())
             .predicate(predicate)
             .projection(Some(self.mapper.column_ids().to_vec()))
             .cache(self.cache_strategy.clone())
-            .inverted_index_applier(self.inverted_index_applier.clone())
-            .bloom_filter_index_applier(self.bloom_filter_index_applier.clone())
-            .fulltext_index_applier(self.fulltext_index_applier.clone())
+            .inverted_index_appliers(self.inverted_index_appliers.clone())
+            .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
+            .fulltext_index_appliers(self.fulltext_index_appliers.clone())
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .flat_format(self.flat_format)
             .compaction(self.compaction)
+            .pre_filter_mode(filter_mode)
             .build_reader_input(reader_metrics)
             .await;
         let (mut file_range_ctx, selection) = match res {
@@ -1106,9 +1113,8 @@ impl ScanInput {
         rows
     }
 
-    /// Returns table predicate of all exprs.
-    pub(crate) fn predicate(&self) -> Option<&Predicate> {
-        self.predicate.predicate()
+    pub(crate) fn predicate_group(&self) -> &PredicateGroup {
+        &self.predicate
     }
 
     /// Returns number of memtables to scan.
@@ -1153,6 +1159,17 @@ impl ScanInput {
     /// Returns SST file ids to scan.
     pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::RegionFileId> {
         self.files.iter().map(|file| file.file_id()).collect()
+    }
+}
+
+fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
+    if append_mode {
+        return PreFilterMode::All;
+    }
+
+    match merge_mode {
+        MergeMode::LastRow => PreFilterMode::SkipFieldsOnDelete,
+        MergeMode::LastNonNull => PreFilterMode::SkipFields,
     }
 }
 

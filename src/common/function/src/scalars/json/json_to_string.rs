@@ -32,7 +32,15 @@ impl Default for JsonToStringFunction {
     fn default() -> Self {
         Self {
             // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
-            signature: Signature::exact(vec![DataType::Binary], Volatility::Immutable),
+            signature: Signature::uniform(
+                1,
+                vec![
+                    DataType::Binary,
+                    DataType::LargeBinary,
+                    DataType::BinaryView,
+                ],
+                Volatility::Immutable,
+            ),
         }
     }
 }
@@ -57,7 +65,8 @@ impl Function for JsonToStringFunction {
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
         let [arg0] = extract_args(self.name(), &args)?;
-        let jsons = arg0.as_binary::<i32>();
+        let arg0 = arrow::compute::cast(&arg0, &DataType::BinaryView)?;
+        let jsons = arg0.as_binary_view();
 
         let size = jsons.len();
         let mut builder = StringViewBuilder::with_capacity(size);

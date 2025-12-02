@@ -14,54 +14,59 @@
 
 use common_meta::instruction::{InstructionReply, OpenRegion, SimpleReply};
 use common_meta::wal_options_allocator::prepare_wal_options;
-use futures_util::future::BoxFuture;
 use store_api::path_utils::table_dir;
 use store_api::region_request::{PathType, RegionOpenRequest};
+use store_api::storage::RegionId;
 
-use crate::heartbeat::handler::HandlerContext;
+use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
 
-impl HandlerContext {
-    pub(crate) fn handle_open_regions_instruction(
-        self,
-        open_regions: Vec<OpenRegion>,
-        open_region_parallelism: usize,
-    ) -> BoxFuture<'static, Option<InstructionReply>> {
-        Box::pin(async move {
-            let requests = open_regions
-                .into_iter()
-                .map(|open_region| {
-                    let OpenRegion {
-                        region_ident,
-                        region_storage_path,
-                        mut region_options,
-                        region_wal_options,
-                        skip_wal_replay,
-                    } = open_region;
-                    let region_id = Self::region_ident_to_region_id(&region_ident);
-                    prepare_wal_options(&mut region_options, region_id, &region_wal_options);
-                    let request = RegionOpenRequest {
-                        engine: region_ident.engine,
-                        table_dir: table_dir(&region_storage_path, region_id.table_id()),
-                        path_type: PathType::Bare,
-                        options: region_options,
-                        skip_wal_replay,
-                        checkpoint: None,
-                    };
-                    (region_id, request)
-                })
-                .collect::<Vec<_>>();
+pub struct OpenRegionsHandler {
+    pub open_region_parallelism: usize,
+}
 
-            let result = self
-                .region_server
-                .handle_batch_open_requests(open_region_parallelism, requests, false)
-                .await;
-            let success = result.is_ok();
-            let error = result.as_ref().map_err(|e| format!("{e:?}")).err();
-            Some(InstructionReply::OpenRegions(SimpleReply {
-                result: success,
-                error,
-            }))
-        })
+#[async_trait::async_trait]
+impl InstructionHandler for OpenRegionsHandler {
+    type Instruction = Vec<OpenRegion>;
+    async fn handle(
+        &self,
+        ctx: &HandlerContext,
+        open_regions: Self::Instruction,
+    ) -> Option<InstructionReply> {
+        let requests = open_regions
+            .into_iter()
+            .map(|open_region| {
+                let OpenRegion {
+                    region_ident,
+                    region_storage_path,
+                    mut region_options,
+                    region_wal_options,
+                    skip_wal_replay,
+                } = open_region;
+                let region_id = RegionId::new(region_ident.table_id, region_ident.region_number);
+                prepare_wal_options(&mut region_options, region_id, &region_wal_options);
+                let request = RegionOpenRequest {
+                    engine: region_ident.engine,
+                    table_dir: table_dir(&region_storage_path, region_id.table_id()),
+                    path_type: PathType::Bare,
+                    options: region_options,
+                    skip_wal_replay,
+                    checkpoint: None,
+                };
+                (region_id, request)
+            })
+            .collect::<Vec<_>>();
+
+        let result = ctx
+            .region_server
+            .handle_batch_open_requests(self.open_region_parallelism, requests, false)
+            .await;
+        let success = result.is_ok();
+        let error = result.as_ref().map_err(|e| format!("{e:?}")).err();
+
+        Some(InstructionReply::OpenRegions(SimpleReply {
+            result: success,
+            error,
+        }))
     }
 }
 

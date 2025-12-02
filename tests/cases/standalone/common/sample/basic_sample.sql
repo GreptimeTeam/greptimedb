@@ -1,0 +1,35 @@
+-- Migrated from DuckDB test: test/sql/sample/same_seed_same_sample.test
+-- FIXME: the results are wrong in this test, waits for https://github.com/apache/datafusion/pull/16325
+-- Test basic SAMPLE functionality
+
+-- Create test table
+CREATE TABLE test(x INTEGER, ts TIMESTAMP TIME INDEX);
+
+-- Insert test data
+INSERT INTO test SELECT number, number * 1000 FROM numbers limit 10000;
+
+-- Test TABLESAMPLE with percentage
+SELECT COUNT(*) > 0 FROM test TABLESAMPLE (10 PERCENT);
+
+-- Test TABLESAMPLE with row count
+SELECT COUNT(*) FROM test TABLESAMPLE (100 ROWS);
+
+-- Test TABLESAMPLE SYSTEM
+SELECT COUNT(*) > 0 FROM test TABLESAMPLE SYSTEM (25 PERCENT);
+
+-- Test TABLESAMPLE BERNOULLI
+SELECT COUNT(*) > 0 FROM test TABLESAMPLE BERNOULLI (25 PERCENT);
+
+-- Test with REPEATABLE for consistent results
+SELECT COUNT(*) AS cnt1 FROM test TABLESAMPLE SYSTEM (10 PERCENT) REPEATABLE (42);
+
+SELECT COUNT(*) AS cnt2 FROM test TABLESAMPLE SYSTEM (10 PERCENT) REPEATABLE (42);
+
+-- Test sampling with WHERE clause
+SELECT COUNT(*) FROM test TABLESAMPLE (10 PERCENT) WHERE x > 5000;
+
+-- Test sampling with ORDER BY
+SELECT x FROM test TABLESAMPLE (5 ROWS) ORDER BY x LIMIT 5;
+
+-- cleanup
+DROP TABLE test;

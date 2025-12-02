@@ -41,9 +41,6 @@ pub const TWCS_REMOTE_COMPACTION: &str = "compaction.twcs.remote_compaction";
 pub const TWCS_FALLBACK_TO_LOCAL: &str = "compaction.twcs.fallback_to_local";
 /// Option key for memtable type.
 pub const MEMTABLE_TYPE: &str = "memtable.type";
-/// Option key for memtable partition tree primary key encoding.
-pub const MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING: &str =
-    "memtable.partition_tree.primary_key_encoding";
 /// Option key for memtable partition tree index max keys per shard.
 pub const MEMTABLE_PARTITION_TREE_INDEX_MAX_KEYS_PER_SHARD: &str =
     "memtable.partition_tree.index_max_keys_per_shard";
@@ -77,7 +74,7 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
         MEMTABLE_PARTITION_TREE_INDEX_MAX_KEYS_PER_SHARD,
         MEMTABLE_PARTITION_TREE_DATA_FREEZE_THRESHOLD,
         MEMTABLE_PARTITION_TREE_FORK_DICTIONARY_BYTES,
-        MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING,
+        // We don't allow to create a mito table with sparse primary key encoding directly.
         APPEND_MODE_KEY,
         MERGE_MODE_KEY,
         SST_FORMAT_KEY,

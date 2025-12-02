@@ -36,13 +36,15 @@ use tokio::sync::Semaphore;
 use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::context::BulkIterContext;
-use crate::memtable::bulk::part::{BulkPart, BulkPartEncodeMetrics, BulkPartEncoder};
+use crate::memtable::bulk::part::{
+    BulkPart, BulkPartEncodeMetrics, BulkPartEncoder, UnorderedPart,
+};
 use crate::memtable::bulk::part_reader::BulkPartRecordBatchIter;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BoxedRecordBatchIterator, EncodedBulkPart, EncodedRange,
     IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange,
-    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, PredicateGroup,
+    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
 };
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
@@ -54,6 +56,8 @@ use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 /// All parts in a bulk memtable.
 #[derive(Default)]
 struct BulkParts {
+    /// Unordered small parts (< 1024 rows).
+    unordered_part: UnorderedPart,
     /// Raw parts.
     parts: Vec<BulkPartWrapper>,
     /// Parts encoded as parquets.
@@ -61,14 +65,15 @@ struct BulkParts {
 }
 
 impl BulkParts {
-    /// Total number of parts (raw + encoded).
+    /// Total number of parts (raw + encoded + unordered).
     fn num_parts(&self) -> usize {
-        self.parts.len() + self.encoded_parts.len()
+        let unordered_count = if self.unordered_part.is_empty() { 0 } else { 1 };
+        self.parts.len() + self.encoded_parts.len() + unordered_count
     }
 
     /// Returns true if there is no part.
     fn is_empty(&self) -> bool {
-        self.parts.is_empty() && self.encoded_parts.is_empty()
+        self.unordered_part.is_empty() && self.parts.is_empty() && self.encoded_parts.is_empty()
     }
 
     /// Returns true if the bulk parts should be merged.
@@ -87,6 +92,11 @@ impl BulkParts {
             .count();
         // If the total number of unmerged encoded parts is >= 8, start a merge task.
         unmerged_count >= 8
+    }
+
+    /// Returns true if the unordered_part should be compacted into a BulkPart.
+    fn should_compact_unordered_part(&self) -> bool {
+        self.unordered_part.should_compact()
     }
 
     /// Collects unmerged parts and marks them as being merged.
@@ -243,7 +253,6 @@ pub struct BulkMemtable {
     max_sequence: AtomicU64,
     num_rows: AtomicUsize,
     /// Cached flat SST arrow schema for memtable compaction.
-    #[allow(dead_code)]
     flat_arrow_schema: SchemaRef,
     /// Compactor for merging bulk parts
     compactor: Arc<Mutex<MemtableCompactor>>,
@@ -298,11 +307,29 @@ impl Memtable for BulkMemtable {
 
         {
             let mut bulk_parts = self.parts.write().unwrap();
-            bulk_parts.parts.push(BulkPartWrapper {
-                part: fragment,
-                file_id: FileId::random(),
-                merging: false,
-            });
+
+            // Routes small parts to unordered_part based on threshold
+            if bulk_parts.unordered_part.should_accept(fragment.num_rows()) {
+                bulk_parts.unordered_part.push(fragment);
+
+                // Compacts unordered_part if threshold is reached
+                if bulk_parts.should_compact_unordered_part()
+                    && let Some(bulk_part) = bulk_parts.unordered_part.to_bulk_part()?
+                {
+                    bulk_parts.parts.push(BulkPartWrapper {
+                        part: bulk_part,
+                        file_id: FileId::random(),
+                        merging: false,
+                    });
+                    bulk_parts.unordered_part.clear();
+                }
+            } else {
+                bulk_parts.parts.push(BulkPartWrapper {
+                    part: fragment,
+                    file_id: FileId::random(),
+                    merging: false,
+                });
+            }
 
             // Since this operation should be fast, we do it in parts lock scope.
             // This ensure the statistics in `ranges()` are correct. What's more,
@@ -331,24 +358,46 @@ impl Memtable for BulkMemtable {
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
-        sequence: Option<SequenceRange>,
-        for_flush: bool,
+        options: RangesOptions,
     ) -> Result<MemtableRanges> {
+        let predicate = options.predicate;
+        let sequence = options.sequence;
         let mut ranges = BTreeMap::new();
         let mut range_id = 0;
 
         // TODO(yingwen): Filter ranges by sequence.
-        let context = Arc::new(BulkIterContext::new(
+        let context = Arc::new(BulkIterContext::new_with_pre_filter_mode(
             self.metadata.clone(),
             projection,
             predicate.predicate().cloned(),
-            for_flush,
+            options.for_flush,
+            options.pre_filter_mode,
         )?);
 
         // Adds ranges for regular parts and encoded parts
         {
             let bulk_parts = self.parts.read().unwrap();
+
+            // Adds range for unordered part if not empty
+            if !bulk_parts.unordered_part.is_empty()
+                && let Some(unordered_bulk_part) = bulk_parts.unordered_part.to_bulk_part()?
+            {
+                let num_rows = unordered_bulk_part.num_rows();
+                let range = MemtableRange::new(
+                    Arc::new(MemtableRangeContext::new(
+                        self.id,
+                        Box::new(BulkRangeIterBuilder {
+                            part: unordered_bulk_part,
+                            context: context.clone(),
+                            sequence,
+                        }),
+                        predicate.clone(),
+                    )),
+                    num_rows,
+                );
+                ranges.insert(range_id, range);
+                range_id += 1;
+            }
 
             // Adds ranges for regular parts
             for part_wrapper in bulk_parts.parts.iter() {
@@ -544,6 +593,26 @@ impl BulkMemtable {
         }
     }
 
+    /// Sets the unordered part threshold (for testing).
+    #[cfg(test)]
+    pub fn set_unordered_part_threshold(&self, threshold: usize) {
+        self.parts
+            .write()
+            .unwrap()
+            .unordered_part
+            .set_threshold(threshold);
+    }
+
+    /// Sets the unordered part compact threshold (for testing).
+    #[cfg(test)]
+    pub fn set_unordered_part_compact_threshold(&self, compact_threshold: usize) {
+        self.parts
+            .write()
+            .unwrap()
+            .unordered_part
+            .set_compact_threshold(compact_threshold);
+    }
+
     /// Updates memtable stats.
     ///
     /// Please update this inside the write lock scope.
@@ -619,12 +688,15 @@ impl IterBuilder for BulkRangeIterBuilder {
 
     fn build_record_batch(
         &self,
-        _metrics: Option<MemScanMetrics>,
+        metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
+        let series_count = self.part.estimated_series_count();
         let iter = BulkPartRecordBatchIter::new(
             self.part.batch.clone(),
             self.context.clone(),
             self.sequence,
+            series_count,
+            metrics,
         );
 
         Ok(Box::new(iter))
@@ -637,7 +709,6 @@ impl IterBuilder for BulkRangeIterBuilder {
 
 /// Iterator builder for encoded bulk range
 struct EncodedBulkRangeIterBuilder {
-    #[allow(dead_code)]
     file_id: FileId,
     part: EncodedBulkPart,
     context: Arc<BulkIterContext>,
@@ -658,9 +729,12 @@ impl IterBuilder for EncodedBulkRangeIterBuilder {
 
     fn build_record_batch(
         &self,
-        _metrics: Option<MemScanMetrics>,
+        metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
-        if let Some(iter) = self.part.read(self.context.clone(), self.sequence)? {
+        if let Some(iter) = self
+            .part
+            .read(self.context.clone(), self.sequence, metrics)?
+        {
             Ok(iter)
         } else {
             // Return an empty iterator if no data to read
@@ -679,7 +753,6 @@ impl IterBuilder for EncodedBulkRangeIterBuilder {
 struct BulkPartWrapper {
     part: BulkPart,
     /// The unique file id for this part in memtable.
-    #[allow(dead_code)]
     file_id: FileId,
     /// Whether this part is currently being merged.
     merging: bool,
@@ -688,7 +761,6 @@ struct BulkPartWrapper {
 struct EncodedPartWrapper {
     part: EncodedBulkPart,
     /// The unique file id for this part in memtable.
-    #[allow(dead_code)]
     file_id: FileId,
     /// Whether this part is currently being merged.
     merging: bool,
@@ -746,12 +818,17 @@ impl PartToMerge {
     ) -> Result<Option<BoxedRecordBatchIterator>> {
         match self {
             PartToMerge::Bulk { part, .. } => {
+                let series_count = part.estimated_series_count();
                 let iter = BulkPartRecordBatchIter::new(
-                    part.batch, context, None, // No sequence filter for merging
+                    part.batch,
+                    context,
+                    None, // No sequence filter for merging
+                    series_count,
+                    None, // No metrics for merging
                 );
                 Ok(Some(Box::new(iter) as BoxedRecordBatchIterator))
             }
-            PartToMerge::Encoded { part, .. } => part.read(context, None),
+            PartToMerge::Encoded { part, .. } => part.read(context, None, None),
         }
     }
 }
@@ -1156,6 +1233,8 @@ mod tests {
         let metadata = metadata_for_test();
         let memtable =
             BulkMemtable::new(999, metadata.clone(), None, None, false, MergeMode::LastRow);
+        // Disable unordered_part for this test
+        memtable.set_unordered_part_threshold(0);
 
         let test_data = [
             (
@@ -1192,7 +1271,12 @@ mod tests {
         assert_eq!(3000, max_ts.value());
 
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
-        let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
 
         assert_eq!(3, ranges.ranges.len());
         assert_eq!(5, ranges.stats.num_rows);
@@ -1234,7 +1318,10 @@ mod tests {
         let projection = vec![4u32];
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let ranges = memtable
-            .ranges(Some(&projection), predicate_group, None, false)
+            .ranges(
+                Some(&projection),
+                RangesOptions::default().with_predicate(predicate_group),
+            )
             .unwrap();
 
         assert_eq!(1, ranges.ranges.len());
@@ -1325,6 +1412,8 @@ mod tests {
         let metadata = metadata_for_test();
         let memtable =
             BulkMemtable::new(777, metadata.clone(), None, None, false, MergeMode::LastRow);
+        // Disable unordered_part for this test
+        memtable.set_unordered_part_threshold(0);
 
         let parts_data = vec![
             (
@@ -1350,7 +1439,12 @@ mod tests {
         }
 
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
-        let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
 
         assert_eq!(3, ranges.ranges.len());
         assert_eq!(5, ranges.stats.num_rows);
@@ -1383,7 +1477,12 @@ mod tests {
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let sequence_filter = Some(SequenceRange::LtEq { max: 400 }); // Filters out rows with sequence > 400
         let ranges = memtable
-            .ranges(None, predicate_group, sequence_filter, false)
+            .ranges(
+                None,
+                RangesOptions::default()
+                    .with_predicate(predicate_group)
+                    .with_sequence(sequence_filter),
+            )
             .unwrap();
 
         assert_eq!(1, ranges.ranges.len());
@@ -1398,6 +1497,8 @@ mod tests {
         let metadata = metadata_for_test();
         let memtable =
             BulkMemtable::new(999, metadata.clone(), None, None, false, MergeMode::LastRow);
+        // Disable unordered_part for this test
+        memtable.set_unordered_part_threshold(0);
 
         // Adds enough bulk parts to trigger encoding
         for i in 0..10 {
@@ -1415,7 +1516,12 @@ mod tests {
         memtable.compact(false).unwrap();
 
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
-        let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
 
         // Should have ranges for both bulk parts and encoded parts
         assert_eq!(3, ranges.ranges.len());
@@ -1434,5 +1540,230 @@ mod tests {
             }
             assert_eq!(total_rows, range.num_rows());
         }
+    }
+
+    #[test]
+    fn test_bulk_memtable_unordered_part() {
+        let metadata = metadata_for_test();
+        let memtable = BulkMemtable::new(
+            1001,
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
+
+        // Set smaller thresholds for testing with smaller inputs
+        // Accept parts with < 5 rows into unordered_part
+        memtable.set_unordered_part_threshold(5);
+        // Compact when total rows >= 10
+        memtable.set_unordered_part_compact_threshold(10);
+
+        // Write 3 small parts (each has 2 rows), should be collected in unordered_part
+        for i in 0..3 {
+            let part = create_bulk_part_with_converter(
+                &format!("key_{}", i),
+                i,
+                vec![1000 + i as i64 * 100, 1100 + i as i64 * 100],
+                vec![Some(i as f64 * 10.0), Some(i as f64 * 10.0 + 1.0)],
+                100 + i as u64,
+            )
+            .unwrap();
+            assert_eq!(2, part.num_rows());
+            memtable.write_bulk(part).unwrap();
+        }
+
+        // Total rows = 6, not yet reaching compact threshold
+        let stats = memtable.stats();
+        assert_eq!(6, stats.num_rows);
+
+        // Write 2 more small parts (each has 2 rows)
+        // This should trigger compaction when total >= 10
+        for i in 3..5 {
+            let part = create_bulk_part_with_converter(
+                &format!("key_{}", i),
+                i,
+                vec![1000 + i as i64 * 100, 1100 + i as i64 * 100],
+                vec![Some(i as f64 * 10.0), Some(i as f64 * 10.0 + 1.0)],
+                100 + i as u64,
+            )
+            .unwrap();
+            memtable.write_bulk(part).unwrap();
+        }
+
+        // Total rows = 10, should have compacted unordered_part into a regular part
+        let stats = memtable.stats();
+        assert_eq!(10, stats.num_rows);
+
+        // Verify we can read all data correctly
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
+
+        // Should have at least 1 range (the compacted part)
+        assert!(!ranges.ranges.is_empty());
+        assert_eq!(10, ranges.stats.num_rows);
+
+        // Read all data and verify
+        let mut total_rows_read = 0;
+        for (_range_id, range) in ranges.ranges.iter() {
+            assert!(range.is_record_batch());
+            let record_batch_iter = range.build_record_batch_iter(None).unwrap();
+
+            for batch_result in record_batch_iter {
+                let batch = batch_result.unwrap();
+                total_rows_read += batch.num_rows();
+            }
+        }
+        assert_eq!(10, total_rows_read);
+    }
+
+    #[test]
+    fn test_bulk_memtable_unordered_part_mixed_sizes() {
+        let metadata = metadata_for_test();
+        let memtable = BulkMemtable::new(
+            1002,
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
+
+        // Set threshold to 4 rows - parts with < 4 rows go to unordered_part
+        memtable.set_unordered_part_threshold(4);
+        memtable.set_unordered_part_compact_threshold(8);
+
+        // Write small parts (3 rows each) - should go to unordered_part
+        for i in 0..2 {
+            let part = create_bulk_part_with_converter(
+                &format!("small_{}", i),
+                i,
+                vec![1000 + i as i64, 2000 + i as i64, 3000 + i as i64],
+                vec![Some(i as f64), Some(i as f64 + 1.0), Some(i as f64 + 2.0)],
+                10 + i as u64,
+            )
+            .unwrap();
+            assert_eq!(3, part.num_rows());
+            memtable.write_bulk(part).unwrap();
+        }
+
+        // Write a large part (5 rows) - should go directly to regular parts
+        let large_part = create_bulk_part_with_converter(
+            "large_key",
+            100,
+            vec![5000, 6000, 7000, 8000, 9000],
+            vec![
+                Some(100.0),
+                Some(101.0),
+                Some(102.0),
+                Some(103.0),
+                Some(104.0),
+            ],
+            50,
+        )
+        .unwrap();
+        assert_eq!(5, large_part.num_rows());
+        memtable.write_bulk(large_part).unwrap();
+
+        // Write another small part (2 rows) - should trigger compaction of unordered_part
+        let part = create_bulk_part_with_converter(
+            "small_2",
+            2,
+            vec![4000, 4100],
+            vec![Some(20.0), Some(21.0)],
+            30,
+        )
+        .unwrap();
+        memtable.write_bulk(part).unwrap();
+
+        let stats = memtable.stats();
+        assert_eq!(13, stats.num_rows); // 3 + 3 + 5 + 2 = 13
+
+        // Verify all data can be read
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
+
+        assert_eq!(13, ranges.stats.num_rows);
+
+        let mut total_rows_read = 0;
+        for (_range_id, range) in ranges.ranges.iter() {
+            let record_batch_iter = range.build_record_batch_iter(None).unwrap();
+            for batch_result in record_batch_iter {
+                let batch = batch_result.unwrap();
+                total_rows_read += batch.num_rows();
+            }
+        }
+        assert_eq!(13, total_rows_read);
+    }
+
+    #[test]
+    fn test_bulk_memtable_unordered_part_with_ranges() {
+        let metadata = metadata_for_test();
+        let memtable = BulkMemtable::new(
+            1003,
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
+
+        // Set small thresholds
+        memtable.set_unordered_part_threshold(3);
+        memtable.set_unordered_part_compact_threshold(100); // High threshold to prevent auto-compaction
+
+        // Write several small parts that stay in unordered_part
+        for i in 0..3 {
+            let part = create_bulk_part_with_converter(
+                &format!("key_{}", i),
+                i,
+                vec![1000 + i as i64 * 100],
+                vec![Some(i as f64 * 10.0)],
+                100 + i as u64,
+            )
+            .unwrap();
+            assert_eq!(1, part.num_rows());
+            memtable.write_bulk(part).unwrap();
+        }
+
+        let stats = memtable.stats();
+        assert_eq!(3, stats.num_rows);
+
+        // Test that ranges() can correctly read from unordered_part
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
+
+        // Should have 1 range for the unordered_part
+        assert_eq!(1, ranges.ranges.len());
+        assert_eq!(3, ranges.stats.num_rows);
+
+        // Verify data is sorted correctly in the range
+        let range = ranges.ranges.get(&0).unwrap();
+        let record_batch_iter = range.build_record_batch_iter(None).unwrap();
+
+        let mut total_rows = 0;
+        for batch_result in record_batch_iter {
+            let batch = batch_result.unwrap();
+            total_rows += batch.num_rows();
+            // Verify data is properly sorted by primary key
+            assert!(batch.num_rows() > 0);
+        }
+        assert_eq!(3, total_rows);
     }
 }

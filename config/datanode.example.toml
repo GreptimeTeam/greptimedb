@@ -2,6 +2,10 @@
 ## @toml2docs:none-default
 node_id = 42
 
+## The default column prefix for auto-created time index and value columns.
+## @toml2docs:none-default
+default_column_prefix = "greptime"
+
 ## Start services after regions have obtained leases.
 ## It will block the datanode start if it can't receive leases in the heartbeat from metasrv.
 require_lease_before_startup = false
@@ -14,6 +18,9 @@ init_regions_in_background = false
 init_regions_parallelism = 16
 
 ## The maximum current queries allowed to be executed. Zero means unlimited.
+## NOTE: This setting affects scan_memory_limit's privileged tier allocation.
+## When set, 70% of queries get privileged memory access (full scan_memory_limit).
+## The remaining 30% get standard tier access (70% of scan_memory_limit).
 max_concurrent_queries = 0
 
 ## Enable telemetry to collect anonymous usage data. Enabled by default.
@@ -257,6 +264,13 @@ overwrite_entry_start_id = false
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
 
+## Memory pool size for query execution operators (aggregation, sorting, join).
+## Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").
+## Setting it to 0 disables the limit (unbounded, default behavior).
+## When this limit is reached, queries will fail with ResourceExhausted error.
+## NOTE: This does NOT limit memory used by table scans.
+memory_pool_size = "50%"
+
 ## The data storage options.
 [storage]
 ## The working home directory.
@@ -485,6 +499,17 @@ write_cache_size = "5GiB"
 ## @toml2docs:none-default
 write_cache_ttl = "8h"
 
+## Preload index (puffin) files into cache on region open (default: true).
+## When enabled, index files are loaded into the write cache during region initialization,
+## which can improve query performance at the cost of longer startup times.
+preload_index_cache = true
+
+## Percentage of write cache capacity allocated for index (puffin) files (default: 20).
+## The remaining capacity is used for data (parquet) files.
+## Must be between 0 and 100 (exclusive). For example, with a 5GiB write cache and 20% allocation,
+## 1GiB is reserved for index files and 4GiB for data files.
+index_cache_percent = 20
+
 ## Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
 
@@ -496,6 +521,14 @@ max_concurrent_scan_files = 384
 
 ## Whether to allow stale WAL entries read during replay.
 allow_stale_entries = false
+
+## Memory limit for table scans across all queries.
+## Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").
+## Setting it to 0 disables the limit.
+## NOTE: Works with max_concurrent_queries for tiered memory allocation.
+## - If max_concurrent_queries is set: 70% of queries get full access, 30% get 70% access.
+## - If max_concurrent_queries is 0 (unlimited): first 20 queries get full access, rest get 70% access.
+scan_memory_limit = "50%"
 
 ## Minimum time interval between two compactions.
 ## To align with the old behavior, the default value is 0 (no restrictions).
@@ -636,8 +669,8 @@ fork_dictionary_bytes = "1GiB"
 [[region_engine]]
 ## Metric engine options.
 [region_engine.metric]
-## Whether to enable the experimental sparse primary key encoding.
-experimental_sparse_primary_key_encoding = false
+## Whether to use sparse primary key encoding.
+sparse_primary_key_encoding = true
 
 ## The logging options.
 [logging]
@@ -678,21 +711,6 @@ otlp_export_protocol = "http"
 ## ratio > 1 are treated as 1. Fractions < 0 are treated as 0
 [logging.tracing_sample_ratio]
 default_ratio = 1.0
-
-## The datanode can export its metrics and send to Prometheus compatible service (e.g. `greptimedb` itself) from remote-write API.
-## This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.
-[export_metrics]
-## whether enable export metrics.
-enable = false
-## The interval of export metrics.
-write_interval = "30s"
-
-[export_metrics.remote_write]
-## The prometheus remote write endpoint that the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=greptime_metrics`.
-url = ""
-
-## HTTP headers of Prometheus remote-write carry.
-headers = { }
 
 ## The tracing options. Only effect when compiled with `tokio-console` feature.
 #+ [tracing]

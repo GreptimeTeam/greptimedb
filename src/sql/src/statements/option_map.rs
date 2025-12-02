@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::ControlFlow;
 
 use common_base::secrets::{ExposeSecret, ExposeSecretMut, SecretString};
+use either::Either;
 use serde::Serialize;
 use sqlparser::ast::{Visit, VisitMut, Visitor, VisitorMut};
 
@@ -53,6 +54,17 @@ impl OptionMap {
             self.secrets.insert(k, SecretString::new(Box::new(v)));
         } else {
             self.options.insert(k, v.into());
+        }
+    }
+
+    pub fn insert_options(&mut self, key: &str, value: OptionValue) {
+        if REDACTED_OPTIONS.contains(&key) {
+            self.secrets.insert(
+                key.to_string(),
+                SecretString::new(Box::new(value.to_string())),
+            );
+        } else {
+            self.options.insert(key.to_string(), value);
         }
     }
 
@@ -129,6 +141,18 @@ impl OptionMap {
             }
         }
         result
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = (&str, Either<&OptionValue, &str>)> {
+        let options = self
+            .options
+            .iter()
+            .map(|(k, v)| (k.as_str(), Either::Left(v)));
+        let secrets = self
+            .secrets
+            .keys()
+            .map(|k| (k.as_str(), Either::Right("******")));
+        std::iter::chain(options, secrets)
     }
 }
 

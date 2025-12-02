@@ -66,7 +66,8 @@ use store_api::region_engine::{
     SettableRegionRoleState,
 };
 use store_api::region_request::{
-    AffectedRows, BatchRegionDdlRequest, RegionCloseRequest, RegionOpenRequest, RegionRequest,
+    AffectedRows, BatchRegionDdlRequest, RegionCatchupRequest, RegionCloseRequest,
+    RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -158,6 +159,27 @@ impl RegionServer {
         }
     }
 
+    /// Gets the MitoEngine if it's registered.
+    pub fn mito_engine(&self) -> Option<MitoEngine> {
+        if let Some(mito) = self.inner.mito_engine.read().unwrap().clone() {
+            Some(mito)
+        } else {
+            self.inner
+                .engines
+                .read()
+                .unwrap()
+                .get(MITO_ENGINE_NAME)
+                .cloned()
+                .and_then(|e| {
+                    let mito = e.as_any().downcast_ref::<MitoEngine>().cloned();
+                    if mito.is_none() {
+                        warn!("Mito engine not found in region server engines");
+                    }
+                    mito
+                })
+        }
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn handle_batch_open_requests(
         &self,
@@ -167,6 +189,17 @@ impl RegionServer {
     ) -> Result<Vec<RegionId>> {
         self.inner
             .handle_batch_open_requests(parallelism, requests, ignore_nonexistent_region)
+            .await
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn handle_batch_catchup_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<Vec<(RegionId, std::result::Result<(), BoxedError>)>> {
+        self.inner
+            .handle_batch_catchup_requests(parallelism, requests)
             .await
     }
 
@@ -378,6 +411,14 @@ impl RegionServer {
     #[cfg(test)]
     /// Registers a region for test purpose.
     pub(crate) fn register_test_region(&self, region_id: RegionId, engine: RegionEngineRef) {
+        {
+            let mut engines = self.inner.engines.write().unwrap();
+            if !engines.contains_key(engine.name()) {
+                debug!("Registering test engine: {}", engine.name());
+                engines.insert(engine.name().to_string(), engine.clone());
+            }
+        }
+
         self.inner
             .region_map
             .insert(region_id, RegionEngineWithStatus::Ready(engine));
@@ -477,7 +518,7 @@ impl RegionServer {
 
         let manifest_info = match manifest_info {
             ManifestInfo::MitoManifestInfo(info) => {
-                RegionManifestInfo::mito(info.data_manifest_version, 0)
+                RegionManifestInfo::mito(info.data_manifest_version, 0, 0)
             }
             ManifestInfo::MetricManifestInfo(info) => RegionManifestInfo::metric(
                 info.data_manifest_version,
@@ -559,6 +600,8 @@ impl RegionServer {
 #[async_trait]
 impl RegionServerHandler for RegionServer {
     async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponseV1> {
+        let failed_requests_cnt = crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT
+            .with_label_values(&[request.as_ref()]);
         let response = match &request {
             region_request::Body::Creates(_)
             | region_request::Body::Drops(_)
@@ -576,6 +619,9 @@ impl RegionServerHandler for RegionServer {
             _ => self.handle_requests_in_serial(request).await,
         }
         .map_err(BoxedError::new)
+        .inspect_err(|_| {
+            failed_requests_cnt.inc();
+        })
         .context(ExecuteGrpcRequestSnafu)?;
 
         Ok(RegionResponseV1 {
@@ -676,14 +722,14 @@ struct RegionServerInner {
     runtime: Runtime,
     event_listener: RegionServerEventListenerRef,
     table_provider_factory: TableProviderFactoryRef,
-    // The number of queries allowed to be executed at the same time.
-    // Act as last line of defense on datanode to prevent query overloading.
+    /// The number of queries allowed to be executed at the same time.
+    /// Act as last line of defense on datanode to prevent query overloading.
     parallelism: Option<RegionServerParallelism>,
-    // The topic stats reporter.
+    /// The topic stats reporter.
     topic_stats_reporter: RwLock<Option<Box<dyn TopicStatsReporter>>>,
-    // HACK(zhongzc): Direct MitoEngine handle for diagnostics. This couples the
-    // server with a concrete engine; acceptable for now to fetch Mito-specific
-    // info (e.g., list SSTs). Consider a diagnostics trait later.
+    /// HACK(zhongzc): Direct MitoEngine handle for diagnostics. This couples the
+    /// server with a concrete engine; acceptable for now to fetch Mito-specific
+    /// info (e.g., list SSTs). Consider a diagnostics trait later.
     mito_engine: RwLock<Option<MitoEngine>>,
 }
 
@@ -951,6 +997,116 @@ impl RegionServerInner {
             .collect::<Vec<_>>())
     }
 
+    pub async fn handle_batch_catchup_requests_inner(
+        &self,
+        engine: RegionEngineRef,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<Vec<(RegionId, std::result::Result<(), BoxedError>)>> {
+        for (region_id, _) in &requests {
+            self.set_region_status_not_ready(*region_id, &engine, &RegionChange::Catchup);
+        }
+        let region_ids = requests
+            .iter()
+            .map(|(region_id, _)| *region_id)
+            .collect::<Vec<_>>();
+        let mut responses = Vec::with_capacity(requests.len());
+        match engine
+            .handle_batch_catchup_requests(parallelism, requests)
+            .await
+        {
+            Ok(results) => {
+                for (region_id, result) in results {
+                    match result {
+                        Ok(_) => {
+                            if let Err(e) = self
+                                .set_region_status_ready(
+                                    region_id,
+                                    engine.clone(),
+                                    RegionChange::Catchup,
+                                )
+                                .await
+                            {
+                                error!(e; "Failed to set region to ready: {}", region_id);
+                                responses.push((region_id, Err(BoxedError::new(e))));
+                            } else {
+                                responses.push((region_id, Ok(())));
+                            }
+                        }
+                        Err(e) => {
+                            self.unset_region_status(region_id, &engine, RegionChange::Catchup);
+                            error!(e; "Failed to catchup region: {}", region_id);
+                            responses.push((region_id, Err(e)));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                for region_id in region_ids {
+                    self.unset_region_status(region_id, &engine, RegionChange::Catchup);
+                }
+                error!(e; "Failed to catchup batch regions");
+                return error::UnexpectedSnafu {
+                    violated: format!("Failed to catchup batch regions: {:?}", e),
+                }
+                .fail();
+            }
+        }
+
+        Ok(responses)
+    }
+
+    pub async fn handle_batch_catchup_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<Vec<(RegionId, std::result::Result<(), BoxedError>)>> {
+        let mut engine_grouped_requests: HashMap<String, Vec<_>> = HashMap::new();
+
+        let mut responses = Vec::with_capacity(requests.len());
+        for (region_id, request) in requests {
+            if let Ok(engine) = self.get_engine(region_id, &RegionChange::Catchup) {
+                match engine {
+                    CurrentEngine::Engine(engine) => {
+                        engine_grouped_requests
+                            .entry(engine.name().to_string())
+                            .or_default()
+                            .push((region_id, request));
+                    }
+                    CurrentEngine::EarlyReturn(_) => {
+                        return error::UnexpectedSnafu {
+                            violated: format!("Unexpected engine type for region {}", region_id),
+                        }
+                        .fail();
+                    }
+                }
+            } else {
+                responses.push((
+                    region_id,
+                    Err(BoxedError::new(
+                        error::RegionNotFoundSnafu { region_id }.build(),
+                    )),
+                ));
+            }
+        }
+
+        for (engine, requests) in engine_grouped_requests {
+            let engine = self
+                .engines
+                .read()
+                .unwrap()
+                .get(&engine)
+                .with_context(|| RegionEngineNotFoundSnafu { name: &engine })?
+                .clone();
+            responses.extend(
+                self.handle_batch_catchup_requests_inner(engine, parallelism, requests)
+                    .await?,
+            );
+        }
+
+        Ok(responses)
+    }
+
     // Handle requests in batch.
     //
     // limitation: all create requests must be in the same engine.
@@ -1044,7 +1200,8 @@ impl RegionServerInner {
             | RegionRequest::Flush(_)
             | RegionRequest::Compact(_)
             | RegionRequest::Truncate(_)
-            | RegionRequest::BuildIndex(_) => RegionChange::None,
+            | RegionRequest::BuildIndex(_)
+            | RegionRequest::EnterStaging(_) => RegionChange::None,
             RegionRequest::Catchup(_) => RegionChange::Catchup,
         };
 
@@ -1079,6 +1236,11 @@ impl RegionServerInner {
                 })
             }
             Err(err) => {
+                if matches!(region_change, RegionChange::Ingest) {
+                    crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
+                        .with_label_values(&[request_type])
+                        .inc();
+                }
                 // Removes the region status if the operation fails.
                 self.unset_region_status(region_id, &engine, region_change);
                 Err(err)

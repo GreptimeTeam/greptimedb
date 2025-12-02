@@ -39,7 +39,7 @@ use common_meta::cache::{new_schema_cache, new_table_schema_cache};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array};
@@ -50,6 +50,7 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use moka::future::CacheBuilder;
 use object_store::ObjectStore;
+use object_store::layers::mock::MockLayer;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
@@ -90,7 +91,7 @@ pub(crate) fn raft_engine_log_store_factory() -> Option<LogStoreFactory> {
     Some(LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory))
 }
 
-pub(crate) fn kafka_log_store_factory() -> Option<LogStoreFactory> {
+pub fn kafka_log_store_factory() -> Option<LogStoreFactory> {
     let _ = dotenv::dotenv();
     let Ok(broker_endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
         warn!("env GT_KAFKA_ENDPOINTS not found");
@@ -130,7 +131,7 @@ pub(crate) fn multiple_log_store_factories(#[case] factory: Option<LogStoreFacto
 #[template]
 #[rstest]
 #[case::with_kafka(kafka_log_store_factory())]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 pub(crate) fn single_kafka_log_store_factory(#[case] factory: Option<LogStoreFactory>) {}
 
 #[template]
@@ -140,7 +141,7 @@ pub(crate) fn single_kafka_log_store_factory(#[case] factory: Option<LogStoreFac
 pub(crate) fn single_raft_engine_log_store_factory(#[case] factory: Option<LogStoreFactory>) {}
 
 #[derive(Clone)]
-pub(crate) struct RaftEngineLogStoreFactory;
+pub struct RaftEngineLogStoreFactory;
 
 impl RaftEngineLogStoreFactory {
     async fn create_log_store<P: AsRef<Path>>(&self, wal_path: P) -> RaftEngineLogStore {
@@ -148,7 +149,7 @@ impl RaftEngineLogStoreFactory {
     }
 }
 
-pub(crate) async fn prepare_test_for_kafka_log_store(factory: &LogStoreFactory) -> Option<String> {
+pub async fn prepare_test_for_kafka_log_store(factory: &LogStoreFactory) -> Option<String> {
     if let LogStoreFactory::Kafka(factory) = factory {
         let topic = uuid::Uuid::new_v4().to_string();
         let client = factory.client().await;
@@ -186,7 +187,7 @@ pub(crate) async fn append_noop_record(client: &Client, topic: &str) {
         .unwrap();
 }
 #[derive(Clone)]
-pub(crate) struct KafkaLogStoreFactory {
+pub struct KafkaLogStoreFactory {
     broker_endpoints: Vec<String>,
 }
 
@@ -204,7 +205,7 @@ impl KafkaLogStoreFactory {
 }
 
 #[derive(Clone)]
-pub(crate) enum LogStoreFactory {
+pub enum LogStoreFactory {
     RaftEngine(RaftEngineLogStoreFactory),
     Kafka(KafkaLogStoreFactory),
 }
@@ -221,13 +222,14 @@ pub struct TestEnv {
     data_home: TempDir,
     intermediate_manager: IntermediateManager,
     puffin_manager: PuffinManagerFactory,
-    log_store: Option<LogStoreImpl>,
+    pub(crate) log_store: Option<LogStoreImpl>,
     log_store_factory: LogStoreFactory,
-    object_store_manager: Option<ObjectStoreManagerRef>,
+    pub(crate) object_store_manager: Option<ObjectStoreManagerRef>,
     schema_metadata_manager: SchemaMetadataManagerRef,
     file_ref_manager: FileReferenceManagerRef,
     kv_backend: KvBackendRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
+    object_store_mock_layer: Option<MockLayer>,
 }
 
 impl TestEnv {
@@ -264,12 +266,19 @@ impl TestEnv {
             file_ref_manager: Arc::new(FileReferenceManager::new(None)),
             kv_backend,
             partition_expr_fetcher: noop_partition_expr_fetcher(),
+            object_store_mock_layer: None,
         }
     }
 
     /// Overwrites the original `log_store_factory`.
-    pub(crate) fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
+    pub fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
         self.log_store_factory = log_store_factory;
+        self
+    }
+
+    /// Sets the original `object_store_mock_layer`.
+    pub fn with_mock_layer(mut self, mock_layer: MockLayer) -> TestEnv {
+        self.object_store_mock_layer = Some(mock_layer);
         self
     }
 
@@ -287,7 +296,7 @@ impl TestEnv {
         self.object_store_manager.clone()
     }
 
-    async fn new_mito_engine(&self, config: MitoConfig) -> MitoEngine {
+    pub(crate) async fn new_mito_engine(&self, config: MitoConfig) -> MitoEngine {
         async fn create<S: LogStore>(
             zelf: &TestEnv,
             config: MitoConfig,
@@ -541,35 +550,51 @@ impl TestEnv {
 
     /// Returns the log store and object store manager.
     async fn create_log_and_object_store_manager(&self) -> (LogStoreImpl, ObjectStoreManager) {
+        let log_store = self.create_log_store().await;
+        let object_store_manager = self.create_object_store_manager();
+
+        (log_store, object_store_manager)
+    }
+
+    pub(crate) async fn create_log_store(&self) -> LogStoreImpl {
         let data_home = self.data_home.path();
         let wal_path = data_home.join("wal");
-        let object_store_manager = self.create_object_store_manager();
 
         match &self.log_store_factory {
             LogStoreFactory::RaftEngine(factory) => {
                 let log_store = factory.create_log_store(wal_path).await;
-                (
-                    LogStoreImpl::RaftEngine(Arc::new(log_store)),
-                    object_store_manager,
-                )
+
+                LogStoreImpl::RaftEngine(Arc::new(log_store))
             }
             LogStoreFactory::Kafka(factory) => {
                 let log_store = factory.create_log_store().await;
 
-                (
-                    LogStoreImpl::Kafka(Arc::new(log_store)),
-                    object_store_manager,
-                )
+                LogStoreImpl::Kafka(Arc::new(log_store))
             }
         }
     }
 
-    fn create_object_store_manager(&self) -> ObjectStoreManager {
+    pub(crate) fn create_object_store_manager(&self) -> ObjectStoreManager {
         let data_home = self.data_home.path();
         let data_path = data_home.join("data").as_path().display().to_string();
         let builder = Fs::default().root(&data_path);
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+
+        let object_store = if let Some(mock_layer) = self.object_store_mock_layer.as_ref() {
+            debug!("create object store with mock layer");
+            ObjectStore::new(builder)
+                .unwrap()
+                .layer(mock_layer.clone())
+                .finish()
+        } else {
+            ObjectStore::new(builder).unwrap().finish()
+        };
         ObjectStoreManager::new("default", object_store)
+    }
+
+    pub(crate) fn create_in_memory_object_store_manager(&self) -> ObjectStoreManager {
+        let builder = object_store::services::Memory::default();
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+        ObjectStoreManager::new("memory", object_store)
     }
 
     /// If `initial_metadata` is `Some`, creates a new manifest. If `initial_metadata`
@@ -608,14 +633,13 @@ impl TestEnv {
                 metadata,
                 0,
                 manifest_opts,
-                Default::default(),
-                Default::default(),
                 FormatType::PrimaryKey,
+                &Default::default(),
             )
             .await
             .map(Some)
         } else {
-            RegionManifestManager::open(manifest_opts, Default::default(), Default::default()).await
+            RegionManifestManager::open(manifest_opts, &Default::default()).await
         }
     }
 
@@ -628,6 +652,7 @@ impl TestEnv {
         let write_cache = WriteCache::new(
             local_store,
             capacity,
+            None,
             None,
             self.puffin_manager.clone(),
             self.intermediate_manager.clone(),
@@ -647,6 +672,7 @@ impl TestEnv {
         let write_cache = WriteCache::new_fs(
             path,
             capacity,
+            None,
             None,
             self.puffin_manager.clone(),
             self.intermediate_manager.clone(),
@@ -1068,6 +1094,19 @@ pub fn build_rows(start: usize, end: usize) -> Vec<Row> {
         .collect()
 }
 
+/// Build rows with schema (string, ts_millis) in range `[start, end)`.
+/// `start`, `end` are in second resolution.
+pub fn build_delete_rows(start: usize, end: usize) -> Vec<Row> {
+    (start..end)
+        .map(|i| {
+            row(vec![
+                ValueData::StringValue(i.to_string()),
+                ValueData::TimestampMillisecondValue(i as i64 * 1000),
+            ])
+        })
+        .collect()
+}
+
 /// Build rows with schema (string, f64, f64, ts_millis).
 /// - `key`: A string key that is common across all rows.
 /// - `timestamps`: Array of timestamp values.
@@ -1165,7 +1204,7 @@ pub async fn delete_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Delete(RegionDeleteRequest { rows }),
+            RegionRequest::Delete(RegionDeleteRequest { rows, hint: None }),
         )
         .await
         .unwrap();

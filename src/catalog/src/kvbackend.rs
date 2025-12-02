@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use client::{CachedKvBackend, CachedKvBackendBuilder, MetaKvBackend};
-
 mod builder;
 mod client;
 mod manager;
 mod table_cache;
 
-pub use builder::KvBackendCatalogManagerBuilder;
+pub use builder::{
+    CatalogManagerConfigurator, CatalogManagerConfiguratorRef, KvBackendCatalogManagerBuilder,
+};
+pub use client::{CachedKvBackend, CachedKvBackendBuilder, MetaKvBackend};
 pub use manager::KvBackendCatalogManager;
 pub use table_cache::{TableCache, TableCacheRef, new_table_cache};

@@ -36,6 +36,7 @@ pub fn find_all_impure_columns(table_info: &TableInfo) -> Vec<ColumnSchema> {
         .collect()
 }
 
+// TODO(yingwen): Support Bulk insert request.
 /// Fill impure default values in the request
 pub struct ImpureDefaultFiller {
     impure_columns: HashMap<String, (api::v1::ColumnSchema, api::v1::Value)>,
@@ -62,7 +63,7 @@ impl ImpureDefaultFiller {
                         column.default_constraint()
                     ),
                 })?;
-            let grpc_default_value = api::helper::to_proto_value(default_value);
+            let grpc_default_value = api::helper::to_grpc_value(default_value);
             let def = column_schemas_to_defs(vec![column], &pk_names)?.swap_remove(0);
             let grpc_column_schema = api::v1::ColumnSchema {
                 column_name: def.name,

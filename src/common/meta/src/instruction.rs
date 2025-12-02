@@ -17,7 +17,7 @@ use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize};
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::{FileRefsManifest, GcReport, RegionId, RegionNumber};
 use strum::Display;
 use table::metadata::TableId;
 use table::table_name::TableName;
@@ -55,6 +55,10 @@ impl Display for RegionIdent {
 /// The result of downgrade leader region.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct DowngradeRegionReply {
+    /// The [RegionId].
+    /// For compatibility, it is defaulted to [RegionId::new(0, 0)].
+    #[serde(default)]
+    pub region_id: RegionId,
     /// Returns the `last_entry_id` if available.
     pub last_entry_id: Option<u64>,
     /// Returns the `metadata_last_entry_id` if available (Only available for metric engine).
@@ -246,7 +250,7 @@ pub struct UpgradeRegion {
     /// `None` stands for no wait,
     /// it's helpful to verify whether the leader region is ready.
     #[serde(with = "humantime_serde")]
-    pub replay_timeout: Option<Duration>,
+    pub replay_timeout: Duration,
     /// The hint for replaying memtable.
     #[serde(default)]
     pub location_id: Option<u64>,
@@ -335,6 +339,16 @@ pub struct FlushRegions {
     pub error_strategy: FlushErrorStrategy,
 }
 
+impl Display for FlushRegions {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "FlushRegions(region_ids={:?}, strategy={:?}, error_strategy={:?})",
+            self.region_ids, self.strategy, self.error_strategy
+        )
+    }
+}
+
 impl FlushRegions {
     /// Create synchronous single-region flush
     pub fn sync_single(region_id: RegionId) -> Self {
@@ -413,6 +427,93 @@ where
     })
 }
 
+/// Instruction to get file references for specified regions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GetFileRefs {
+    /// List of region IDs to get file references from active FileHandles (in-memory).
+    pub query_regions: Vec<RegionId>,
+    /// Mapping from the source region ID (where to read the manifest) to
+    /// the target region IDs (whose file references to look for).
+    /// Key: The region ID of the manifest.
+    /// Value: The list of region IDs to find references for in that manifest.
+    pub related_regions: HashMap<RegionId, Vec<RegionId>>,
+}
+
+impl Display for GetFileRefs {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GetFileRefs(region_ids={:?})", self.query_regions)
+    }
+}
+
+/// Instruction to trigger garbage collection for a region.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GcRegions {
+    /// The region ID to perform GC on, only regions that are currently on the given datanode can be garbage collected, regions not on the datanode will report errors.
+    pub regions: Vec<RegionId>,
+    /// The file references manifest containing temporary file references.
+    pub file_refs_manifest: FileRefsManifest,
+    /// Whether to perform a full file listing to find orphan files.
+    pub full_file_listing: bool,
+}
+
+impl Display for GcRegions {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "GcRegion(regions={:?}, file_refs_count={}, full_file_listing={})",
+            self.regions,
+            self.file_refs_manifest.file_refs.len(),
+            self.full_file_listing
+        )
+    }
+}
+
+/// Reply for GetFileRefs instruction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GetFileRefsReply {
+    /// The file references manifest.
+    pub file_refs_manifest: FileRefsManifest,
+    /// Whether the operation was successful.
+    pub success: bool,
+    /// Error message if any.
+    pub error: Option<String>,
+}
+
+impl Display for GetFileRefsReply {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "GetFileRefsReply(success={}, file_refs_count={}, error={:?})",
+            self.success,
+            self.file_refs_manifest.file_refs.len(),
+            self.error
+        )
+    }
+}
+
+/// Reply for GC instruction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GcRegionsReply {
+    pub result: Result<GcReport, String>,
+}
+
+impl Display for GcRegionsReply {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "GcReply(result={})",
+            match &self.result {
+                Ok(report) => format!(
+                    "GcReport(deleted_files_count={}, need_retry_regions_count={})",
+                    report.deleted_files.len(),
+                    report.need_retry_regions.len()
+                ),
+                Err(err) => format!("Err({})", err),
+            }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
 pub enum Instruction {
     /// Opens regions.
@@ -421,19 +522,88 @@ pub enum Instruction {
     /// Closes regions.
     #[serde(deserialize_with = "single_or_multiple_from", alias = "CloseRegion")]
     CloseRegions(Vec<RegionIdent>),
-    /// Upgrades a region.
-    UpgradeRegion(UpgradeRegion),
-    /// Downgrades a region.
-    DowngradeRegion(DowngradeRegion),
+    /// Upgrades regions.
+    #[serde(deserialize_with = "single_or_multiple_from", alias = "UpgradeRegion")]
+    UpgradeRegions(Vec<UpgradeRegion>),
+    #[serde(
+        deserialize_with = "single_or_multiple_from",
+        alias = "DowngradeRegion"
+    )]
+    /// Downgrades regions.
+    DowngradeRegions(Vec<DowngradeRegion>),
     /// Invalidates batch cache.
     InvalidateCaches(Vec<CacheIdent>),
     /// Flushes regions.
     FlushRegions(FlushRegions),
+    /// Gets file references for regions.
+    GetFileRefs(GetFileRefs),
+    /// Triggers garbage collection for a region.
+    GcRegions(GcRegions),
+}
+
+impl Instruction {
+    /// Converts the instruction into a vector of [OpenRegion].
+    pub fn into_open_regions(self) -> Option<Vec<OpenRegion>> {
+        match self {
+            Self::OpenRegions(open_regions) => Some(open_regions),
+            _ => None,
+        }
+    }
+
+    /// Converts the instruction into a vector of [RegionIdent].
+    pub fn into_close_regions(self) -> Option<Vec<RegionIdent>> {
+        match self {
+            Self::CloseRegions(close_regions) => Some(close_regions),
+            _ => None,
+        }
+    }
+
+    /// Converts the instruction into a [FlushRegions].
+    pub fn into_flush_regions(self) -> Option<FlushRegions> {
+        match self {
+            Self::FlushRegions(flush_regions) => Some(flush_regions),
+            _ => None,
+        }
+    }
+
+    /// Converts the instruction into a [DowngradeRegion].
+    pub fn into_downgrade_regions(self) -> Option<Vec<DowngradeRegion>> {
+        match self {
+            Self::DowngradeRegions(downgrade_region) => Some(downgrade_region),
+            _ => None,
+        }
+    }
+
+    /// Converts the instruction into a [UpgradeRegion].
+    pub fn into_upgrade_regions(self) -> Option<Vec<UpgradeRegion>> {
+        match self {
+            Self::UpgradeRegions(upgrade_region) => Some(upgrade_region),
+            _ => None,
+        }
+    }
+
+    pub fn into_get_file_refs(self) -> Option<GetFileRefs> {
+        match self {
+            Self::GetFileRefs(get_file_refs) => Some(get_file_refs),
+            _ => None,
+        }
+    }
+
+    pub fn into_gc_regions(self) -> Option<GcRegions> {
+        match self {
+            Self::GcRegions(gc_regions) => Some(gc_regions),
+            _ => None,
+        }
+    }
 }
 
 /// The reply of [UpgradeRegion].
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct UpgradeRegionReply {
+    /// The [RegionId].
+    /// For compatibility, it is defaulted to [RegionId::new(0, 0)].
+    #[serde(default)]
+    pub region_id: RegionId,
     /// Returns true if `last_entry_id` has been replayed to the latest.
     pub ready: bool,
     /// Indicates whether the region exists.
@@ -453,15 +623,91 @@ impl Display for UpgradeRegionReply {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct DowngradeRegionsReply {
+    pub replies: Vec<DowngradeRegionReply>,
+}
+
+impl DowngradeRegionsReply {
+    pub fn new(replies: Vec<DowngradeRegionReply>) -> Self {
+        Self { replies }
+    }
+
+    pub fn single(reply: DowngradeRegionReply) -> Self {
+        Self::new(vec![reply])
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DowngradeRegionsCompat {
+    Single(DowngradeRegionReply),
+    Multiple(DowngradeRegionsReply),
+}
+
+fn downgrade_regions_compat_from<'de, D>(deserializer: D) -> Result<DowngradeRegionsReply, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let helper = DowngradeRegionsCompat::deserialize(deserializer)?;
+    Ok(match helper {
+        DowngradeRegionsCompat::Single(x) => DowngradeRegionsReply::new(vec![x]),
+        DowngradeRegionsCompat::Multiple(reply) => reply,
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct UpgradeRegionsReply {
+    pub replies: Vec<UpgradeRegionReply>,
+}
+
+impl UpgradeRegionsReply {
+    pub fn new(replies: Vec<UpgradeRegionReply>) -> Self {
+        Self { replies }
+    }
+
+    pub fn single(reply: UpgradeRegionReply) -> Self {
+        Self::new(vec![reply])
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum UpgradeRegionsCompat {
+    Single(UpgradeRegionReply),
+    Multiple(UpgradeRegionsReply),
+}
+
+fn upgrade_regions_compat_from<'de, D>(deserializer: D) -> Result<UpgradeRegionsReply, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let helper = UpgradeRegionsCompat::deserialize(deserializer)?;
+    Ok(match helper {
+        UpgradeRegionsCompat::Single(x) => UpgradeRegionsReply::new(vec![x]),
+        UpgradeRegionsCompat::Multiple(reply) => reply,
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InstructionReply {
     #[serde(alias = "open_region")]
     OpenRegions(SimpleReply),
     #[serde(alias = "close_region")]
     CloseRegions(SimpleReply),
-    UpgradeRegion(UpgradeRegionReply),
-    DowngradeRegion(DowngradeRegionReply),
+    #[serde(
+        deserialize_with = "upgrade_regions_compat_from",
+        alias = "upgrade_region"
+    )]
+    UpgradeRegions(UpgradeRegionsReply),
+    #[serde(
+        alias = "downgrade_region",
+        deserialize_with = "downgrade_regions_compat_from"
+    )]
+    DowngradeRegions(DowngradeRegionsReply),
     FlushRegions(FlushRegionReply),
+    GetFileRefs(GetFileRefsReply),
+    GcRegions(GcRegionsReply),
 }
 
 impl Display for InstructionReply {
@@ -469,11 +715,15 @@ impl Display for InstructionReply {
         match self {
             Self::OpenRegions(reply) => write!(f, "InstructionReply::OpenRegions({})", reply),
             Self::CloseRegions(reply) => write!(f, "InstructionReply::CloseRegions({})", reply),
-            Self::UpgradeRegion(reply) => write!(f, "InstructionReply::UpgradeRegion({})", reply),
-            Self::DowngradeRegion(reply) => {
-                write!(f, "InstructionReply::DowngradeRegion({})", reply)
+            Self::UpgradeRegions(reply) => {
+                write!(f, "InstructionReply::UpgradeRegions({:?})", reply.replies)
+            }
+            Self::DowngradeRegions(reply) => {
+                write!(f, "InstructionReply::DowngradeRegions({:?})", reply.replies)
             }
             Self::FlushRegions(reply) => write!(f, "InstructionReply::FlushRegions({})", reply),
+            Self::GetFileRefs(reply) => write!(f, "InstructionReply::GetFileRefs({})", reply),
+            Self::GcRegions(reply) => write!(f, "InstructionReply::GcRegion({})", reply),
         }
     }
 }
@@ -493,10 +743,35 @@ impl InstructionReply {
             _ => panic!("Expected OpenRegions reply"),
         }
     }
+
+    pub fn expect_upgrade_regions_reply(self) -> Vec<UpgradeRegionReply> {
+        match self {
+            Self::UpgradeRegions(reply) => reply.replies,
+            _ => panic!("Expected UpgradeRegion reply"),
+        }
+    }
+
+    pub fn expect_downgrade_regions_reply(self) -> Vec<DowngradeRegionReply> {
+        match self {
+            Self::DowngradeRegions(reply) => reply.replies,
+            _ => panic!("Expected DowngradeRegion reply"),
+        }
+    }
+
+    pub fn expect_flush_regions_reply(self) -> FlushRegionReply {
+        match self {
+            Self::FlushRegions(reply) => reply,
+            _ => panic!("Expected FlushRegions reply"),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use store_api::storage::FileId;
+
     use super::*;
 
     #[test]
@@ -532,11 +807,60 @@ mod tests {
             r#"{"CloseRegions":[{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"}]}"#,
             serialized
         );
+
+        let upgrade_region = Instruction::UpgradeRegions(vec![UpgradeRegion {
+            region_id: RegionId::new(1024, 1),
+            last_entry_id: None,
+            metadata_last_entry_id: None,
+            replay_timeout: Duration::from_millis(1000),
+            location_id: None,
+            replay_entry_id: None,
+            metadata_replay_entry_id: None,
+        }]);
+
+        let serialized = serde_json::to_string(&upgrade_region).unwrap();
+        assert_eq!(
+            r#"{"UpgradeRegions":[{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"replay_timeout":"1s","location_id":null}]}"#,
+            serialized
+        );
+    }
+
+    #[test]
+    fn test_serialize_instruction_reply() {
+        let downgrade_region_reply = InstructionReply::DowngradeRegions(
+            DowngradeRegionsReply::single(DowngradeRegionReply {
+                region_id: RegionId::new(1024, 1),
+                last_entry_id: None,
+                metadata_last_entry_id: None,
+                exists: true,
+                error: None,
+            }),
+        );
+
+        let serialized = serde_json::to_string(&downgrade_region_reply).unwrap();
+        assert_eq!(
+            r#"{"type":"downgrade_regions","replies":[{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"exists":true,"error":null}]}"#,
+            serialized
+        );
+
+        let upgrade_region_reply =
+            InstructionReply::UpgradeRegions(UpgradeRegionsReply::single(UpgradeRegionReply {
+                region_id: RegionId::new(1024, 1),
+                ready: true,
+                exists: true,
+                error: None,
+            }));
+        let serialized = serde_json::to_string(&upgrade_region_reply).unwrap();
+        assert_eq!(
+            r#"{"type":"upgrade_regions","replies":[{"region_id":4398046511105,"ready":true,"exists":true,"error":null}]}"#,
+            serialized
+        );
     }
 
     #[test]
     fn test_deserialize_instruction() {
-        let open_region_instruction = r#"{"OpenRegion":[{"region_ident":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{},"skip_wal_replay":false}]}"#;
+        // legacy open region instruction
+        let open_region_instruction = r#"{"OpenRegion":{"region_ident":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{},"skip_wal_replay":false}}"#;
         let open_region_instruction: Instruction =
             serde_json::from_str(open_region_instruction).unwrap();
         let open_region = Instruction::OpenRegions(vec![OpenRegion::new(
@@ -553,7 +877,8 @@ mod tests {
         )]);
         assert_eq!(open_region_instruction, open_region);
 
-        let close_region_instruction = r#"{"CloseRegion":[{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"}]}"#;
+        // legacy close region instruction
+        let close_region_instruction = r#"{"CloseRegion":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"}}"#;
         let close_region_instruction: Instruction =
             serde_json::from_str(close_region_instruction).unwrap();
         let close_region = Instruction::CloseRegions(vec![RegionIdent {
@@ -564,6 +889,35 @@ mod tests {
         }]);
         assert_eq!(close_region_instruction, close_region);
 
+        // legacy downgrade region instruction
+        let downgrade_region_instruction = r#"{"DowngradeRegions":{"region_id":4398046511105,"flush_timeout":{"secs":1,"nanos":0}}}"#;
+        let downgrade_region_instruction: Instruction =
+            serde_json::from_str(downgrade_region_instruction).unwrap();
+        let downgrade_region = Instruction::DowngradeRegions(vec![DowngradeRegion {
+            region_id: RegionId::new(1024, 1),
+            flush_timeout: Some(Duration::from_millis(1000)),
+        }]);
+        assert_eq!(downgrade_region_instruction, downgrade_region);
+
+        // legacy upgrade region instruction
+        let upgrade_region_instruction = r#"{"UpgradeRegion":{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"replay_timeout":"1s","location_id":null,"replay_entry_id":null,"metadata_replay_entry_id":null}}"#;
+        let upgrade_region_instruction: Instruction =
+            serde_json::from_str(upgrade_region_instruction).unwrap();
+        let upgrade_region = Instruction::UpgradeRegions(vec![UpgradeRegion {
+            region_id: RegionId::new(1024, 1),
+            last_entry_id: None,
+            metadata_last_entry_id: None,
+            replay_timeout: Duration::from_millis(1000),
+            location_id: None,
+            replay_entry_id: None,
+            metadata_replay_entry_id: None,
+        }]);
+        assert_eq!(upgrade_region_instruction, upgrade_region);
+    }
+
+    #[test]
+    fn test_deserialize_instruction_reply() {
+        // legacy close region reply
         let close_region_instruction_reply =
             r#"{"result":true,"error":null,"type":"close_region"}"#;
         let close_region_instruction_reply: InstructionReply =
@@ -574,6 +928,7 @@ mod tests {
         });
         assert_eq!(close_region_instruction_reply, close_region_reply);
 
+        // legacy open region reply
         let open_region_instruction_reply = r#"{"result":true,"error":null,"type":"open_region"}"#;
         let open_region_instruction_reply: InstructionReply =
             serde_json::from_str(open_region_instruction_reply).unwrap();
@@ -582,6 +937,34 @@ mod tests {
             error: None,
         });
         assert_eq!(open_region_instruction_reply, open_region_reply);
+
+        // legacy downgrade region reply
+        let downgrade_region_instruction_reply = r#"{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"exists":true,"error":null,"type":"downgrade_region"}"#;
+        let downgrade_region_instruction_reply: InstructionReply =
+            serde_json::from_str(downgrade_region_instruction_reply).unwrap();
+        let downgrade_region_reply = InstructionReply::DowngradeRegions(
+            DowngradeRegionsReply::single(DowngradeRegionReply {
+                region_id: RegionId::new(1024, 1),
+                last_entry_id: None,
+                metadata_last_entry_id: None,
+                exists: true,
+                error: None,
+            }),
+        );
+        assert_eq!(downgrade_region_instruction_reply, downgrade_region_reply);
+
+        // legacy upgrade region reply
+        let upgrade_region_instruction_reply = r#"{"region_id":4398046511105,"ready":true,"exists":true,"error":null,"type":"upgrade_region"}"#;
+        let upgrade_region_instruction_reply: InstructionReply =
+            serde_json::from_str(upgrade_region_instruction_reply).unwrap();
+        let upgrade_region_reply =
+            InstructionReply::UpgradeRegions(UpgradeRegionsReply::single(UpgradeRegionReply {
+                region_id: RegionId::new(1024, 1),
+                ready: true,
+                exists: true,
+                error: None,
+            }));
+        assert_eq!(upgrade_region_instruction_reply, upgrade_region_reply);
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -755,5 +1138,31 @@ mod tests {
             }
             _ => panic!("Expected FlushRegions instruction"),
         }
+    }
+
+    #[test]
+    fn test_serialize_get_file_refs_instruction_reply() {
+        let mut manifest = FileRefsManifest::default();
+        let r0 = RegionId::new(1024, 1);
+        let r1 = RegionId::new(1024, 2);
+        manifest
+            .file_refs
+            .insert(r0, HashSet::from([FileId::random()]));
+        manifest
+            .file_refs
+            .insert(r1, HashSet::from([FileId::random()]));
+        manifest.manifest_version.insert(r0, 10);
+        manifest.manifest_version.insert(r1, 20);
+
+        let instruction_reply = InstructionReply::GetFileRefs(GetFileRefsReply {
+            file_refs_manifest: manifest,
+            success: true,
+            error: None,
+        });
+
+        let serialized = serde_json::to_string(&instruction_reply).unwrap();
+        let deserialized = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(instruction_reply, deserialized);
     }
 }

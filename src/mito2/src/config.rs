@@ -18,13 +18,16 @@ use std::cmp;
 use std::path::Path;
 use std::time::Duration;
 
+use common_base::memory_limit::MemoryLimit;
 use common_base::readable_size::ReadableSize;
 use common_stat::{get_total_cpu_cores, get_total_memory_readable};
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
+use crate::cache::file_cache::DEFAULT_INDEX_CACHE_PERCENT;
 use crate::error::Result;
+use crate::gc::GcConfig;
 use crate::memtable::MemtableConfig;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
@@ -117,6 +120,12 @@ pub struct MitoConfig {
     /// TTL for write cache.
     #[serde(with = "humantime_serde")]
     pub write_cache_ttl: Option<Duration>,
+    /// Preload index (puffin) files into cache on region open (default: true).
+    pub preload_index_cache: bool,
+    /// Percentage of write cache capacity allocated for index (puffin) files (default: 20).
+    /// The remaining capacity is used for data (parquet) files.
+    /// Must be between 0 and 100 (exclusive).
+    pub index_cache_percent: u8,
 
     // Other configs:
     /// Buffer size for SST writing.
@@ -127,6 +136,9 @@ pub struct MitoConfig {
     pub max_concurrent_scan_files: usize,
     /// Whether to allow stale entries read during replay.
     pub allow_stale_entries: bool,
+    /// Memory limit for table scans across all queries. Setting it to 0 disables the limit.
+    /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
+    pub scan_memory_limit: MemoryLimit,
 
     /// Index configs.
     pub index: IndexConfig,
@@ -148,6 +160,8 @@ pub struct MitoConfig {
     /// Whether to enable experimental flat format as the default format.
     /// When enabled, forces using BulkMemtable and BulkMemtableBuilder.
     pub default_experimental_flat_format: bool,
+
+    pub gc: GcConfig,
 }
 
 impl Default for MitoConfig {
@@ -175,10 +189,13 @@ impl Default for MitoConfig {
             write_cache_path: String::new(),
             write_cache_size: ReadableSize::gb(5),
             write_cache_ttl: None,
+            preload_index_cache: true,
+            index_cache_percent: DEFAULT_INDEX_CACHE_PERCENT,
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             allow_stale_entries: false,
+            scan_memory_limit: MemoryLimit::default(),
             index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),
@@ -186,6 +203,7 @@ impl Default for MitoConfig {
             memtable: MemtableConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
             default_experimental_flat_format: false,
+            gc: GcConfig::default(),
         };
 
         // Adjust buffer and cache size according to system memory if we can.
@@ -260,6 +278,15 @@ impl MitoConfig {
         // Sets write cache path if it is empty.
         if self.write_cache_path.trim().is_empty() {
             self.write_cache_path = data_home.to_string();
+        }
+
+        // Validate index_cache_percent is within valid range (0, 100)
+        if self.index_cache_percent == 0 || self.index_cache_percent >= 100 {
+            warn!(
+                "Invalid index_cache_percent {}, resetting to default {}",
+                self.index_cache_percent, DEFAULT_INDEX_CACHE_PERCENT
+            );
+            self.index_cache_percent = DEFAULT_INDEX_CACHE_PERCENT;
         }
 
         self.index.sanitize(data_home, &self.inverted_index)?;

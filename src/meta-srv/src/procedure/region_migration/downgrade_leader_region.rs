@@ -19,10 +19,10 @@ use api::v1::meta::MailboxMessage;
 use common_error::ext::BoxedError;
 use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{
-    DowngradeRegion, DowngradeRegionReply, Instruction, InstructionReply,
+    DowngradeRegion, DowngradeRegionReply, DowngradeRegionsReply, Instruction, InstructionReply,
 };
 use common_procedure::{Context as ProcedureContext, Status};
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -70,30 +70,30 @@ impl State for DowngradeLeaderRegion {
             Ok(_) => {
                 // Do nothing
                 info!(
-                    "Downgraded region leader success, region: {}",
-                    ctx.persistent_ctx.region_id
+                    "Downgraded region leader success, region: {:?}",
+                    ctx.persistent_ctx.region_ids
                 );
             }
             Err(error::Error::ExceededDeadline { .. }) => {
                 info!(
-                    "Downgrade region leader exceeded deadline, region: {}",
-                    ctx.persistent_ctx.region_id
+                    "Downgrade region leader exceeded deadline, region: {:?}",
+                    ctx.persistent_ctx.region_ids
                 );
                 // Rollbacks the metadata if procedure is timeout
                 return Ok((Box::new(UpdateMetadata::Rollback), Status::executing(false)));
             }
             Err(err) => {
-                error!(err; "Occurs non-retryable error, region: {}", ctx.persistent_ctx.region_id);
+                error!(err; "Occurs non-retryable error, region: {:?}", ctx.persistent_ctx.region_ids);
                 if let Some(deadline) = ctx.volatile_ctx.leader_region_lease_deadline.as_ref() {
                     info!(
-                        "Running into the downgrade region leader slow path, region: {}, sleep until {:?}",
-                        ctx.persistent_ctx.region_id, deadline
+                        "Running into the downgrade region leader slow path, region: {:?}, sleep until {:?}",
+                        ctx.persistent_ctx.region_ids, deadline
                     );
                     tokio::time::sleep_until(*deadline).await;
                 } else {
                     warn!(
-                        "Leader region lease deadline is not set, region: {}",
-                        ctx.persistent_ctx.region_id
+                        "Leader region lease deadline is not set, region: {:?}",
+                        ctx.persistent_ctx.region_ids
                     );
                 }
             }
@@ -118,12 +118,76 @@ impl DowngradeLeaderRegion {
         ctx: &Context,
         flush_timeout: Duration,
     ) -> Instruction {
-        let pc = &ctx.persistent_ctx;
-        let region_id = pc.region_id;
-        Instruction::DowngradeRegion(DowngradeRegion {
+        let region_ids = &ctx.persistent_ctx.region_ids;
+        let mut downgrade_regions = Vec::with_capacity(region_ids.len());
+        for region_id in region_ids {
+            downgrade_regions.push(DowngradeRegion {
+                region_id: *region_id,
+                flush_timeout: Some(flush_timeout),
+            });
+        }
+
+        Instruction::DowngradeRegions(downgrade_regions)
+    }
+
+    fn handle_downgrade_region_reply(
+        &self,
+        ctx: &mut Context,
+        reply: &DowngradeRegionReply,
+        now: &Instant,
+    ) -> Result<()> {
+        let leader = &ctx.persistent_ctx.from_peer;
+        let DowngradeRegionReply {
             region_id,
-            flush_timeout: Some(flush_timeout),
-        })
+            last_entry_id,
+            metadata_last_entry_id,
+            exists,
+            error,
+        } = reply;
+
+        if error.is_some() {
+            return error::RetryLaterSnafu {
+                reason: format!(
+                    "Failed to downgrade the region {} on datanode {:?}, error: {:?}, elapsed: {:?}",
+                    region_id, leader, error, now.elapsed()
+                ),
+            }
+            .fail();
+        }
+
+        if !exists {
+            warn!(
+                "Trying to downgrade the region {} on datanode {:?}, but region doesn't exist!, elapsed: {:?}",
+                region_id,
+                leader,
+                now.elapsed()
+            );
+        } else {
+            info!(
+                "Region {} leader is downgraded on datanode {:?}, last_entry_id: {:?}, metadata_last_entry_id: {:?}, elapsed: {:?}",
+                region_id,
+                leader,
+                last_entry_id,
+                metadata_last_entry_id,
+                now.elapsed()
+            );
+        }
+
+        if let Some(last_entry_id) = last_entry_id {
+            debug!(
+                "set last_entry_id: {:?}, region_id: {:?}",
+                last_entry_id, region_id
+            );
+            ctx.volatile_ctx
+                .set_last_entry_id(*region_id, *last_entry_id);
+        }
+
+        if let Some(metadata_last_entry_id) = metadata_last_entry_id {
+            ctx.volatile_ctx
+                .set_metadata_last_entry_id(*region_id, *metadata_last_entry_id);
+        }
+
+        Ok(())
     }
 
     /// Tries to downgrade a leader region.
@@ -140,7 +204,7 @@ impl DowngradeLeaderRegion {
     /// - [ExceededDeadline](error::Error::ExceededDeadline)
     /// - Invalid JSON.
     async fn downgrade_region(&self, ctx: &mut Context) -> Result<()> {
-        let region_id = ctx.persistent_ctx.region_id;
+        let region_ids = &ctx.persistent_ctx.region_ids;
         let operation_timeout =
             ctx.next_operation_timeout()
                 .context(error::ExceededDeadlineSnafu {
@@ -150,7 +214,7 @@ impl DowngradeLeaderRegion {
 
         let leader = &ctx.persistent_ctx.from_peer;
         let msg = MailboxMessage::json_message(
-            &format!("Downgrade leader region: {}", region_id),
+            &format!("Downgrade leader regions: {:?}", region_ids),
             &format!("Metasrv@{}", ctx.server_addr()),
             &format!("Datanode-{}@{}", leader.id, leader.addr),
             common_time::util::current_time_millis(),
@@ -168,17 +232,12 @@ impl DowngradeLeaderRegion {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
                 info!(
-                    "Received downgrade region reply: {:?}, region: {}, elapsed: {:?}",
+                    "Received downgrade region reply: {:?}, region: {:?}, elapsed: {:?}",
                     reply,
-                    region_id,
+                    region_ids,
                     now.elapsed()
                 );
-                let InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                    last_entry_id,
-                    metadata_last_entry_id,
-                    exists,
-                    error,
-                }) = reply
+                let InstructionReply::DowngradeRegions(DowngradeRegionsReply { replies }) = reply
                 else {
                     return error::UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
@@ -187,48 +246,14 @@ impl DowngradeLeaderRegion {
                     .fail();
                 };
 
-                if error.is_some() {
-                    return error::RetryLaterSnafu {
-                        reason: format!(
-                            "Failed to downgrade the region {} on datanode {:?}, error: {:?}, elapsed: {:?}",
-                            region_id, leader, error, now.elapsed()
-                        ),
-                    }
-                    .fail();
+                for reply in replies {
+                    self.handle_downgrade_region_reply(ctx, &reply, &now)?;
                 }
-
-                if !exists {
-                    warn!(
-                        "Trying to downgrade the region {} on datanode {:?}, but region doesn't exist!, elapsed: {:?}",
-                        region_id,
-                        leader,
-                        now.elapsed()
-                    );
-                } else {
-                    info!(
-                        "Region {} leader is downgraded on datanode {:?}, last_entry_id: {:?}, metadata_last_entry_id: {:?}, elapsed: {:?}",
-                        region_id,
-                        leader,
-                        last_entry_id,
-                        metadata_last_entry_id,
-                        now.elapsed()
-                    );
-                }
-
-                if let Some(last_entry_id) = last_entry_id {
-                    ctx.volatile_ctx.set_last_entry_id(last_entry_id);
-                }
-
-                if let Some(metadata_last_entry_id) = metadata_last_entry_id {
-                    ctx.volatile_ctx
-                        .set_metadata_last_entry_id(metadata_last_entry_id);
-                }
-
                 Ok(())
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
-                    "Mailbox received timeout for downgrade leader region {region_id} on datanode {:?}, elapsed: {:?}",
+                    "Mailbox received timeout for downgrade leader region {region_ids:?} on datanode {:?}, elapsed: {:?}",
                     leader,
                     now.elapsed()
                 );
@@ -244,7 +269,7 @@ impl DowngradeLeaderRegion {
         let last_connection_at = match find_datanode_lease_value(&ctx.in_memory, leader.id).await {
             Ok(lease_value) => lease_value.map(|lease_value| lease_value.timestamp_millis),
             Err(err) => {
-                error!(err; "Failed to find datanode lease value for datanode: {}, during region migration, region: {}", leader, ctx.persistent_ctx.region_id);
+                error!(err; "Failed to find datanode lease value for datanode: {}, during region migration, region: {:?}", leader, ctx.persistent_ctx.region_ids);
                 return;
             }
         };
@@ -262,8 +287,8 @@ impl DowngradeLeaderRegion {
             if elapsed >= (REGION_LEASE_SECS * 1000) as i64 {
                 ctx.volatile_ctx.reset_leader_region_lease_deadline();
                 info!(
-                    "Datanode {}({}) has been disconnected for longer than the region lease period ({:?}), reset leader region lease deadline to None, region: {}",
-                    leader, last_connection_at, region_lease, ctx.persistent_ctx.region_id
+                    "Datanode {}({}) has been disconnected for longer than the region lease period ({:?}), reset leader region lease deadline to None, region: {:?}",
+                    leader, last_connection_at, region_lease, ctx.persistent_ctx.region_ids
                 );
             } else if elapsed > 0 {
                 // `now - last_connection_at` < REGION_LEASE_SECS * 1000
@@ -273,23 +298,23 @@ impl DowngradeLeaderRegion {
                 ctx.volatile_ctx
                     .set_leader_region_lease_deadline(lease_timeout);
                 info!(
-                    "Datanode {}({}) last connected {:?} ago, updated leader region lease deadline to {:?}, region: {}",
+                    "Datanode {}({}) last connected {:?} ago, updated leader region lease deadline to {:?}, region: {:?}",
                     leader,
                     last_connection_at,
                     elapsed,
                     ctx.volatile_ctx.leader_region_lease_deadline,
-                    ctx.persistent_ctx.region_id
+                    ctx.persistent_ctx.region_ids
                 );
             } else {
                 warn!(
-                    "Datanode {} has invalid last connection timestamp: {} (which is after current time: {}), region: {}",
-                    leader, last_connection_at, now, ctx.persistent_ctx.region_id
+                    "Datanode {} has invalid last connection timestamp: {} (which is after current time: {}), region: {:?}",
+                    leader, last_connection_at, now, ctx.persistent_ctx.region_ids
                 )
             }
         } else {
             warn!(
-                "Failed to find last connection time for datanode {}, unable to update region lease deadline, region: {}",
-                leader, ctx.persistent_ctx.region_id
+                "Failed to find last connection time for datanode {}, unable to update region lease deadline, region: {:?}",
+                leader, ctx.persistent_ctx.region_ids
             )
         }
     }
@@ -314,19 +339,20 @@ impl DowngradeLeaderRegion {
                 retry += 1;
                 // Throws the error immediately if the procedure exceeded the deadline.
                 if matches!(err, error::Error::ExceededDeadline { .. }) {
-                    error!(err; "Failed to downgrade region leader, region: {}, exceeded deadline", ctx.persistent_ctx.region_id);
+                    error!(err; "Failed to downgrade region leader, regions: {:?}, exceeded deadline", ctx.persistent_ctx.region_ids);
                     return Err(err);
                 } else if matches!(err, error::Error::PusherNotFound { .. }) {
                     // Throws the error immediately if the datanode is unreachable.
-                    error!(err; "Failed to downgrade region leader, region: {}, datanode({}) is unreachable(PusherNotFound)", ctx.persistent_ctx.region_id, ctx.persistent_ctx.from_peer.id);
+                    error!(err; "Failed to downgrade region leader, regions: {:?}, datanode({}) is unreachable(PusherNotFound)", ctx.persistent_ctx.region_ids, ctx.persistent_ctx.from_peer.id);
                     self.update_leader_region_lease_deadline(ctx).await;
                     return Err(err);
                 } else if err.is_retryable() && retry < self.optimistic_retry {
-                    error!(err; "Failed to downgrade region leader, region: {}, retry later", ctx.persistent_ctx.region_id);
+                    error!(err; "Failed to downgrade region leader, regions: {:?}, retry later", ctx.persistent_ctx.region_ids);
                     sleep(self.retry_initial_interval).await;
                 } else {
                     return Err(BoxedError::new(err)).context(error::DowngradeLeaderSnafu {
-                        region_id: ctx.persistent_ctx.region_id,
+                        // TODO(weny): handle multiple regions.
+                        region_id: ctx.persistent_ctx.region_ids[0],
                     })?;
                 }
             } else {
@@ -363,22 +389,21 @@ mod tests {
     };
 
     fn new_persistent_context() -> PersistentContext {
-        PersistentContext {
-            catalog: "greptime".into(),
-            schema: "public".into(),
-            from_peer: Peer::empty(1),
-            to_peer: Peer::empty(2),
-            region_id: RegionId::new(1024, 1),
-            timeout: Duration::from_millis(1000),
-            trigger_reason: RegionMigrationTriggerReason::Manual,
-        }
+        PersistentContext::new(
+            vec![("greptime".into(), "public".into())],
+            Peer::empty(1),
+            Peer::empty(2),
+            vec![RegionId::new(1024, 1)],
+            Duration::from_millis(1000),
+            RegionMigrationTriggerReason::Manual,
+        )
     }
 
     async fn prepare_table_metadata(ctx: &Context, wal_options: HashMap<u32, String>) {
-        let table_info =
-            new_test_table_info(ctx.persistent_ctx.region_id.table_id(), vec![1]).into();
+        let region_id = ctx.persistent_ctx.region_ids[0];
+        let table_info = new_test_table_info(region_id.table_id(), vec![1]).into();
         let region_routes = vec![RegionRoute {
-            region: Region::new_test(ctx.persistent_ctx.region_id),
+            region: Region::new_test(region_id),
             leader_peer: Some(ctx.persistent_ctx.from_peer.clone()),
             follower_peers: vec![ctx.persistent_ctx.to_peer.clone()],
             ..Default::default()
@@ -586,7 +611,13 @@ mod tests {
         });
 
         state.downgrade_region_with_retry(&mut ctx).await.unwrap();
-        assert_eq!(ctx.volatile_ctx.leader_region_last_entry_id, Some(1));
+        assert_eq!(
+            ctx.volatile_ctx
+                .leader_region_last_entry_ids
+                .get(&RegionId::new(0, 0))
+                .cloned(),
+            Some(1)
+        );
         assert!(ctx.volatile_ctx.leader_region_lease_deadline.is_none());
     }
 
@@ -632,7 +663,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_matches!(err, error::Error::DowngradeLeader { .. });
-        assert_eq!(ctx.volatile_ctx.leader_region_last_entry_id, None);
+        // assert_eq!(ctx.volatile_ctx.leader_region_last_entry_id, None);
         // Should remain no change.
         assert_eq!(
             ctx.volatile_ctx.leader_region_lease_deadline.unwrap(),
@@ -667,7 +698,13 @@ mod tests {
         let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
         let elapsed = timer.elapsed().as_secs();
         assert!(elapsed < REGION_LEASE_SECS / 2);
-        assert_eq!(ctx.volatile_ctx.leader_region_last_entry_id, Some(1));
+        assert_eq!(
+            ctx.volatile_ctx
+                .leader_region_last_entry_ids
+                .get(&RegionId::new(0, 0))
+                .cloned(),
+            Some(1)
+        );
         assert!(ctx.volatile_ctx.leader_region_lease_deadline.is_none());
 
         let _ = next

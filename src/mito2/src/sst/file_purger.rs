@@ -80,15 +80,16 @@ pub fn is_local_fs(sst_layer: &AccessLayerRef) -> bool {
 /// only manages the file references without deleting the actual files.
 ///
 pub fn create_file_purger(
+    gc_enabled: bool,
     scheduler: SchedulerRef,
     sst_layer: AccessLayerRef,
     cache_manager: Option<CacheManagerRef>,
     file_ref_manager: FileReferenceManagerRef,
 ) -> FilePurgerRef {
-    if is_local_fs(&sst_layer) {
-        Arc::new(LocalFilePurger::new(scheduler, sst_layer, cache_manager))
-    } else {
+    if gc_enabled && !is_local_fs(&sst_layer) {
         Arc::new(ObjectStoreFilePurger { file_ref_manager })
+    } else {
+        Arc::new(LocalFilePurger::new(scheduler, sst_layer, cache_manager))
     }
 }
 
@@ -128,7 +129,7 @@ impl LocalFilePurger {
         if let Err(e) = self.scheduler.schedule(Box::pin(async move {
             if let Err(e) = delete_files(
                 file_meta.region_id,
-                &[file_meta.file_id],
+                &[(file_meta.file_id, file_meta.index_file_id().file_id())],
                 file_meta.exists_index(),
                 &sst_layer,
                 &cache_manager,
@@ -162,6 +163,7 @@ impl FilePurger for ObjectStoreFilePurger {
         // notice that no matter whether the file is deleted or not, we need to remove the reference
         // because the file is no longer in use nonetheless.
         self.file_ref_manager.remove_file(&file_meta);
+        // TODO(discord9): consider impl a .tombstone file to reduce files needed to list
     }
 
     fn new_file(&self, file_meta: &FileMeta) {
@@ -183,7 +185,9 @@ mod tests {
     use super::*;
     use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
-    use crate::sst::file::{FileHandle, FileMeta, FileTimeRange, IndexType, RegionFileId};
+    use crate::sst::file::{
+        ColumnIndexMetadata, FileHandle, FileMeta, FileTimeRange, IndexType, RegionFileId,
+    };
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
@@ -231,11 +235,14 @@ mod tests {
                     level: 0,
                     file_size: 4096,
                     available_indexes: Default::default(),
+                    indexes: Default::default(),
                     index_file_size: 0,
+                    index_file_id: None,
                     num_rows: 0,
                     num_row_groups: 0,
                     sequence: None,
                     partition_expr: None,
+                    num_series: 0,
                 },
                 file_purger,
             );
@@ -297,11 +304,17 @@ mod tests {
                     level: 0,
                     file_size: 4096,
                     available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                    indexes: vec![ColumnIndexMetadata {
+                        column_id: 0,
+                        created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                    }],
                     index_file_size: 4096,
+                    index_file_id: None,
                     num_rows: 1024,
                     num_row_groups: 1,
                     sequence: NonZeroU64::new(4096),
                     partition_expr: None,
+                    num_series: 0,
                 },
                 file_purger,
             );

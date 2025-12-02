@@ -15,6 +15,7 @@
 use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
+use common_base::memory_limit::MemoryLimit;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
@@ -30,7 +31,6 @@ use meta_srv::selector::SelectorType;
 use metric_engine::config::EngineConfig as MetricEngineConfig;
 use mito2::config::MitoConfig;
 use query::options::QueryOptions;
-use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -48,6 +48,7 @@ fn test_load_datanode_example_config() {
     let expected = GreptimeOptions::<DatanodeOptions> {
         component: DatanodeOptions {
             node_id: Some(42),
+            default_column_prefix: Some("greptime".to_string()),
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
@@ -73,24 +74,24 @@ fn test_load_datanode_example_config() {
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
+                    scan_memory_limit: MemoryLimit::Percentage(50),
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
                 RegionEngineConfig::Metric(MetricEngineConfig {
-                    experimental_sparse_primary_key_encoding: false,
+                    sparse_primary_key_encoding: true,
                     flush_metadata_region_interval: Duration::from_secs(30),
                 }),
             ],
+            query: QueryOptions {
+                memory_pool_size: MemoryLimit::Percentage(50),
+                ..Default::default()
+            },
             logging: LoggingOptions {
                 level: Some("info".to_string()),
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
-                ..Default::default()
-            },
-            export_metrics: ExportMetricsOption {
-                self_import: None,
-                remote_write: Some(Default::default()),
                 ..Default::default()
             },
             grpc: GrpcOptions::default()
@@ -113,6 +114,7 @@ fn test_load_frontend_example_config() {
     let expected = GreptimeOptions::<FrontendOptions> {
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
+            default_column_prefix: Some("greptime".to_string()),
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
@@ -138,11 +140,6 @@ fn test_load_frontend_example_config() {
                     ..Default::default()
                 },
             },
-            export_metrics: ExportMetricsOption {
-                self_import: None,
-                remote_write: Some(Default::default()),
-                ..Default::default()
-            },
             grpc: GrpcOptions {
                 bind_addr: "127.0.0.1:4001".to_string(),
                 server_addr: "127.0.0.1:4001".to_string(),
@@ -151,6 +148,10 @@ fn test_load_frontend_example_config() {
             internal_grpc: Some(GrpcOptions::internal_default()),
             http: HttpOptions {
                 cors_allowed_origins: vec!["https://example.com".to_string()],
+                ..Default::default()
+            },
+            query: QueryOptions {
+                memory_pool_size: MemoryLimit::Percentage(50),
                 ..Default::default()
             },
             ..Default::default()
@@ -188,11 +189,6 @@ fn test_load_metasrv_example_config() {
                     connect_timeout: Duration::from_secs(10),
                     tcp_nodelay: true,
                 },
-            },
-            export_metrics: ExportMetricsOption {
-                self_import: None,
-                remote_write: Some(Default::default()),
-                ..Default::default()
             },
             backend_tls: Some(TlsOption {
                 mode: TlsMode::Prefer,
@@ -240,6 +236,7 @@ fn test_load_flownode_example_config() {
             query: QueryOptions {
                 parallelism: 1,
                 allow_query_fallback: false,
+                memory_pool_size: MemoryLimit::Percentage(50),
             },
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
@@ -273,6 +270,7 @@ fn test_load_standalone_example_config() {
     let expected = GreptimeOptions::<StandaloneOptions> {
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
+            default_column_prefix: Some("greptime".to_string()),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
                 sync_period: Some(Duration::from_secs(10)),
@@ -283,11 +281,12 @@ fn test_load_standalone_example_config() {
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
+                    scan_memory_limit: MemoryLimit::Percentage(50),
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
                 RegionEngineConfig::Metric(MetricEngineConfig {
-                    experimental_sparse_primary_key_encoding: false,
+                    sparse_primary_key_encoding: true,
                     flush_metadata_region_interval: Duration::from_secs(30),
                 }),
             ],
@@ -302,16 +301,14 @@ fn test_load_standalone_example_config() {
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
-            export_metrics: ExportMetricsOption {
-                self_import: Some(Default::default()),
-                remote_write: Some(Default::default()),
-                ..Default::default()
-            },
             http: HttpOptions {
                 cors_allowed_origins: vec!["https://example.com".to_string()],
                 ..Default::default()
             },
-
+            query: QueryOptions {
+                memory_pool_size: MemoryLimit::Percentage(50),
+                ..Default::default()
+            },
             ..Default::default()
         },
         ..Default::default()

@@ -287,7 +287,6 @@ impl GreptimeDbStandaloneBuilder {
             instance,
             servers: ServerHandlers::default(),
             heartbeat_task: None,
-            export_metrics_task: None,
         };
 
         frontend.start().await.unwrap();
@@ -310,6 +309,7 @@ impl GreptimeDbStandaloneBuilder {
             store_types,
             &self.instance_name,
             self.datanode_wal_config.clone(),
+            Default::default(),
         );
 
         let kv_backend_config = KvBackendConfig::default();

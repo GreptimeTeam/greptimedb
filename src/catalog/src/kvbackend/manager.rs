@@ -18,8 +18,7 @@ use std::sync::{Arc, Weak};
 
 use async_stream::try_stream;
 use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
-    PG_CATALOG_NAME,
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
 };
 use common_error::ext::BoxedError;
 use common_meta::cache::{
@@ -45,7 +44,6 @@ use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::PartitionRules;
-use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
 use table::table_name::TableName;
 use tokio::sync::Semaphore;
 use tokio_stream::wrappers::ReceiverStream;
@@ -55,12 +53,13 @@ use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
     ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
 };
-#[cfg(feature = "enterprise")]
-use crate::information_schema::InformationSchemaTableFactoryRef;
-use crate::information_schema::{InformationExtensionRef, InformationSchemaProvider};
+use crate::information_schema::{
+    InformationExtensionRef, InformationSchemaProvider, InformationSchemaTableFactoryRef,
+};
 use crate::kvbackend::TableCacheRef;
 use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::SystemSchemaProvider;
+use crate::system_schema::numbers_table_provider::NumbersTableProvider;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
 
 /// Access all existing catalog, schema and tables.
@@ -555,9 +554,9 @@ pub(super) struct SystemCatalog {
     // system_schema_provider for default catalog
     pub(super) information_schema_provider: Arc<InformationSchemaProvider>,
     pub(super) pg_catalog_provider: Arc<PGCatalogProvider>,
+    pub(super) numbers_table_provider: NumbersTableProvider,
     pub(super) backend: KvBackendRef,
     pub(super) process_manager: Option<ProcessManagerRef>,
-    #[cfg(feature = "enterprise")]
     pub(super) extra_information_table_factories:
         std::collections::HashMap<String, InformationSchemaTableFactoryRef>,
 }
@@ -584,9 +583,7 @@ impl SystemCatalog {
             PG_CATALOG_NAME if channel == Channel::Postgres => {
                 self.pg_catalog_provider.table_names()
             }
-            DEFAULT_SCHEMA_NAME => {
-                vec![NUMBERS_TABLE_NAME.to_string()]
-            }
+            DEFAULT_SCHEMA_NAME => self.numbers_table_provider.table_names(),
             _ => vec![],
         }
     }
@@ -604,7 +601,7 @@ impl SystemCatalog {
         if schema == INFORMATION_SCHEMA_NAME {
             self.information_schema_provider.table(table).is_some()
         } else if schema == DEFAULT_SCHEMA_NAME {
-            table == NUMBERS_TABLE_NAME
+            self.numbers_table_provider.table_exists(table)
         } else if schema == PG_CATALOG_NAME && channel == Channel::Postgres {
             self.pg_catalog_provider.table(table).is_some()
         } else {
@@ -630,7 +627,6 @@ impl SystemCatalog {
                         self.process_manager.clone(),
                         self.backend.clone(),
                     );
-                    #[cfg(feature = "enterprise")]
                     let provider = provider
                         .with_extra_table_factories(self.extra_information_table_factories.clone());
                     Arc::new(provider)
@@ -649,8 +645,8 @@ impl SystemCatalog {
                     });
                 pg_catalog_provider.table(table_name)
             }
-        } else if schema == DEFAULT_SCHEMA_NAME && table_name == NUMBERS_TABLE_NAME {
-            Some(NumbersTable::table(NUMBERS_TABLE_ID))
+        } else if schema == DEFAULT_SCHEMA_NAME {
+            self.numbers_table_provider.table(table_name)
         } else {
             None
         }

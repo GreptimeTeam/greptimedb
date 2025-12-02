@@ -55,7 +55,7 @@ lazy_static = "1.4"
 log-store = { workspace = true }
 mito-codec.workspace = true
 moka = { workspace = true, features = ["sync", "future"] }
-object-store.workspace = true
+object-store = { workspace = true, features = ["testing"] }
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true
 pin-project.workspace = true
@@ -65,7 +65,7 @@ partition.workspace = true
 puffin.workspace = true
 rand.workspace = true
 rayon = "1.10"
-regex = "1.5"
+regex.workspace = true
 rskafka = { workspace = true, optional = true }
 rstest = { workspace = true, optional = true }
 rstest_reuse = { workspace = true, optional = true }

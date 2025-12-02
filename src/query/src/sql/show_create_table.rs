@@ -16,7 +16,9 @@
 
 use std::collections::HashMap;
 
+use arrow_schema::extension::ExtensionType;
 use common_meta::SchemaOptions;
+use datatypes::extension::json::JsonExtensionType;
 use datatypes::schema::{
     COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
     COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
@@ -157,6 +159,15 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
 
     if column_schema.is_inverted_indexed() {
         extensions.inverted_index_options = Some(HashMap::new().into());
+    }
+
+    if let Some(json_extension) = column_schema.extension_type::<JsonExtensionType>()? {
+        let settings = json_extension
+            .metadata()
+            .json_structure_settings
+            .clone()
+            .unwrap_or_default();
+        extensions.set_json_structure_settings(settings);
     }
 
     Ok(Column {

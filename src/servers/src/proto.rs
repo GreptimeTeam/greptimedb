@@ -19,7 +19,7 @@ use std::slice;
 
 use api::prom_store::remote::Sample;
 use bytes::{Buf, Bytes};
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::warn;
 use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition};
 use prost::DecodeError;
@@ -407,10 +407,10 @@ impl PromSeriesProcessor {
 
             let timestamp = s.timestamp;
             pipeline_map.insert(
-                KeyString::from(GREPTIME_TIMESTAMP),
+                KeyString::from(greptime_timestamp()),
                 VrlValue::Integer(timestamp),
             );
-            pipeline_map.insert(KeyString::from(GREPTIME_VALUE), VrlValue::Float(value));
+            pipeline_map.insert(KeyString::from(greptime_value()), VrlValue::Float(value));
             if one_sample {
                 vec_pipeline_map.push(VrlValue::Object(pipeline_map));
                 break;

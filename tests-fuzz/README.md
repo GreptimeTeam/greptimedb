@@ -50,8 +50,19 @@ Print the `std::fmt::Debug` output for an input.
 cargo fuzz fmt fuzz_target .crash --fuzz-dir tests-fuzz -D -s none
 ```
 Rerun the fuzz test with the input.
+You can override fuzz input with environment variables. For example, to override fuzz input like:
+
+```
+FuzzInput {
+    seed: 6666,
+    actions: 175
+}
+```
+
+you can run with `GT_FUZZ_OVERRIDE_SEED=6666` and `GT_FUZZ_OVERRIDE_ACTIONS=175`:
 
 ```bash
-cargo fuzz run fuzz_target .crash --fuzz-dir tests-fuzz -D -s none
+GT_FUZZ_OVERRIDE_SEED=6666 GT_FUZZ_OVERRIDE_ACTIONS=175 cargo fuzz run fuzz_target .crash --fuzz-dir tests-fuzz -D -s none
 ```
+
 For more details, visit [cargo fuzz](https://rust-fuzz.github.io/book/cargo-fuzz/tutorial.html) or run the command `cargo fuzz --help`.

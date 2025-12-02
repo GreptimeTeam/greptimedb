@@ -36,7 +36,7 @@ object_store_opendal.workspace = true
 orc-rust = { version = "0.6.3", default-features = false, features = ["async"] }
 parquet.workspace = true
 paste.workspace = true
-regex = "1.7"
+regex.workspace = true
 serde.workspace = true
 snafu.workspace = true
 strum.workspace = true

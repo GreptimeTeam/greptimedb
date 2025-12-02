@@ -164,6 +164,25 @@ impl DatanodeTableManager {
             .transpose()
     }
 
+    pub async fn batch_get(
+        &self,
+        keys: &[DatanodeTableKey],
+    ) -> Result<HashMap<DatanodeTableKey, DatanodeTableValue>> {
+        let req = BatchGetRequest::default().with_keys(keys.iter().map(|k| k.to_bytes()).collect());
+        let resp = self.kv_backend.batch_get(req).await?;
+        let values = resp
+            .kvs
+            .into_iter()
+            .map(|kv| {
+                Ok((
+                    DatanodeTableKey::from_bytes(&kv.key)?,
+                    DatanodeTableValue::try_from_raw_value(&kv.value)?,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        Ok(values)
+    }
+
     pub fn tables(
         &self,
         datanode_id: DatanodeId,

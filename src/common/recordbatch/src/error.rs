@@ -133,18 +133,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to downcast vector of type '{:?}' to type '{:?}'",
-        from_type,
-        to_type
-    ))]
-    DowncastVector {
-        from_type: ConcreteDataType,
-        to_type: ConcreteDataType,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Error occurs when performing arrow computation"))]
     ArrowCompute {
         #[snafu(source)]
@@ -193,6 +181,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Exceeded memory limit: {}", msg))]
+    ExceedMemoryLimit {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to align JSON array, reason: {reason}"))]
+    AlignJsonArray {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -208,9 +210,8 @@ impl ErrorExt for Error {
             | Error::ToArrowScalar { .. }
             | Error::ProjectArrowRecordBatch { .. }
             | Error::PhysicalExpr { .. }
-            | Error::RecordBatchSliceIndexOverflow { .. } => StatusCode::Internal,
-
-            Error::DowncastVector { .. } => StatusCode::Unexpected,
+            | Error::RecordBatchSliceIndexOverflow { .. }
+            | Error::AlignJsonArray { .. } => StatusCode::Internal,
 
             Error::PollStream { .. } => StatusCode::EngineExecuteQuery,
 
@@ -229,6 +230,8 @@ impl ErrorExt for Error {
             Error::StreamTimeout { .. } => StatusCode::Cancelled,
 
             Error::StreamCancelled { .. } => StatusCode::Cancelled,
+
+            Error::ExceedMemoryLimit { .. } => StatusCode::RuntimeResourcesExhausted,
         }
     }
 

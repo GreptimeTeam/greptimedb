@@ -51,7 +51,7 @@ use tests_fuzz::utils::partition::{fetch_partition, fetch_partitions, region_dis
 use tests_fuzz::utils::procedure::procedure_state;
 use tests_fuzz::utils::wait::wait_condition_fn;
 use tests_fuzz::utils::{
-    Connections, compact_table, flush_memtable, get_gt_fuzz_input_max_rows,
+    Connections, compact_table, flush_memtable, get_fuzz_override, get_gt_fuzz_input_max_rows,
     get_gt_fuzz_input_max_tables, init_greptime_connections_via_env,
 };
 use tests_fuzz::validator::row::count_values;
@@ -75,12 +75,14 @@ struct FuzzInput {
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
+        let seed = get_fuzz_override::<u64>("SEED").unwrap_or(u.int_in_range(u64::MIN..=u64::MAX)?);
         let mut rng = ChaChaRng::seed_from_u64(seed);
         let max_rows = get_gt_fuzz_input_max_rows();
-        let rows = rng.random_range(2..max_rows);
+        let rows =
+            get_fuzz_override::<usize>("ROWS").unwrap_or_else(|| rng.random_range(2..max_rows));
         let max_tables = get_gt_fuzz_input_max_tables();
-        let tables = rng.random_range(1..max_tables);
+        let tables =
+            get_fuzz_override::<usize>("TABLES").unwrap_or_else(|| rng.random_range(1..max_tables));
 
         Ok(FuzzInput { rows, seed, tables })
     }

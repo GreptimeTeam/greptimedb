@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,17 +20,23 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_extension::DistributedInformationExtension;
-use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, MetaKvBackend};
+use catalog::kvbackend::{
+    CachedKvBackendBuilder, CatalogManagerConfiguratorRef, KvBackendCatalogManagerBuilder,
+    MetaKvBackend,
+};
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
+use common_error::ext::BoxedError;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+use common_query::prelude::set_default_prefix;
+use common_stat::ResourceStatImpl;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_time::timezone::set_default_timezone;
@@ -39,14 +46,16 @@ use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
+use plugins::frontend::context::{
+    CatalogManagerConfigureContext, DistributedCatalogManagerConfigureContext,
+};
 use servers::addrs;
-use servers::export_metrics::ExportMetricsTask;
 use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
-use crate::error::{self, Result};
+use crate::error::{self, OtherSnafu, Result};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
@@ -174,6 +183,8 @@ pub struct StartCommand {
     #[clap(long)]
     tls_key_path: Option<String>,
     #[clap(long)]
+    tls_watch: bool,
+    #[clap(long)]
     user_provider: Option<String>,
     #[clap(long)]
     disable_dashboard: Option<bool>,
@@ -227,6 +238,7 @@ impl StartCommand {
             self.tls_mode.clone(),
             self.tls_cert_path.clone(),
             self.tls_key_path.clone(),
+            self.tls_watch,
         );
 
         if let Some(addr) = &self.http_addr {
@@ -332,6 +344,9 @@ impl StartCommand {
             .context(error::StartFrontendSnafu)?;
 
         set_default_timezone(opts.default_timezone.as_deref()).context(error::InitTimezoneSnafu)?;
+        set_default_prefix(opts.default_column_prefix.as_deref())
+            .map_err(BoxedError::new)
+            .context(error::BuildCliSnafu)?;
 
         let meta_client_options = opts
             .meta_client
@@ -408,9 +423,18 @@ impl StartCommand {
             layered_cache_registry.clone(),
         )
         .with_process_manager(process_manager.clone());
-        #[cfg(feature = "enterprise")]
-        let builder = if let Some(factories) = plugins.get() {
-            builder.with_extra_information_table_factories(factories)
+        let builder = if let Some(configurator) =
+            plugins.get::<CatalogManagerConfiguratorRef<CatalogManagerConfigureContext>>()
+        {
+            let ctx = DistributedCatalogManagerConfigureContext {
+                meta_client: meta_client.clone(),
+            };
+            let ctx = CatalogManagerConfigureContext::Distributed(ctx);
+
+            configurator
+                .configure(builder, ctx)
+                .await
+                .context(OtherSnafu)?
         } else {
             builder
         };
@@ -421,11 +445,15 @@ impl StartCommand {
             Arc::new(InvalidateCacheHandler::new(layered_cache_registry.clone())),
         ]);
 
+        let mut resource_stat = ResourceStatImpl::default();
+        resource_stat.start_collect_cpu_usage();
+
         let heartbeat_task = HeartbeatTask::new(
             &opts,
             meta_client.clone(),
             opts.heartbeat.clone(),
             Arc::new(executor),
+            Arc::new(resource_stat),
         );
         let heartbeat_task = Some(heartbeat_task);
 
@@ -445,9 +473,6 @@ impl StartCommand {
         .context(error::StartFrontendSnafu)?;
         let instance = Arc::new(instance);
 
-        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
-            .context(error::ServersSnafu)?;
-
         let servers = Services::new(opts, instance.clone(), plugins)
             .build()
             .context(error::StartFrontendSnafu)?;
@@ -456,7 +481,6 @@ impl StartCommand {
             instance,
             servers,
             heartbeat_task,
-            export_metrics_task,
         };
 
         Ok(Instance::new(frontend, guard))

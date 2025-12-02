@@ -18,7 +18,8 @@ use api::v1::column::Values;
 use api::v1::greptime_request::Request;
 use api::v1::value::ValueData;
 use api::v1::{
-    Decimal128, InsertRequests, IntervalMonthDayNano, RowInsertRequest, RowInsertRequests,
+    Decimal128, InsertRequests, IntervalMonthDayNano, JsonValue, RowInsertRequest,
+    RowInsertRequests, json_value,
 };
 use pipeline::ContextReq;
 use snafu::ResultExt;
@@ -229,12 +230,29 @@ impl Limiter {
                         .unwrap_or(0)
                 })
                 .sum(),
-            ValueData::JsonValue(inner) => inner
-                .as_ref()
-                .value_data
-                .as_ref()
-                .map(Self::size_of_value_data)
-                .unwrap_or(0),
+            ValueData::JsonValue(v) => {
+                fn calc(v: &JsonValue) -> usize {
+                    let Some(value) = v.value.as_ref() else {
+                        return 0;
+                    };
+                    match value {
+                        json_value::Value::Boolean(_) => size_of::<bool>(),
+                        json_value::Value::Int(_) => size_of::<i64>(),
+                        json_value::Value::Uint(_) => size_of::<u64>(),
+                        json_value::Value::Float(_) => size_of::<f64>(),
+                        json_value::Value::Str(s) => s.len(),
+                        json_value::Value::Array(array) => array.items.iter().map(calc).sum(),
+                        json_value::Value::Object(object) => object
+                            .entries
+                            .iter()
+                            .flat_map(|entry| {
+                                entry.value.as_ref().map(|v| entry.key.len() + calc(v))
+                            })
+                            .sum(),
+                    }
+                }
+                calc(v)
+            }
         }
     }
 }

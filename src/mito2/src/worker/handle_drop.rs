@@ -83,11 +83,13 @@ where
         self.flush_scheduler.on_region_dropped(region_id);
         // Notifies compaction scheduler.
         self.compaction_scheduler.on_region_dropped(region_id);
+        // notifies index build scheduler.
+        self.index_build_scheduler
+            .on_region_dropped(region_id)
+            .await;
 
         // Marks region version as dropped
-        region
-            .version_control
-            .mark_dropped(&region.memtable_builder);
+        region.version_control.mark_dropped();
         info!(
             "Region {} is dropped logically, but some files are not deleted yet",
             region_id

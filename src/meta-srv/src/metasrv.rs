@@ -22,7 +22,6 @@ use std::time::Duration;
 use clap::ValueEnum;
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
-use common_config::utils::ResourceSpec;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_event_recorder::EventRecorderOptions;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
@@ -47,11 +46,12 @@ use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_procedure::ProcedureManagerRef;
 use common_procedure::options::ProcedureConfig;
+use common_stat::ResourceStatRef;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{error, info, warn};
+use common_time::util::DefaultSystemTimer;
 use common_wal::config::MetasrvWalConfig;
 use serde::{Deserialize, Serialize};
-use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use servers::tls::TlsOption;
@@ -67,6 +67,7 @@ use crate::error::{
     StartTelemetryTaskSnafu, StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
+use crate::gc::{GcSchedulerOptions, GcTickerRef};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
@@ -168,8 +169,6 @@ pub struct MetasrvOptions {
     pub data_home: String,
     /// The WAL options.
     pub wal: MetasrvWalConfig,
-    /// The metrics export options.
-    pub export_metrics: ExportMetricsOption,
     /// The store key prefix. If it is not empty, all keys in the store will be prefixed with it.
     /// This is useful when multiple metasrv clusters share the same store.
     pub store_key_prefix: String,
@@ -209,6 +208,8 @@ pub struct MetasrvOptions {
     pub event_recorder: EventRecorderOptions,
     /// The stats persistence options.
     pub stats_persistence: StatsPersistenceOptions,
+    /// The GC scheduler options.
+    pub gc: GcSchedulerOptions,
 }
 
 impl fmt::Debug for MetasrvOptions {
@@ -233,7 +234,6 @@ impl fmt::Debug for MetasrvOptions {
             .field("enable_telemetry", &self.enable_telemetry)
             .field("data_home", &self.data_home)
             .field("wal", &self.wal)
-            .field("export_metrics", &self.export_metrics)
             .field("store_key_prefix", &self.store_key_prefix)
             .field("max_txn_ops", &self.max_txn_ops)
             .field("flush_stats_factor", &self.flush_stats_factor)
@@ -291,7 +291,6 @@ impl Default for MetasrvOptions {
             enable_telemetry: true,
             data_home: DEFAULT_DATA_HOME.to_string(),
             wal: MetasrvWalConfig::default(),
-            export_metrics: ExportMetricsOption::default(),
             store_key_prefix: String::new(),
             max_txn_ops: 128,
             flush_stats_factor: 3,
@@ -307,6 +306,7 @@ impl Default for MetasrvOptions {
             node_max_idle_time: Duration::from_secs(24 * 60 * 60),
             event_recorder: EventRecorderOptions::default(),
             stats_persistence: StatsPersistenceOptions::default(),
+            gc: GcSchedulerOptions::default(),
         }
     }
 }
@@ -372,12 +372,18 @@ pub struct MetasrvNodeInfo {
     pub git_commit: String,
     // The node start timestamp in milliseconds
     pub start_time_ms: u64,
-    // The node cpus
+    // The node total cpu millicores
     #[serde(default)]
-    pub cpus: u32,
-    // The node memory bytes
+    pub total_cpu_millicores: i64,
+    // The node total memory bytes
     #[serde(default)]
-    pub memory_bytes: u64,
+    pub total_memory_bytes: i64,
+    /// The node build cpu usage millicores
+    #[serde(default)]
+    pub cpu_usage_millicores: i64,
+    /// The node build memory usage bytes
+    #[serde(default)]
+    pub memory_usage_bytes: i64,
     // The node hostname
     #[serde(default)]
     pub hostname: String,
@@ -397,15 +403,19 @@ impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
             version: node_info.version.clone(),
             git_commit: node_info.git_commit.clone(),
             start_time_ms: node_info.start_time_ms,
-            cpus: node_info.cpus,
-            memory_bytes: node_info.memory_bytes,
+            cpus: node_info.total_cpu_millicores as u32,
+            memory_bytes: node_info.total_memory_bytes as u64,
             // The canonical location for node information.
             info: Some(api::v1::meta::NodeInfo {
                 version: node_info.version,
                 git_commit: node_info.git_commit,
                 start_time_ms: node_info.start_time_ms,
-                cpus: node_info.cpus,
-                memory_bytes: node_info.memory_bytes,
+                total_cpu_millicores: node_info.total_cpu_millicores,
+                total_memory_bytes: node_info.total_memory_bytes,
+                cpu_usage_millicores: node_info.cpu_usage_millicores,
+                memory_usage_bytes: node_info.memory_usage_bytes,
+                cpus: node_info.total_cpu_millicores as u32,
+                memory_bytes: node_info.total_memory_bytes as u64,
                 hostname: node_info.hostname,
             }),
         }
@@ -517,7 +527,8 @@ pub struct Metasrv {
     region_flush_ticker: Option<RegionFlushTickerRef>,
     table_id_sequence: SequenceRef,
     reconciliation_manager: ReconciliationManagerRef,
-    resource_spec: ResourceSpec,
+    resource_stat: ResourceStatRef,
+    gc_ticker: Option<GcTickerRef>,
 
     plugins: Plugins,
 }
@@ -577,6 +588,9 @@ impl Metasrv {
             }
             if let Some(region_flush_trigger) = &self.region_flush_ticker {
                 leadership_change_notifier.add_listener(region_flush_trigger.clone() as _);
+            }
+            if let Some(gc_ticker) = &self.gc_ticker {
+                leadership_change_notifier.add_listener(gc_ticker.clone() as _);
             }
             if let Some(customizer) = self.plugins.get::<LeadershipChangeNotifierCustomizerRef>() {
                 customizer.customize(&mut leadership_change_notifier);
@@ -699,8 +713,8 @@ impl Metasrv {
         self.start_time_ms
     }
 
-    pub fn resource_spec(&self) -> &ResourceSpec {
-        &self.resource_spec
+    pub fn resource_stat(&self) -> &ResourceStatRef {
+        &self.resource_stat
     }
 
     pub fn node_info(&self) -> MetasrvNodeInfo {
@@ -710,8 +724,10 @@ impl Metasrv {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms: self.start_time_ms(),
-            cpus: self.resource_spec().cpus as u32,
-            memory_bytes: self.resource_spec().memory.unwrap_or_default().as_bytes(),
+            total_cpu_millicores: self.resource_stat.get_total_cpu_millicores(),
+            total_memory_bytes: self.resource_stat.get_total_memory_bytes(),
+            cpu_usage_millicores: self.resource_stat.get_cpu_usage_millicores(),
+            memory_usage_bytes: self.resource_stat.get_memory_usage_bytes(),
             hostname: hostname::get()
                 .unwrap_or_default()
                 .to_string_lossy()
@@ -723,6 +739,7 @@ impl Metasrv {
     /// A datanode is considered alive when it's still within the lease period.
     pub(crate) async fn lookup_datanode_peer(&self, peer_id: u64) -> Result<Option<Peer>> {
         discovery::utils::alive_datanode(
+            &DefaultSystemTimer,
             self.meta_peer_client.as_ref(),
             peer_id,
             Duration::from_secs(distributed_time_constants::DATANODE_LEASE_SECS),
@@ -846,5 +863,20 @@ impl Metasrv {
             leader_region_registry,
             topic_stats_registry,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::metasrv::MetasrvNodeInfo;
+
+    #[test]
+    fn test_deserialize_metasrv_node_info() {
+        let str = r#"{"addr":"127.0.0.1:4002","version":"0.1.0","git_commit":"1234567890","start_time_ms":1715145600}"#;
+        let node_info: MetasrvNodeInfo = serde_json::from_str(str).unwrap();
+        assert_eq!(node_info.addr, "127.0.0.1:4002");
+        assert_eq!(node_info.version, "0.1.0");
+        assert_eq!(node_info.git_commit, "1234567890");
+        assert_eq!(node_info.start_time_ms, 1715145600);
     }
 }

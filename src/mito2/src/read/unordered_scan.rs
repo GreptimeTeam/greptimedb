@@ -399,6 +399,10 @@ impl UnorderedScan {
 }
 
 impl RegionScanner for UnorderedScan {
+    fn name(&self) -> &str {
+        "UnorderedScan"
+    }
+
     fn properties(&self) -> &ScannerProperties {
         &self.properties
     }
@@ -427,8 +431,14 @@ impl RegionScanner for UnorderedScan {
             .map_err(BoxedError::new)
     }
 
-    fn has_predicate(&self) -> bool {
-        let predicate = self.stream_ctx.input.predicate();
+    /// If this scanner have predicate other than region partition exprs
+    fn has_predicate_without_region(&self) -> bool {
+        let predicate = self
+            .stream_ctx
+            .input
+            .predicate_group()
+            .predicate_without_region();
+
         predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
     }
 

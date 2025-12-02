@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -21,13 +21,14 @@ use axum::Extension;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode as HttpStatusCode};
 use axum::response::IntoResponse;
-use chrono::Utc;
+use axum_extra::TypedHeader;
 use common_catalog::consts::{PARENT_SPAN_ID_COLUMN, TRACE_TABLE_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::{debug, error, tracing, warn};
+use headers::UserAgent;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value as JsonValue;
 use session::context::{Channel, QueryContext};
@@ -41,10 +42,12 @@ use crate::http::extractor::TraceTableName;
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::{
     DURATION_NANO_COLUMN, KEY_OTEL_SCOPE_NAME, KEY_OTEL_SCOPE_VERSION, KEY_OTEL_STATUS_CODE,
-    KEY_SERVICE_NAME, KEY_SPAN_KIND, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN,
-    SCOPE_VERSION_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN,
-    SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE,
-    SPAN_STATUS_PREFIX, SPAN_STATUS_UNSET, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    KEY_OTEL_STATUS_ERROR_KEY, KEY_OTEL_STATUS_MESSAGE, KEY_OTEL_TRACE_STATE, KEY_SERVICE_NAME,
+    KEY_SPAN_KIND, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN, SCOPE_VERSION_COLUMN,
+    SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_ERROR,
+    SPAN_STATUS_MESSAGE_COLUMN, SPAN_STATUS_PREFIX, SPAN_STATUS_UNSET, TIMESTAMP_COLUMN,
+    TRACE_ID_COLUMN, TRACE_STATE_COLUMN,
 };
 use crate::query_handler::JaegerQueryHandlerRef;
 
@@ -52,7 +55,9 @@ pub const JAEGER_QUERY_TABLE_NAME_KEY: &str = "jaeger_query_table_name";
 
 const REF_TYPE_CHILD_OF: &str = "CHILD_OF";
 const SPAN_KIND_TIME_FMTS: [&str; 2] = ["%Y-%m-%d %H:%M:%S%.6f%z", "%Y-%m-%d %H:%M:%S%.9f%z"];
-pub const JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER: &str = "x-greptime-jaeger-query-time-range";
+
+const TRACE_NOT_FOUND_ERROR_CODE: i32 = 404;
+const TRACE_NOT_FOUND_ERROR_MSG: &str = "trace not found";
 
 /// JaegerAPIResponse is the response of Jaeger HTTP API.
 /// The original version is `structuredResponse` which is defined in https://github.com/jaegertracing/jaeger/blob/main/cmd/query/app/http_handler.go.
@@ -63,6 +68,22 @@ pub struct JaegerAPIResponse {
     pub limit: usize,
     pub offset: usize,
     pub errors: Vec<JaegerAPIError>,
+}
+
+impl JaegerAPIResponse {
+    pub fn trace_not_found() -> Self {
+        Self {
+            data: None,
+            total: 0,
+            limit: 0,
+            offset: 0,
+            errors: vec![JaegerAPIError {
+                code: TRACE_NOT_FOUND_ERROR_CODE,
+                msg: TRACE_NOT_FOUND_ERROR_MSG.to_string(),
+                trace_id: None,
+            }],
+        }
+    }
 }
 
 /// JaegerData is the query result of Jaeger HTTP API.
@@ -340,6 +361,30 @@ pub struct QueryTraceParams {
     pub end_time: Option<i64>,
     pub min_duration: Option<u64>,
     pub max_duration: Option<u64>,
+
+    // The user agent of the trace query, mainly find traces
+    pub user_agent: TraceUserAgent,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum TraceUserAgent {
+    Grafana,
+    // Jaeger-UI does not actually send user agent
+    // But it's a jaeger API, so let's treat it as jaeger
+    #[default]
+    Jaeger,
+}
+
+impl From<UserAgent> for TraceUserAgent {
+    fn from(value: UserAgent) -> Self {
+        let ua_str = value.as_str().to_lowercase();
+        debug!("received user agent: {}", ua_str);
+        if ua_str.contains("grafana") {
+            Self::Grafana
+        } else {
+            Self::Jaeger
+        }
+    }
 }
 
 /// Handle the GET `/api/services` request.
@@ -427,7 +472,13 @@ pub async fn handle_get_trace(
     let end_time_ns = query_params.end.map(|end_us| end_us * 1000);
 
     let output = match handler
-        .get_trace(query_ctx, &trace_id, start_time_ns, end_time_ns)
+        .get_trace(
+            query_ctx,
+            &trace_id,
+            start_time_ns,
+            end_time_ns,
+            query_params.limit,
+        )
         .await
     {
         Ok(output) => output,
@@ -442,6 +493,10 @@ pub async fn handle_get_trace(
 
     match covert_to_records(output).await {
         Ok(Some(records)) => match traces_from_records(records) {
+            Ok(traces) if traces.is_empty() => (
+                HttpStatusCode::NOT_FOUND,
+                axum::Json(JaegerAPIResponse::trace_not_found()),
+            ),
             Ok(traces) => (
                 HttpStatusCode::OK,
                 axum::Json(JaegerAPIResponse {
@@ -454,7 +509,10 @@ pub async fn handle_get_trace(
                 error_response(err)
             }
         },
-        Ok(None) => (HttpStatusCode::OK, axum::Json(JaegerAPIResponse::default())),
+        Ok(None) => (
+            HttpStatusCode::NOT_FOUND,
+            axum::Json(JaegerAPIResponse::trace_not_found()),
+        ),
         Err(err) => {
             error!("Failed to get trace '{}': {:?}", trace_id, err);
             error_response(err)
@@ -470,6 +528,7 @@ pub async fn handle_find_traces(
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
     TraceTableName(table_name): TraceTableName,
+    optional_user_agent: Option<TypedHeader<UserAgent>>,
 ) -> impl IntoResponse {
     debug!(
         "Received Jaeger '/api/traces' request, query_params: {:?}, query_ctx: {:?}",
@@ -486,7 +545,10 @@ pub async fn handle_find_traces(
         .start_timer();
 
     match QueryTraceParams::from_jaeger_query_params(query_params) {
-        Ok(query_params) => {
+        Ok(mut query_params) => {
+            if let Some(TypedHeader(user_agent)) = optional_user_agent {
+                query_params.user_agent = user_agent.into();
+            }
             let output = handler.find_traces(query_ctx, query_params).await;
             match output {
                 Ok(output) => match covert_to_records(output).await {
@@ -528,13 +590,6 @@ pub async fn handle_get_operations(
         query_params, query_ctx, headers
     );
 
-    let (start, end) = match parse_jaeger_time_range_for_operations(&headers, &query_params) {
-        Ok((start, end)) => (start, end),
-        Err(e) => return error_response(e),
-    };
-
-    debug!("Get operations with start: {:?}, end: {:?}", start, end);
-
     if let Some(service_name) = &query_params.service_name {
         update_query_context(&mut query_ctx, table_name);
         let query_ctx = Arc::new(query_ctx);
@@ -546,13 +601,7 @@ pub async fn handle_get_operations(
             .start_timer();
 
         match handler
-            .get_operations(
-                query_ctx,
-                service_name,
-                query_params.span_kind.as_deref(),
-                start,
-                end,
-            )
+            .get_operations(query_ctx, service_name, query_params.span_kind.as_deref())
             .await
         {
             Ok(output) => match covert_to_records(output).await {
@@ -625,15 +674,7 @@ pub async fn handle_get_operations_by_service(
         .with_label_values(&[&db, "/api/services"])
         .start_timer();
 
-    let (start, end) = match parse_jaeger_time_range_for_operations(&headers, &query_params) {
-        Ok((start, end)) => (start, end),
-        Err(e) => return error_response(e),
-    };
-
-    match handler
-        .get_operations(query_ctx, &service_name, None, start, end)
-        .await
-    {
+    match handler.get_operations(query_ctx, &service_name, None).await {
         Ok(output) => match covert_to_records(output).await {
             Ok(Some(records)) => match operations_from_records(records, false) {
                 Ok(operations) => {
@@ -677,7 +718,10 @@ async fn covert_to_records(output: Output) -> Result<Option<HttpRecordsOutput>> 
                     .await
                     .context(CollectRecordbatchSnafu)?,
             )?;
-            debug!("The query records: {:?}", records);
+            debug!(
+                "The query records: {}",
+                serde_json::to_string(&records).unwrap()
+            );
             Ok(Some(records))
         }
         // It's unlikely to happen. However, if the output is not a stream, return None.
@@ -721,7 +765,8 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     // maintain the mapping: trace_id -> (process_id -> service_name).
     let mut trace_id_to_processes: HashMap<String, HashMap<String, String>> = HashMap::new();
     // maintain the mapping: trace_id -> spans.
-    let mut trace_id_to_spans: HashMap<String, Vec<Span>> = HashMap::new();
+    // use BTreeMap to retain order
+    let mut trace_id_to_spans: BTreeMap<String, Vec<Span>> = BTreeMap::new();
     // maintain the mapping: service.name -> resource.attributes.
     let mut service_to_resource_attributes: HashMap<String, Vec<KeyValue>> = HashMap::new();
 
@@ -881,6 +926,38 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                             key: KEY_OTEL_STATUS_CODE.to_string(),
                             value_type: ValueType::String,
                             value: Value::String(normalize_status_code(&span_status)),
+                        });
+                        // set error to comply with the Jaeger API
+                        if span_status == SPAN_STATUS_ERROR {
+                            span.tags.push(KeyValue {
+                                key: KEY_OTEL_STATUS_ERROR_KEY.to_string(),
+                                value_type: ValueType::Boolean,
+                                value: Value::Boolean(true),
+                            });
+                        }
+                    }
+                }
+
+                SPAN_STATUS_MESSAGE_COLUMN => {
+                    if let JsonValue::String(span_status_message) = cell
+                        && !span_status_message.is_empty()
+                    {
+                        span.tags.push(KeyValue {
+                            key: KEY_OTEL_STATUS_MESSAGE.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(span_status_message),
+                        });
+                    }
+                }
+
+                TRACE_STATE_COLUMN => {
+                    if let JsonValue::String(trace_state) = cell
+                        && !trace_state.is_empty()
+                    {
+                        span.tags.push(KeyValue {
+                            key: KEY_OTEL_TRACE_STATE.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(trace_state),
                         });
                     }
                 }
@@ -1115,42 +1192,6 @@ fn convert_string_to_boolean(input: &serde_json::Value) -> Option<serde_json::Va
     }
 
     None
-}
-
-fn parse_jaeger_time_range_for_operations(
-    headers: &HeaderMap,
-    query_params: &JaegerQueryParams,
-) -> Result<(Option<i64>, Option<i64>)> {
-    if let Some(time_range) = headers.get(JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER) {
-        match time_range.to_str() {
-            Ok(time_range) => match humantime::parse_duration(time_range) {
-                Ok(duration) => {
-                    debug!(
-                        "Get operations with time range: {:?}, duration: {:?}",
-                        time_range, duration
-                    );
-                    let now = Utc::now().timestamp_micros();
-                    Ok((Some(now - duration.as_micros() as i64), Some(now)))
-                }
-                Err(e) => {
-                    error!("Failed to parse time range header: {:?}", e);
-                    Err(InvalidJaegerQuerySnafu {
-                        reason: format!("invalid time range header: {:?}", time_range),
-                    }
-                    .build())
-                }
-            },
-            Err(e) => {
-                error!("Failed to convert time range header to string: {:?}", e);
-                Err(InvalidJaegerQuerySnafu {
-                    reason: format!("invalid time range header: {:?}", time_range),
-                }
-                .build())
-            }
-        }
-    } else {
-        Ok((query_params.start, query_params.end))
-    }
 }
 
 #[cfg(test)]
@@ -1586,6 +1627,7 @@ mod tests {
                         ("http.method".to_string(), JsonValue::String("GET".to_string())),
                         ("http.path".to_string(), JsonValue::String("/api/v1/users".to_string())),
                     ])),
+                    user_agent: TraceUserAgent::Jaeger,
                 },
             ),
         ];

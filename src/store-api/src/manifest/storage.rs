@@ -55,7 +55,7 @@ pub trait ManifestLogStorage {
 
     /// Delete logs in [start, end) and ignore checkpoints.
     async fn delete(&self, start: ManifestVersion, end: ManifestVersion)
-        -> Result<(), Self::Error>;
+    -> Result<(), Self::Error>;
 
     /// Save a checkpoint.
     async fn save_checkpoint(
@@ -66,7 +66,7 @@ pub trait ManifestLogStorage {
 
     /// Load the latest checkpoint
     async fn load_last_checkpoint(&self)
-        -> Result<Option<(ManifestVersion, Vec<u8>)>, Self::Error>;
+    -> Result<Option<(ManifestVersion, Vec<u8>)>, Self::Error>;
     /// Delete the checkpoint by version
     async fn delete_checkpoint(&self, version: ManifestVersion) -> Result<(), Self::Error>;
 

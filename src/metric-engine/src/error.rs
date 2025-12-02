@@ -50,6 +50,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to batch catchup mito region"))]
+    BatchCatchupMitoRegion {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("No open region result for region {}", region_id))]
     NoOpenRegionResult {
         region_id: RegionId,
@@ -142,22 +149,15 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Mito delete operation fails"))]
-    MitoDeleteOperation {
-        source: BoxedError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Mito catchup operation fails"))]
-    MitoCatchupOperation {
-        source: BoxedError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Mito sync operation fails"))]
     MitoSyncOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Mito enter staging operation fails"))]
+    MitoEnterStagingOperation {
         source: BoxedError,
         #[snafu(implicit)]
         location: Location,
@@ -249,6 +249,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unsupported remap manifests request for region {}", region_id))]
+    UnsupportedRemapManifestsRequest {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported alter kind: {}", kind))]
     UnsupportedAlterKind {
         kind: String,
@@ -331,7 +338,8 @@ impl ErrorExt for Error {
             | AddingFieldColumn { .. }
             | ParseRegionOptions { .. }
             | UnexpectedRequest { .. }
-            | UnsupportedAlterKind { .. } => StatusCode::InvalidArguments,
+            | UnsupportedAlterKind { .. }
+            | UnsupportedRemapManifestsRequest { .. } => StatusCode::InvalidArguments,
 
             ForbiddenPhysicalAlter { .. } | UnsupportedRegionRequest { .. } => {
                 StatusCode::Unsupported
@@ -357,11 +365,11 @@ impl ErrorExt for Error {
             | CloseMitoRegion { source, .. }
             | MitoReadOperation { source, .. }
             | MitoWriteOperation { source, .. }
-            | MitoCatchupOperation { source, .. }
             | MitoFlushOperation { source, .. }
-            | MitoDeleteOperation { source, .. }
             | MitoSyncOperation { source, .. }
-            | BatchOpenMitoRegion { source, .. } => source.status_code(),
+            | MitoEnterStagingOperation { source, .. }
+            | BatchOpenMitoRegion { source, .. }
+            | BatchCatchupMitoRegion { source, .. } => source.status_code(),
 
             EncodePrimaryKey { source, .. } => source.status_code(),
 

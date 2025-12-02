@@ -216,6 +216,8 @@ where
     }
 
     fn put_page(&self, key: K, page_key: PageKey, value: Bytes) {
+        // Clones the value to ensure it doesn't reference a larger buffer.
+        let value = Bytes::from(value.to_vec());
         CACHE_BYTES
             .with_label_values(&[INDEX_CONTENT_TYPE])
             .add((self.weight_of_content)(&(key, page_key), &value).into());

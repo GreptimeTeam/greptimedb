@@ -74,11 +74,17 @@ pub trait EventListener: Send + Sync {
     /// Notifies the listener that region starts to send a region change result to worker.
     async fn on_notify_region_change_result_begin(&self, _region_id: RegionId) {}
 
+    /// Notifies the listener that region starts to send a enter staging result to worker.
+    async fn on_enter_staging_result_begin(&self, _region_id: RegionId) {}
+
     /// Notifies the listener that the index build task is executed successfully.
-    async fn on_index_build_success(&self, _region_file_id: RegionFileId) {}
+    async fn on_index_build_finish(&self, _region_file_id: RegionFileId) {}
 
     /// Notifies the listener that the index build task is started.
     async fn on_index_build_begin(&self, _region_file_id: RegionFileId) {}
+
+    /// Notifies the listener that the index build task is aborted.
+    async fn on_index_build_abort(&self, _region_file_id: RegionFileId) {}
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;
@@ -304,50 +310,111 @@ impl EventListener for NotifyRegionChangeResultListener {
             region_id
         );
         self.notify.notified().await;
+        info!(
+            "Continue to sending region change result for region {}",
+            region_id
+        );
+    }
+}
+
+#[derive(Default)]
+pub struct NotifyEnterStagingResultListener {
+    notify: Notify,
+}
+
+impl NotifyEnterStagingResultListener {
+    /// Continue to sending enter staging result.
+    pub fn wake_notify(&self) {
+        self.notify.notify_one();
+    }
+}
+
+#[async_trait]
+impl EventListener for NotifyEnterStagingResultListener {
+    async fn on_enter_staging_result_begin(&self, region_id: RegionId) {
+        info!(
+            "Wait on notify to start notify enter staging result for region {}",
+            region_id
+        );
+        self.notify.notified().await;
+        info!(
+            "Continue to sending enter staging result for region {}",
+            region_id
+        );
     }
 }
 
 #[derive(Default)]
 pub struct IndexBuildListener {
-    notify: Notify,
-    success_count: AtomicUsize,
-    start_count: AtomicUsize,
+    begin_count: AtomicUsize,
+    begin_notify: Notify,
+    finish_count: AtomicUsize,
+    finish_notify: Notify,
+    abort_count: AtomicUsize,
+    abort_notify: Notify,
+    // stop means finished or aborted
+    stop_notify: Notify,
 }
 
 impl IndexBuildListener {
     /// Wait until index build is done for `times` times.
     pub async fn wait_finish(&self, times: usize) {
-        while self.success_count.load(Ordering::Relaxed) < times {
-            self.notify.notified().await;
+        while self.finish_count.load(Ordering::Relaxed) < times {
+            self.finish_notify.notified().await;
+        }
+    }
+
+    /// Wait until index build is stopped for `times` times.
+    pub async fn wait_stop(&self, times: usize) {
+        while self.finish_count.load(Ordering::Relaxed) + self.abort_count.load(Ordering::Relaxed)
+            < times
+        {
+            self.stop_notify.notified().await;
+        }
+    }
+
+    /// Wait until index build is begun for `times` times.
+    pub async fn wait_begin(&self, times: usize) {
+        while self.begin_count.load(Ordering::Relaxed) < times {
+            self.begin_notify.notified().await;
         }
     }
 
     /// Clears the success count.
-    pub fn clear_success_count(&self) {
-        self.success_count.store(0, Ordering::Relaxed);
+    pub fn clear_finish_count(&self) {
+        self.finish_count.store(0, Ordering::Relaxed);
     }
 
     /// Returns the success count.
-    pub fn success_count(&self) -> usize {
-        self.success_count.load(Ordering::Relaxed)
+    pub fn finish_count(&self) -> usize {
+        self.finish_count.load(Ordering::Relaxed)
     }
 
     /// Returns the start count.
     pub fn begin_count(&self) -> usize {
-        self.start_count.load(Ordering::Relaxed)
+        self.begin_count.load(Ordering::Relaxed)
     }
 }
 
 #[async_trait]
 impl EventListener for IndexBuildListener {
-    async fn on_index_build_success(&self, region_file_id: RegionFileId) {
+    async fn on_index_build_finish(&self, region_file_id: RegionFileId) {
         info!("Region {} index build successfully", region_file_id);
-        self.success_count.fetch_add(1, Ordering::Relaxed);
-        self.notify.notify_one();
+        self.finish_count.fetch_add(1, Ordering::Relaxed);
+        self.finish_notify.notify_one();
+        self.stop_notify.notify_one();
     }
 
     async fn on_index_build_begin(&self, region_file_id: RegionFileId) {
         info!("Region {} index build begin", region_file_id);
-        self.start_count.fetch_add(1, Ordering::Relaxed);
+        self.begin_count.fetch_add(1, Ordering::Relaxed);
+        self.begin_notify.notify_one();
+    }
+
+    async fn on_index_build_abort(&self, region_file_id: RegionFileId) {
+        info!("Region {} index build aborted", region_file_id);
+        self.abort_count.fetch_add(1, Ordering::Relaxed);
+        self.abort_notify.notify_one();
+        self.stop_notify.notify_one();
     }
 }

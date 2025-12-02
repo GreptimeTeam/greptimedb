@@ -55,13 +55,11 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Unsupported expr in default constraint: {} for column: {}",
-        expr,
-        column_name
+        "Unsupported default constraint for column: '{column_name}', reason: {reason}"
     ))]
     UnsupportedDefaultValue {
         column_name: String,
-        expr: Expr,
+        reason: String,
         #[snafu(implicit)]
         location: Location,
     },

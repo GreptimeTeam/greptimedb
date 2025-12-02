@@ -45,23 +45,23 @@ Affected Rows: 0
 
 SHOW TABLES;
 
-+------------+
-| Tables     |
-+------------+
-| numbers    |
-| test_table |
-| test_view  |
-+------------+
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
+| test_table       |
+| test_view        |
++------------------+
 
 SHOW FULL TABLES;
 
-+------------+-----------------+
-| Tables     | Table_type      |
-+------------+-----------------+
-| numbers    | LOCAL TEMPORARY |
-| test_table | BASE TABLE      |
-| test_view  | VIEW            |
-+------------+-----------------+
++------------------+-----------------+
+| Tables_in_public | Table_type      |
++------------------+-----------------+
+| numbers          | LOCAL TEMPORARY |
+| test_table       | BASE TABLE      |
+| test_view        | VIEW            |
++------------------+-----------------+
 
 -- psql: \dv
 SELECT n.nspname as "Schema",
@@ -113,7 +113,6 @@ SELECT * FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME, TABLE_TYPE;
 |greptime|information_schema|region_peers|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||Y|
 |greptime|information_schema|region_statistics|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||Y|
 |greptime|information_schema|routines|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||Y|
-|greptime|information_schema|runtime_metrics|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||Y|
 |greptime|information_schema|schema_privileges|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||Y|
 |greptime|information_schema|schemata|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||Y|
 |greptime|information_schema|session_status|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||Y|
@@ -125,7 +124,6 @@ SELECT * FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME, TABLE_TYPE;
 |greptime|information_schema|tables|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||Y|
 |greptime|public|test_table|BASETABLE|ID|ID|ID|ID|ID|ID|mito|ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||N|
 |greptime|public|test_view|VIEW|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||N|
-|greptime|information_schema|triggers|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||Y|
 |greptime|information_schema|views|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||Y|
 +++++++++++++++++++++++++
 
@@ -184,11 +182,11 @@ Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public
 
 SHOW TABLES;
 
-+---------+
-| Tables  |
-+---------+
-| numbers |
-+---------+
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
++------------------+
 
 -- psql: \dv
 SELECT n.nspname as "Schema",

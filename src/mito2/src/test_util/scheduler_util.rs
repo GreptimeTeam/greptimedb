@@ -111,10 +111,10 @@ impl SchedulerEnv {
     }
 
     /// Creates a new index build scheduler.
-    pub(crate) fn mock_index_build_scheduler(&self) -> IndexBuildScheduler {
+    pub(crate) fn mock_index_build_scheduler(&self, files_limit: usize) -> IndexBuildScheduler {
         let scheduler = self.get_scheduler();
 
-        IndexBuildScheduler::new(scheduler)
+        IndexBuildScheduler::new(scheduler, files_limit)
     }
 
     /// Creates a new manifest context.
@@ -133,9 +133,8 @@ impl SchedulerEnv {
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
                 },
-                Default::default(),
-                Default::default(),
                 FormatType::PrimaryKey,
+                &Default::default(),
             )
             .await
             .unwrap(),

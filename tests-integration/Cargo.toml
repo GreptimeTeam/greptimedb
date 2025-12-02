@@ -35,6 +35,7 @@ common-procedure.workspace = true
 common-query.workspace = true
 common-recordbatch.workspace = true
 common-runtime.workspace = true
+common-stat.workspace = true
 common-telemetry.workspace = true
 common-test-util.workspace = true
 common-time.workspace = true
@@ -53,6 +54,7 @@ log-query = { workspace = true }
 loki-proto.workspace = true
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
+mito2.workspace = true
 moka.workspace = true
 mysql_async = { version = "0.35", default-features = false, features = [
     "time",
@@ -72,8 +74,7 @@ session.workspace = true
 similar-asserts.workspace = true
 snafu.workspace = true
 sql.workspace = true
-sqlx = { version = "0.8", features = [
-    "runtime-tokio-rustls",
+sqlx = { workspace = true, features = [
     "mysql",
     "postgres",
     "chrono",

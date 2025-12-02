@@ -36,6 +36,14 @@ SELECT vec_elem_sum(parse_vec('[1.0, 2.0, 3.0]'));
 
 SELECT vec_elem_sum(parse_vec('[-1.0, -2.0, -3.0]'));
 
+SELECT vec_elem_avg('[1.0, 2.0, 3.0]');
+
+SELECT vec_elem_avg('[-1.0, -2.0, -3.0]');
+
+SELECT vec_elem_avg(parse_vec('[1.0, 2.0, 3.0]'));
+
+SELECT vec_elem_avg(parse_vec('[-1.0, -2.0, -3.0]'));
+
 SELECT vec_to_string(vec_div('[1.0, 2.0]', '[3.0, 4.0]'));
 
 SELECT vec_to_string(vec_div(parse_vec('[1.0, 2.0]'), '[3.0, 4.0]'));
@@ -67,6 +75,15 @@ FROM (
     SELECT '[1.0, 2.0, 3.0]' AS v
     UNION ALL
     SELECT '[-1.0, -2.0, -3.0]' AS v
+    UNION ALL
+    SELECT '[4.0, 5.0, 6.0]' AS v
+);
+
+SELECT vec_to_string(vec_avg(v))
+FROM (
+    SELECT '[1.0, 2.0, 3.0]' AS v
+    UNION ALL
+    SELECT '[10.0, 11.0, 12.0]' AS v
     UNION ALL
     SELECT '[4.0, 5.0, 6.0]' AS v
 );

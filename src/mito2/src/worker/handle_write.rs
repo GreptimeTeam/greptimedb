@@ -241,6 +241,12 @@ impl<S> RegionWorkerLoop<S> {
                     // No such region.
                     continue;
                 };
+                #[cfg(test)]
+                debug!(
+                    "Handling write request for region {}, state: {:?}",
+                    region_id,
+                    region.state()
+                );
                 match region.state() {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
@@ -256,6 +262,16 @@ impl<S> RegionWorkerLoop<S> {
                     RegionRoleState::Leader(RegionLeaderState::Altering) => {
                         debug!(
                             "Region {} is altering, add request to pending writes",
+                            region.region_id
+                        );
+                        self.stalling_count.add(1);
+                        WRITE_STALL_TOTAL.inc();
+                        self.stalled_requests.push(sender_req);
+                        continue;
+                    }
+                    RegionRoleState::Leader(RegionLeaderState::EnteringStaging) => {
+                        debug!(
+                            "Region {} is entering staging, add request to pending writes",
                             region.region_id
                         );
                         self.stalling_count.add(1);
@@ -388,17 +404,14 @@ impl<S> RegionWorkerLoop<S> {
             let need_fill_missing_columns = region_ctx.version().metadata.schema_version
                 != bulk_req.region_metadata.schema_version;
 
-            // Only fill missing columns if primary key is dense encoded.
-            if need_fill_missing_columns {
-                // todo(hl): support filling default columns
-                bulk_req.sender.send(
-                    InvalidRequestSnafu {
-                        region_id,
-                        reason: "Schema mismatch",
-                    }
-                    .fail(),
-                );
-                return;
+            // Fill missing columns if needed
+            if need_fill_missing_columns
+                && let Err(e) = bulk_req
+                    .request
+                    .fill_missing_columns(&region_ctx.version().metadata)
+            {
+                bulk_req.sender.send(Err(e));
+                continue;
             }
 
             // Collect requests by region.

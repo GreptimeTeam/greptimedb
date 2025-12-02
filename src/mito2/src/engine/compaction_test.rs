@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use api::v1::{ColumnSchema, Rows};
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
-use datatypes::prelude::ScalarVector;
-use datatypes::vectors::TimestampMillisecondVector;
+use datatypes::arrow::array::AsArray;
+use datatypes::arrow::datatypes::TimestampMillisecondType;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::AlterKind::SetRegionOptions;
 use store_api::region_request::{
@@ -100,7 +100,7 @@ pub(crate) async fn delete_and_flush(
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Delete(RegionDeleteRequest { rows }),
+            RegionRequest::Delete(RegionDeleteRequest { rows, hint: None }),
         )
         .await
         .unwrap();
@@ -125,10 +125,8 @@ async fn collect_stream_ts(stream: SendableRecordBatchStream) -> Vec<i64> {
         let ts_col = batch
             .column_by_name("ts")
             .unwrap()
-            .as_any()
-            .downcast_ref::<TimestampMillisecondVector>()
-            .unwrap();
-        res.extend(ts_col.iter_data().map(|t| t.unwrap().0.value()));
+            .as_primitive::<TimestampMillisecondType>();
+        res.extend((0..ts_col.len()).map(|i| ts_col.value(i)));
     }
     res
 }

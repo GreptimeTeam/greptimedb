@@ -25,8 +25,7 @@ use store_api::region_engine::{RegionRole, RegionStatistic};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
-use crate::error;
-use crate::error::Result;
+use crate::error::{self, DeserializeFromJsonSnafu, Result};
 use crate::heartbeat::utils::get_datanode_workloads;
 
 const DATANODE_STAT_PREFIX: &str = "__meta_datanode_stat";
@@ -66,10 +65,12 @@ pub struct Stat {
     pub node_epoch: u64,
     /// The datanode workloads.
     pub datanode_workloads: DatanodeWorkloads,
+    /// The GC statistics of the datanode.
+    pub gc_stat: Option<GcStat>,
 }
 
 /// The statistics of a region.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegionStat {
     /// The region_id.
     pub id: RegionId,
@@ -126,11 +127,13 @@ pub trait TopicStatsReporter: Send + Sync {
     fn reportable_topics(&mut self) -> Vec<TopicStat>;
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum RegionManifestInfo {
     Mito {
         manifest_version: u64,
         flushed_entry_id: u64,
+        /// Number of files removed in the manifest's `removed_files` field.
+        file_removed_cnt: u64,
     },
     Metric {
         data_manifest_version: u64,
@@ -222,11 +225,12 @@ impl TryFrom<&HeartbeatRequest> for Stat {
             node_epoch,
             node_workloads,
             topic_stats,
+            extensions,
             ..
         } = value;
 
         match (header, peer) {
-            (Some(_header), Some(peer)) => {
+            (Some(header), Some(peer)) => {
                 let region_stats = region_stats
                     .iter()
                     .map(RegionStat::from)
@@ -234,6 +238,14 @@ impl TryFrom<&HeartbeatRequest> for Stat {
                 let topic_stats = topic_stats.iter().map(TopicStat::from).collect::<Vec<_>>();
 
                 let datanode_workloads = get_datanode_workloads(node_workloads.as_ref());
+
+                let gc_stat = GcStat::from_extensions(extensions).map_err(|err| {
+                    common_telemetry::error!(
+                        "Failed to deserialize GcStat from extensions: {}",
+                        err
+                    );
+                    header.clone()
+                })?;
                 Ok(Self {
                     timestamp_millis: time_util::current_time_millis(),
                     // datanode id
@@ -247,6 +259,7 @@ impl TryFrom<&HeartbeatRequest> for Stat {
                     topic_stats,
                     node_epoch: *node_epoch,
                     datanode_workloads,
+                    gc_stat,
                 })
             }
             (header, _) => Err(header.clone()),
@@ -260,9 +273,11 @@ impl From<store_api::region_engine::RegionManifestInfo> for RegionManifestInfo {
             store_api::region_engine::RegionManifestInfo::Mito {
                 manifest_version,
                 flushed_entry_id,
+                file_removed_cnt,
             } => RegionManifestInfo::Mito {
                 manifest_version,
                 flushed_entry_id,
+                file_removed_cnt,
             },
             store_api::region_engine::RegionManifestInfo::Metric {
                 data_manifest_version,
@@ -316,6 +331,43 @@ impl From<&api::v1::meta::TopicStat> for TopicStat {
             record_size: value.record_size,
             record_num: value.record_num,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GcStat {
+    /// Number of GC tasks currently running on the datanode.
+    pub running_gc_tasks: u32,
+    /// The maximum number of concurrent GC tasks the datanode can handle.
+    pub gc_concurrency: u32,
+}
+
+impl GcStat {
+    pub const GC_STAT_KEY: &str = "__gc_stat";
+
+    pub fn new(running_gc_tasks: u32, gc_concurrency: u32) -> Self {
+        Self {
+            running_gc_tasks,
+            gc_concurrency,
+        }
+    }
+
+    pub fn into_extensions(&self, extensions: &mut std::collections::HashMap<String, Vec<u8>>) {
+        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        extensions.insert(Self::GC_STAT_KEY.to_string(), bytes);
+    }
+
+    pub fn from_extensions(
+        extensions: &std::collections::HashMap<String, Vec<u8>>,
+    ) -> Result<Option<Self>> {
+        extensions
+            .get(Self::GC_STAT_KEY)
+            .map(|bytes| {
+                serde_json::from_slice(bytes).with_context(|_| DeserializeFromJsonSnafu {
+                    input: String::from_utf8_lossy(bytes).to_string(),
+                })
+            })
+            .transpose()
     }
 }
 

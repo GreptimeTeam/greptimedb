@@ -54,7 +54,7 @@ show create table t3;
 
 create table t4 (ts timestamp time index default now);
 
-Error: 1001(Unsupported), Unsupported expr in default constraint: now for column: ts
+Error: 1001(Unsupported), Unsupported default constraint for column: 'ts', reason: expr 'now' not supported
 
 drop table t1;
 

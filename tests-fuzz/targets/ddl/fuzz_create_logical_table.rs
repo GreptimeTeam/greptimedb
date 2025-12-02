@@ -38,7 +38,7 @@ use tests_fuzz::generator::create_expr::{
 use tests_fuzz::ir::{Column, primary_key_and_not_null_column_options_generator};
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
-use tests_fuzz::utils::{Connections, init_greptime_connections_via_env};
+use tests_fuzz::utils::{Connections, get_fuzz_override, init_greptime_connections_via_env};
 use tests_fuzz::validator;
 
 struct FuzzContext {
@@ -58,7 +58,7 @@ struct FuzzInput {
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
+        let seed = get_fuzz_override::<u64>("SEED").unwrap_or(u.int_in_range(u64::MIN..=u64::MAX)?);
         Ok(FuzzInput { seed })
     }
 }

@@ -29,14 +29,15 @@ use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
     PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
-    TRACE_TABLE_NAME_SESSION_KEY, default_engine, trace_services_table_name,
+    TRACE_TABLE_NAME_SESSION_KEY, default_engine, trace_operations_table_name,
+    trace_services_table_name,
 };
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
 use datatypes::schema::SkippingIndexOptions;
@@ -53,7 +54,8 @@ use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TWCS_TIME_WINDOW,
+    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TTL_KEY,
+    TWCS_TIME_WINDOW,
 };
 use store_api::storage::{RegionId, TableId};
 use table::TableRef;
@@ -351,10 +353,11 @@ impl Inserter {
         &self,
         insert: &Insert,
         ctx: &QueryContextRef,
+        statement_executor: &StatementExecutor,
     ) -> Result<Output> {
         let (inserts, table_info) =
             StatementToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, ctx)
-                .convert(insert, ctx)
+                .convert(insert, ctx, statement_executor)
                 .await?;
 
         let table_infos =
@@ -618,11 +621,16 @@ impl Inserter {
                 // note that auto create table shouldn't be ttl instant table
                 // for it's a very unexpected behavior and should be set by user explicitly
                 for mut create_table in create_tables {
-                    if create_table.table_name == trace_services_table_name(trace_table_name) {
-                        // Disable append mode for trace services table since it requires upsert behavior.
+                    if create_table.table_name == trace_services_table_name(trace_table_name)
+                        || create_table.table_name == trace_operations_table_name(trace_table_name)
+                    {
+                        // Disable append mode for auxiliary tables (services/operations) since they require upsert behavior.
                         create_table
                             .table_options
                             .insert(APPEND_MODE_KEY.to_string(), "false".to_string());
+                        // Remove `ttl` key from table options if it exists
+                        create_table.table_options.remove(TTL_KEY);
+
                         let table = self
                             .create_physical_table(create_table, None, ctx, statement_executor)
                             .await?;
@@ -718,14 +726,14 @@ impl Inserter {
         // schema with timestamp and field column
         let default_schema = vec![
             ColumnSchema {
-                column_name: GREPTIME_TIMESTAMP.to_string(),
+                column_name: greptime_timestamp().to_string(),
                 datatype: ColumnDataType::TimestampMillisecond as _,
                 semantic_type: SemanticType::Timestamp as _,
                 datatype_extension: None,
                 options: None,
             },
             ColumnSchema {
-                column_name: GREPTIME_VALUE.to_string(),
+                column_name: greptime_value().to_string(),
                 datatype: ColumnDataType::Float64 as _,
                 semantic_type: SemanticType::Field as _,
                 datatype_extension: None,

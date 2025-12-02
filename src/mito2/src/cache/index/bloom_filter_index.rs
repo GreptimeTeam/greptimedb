@@ -15,7 +15,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use api::v1::index::BloomFilterMeta;
+use api::v1::index::{BloomFilterLoc, BloomFilterMeta};
 use async_trait::async_trait;
 use bytes::Bytes;
 use index::bloom_filter::error::Result;
@@ -60,11 +60,17 @@ impl BloomFilterIndexCache {
 /// Calculates weight for bloom filter index metadata.
 fn bloom_filter_index_metadata_weight(
     k: &(FileId, ColumnId, Tag),
-    _: &Arc<BloomFilterMeta>,
+    meta: &Arc<BloomFilterMeta>,
 ) -> u32 {
-    (k.0.as_bytes().len()
+    let base = k.0.as_bytes().len()
         + std::mem::size_of::<ColumnId>()
-        + std::mem::size_of::<BloomFilterMeta>()) as u32
+        + std::mem::size_of::<Tag>()
+        + std::mem::size_of::<BloomFilterMeta>();
+
+    let vec_estimated = meta.segment_loc_indices.len() * std::mem::size_of::<u64>()
+        + meta.bloom_filter_locs.len() * std::mem::size_of::<BloomFilterLoc>();
+
+    (base + vec_estimated) as u32
 }
 
 /// Calculates weight for bloom filter index content.
@@ -170,6 +176,45 @@ mod test {
     use super::*;
 
     const FUZZ_REPEAT_TIMES: usize = 100;
+
+    #[test]
+    fn bloom_filter_metadata_weight_counts_vec_contents() {
+        let file_id = FileId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let column_id: ColumnId = 42;
+        let tag = Tag::Skipping;
+
+        let meta = BloomFilterMeta {
+            rows_per_segment: 128,
+            segment_count: 2,
+            row_count: 256,
+            bloom_filter_size: 1024,
+            segment_loc_indices: vec![0, 64, 128, 192],
+            bloom_filter_locs: vec![
+                BloomFilterLoc {
+                    offset: 0,
+                    size: 512,
+                    element_count: 1000,
+                },
+                BloomFilterLoc {
+                    offset: 512,
+                    size: 512,
+                    element_count: 1000,
+                },
+            ],
+        };
+
+        let weight =
+            bloom_filter_index_metadata_weight(&(file_id, column_id, tag), &Arc::new(meta.clone()));
+
+        let base = file_id.as_bytes().len()
+            + std::mem::size_of::<ColumnId>()
+            + std::mem::size_of::<Tag>()
+            + std::mem::size_of::<BloomFilterMeta>();
+        let expected_dynamic = meta.segment_loc_indices.len() * std::mem::size_of::<u64>()
+            + meta.bloom_filter_locs.len() * std::mem::size_of::<BloomFilterLoc>();
+
+        assert_eq!(weight as usize, base + expected_dynamic);
+    }
 
     #[test]
     fn fuzz_index_calculation() {

@@ -66,6 +66,7 @@ impl Inserter {
             return Ok(0);
         }
 
+        // TODO(yingwen): Fill record batch impure default values.
         // notify flownode to update dirty timestamps if flow is configured.
         self.maybe_update_flow_dirty_window(table_info.clone(), record_batch.clone());
 

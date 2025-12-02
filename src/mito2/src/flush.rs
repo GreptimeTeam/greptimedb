@@ -40,7 +40,9 @@ use crate::error::{
     RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::memtable::{BoxedRecordBatchIterator, EncodedRange, IterBuilder, MemtableRanges};
+use crate::memtable::{
+    BoxedRecordBatchIterator, EncodedRange, IterBuilder, MemtableRanges, RangesOptions,
+};
 use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
@@ -49,7 +51,6 @@ use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::read::merge::MergeReaderBuilder;
-use crate::read::scan_region::PredicateGroup;
 use crate::read::{FlatSource, Source};
 use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
@@ -207,7 +208,7 @@ impl WriteBufferManager for WriteBufferManagerImpl {
 }
 
 /// Reason of a flush task.
-#[derive(Debug, IntoStaticStr)]
+#[derive(Debug, IntoStaticStr, Clone, Copy, PartialEq, Eq)]
 pub enum FlushReason {
     /// Other reasons.
     Others,
@@ -221,6 +222,8 @@ pub enum FlushReason {
     Periodically,
     /// Flush memtable during downgrading state.
     Downgrading,
+    /// Enter staging mode.
+    EnterStaging,
 }
 
 impl FlushReason {
@@ -252,6 +255,8 @@ pub(crate) struct RegionFlushTask {
     pub(crate) index_options: IndexOptions,
     /// Semaphore to control flush concurrency.
     pub(crate) flush_semaphore: Arc<Semaphore>,
+    /// Whether the region is in staging mode.
+    pub(crate) is_staging: bool,
 }
 
 impl RegionFlushTask {
@@ -315,6 +320,7 @@ impl RegionFlushTask {
                     _timer: timer,
                     edit,
                     memtables_to_remove,
+                    is_staging: self.is_staging,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -397,7 +403,10 @@ impl RegionFlushTask {
             flushed_sequence: Some(version_data.committed_sequence),
             committed_sequence: None,
         };
-        info!("Applying {edit:?} to region {}", self.region_id);
+        info!(
+            "Applying {edit:?} to region {}, is_staging: {}",
+            self.region_id, self.is_staging
+        );
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
 
@@ -416,11 +425,12 @@ impl RegionFlushTask {
         // add a cleanup job to remove them later.
         let version = self
             .manifest_ctx
-            .update_manifest(expected_state, action_list)
+            .update_manifest(expected_state, action_list, self.is_staging)
             .await?;
         info!(
-            "Successfully update manifest version to {version}, region: {}, reason: {}",
+            "Successfully update manifest version to {version}, region: {}, is_staging: {}, reason: {}",
             self.region_id,
+            self.is_staging,
             self.reason.as_str()
         );
 
@@ -459,7 +469,7 @@ impl RegionFlushTask {
             flush_metrics.compact_memtable += compact_cost;
 
             // Sets `for_flush` flag to true.
-            let mem_ranges = mem.ranges(None, PredicateGroup::default(), None, true)?;
+            let mem_ranges = mem.ranges(None, RangesOptions::for_flush())?;
             let num_mem_ranges = mem_ranges.ranges.len();
             let num_mem_rows = mem_ranges.stats.num_rows();
             let memtable_id = mem.id();
@@ -525,21 +535,19 @@ impl RegionFlushTask {
                 let source = Either::Left(source);
                 let write_request = self.new_write_request(version, max_sequence, source);
 
-                let (ssts_written, metrics) = self
+                let mut metrics = Metrics::new(WriteType::Flush);
+                let ssts_written = self
                     .access_layer
-                    .write_sst(write_request, &write_opts, WriteType::Flush)
+                    .write_sst(write_request, &write_opts, &mut metrics)
                     .await?;
                 if ssts_written.is_empty() {
                     // No data written.
                     continue;
                 }
 
-                common_telemetry::debug!(
+                debug!(
                     "Region {} flush one memtable, num_mem_ranges: {}, num_rows: {}, metrics: {:?}",
-                    self.region_id,
-                    num_mem_ranges,
-                    num_mem_rows,
-                    metrics
+                    self.region_id, num_mem_ranges, num_mem_rows, metrics
                 );
 
                 flush_metrics = flush_metrics.merge(metrics);
@@ -591,9 +599,11 @@ impl RegionFlushTask {
             let semaphore = self.flush_semaphore.clone();
             let task = common_runtime::spawn_global(async move {
                 let _permit = semaphore.acquire().await.unwrap();
-                access_layer
-                    .write_sst(write_request, &write_opts, WriteType::Flush)
-                    .await
+                let mut metrics = Metrics::new(WriteType::Flush);
+                let ssts = access_layer
+                    .write_sst(write_request, &write_opts, &mut metrics)
+                    .await?;
+                Ok((ssts, metrics))
             });
             tasks.push(task);
         }
@@ -636,11 +646,14 @@ impl RegionFlushTask {
             level: 0,
             file_size: sst_info.file_size,
             available_indexes: sst_info.index_metadata.build_available_indexes(),
+            indexes: sst_info.index_metadata.build_indexes(),
             index_file_size: sst_info.index_metadata.file_size,
+            index_file_id: None,
             num_rows: sst_info.num_rows as u64,
             num_row_groups: sst_info.num_row_groups,
             sequence: NonZeroU64::new(max_sequence),
             partition_expr,
+            num_series: sst_info.num_series,
         }
     }
 
@@ -740,7 +753,6 @@ struct FlatSources {
     encoded: SmallVec<[EncodedRange; 4]>,
 }
 
-// TODO(yingwen): Flushes into multiple files in parallel.
 /// Returns the max sequence and [FlatSource] for the given memtable.
 fn memtable_flat_sources(
     schema: SchemaRef,
@@ -762,6 +774,9 @@ fn memtable_flat_sources(
             flat_sources.encoded.push(encoded);
         } else {
             let iter = only_range.build_record_batch_iter(None)?;
+            // Dedup according to append mode and merge mode.
+            // Even single range may have duplicate rows.
+            let iter = maybe_dedup_one(options, field_column_start, iter);
             flat_sources.sources.push(FlatSource::Iter(iter));
         };
     } else {
@@ -827,6 +842,28 @@ fn merge_and_dedup(
         }
     };
     Ok(maybe_dedup)
+}
+
+fn maybe_dedup_one(
+    options: &RegionOptions,
+    field_column_start: usize,
+    input_iter: BoxedRecordBatchIterator,
+) -> BoxedRecordBatchIterator {
+    if options.append_mode {
+        // No dedup in append mode
+        input_iter
+    } else {
+        // Dedup according to merge mode.
+        match options.merge_mode() {
+            MergeMode::LastRow => {
+                Box::new(FlatDedupIterator::new(input_iter, FlatLastRow::new(false)))
+            }
+            MergeMode::LastNonNull => Box::new(FlatDedupIterator::new(
+                input_iter,
+                FlatLastNonNull::new(field_column_start, false),
+            )),
+        }
+    }
 }
 
 /// Manages background flushes of a worker.
@@ -1162,11 +1199,16 @@ impl FlushStatus {
 
 #[cfg(test)]
 mod tests {
+    use mito_codec::row_converter::build_primary_key_codec;
     use tokio::sync::oneshot;
 
     use super::*;
     use crate::cache::CacheManager;
+    use crate::memtable::bulk::part::BulkPartConverter;
     use crate::memtable::time_series::TimeSeriesMemtableBuilder;
+    use crate::memtable::{Memtable, RangesOptions};
+    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
+    use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::version_util::{VersionControlBuilder, write_rows_to_version};
 
@@ -1259,6 +1301,7 @@ mod tests {
                 .await,
             index_options: IndexOptions::default(),
             flush_semaphore: Arc::new(Semaphore::new(2)),
+            is_staging: false,
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler
@@ -1301,6 +1344,7 @@ mod tests {
                 manifest_ctx: manifest_ctx.clone(),
                 index_options: IndexOptions::default(),
                 flush_semaphore: Arc::new(Semaphore::new(2)),
+                is_staging: false,
             })
             .collect();
         // Schedule first task.
@@ -1348,6 +1392,115 @@ mod tests {
         for output_rx in output_rxs {
             let output = output_rx.await.unwrap().unwrap();
             assert_eq!(output, 0);
+        }
+    }
+
+    // Verifies single-range flat flush path respects append_mode (no dedup) vs dedup when disabled.
+    #[test]
+    fn test_memtable_flat_sources_single_range_append_mode_behavior() {
+        // Build test metadata and flat schema
+        let metadata = metadata_for_test();
+        let schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+
+        // Prepare a bulk part containing duplicate rows for the same PK and timestamp
+        // Two rows with identical keys and timestamps (ts = 1000), different field values
+        let capacity = 16;
+        let pk_codec = build_primary_key_codec(&metadata);
+        let mut converter =
+            BulkPartConverter::new(&metadata, schema.clone(), capacity, pk_codec, true);
+        let kvs = build_key_values_with_ts_seq_values(
+            &metadata,
+            "dup_key".to_string(),
+            1,
+            vec![1000i64, 1000i64].into_iter(),
+            vec![Some(1.0f64), Some(2.0f64)].into_iter(),
+            1,
+        );
+        converter.append_key_values(&kvs).unwrap();
+        let part = converter.convert().unwrap();
+
+        // Helper to build MemtableRanges with a single range from one bulk part.
+        // We use BulkMemtable directly because it produces record batch iterators.
+        let build_ranges = |append_mode: bool| -> MemtableRanges {
+            let memtable = crate::memtable::bulk::BulkMemtable::new(
+                1,
+                metadata.clone(),
+                None,
+                None,
+                append_mode,
+                MergeMode::LastRow,
+            );
+            memtable.write_bulk(part.clone()).unwrap();
+            memtable.ranges(None, RangesOptions::for_flush()).unwrap()
+        };
+
+        // Case 1: append_mode = false => dedup happens, total rows should be 1
+        {
+            let mem_ranges = build_ranges(false);
+            assert_eq!(1, mem_ranges.ranges.len());
+
+            let options = RegionOptions {
+                append_mode: false,
+                merge_mode: Some(MergeMode::LastRow),
+                ..Default::default()
+            };
+
+            let flat_sources = memtable_flat_sources(
+                schema.clone(),
+                mem_ranges,
+                &options,
+                metadata.primary_key.len(),
+            )
+            .unwrap();
+            assert!(flat_sources.encoded.is_empty());
+            assert_eq!(1, flat_sources.sources.len());
+
+            // Consume the iterator and count rows
+            let mut total_rows = 0usize;
+            for source in flat_sources.sources {
+                match source {
+                    crate::read::FlatSource::Iter(iter) => {
+                        for rb in iter {
+                            total_rows += rb.unwrap().num_rows();
+                        }
+                    }
+                    crate::read::FlatSource::Stream(_) => unreachable!(),
+                }
+            }
+            assert_eq!(1, total_rows, "dedup should keep a single row");
+        }
+
+        // Case 2: append_mode = true => no dedup, total rows should be 2
+        {
+            let mem_ranges = build_ranges(true);
+            assert_eq!(1, mem_ranges.ranges.len());
+
+            let options = RegionOptions {
+                append_mode: true,
+                ..Default::default()
+            };
+
+            let flat_sources =
+                memtable_flat_sources(schema, mem_ranges, &options, metadata.primary_key.len())
+                    .unwrap();
+            assert!(flat_sources.encoded.is_empty());
+            assert_eq!(1, flat_sources.sources.len());
+
+            let mut total_rows = 0usize;
+            for source in flat_sources.sources {
+                match source {
+                    crate::read::FlatSource::Iter(iter) => {
+                        for rb in iter {
+                            total_rows += rb.unwrap().num_rows();
+                        }
+                    }
+                    crate::read::FlatSource::Stream(_) => unreachable!(),
+                }
+            }
+            assert_eq!(2, total_rows, "append_mode should preserve duplicates");
         }
     }
 }

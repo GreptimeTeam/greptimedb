@@ -21,18 +21,18 @@ use std::hash::{Hash, Hasher};
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{Label, Query, ReadRequest, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
+use arrow::array::{Array, AsArray};
+use arrow::datatypes::{Float64Type, TimestampMillisecondType};
 use common_grpc::precision::Precision;
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::tracing;
-use common_time::timestamp::TimeUnit;
 use datafusion::prelude::{Expr, col, lit, regexp_match};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
-use datatypes::prelude::{ConcreteDataType, Value};
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use query::dataframe::DataFrame;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt};
 use snap::raw::{Decoder, Encoder};
 
 use crate::error::{self, Result};
@@ -111,8 +111,8 @@ pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
 
     let mut conditions = Vec::with_capacity(label_matches.len() + 1);
 
-    conditions.push(col(GREPTIME_TIMESTAMP).gt_eq(lit_timestamp_millisecond(start_timestamp_ms)));
-    conditions.push(col(GREPTIME_TIMESTAMP).lt_eq(lit_timestamp_millisecond(end_timestamp_ms)));
+    conditions.push(col(greptime_timestamp()).gt_eq(lit_timestamp_millisecond(start_timestamp_ms)));
+    conditions.push(col(greptime_timestamp()).lt_eq(lit_timestamp_millisecond(end_timestamp_ms)));
 
     for m in label_matches {
         let name = &m.name;
@@ -233,6 +233,24 @@ fn collect_timeseries_ids(table_name: &str, recordbatch: &RecordBatch) -> Vec<Ti
     let row_count = recordbatch.num_rows();
     let mut timeseries_ids = Vec::with_capacity(row_count);
 
+    let column_names = recordbatch
+        .schema
+        .column_schemas()
+        .iter()
+        .map(|column_schema| &column_schema.name);
+    let columns = column_names
+        .enumerate()
+        .filter(|(_, column_name)| {
+            *column_name != greptime_timestamp() && *column_name != greptime_value()
+        })
+        .map(|(i, column_name)| {
+            (
+                column_name,
+                recordbatch.iter_column_as_string(i).collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+
     for row in 0..row_count {
         let mut labels = Vec::with_capacity(recordbatch.num_columns() - 1);
         labels.push(new_label(
@@ -240,19 +258,10 @@ fn collect_timeseries_ids(table_name: &str, recordbatch: &RecordBatch) -> Vec<Ti
             table_name.to_string(),
         ));
 
-        for (i, column_schema) in recordbatch.schema.column_schemas().iter().enumerate() {
-            if column_schema.name == GREPTIME_VALUE || column_schema.name == GREPTIME_TIMESTAMP {
-                continue;
+        for (column_name, column_values) in columns.iter() {
+            if let Some(value) = &column_values[row] {
+                labels.push(new_label((*column_name).clone(), value.clone()));
             }
-
-            let column = &recordbatch.columns()[i];
-            // A label with an empty label value is considered equivalent to a label that does not exist.
-            if column.is_null(row) {
-                continue;
-            }
-
-            let value = column.get(row).to_string();
-            labels.push(new_label(column_schema.name.clone(), value));
         }
         timeseries_ids.push(TimeSeriesId { labels });
     }
@@ -274,35 +283,33 @@ pub fn recordbatches_to_timeseries(
 }
 
 fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Vec<TimeSeries>> {
-    let ts_column = recordbatch.column_by_name(GREPTIME_TIMESTAMP).context(
+    let ts_column = recordbatch.column_by_name(greptime_timestamp()).context(
         error::InvalidPromRemoteReadQueryResultSnafu {
             msg: "missing greptime_timestamp column in query result",
         },
     )?;
-    ensure!(
-        ts_column.data_type() == ConcreteDataType::timestamp_millisecond_datatype(),
-        error::InvalidPromRemoteReadQueryResultSnafu {
+    let ts_column = ts_column
+        .as_primitive_opt::<TimestampMillisecondType>()
+        .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
             msg: format!(
                 "Expect timestamp column of datatype Timestamp(Millisecond), actual {:?}",
                 ts_column.data_type()
-            )
-        }
-    );
+            ),
+        })?;
 
-    let field_column = recordbatch.column_by_name(GREPTIME_VALUE).context(
+    let field_column = recordbatch.column_by_name(greptime_value()).context(
         error::InvalidPromRemoteReadQueryResultSnafu {
             msg: "missing greptime_value column in query result",
         },
     )?;
-    ensure!(
-        field_column.data_type() == ConcreteDataType::float64_datatype(),
-        error::InvalidPromRemoteReadQueryResultSnafu {
+    let field_column = field_column
+        .as_primitive_opt::<Float64Type>()
+        .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
             msg: format!(
                 "Expect value column of datatype Float64, actual {:?}",
                 field_column.data_type()
-            )
-        }
-    );
+            ),
+        })?;
 
     // First, collect each row's timeseries id
     let timeseries_ids = collect_timeseries_ids(table, &recordbatch);
@@ -321,14 +328,8 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
             continue;
         }
 
-        let value: f64 = match field_column.get(row) {
-            Value::Float64(value) => value.into(),
-            _ => unreachable!("checked by the \"ensure\" above"),
-        };
-        let timestamp = match ts_column.get(row) {
-            Value::Timestamp(t) if t.unit() == TimeUnit::Millisecond => t.value(),
-            _ => unreachable!("checked by the \"ensure\" above"),
-        };
+        let value = field_column.value(row);
+        let timestamp = ts_column.value(row);
         let sample = Sample { value, timestamp };
 
         timeseries.samples.push(sample);
@@ -381,14 +382,14 @@ pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertR
             // value
             row_writer::write_f64(
                 table_data,
-                GREPTIME_VALUE,
+                greptime_value(),
                 series.samples[0].value,
                 &mut one_row,
             )?;
             // timestamp
             row_writer::write_ts_to_millis(
                 table_data,
-                GREPTIME_TIMESTAMP,
+                greptime_timestamp(),
                 Some(series.samples[0].timestamp),
                 Precision::Millisecond,
                 &mut one_row,
@@ -403,11 +404,11 @@ pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertR
                 let kvs = kvs.clone();
                 row_writer::write_tags(table_data, kvs, &mut one_row)?;
                 // value
-                row_writer::write_f64(table_data, GREPTIME_VALUE, *value, &mut one_row)?;
+                row_writer::write_f64(table_data, greptime_value(), *value, &mut one_row)?;
                 // timestamp
                 row_writer::write_ts_to_millis(
                     table_data,
-                    GREPTIME_TIMESTAMP,
+                    greptime_timestamp(),
                     Some(*timestamp),
                     Precision::Millisecond,
                     &mut one_row,
@@ -578,6 +579,7 @@ mod tests {
     use api::prom_store::remote::LabelMatcher;
     use api::v1::{ColumnDataType, Row, SemanticType};
     use datafusion::prelude::SessionContext;
+    use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
     use table::table::adapter::DfTableProviderAdapter;
@@ -628,11 +630,11 @@ mod tests {
 
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
-                GREPTIME_TIMESTAMP,
+                greptime_timestamp(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 true,
             ),
-            ColumnSchema::new(GREPTIME_VALUE, ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("job", ConcreteDataType::string_datatype(), true),
         ]));
@@ -655,10 +657,12 @@ mod tests {
         let plan = query_to_plan(DataFrame::DataFusion(dataframe), &q).unwrap();
         let display_string = format!("{}", plan.display_indent());
 
-        assert_eq!(
-            "Filter: ?table?.greptime_timestamp >= TimestampMillisecond(1000, None) AND ?table?.greptime_timestamp <= TimestampMillisecond(2000, None)\n  TableScan: ?table?",
-            display_string
+        let ts_col = greptime_timestamp();
+        let expected = format!(
+            "Filter: ?table?.{} >= TimestampMillisecond(1000, None) AND ?table?.{} <= TimestampMillisecond(2000, None)\n  TableScan: ?table?",
+            ts_col, ts_col
         );
+        assert_eq!(expected, display_string);
 
         let q = Query {
             start_timestamp_ms: 1000,
@@ -687,22 +691,24 @@ mod tests {
         let plan = query_to_plan(DataFrame::DataFusion(dataframe), &q).unwrap();
         let display_string = format!("{}", plan.display_indent());
 
-        assert_eq!(
-            "Filter: ?table?.greptime_timestamp >= TimestampMillisecond(1000, None) AND ?table?.greptime_timestamp <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\")\n  TableScan: ?table?",
-            display_string
+        let ts_col = greptime_timestamp();
+        let expected = format!(
+            "Filter: ?table?.{} >= TimestampMillisecond(1000, None) AND ?table?.{} <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\")\n  TableScan: ?table?",
+            ts_col, ts_col
         );
+        assert_eq!(expected, display_string);
     }
 
     fn column_schemas_with(
         mut kts_iter: Vec<(&str, ColumnDataType, SemanticType)>,
     ) -> Vec<api::v1::ColumnSchema> {
         kts_iter.push((
-            "greptime_value",
+            greptime_value(),
             ColumnDataType::Float64,
             SemanticType::Field,
         ));
         kts_iter.push((
-            "greptime_timestamp",
+            greptime_timestamp(),
             ColumnDataType::TimestampMillisecond,
             SemanticType::Timestamp,
         ));
@@ -837,11 +843,11 @@ mod tests {
     fn test_recordbatches_to_timeseries() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
-                GREPTIME_TIMESTAMP,
+                greptime_timestamp(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 true,
             ),
-            ColumnSchema::new(GREPTIME_VALUE, ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
         ]));
 

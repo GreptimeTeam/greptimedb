@@ -40,7 +40,7 @@ use parquet::schema::types::ColumnPath;
 use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
+use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use store_api::storage::{FileId, SequenceNumber};
 use tokio::io::AsyncWrite;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
@@ -57,10 +57,12 @@ use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index}
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
-use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions};
+use crate::sst::{
+    DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
+};
 
 /// Parquet SST writer.
-pub struct ParquetWriter<F: WriterFactory, I: IndexerBuilder, P: FilePathProvider> {
+pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathProvider> {
     /// Path provider that creates SST and index file paths according to file id.
     path_provider: P,
     writer: Option<AsyncArrowWriter<SizeAwareWriter<F::Writer>>>,
@@ -79,7 +81,7 @@ pub struct ParquetWriter<F: WriterFactory, I: IndexerBuilder, P: FilePathProvide
     /// Cleaner to remove temp files on failure.
     file_cleaner: Option<TempFileCleaner>,
     /// Write metrics
-    metrics: Metrics,
+    metrics: &'a mut Metrics,
 }
 
 pub trait WriterFactory {
@@ -105,7 +107,7 @@ impl WriterFactory for ObjectStoreWriterFactory {
     }
 }
 
-impl<I, P> ParquetWriter<ObjectStoreWriterFactory, I, P>
+impl<'a, I, P> ParquetWriter<'a, ObjectStoreWriterFactory, I, P>
 where
     P: FilePathProvider,
     I: IndexerBuilder,
@@ -116,8 +118,8 @@ where
         index_config: IndexConfig,
         indexer_builder: I,
         path_provider: P,
-        metrics: Metrics,
-    ) -> ParquetWriter<ObjectStoreWriterFactory, I, P> {
+        metrics: &'a mut Metrics,
+    ) -> ParquetWriter<'a, ObjectStoreWriterFactory, I, P> {
         ParquetWriter::new(
             ObjectStoreWriterFactory { object_store },
             metadata,
@@ -135,7 +137,7 @@ where
     }
 }
 
-impl<F, I, P> ParquetWriter<F, I, P>
+impl<'a, F, I, P> ParquetWriter<'a, F, I, P>
 where
     F: WriterFactory,
     I: IndexerBuilder,
@@ -148,8 +150,8 @@ where
         index_config: IndexConfig,
         indexer_builder: I,
         path_provider: P,
-        metrics: Metrics,
-    ) -> ParquetWriter<F, I, P> {
+        metrics: &'a mut Metrics,
+    ) -> ParquetWriter<'a, F, I, P> {
         let init_file = FileId::random();
         let indexer = indexer_builder.build(init_file).await;
 
@@ -176,7 +178,7 @@ where
     ) -> Result<()> {
         // maybe_init_writer will re-create a new file.
         if let Some(mut current_writer) = mem::take(&mut self.writer) {
-            let stats = mem::take(stats);
+            let mut stats = mem::take(stats);
             // At least one row has been written.
             assert!(stats.num_rows > 0);
 
@@ -211,6 +213,7 @@ where
 
             // convert FileMetaData to ParquetMetaData
             let parquet_metadata = parse_parquet_metadata(file_meta)?;
+            let num_series = stats.series_estimator.finish();
             ssts.push(SstInfo {
                 file_id: self.current_file,
                 time_range,
@@ -219,6 +222,7 @@ where
                 num_row_groups: parquet_metadata.num_row_groups() as u64,
                 file_metadata: Some(Arc::new(parquet_metadata)),
                 index_metadata: index_output,
+                num_series,
             });
             self.current_file = FileId::random();
             self.bytes_written.store(0, Ordering::Relaxed)
@@ -384,12 +388,14 @@ where
                 .clone(),
         ]);
         let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
+        let op_type_col = ColumnPath::new(vec![OP_TYPE_COLUMN_NAME.to_string()]);
 
         builder
             .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
             .set_column_dictionary_enabled(seq_col, false)
             .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
             .set_column_dictionary_enabled(ts_col, false)
+            .set_column_compression(op_type_col, Compression::UNCOMPRESSED)
     }
 
     async fn write_next_batch(
@@ -483,11 +489,6 @@ where
             Ok(self.writer.as_mut().unwrap())
         }
     }
-
-    /// Consumes write and return the collected metrics.
-    pub fn into_metrics(self) -> Metrics {
-        self.metrics
-    }
 }
 
 #[derive(Default)]
@@ -496,6 +497,8 @@ struct SourceStats {
     num_rows: usize,
     /// Time range of fetched batches.
     time_range: Option<(Timestamp, Timestamp)>,
+    /// Series estimator for computing num_series.
+    series_estimator: SeriesEstimator,
 }
 
 impl SourceStats {
@@ -505,6 +508,7 @@ impl SourceStats {
         }
 
         self.num_rows += batch.num_rows();
+        self.series_estimator.update(batch);
         // Safety: batch is not empty.
         let (min_in_batch, max_in_batch) = (
             batch.first_timestamp().unwrap(),
@@ -524,6 +528,7 @@ impl SourceStats {
         }
 
         self.num_rows += record_batch.num_rows();
+        self.series_estimator.update_flat(record_batch);
 
         // Get the timestamp column by index
         let time_index_col_idx = time_index_column_index(record_batch.num_columns());

@@ -77,6 +77,7 @@ struct PersistRegionStat<'a> {
     sst_size: u64,
     write_bytes_delta: u64,
     #[col(
+        // This col name is for the information schema table, so we don't touch it
         name = "greptime_timestamp",
         semantic = "Timestamp",
         datatype = "TimestampMillisecond"
@@ -293,6 +294,7 @@ mod tests {
             region_manifest: RegionManifestInfo::Mito {
                 manifest_version: 1,
                 flushed_entry_id: 100,
+                file_removed_cnt: 0,
             },
             written_bytes,
             data_topic_latest_entry_id: 200,

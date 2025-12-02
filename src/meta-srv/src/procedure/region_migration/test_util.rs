@@ -185,15 +185,14 @@ impl TestingEnv {
 
 /// Generates a [PersistentContext].
 pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> PersistentContext {
-    PersistentContext {
-        catalog: "greptime".into(),
-        schema: "public".into(),
-        from_peer: Peer::empty(from),
-        to_peer: Peer::empty(to),
-        region_id,
-        timeout: Duration::from_secs(10),
-        trigger_reason: RegionMigrationTriggerReason::default(),
-    }
+    PersistentContext::new(
+        vec![("greptime".into(), "public".into())],
+        Peer::empty(from),
+        Peer::empty(to),
+        vec![region_id],
+        Duration::from_secs(10),
+        RegionMigrationTriggerReason::default(),
+    )
 }
 
 /// The test suite for region migration procedure.
@@ -306,37 +305,38 @@ impl ProcedureMigrationTestSuite {
 
     /// Verifies table metadata after region migration.
     pub(crate) async fn verify_table_metadata(&self) {
-        let region_id = self.context.persistent_ctx.region_id;
-        let table_route = self
-            .env
-            .table_metadata_manager
-            .table_route_manager()
-            .table_route_storage()
-            .get(region_id.table_id())
-            .await
-            .unwrap()
-            .unwrap();
-        let region_routes = table_route.region_routes().unwrap();
+        for region_id in &self.context.persistent_ctx.region_ids {
+            let table_route = self
+                .env
+                .table_metadata_manager
+                .table_route_manager()
+                .table_route_storage()
+                .get(region_id.table_id())
+                .await
+                .unwrap()
+                .unwrap();
+            let region_routes = table_route.region_routes().unwrap();
 
-        let expected_leader_id = self.context.persistent_ctx.to_peer.id;
-        let removed_follower_id = self.context.persistent_ctx.from_peer.id;
+            let expected_leader_id = self.context.persistent_ctx.to_peer.id;
+            let removed_follower_id = self.context.persistent_ctx.from_peer.id;
 
-        let region_route = region_routes
-            .iter()
-            .find(|route| route.region.id == region_id)
-            .unwrap();
-
-        assert!(!region_route.is_leader_downgrading());
-        assert_eq!(
-            region_route.leader_peer.as_ref().unwrap().id,
-            expected_leader_id
-        );
-        assert!(
-            !region_route
-                .follower_peers
+            let region_route = region_routes
                 .iter()
-                .any(|route| route.id == removed_follower_id)
-        )
+                .find(|route| route.region.id == *region_id)
+                .unwrap();
+
+            assert!(!region_route.is_leader_downgrading());
+            assert_eq!(
+                region_route.leader_peer.as_ref().unwrap().id,
+                expected_leader_id
+            );
+            assert!(
+                !region_route
+                    .follower_peers
+                    .iter()
+                    .any(|route| route.id == removed_follower_id)
+            )
+        }
     }
 }
 

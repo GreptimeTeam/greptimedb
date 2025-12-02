@@ -44,7 +44,9 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
+use common_stat::ResourceStatImpl;
 use common_test_util::temp_dir::create_temp_dir;
+use common_time::util::DefaultSystemTimer;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
@@ -57,8 +59,10 @@ use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::discovery;
+use meta_srv::gc::GcSchedulerOptions;
 use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
+use mito2::gc::GcConfig;
 use object_store::config::ObjectStoreConfig;
 use rand::Rng;
 use servers::grpc::GrpcOptions;
@@ -101,6 +105,8 @@ pub struct GreptimeDbClusterBuilder {
     datanodes: Option<u32>,
     datanode_wal_config: DatanodeWalConfig,
     metasrv_wal_config: MetasrvWalConfig,
+    datanode_gc_config: GcConfig,
+    metasrv_gc_config: GcSchedulerOptions,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
 }
@@ -132,6 +138,8 @@ impl GreptimeDbClusterBuilder {
             datanodes: None,
             datanode_wal_config: DatanodeWalConfig::default(),
             metasrv_wal_config: MetasrvWalConfig::default(),
+            datanode_gc_config: GcConfig::default(),
+            metasrv_gc_config: GcSchedulerOptions::default(),
             shared_home_dir: None,
             meta_selector: None,
         }
@@ -164,6 +172,17 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_metasrv_wal_config(mut self, metasrv_wal_config: MetasrvWalConfig) -> Self {
         self.metasrv_wal_config = metasrv_wal_config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_datanode_gc_config(mut self, datanode_gc_config: GcConfig) -> Self {
+        self.datanode_gc_config = datanode_gc_config;
+        self
+    }
+
+    pub fn with_metasrv_gc_config(mut self, metasrv_gc_config: GcSchedulerOptions) -> Self {
+        self.metasrv_gc_config = metasrv_gc_config;
         self
     }
 
@@ -203,6 +222,7 @@ impl GreptimeDbClusterBuilder {
                 server_addr: "127.0.0.1:3002".to_string(),
                 ..Default::default()
             },
+            gc: self.metasrv_gc_config.clone(),
             ..Default::default()
         };
 
@@ -277,6 +297,7 @@ impl GreptimeDbClusterBuilder {
                     vec![],
                     home_dir,
                     self.datanode_wal_config.clone(),
+                    self.datanode_gc_config.clone(),
                 )
             } else {
                 let (opts, guard) = create_tmp_dir_and_datanode_opts(
@@ -284,6 +305,7 @@ impl GreptimeDbClusterBuilder {
                     self.store_providers.clone().unwrap_or_default(),
                     &format!("{}-dn-{}", self.cluster_name, datanode_id),
                     self.datanode_wal_config.clone(),
+                    self.datanode_gc_config.clone(),
                 );
                 guards.push(guard);
 
@@ -318,6 +340,7 @@ impl GreptimeDbClusterBuilder {
     ) {
         for _ in 0..100 {
             let alive_datanodes = discovery::utils::alive_datanodes(
+                &DefaultSystemTimer,
                 meta_peer_client.as_ref(),
                 Duration::from_secs(u64::MAX),
                 None,
@@ -411,11 +434,15 @@ impl GreptimeDbClusterBuilder {
 
         let fe_opts = self.build_frontend_options();
 
+        let mut resource_stat = ResourceStatImpl::default();
+        resource_stat.start_collect_cpu_usage();
+
         let heartbeat_task = HeartbeatTask::new(
             &fe_opts,
             meta_client.clone(),
             HeartbeatOptions::default(),
             Arc::new(handlers_executor),
+            Arc::new(resource_stat),
         );
 
         let instance = FrontendBuilder::new(
@@ -447,7 +474,6 @@ impl GreptimeDbClusterBuilder {
             instance,
             servers,
             heartbeat_task: Some(heartbeat_task),
-            export_metrics_task: None,
         }
     }
 

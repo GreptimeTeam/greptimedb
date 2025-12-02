@@ -28,7 +28,6 @@ use mito2::config::MitoConfig;
 pub(crate) use object_store::config::ObjectStoreConfig;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
-use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
@@ -66,6 +65,7 @@ impl Default for StorageConfig {
 #[serde(default)]
 pub struct DatanodeOptions {
     pub node_id: Option<u64>,
+    pub default_column_prefix: Option<String>,
     pub workload_types: Vec<DatanodeWorkloadType>,
     pub require_lease_before_startup: bool,
     pub init_regions_in_background: bool,
@@ -81,7 +81,6 @@ pub struct DatanodeOptions {
     pub region_engine: Vec<RegionEngineConfig>,
     pub logging: LoggingOptions,
     pub enable_telemetry: bool,
-    pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
@@ -119,6 +118,7 @@ impl Default for DatanodeOptions {
     fn default() -> Self {
         Self {
             node_id: None,
+            default_column_prefix: None,
             workload_types: vec![DatanodeWorkloadType::Hybrid],
             require_lease_before_startup: false,
             init_regions_in_background: false,
@@ -136,7 +136,6 @@ impl Default for DatanodeOptions {
             logging: LoggingOptions::default(),
             heartbeat: HeartbeatOptions::datanode_default(),
             enable_telemetry: true,
-            export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),

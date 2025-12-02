@@ -32,6 +32,7 @@ use crate::error::{FlamegraphSnafu, ParseJeHeapSnafu, Result};
 const PROF_DUMP: &[u8] = b"prof.dump\0";
 const OPT_PROF: &[u8] = b"opt.prof\0";
 const PROF_ACTIVE: &[u8] = b"prof.active\0";
+const PROF_GDUMP: &[u8] = b"prof.gdump\0";
 
 pub async fn dump_profile() -> Result<Vec<u8>> {
     ensure!(is_prof_enabled()?, ProfilingNotEnabledSnafu);
@@ -118,4 +119,17 @@ pub fn is_heap_profile_active() -> Result<bool> {
 fn is_prof_enabled() -> Result<bool> {
     // safety: OPT_PROF variable, if present, is always a boolean value.
     Ok(unsafe { tikv_jemalloc_ctl::raw::read::<bool>(OPT_PROF).context(ReadOptProfSnafu)? })
+}
+
+pub fn set_gdump_active(active: bool) -> Result<()> {
+    ensure!(is_prof_enabled()?, ProfilingNotEnabledSnafu);
+    unsafe {
+        tikv_jemalloc_ctl::raw::update(PROF_GDUMP, active).context(error::UpdateGdumpSnafu)?;
+    }
+    Ok(())
+}
+
+pub fn is_gdump_active() -> Result<bool> {
+    // safety: PROF_GDUMP, if present, is a boolean value.
+    unsafe { Ok(tikv_jemalloc_ctl::raw::read::<bool>(PROF_GDUMP).context(error::ReadGdumpSnafu)?) }
 }

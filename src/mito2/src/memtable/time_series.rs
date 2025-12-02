@@ -53,7 +53,7 @@ use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable,
     MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
-    MemtableStats, PredicateGroup,
+    MemtableStats, RangesOptions,
 };
 use crate::metrics::{
     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT, MEMTABLE_ACTIVE_SERIES_COUNT, READ_ROWS_TOTAL,
@@ -303,10 +303,10 @@ impl Memtable for TimeSeriesMemtable {
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
-        sequence: Option<SequenceRange>,
-        _for_flush: bool,
+        options: RangesOptions,
     ) -> Result<MemtableRanges> {
+        let predicate = options.predicate;
+        let sequence = options.sequence;
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -922,7 +922,9 @@ impl ValueBuilder {
                             )
                         };
                     mutable_vector.push_nulls(num_rows - 1);
-                    let _ = mutable_vector.push(field_value);
+                    mutable_vector
+                        .push(field_value)
+                        .unwrap_or_else(|e| panic!("unexpected field value: {e:?}"));
                     self.fields[idx] = Some(mutable_vector);
                     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.inc();
                 }

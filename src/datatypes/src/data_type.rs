@@ -15,7 +15,6 @@
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::compute::cast as arrow_array_cast;
 use arrow::datatypes::{
     DataType as ArrowDataType, IntervalUnit as ArrowIntervalUnit, TimeUnit as ArrowTimeUnit,
 };
@@ -33,8 +32,8 @@ use crate::types::{
     BinaryType, BooleanType, DateType, Decimal128Type, DictionaryType, DurationMicrosecondType,
     DurationMillisecondType, DurationNanosecondType, DurationSecondType, DurationType, Float32Type,
     Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, IntervalDayTimeType,
-    IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonFormat, JsonType, ListType,
-    NullType, StringType, StructType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
+    IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonType, ListType, NullType,
+    StringType, StructType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
     UInt8Type, UInt16Type, UInt32Type, UInt64Type, VectorType,
 };
@@ -277,6 +276,10 @@ impl ConcreteDataType {
         matches!(self, ConcreteDataType::Null(NullType))
     }
 
+    pub(crate) fn is_struct(&self) -> bool {
+        matches!(self, ConcreteDataType::Struct(_))
+    }
+
     /// Try to cast the type as a [`ListType`].
     pub fn as_list(&self) -> Option<&ListType> {
         match self {
@@ -348,9 +351,9 @@ impl ConcreteDataType {
         }
     }
 
-    pub fn as_json(&self) -> Option<JsonType> {
+    pub fn as_json(&self) -> Option<&JsonType> {
         match self {
-            ConcreteDataType::Json(j) => Some(j.clone()),
+            ConcreteDataType::Json(j) => Some(j),
             _ => None,
         }
     }
@@ -364,8 +367,10 @@ impl ConcreteDataType {
 
     /// Checks if the data type can cast to another data type.
     pub fn can_arrow_type_cast_to(&self, to_type: &ConcreteDataType) -> bool {
-        let array = arrow_array::new_empty_array(&self.as_arrow_type());
-        arrow_array_cast(array.as_ref(), &to_type.as_arrow_type()).is_ok()
+        match (self, to_type) {
+            (ConcreteDataType::Json(this), ConcreteDataType::Json(that)) => that.is_include(this),
+            _ => arrow::compute::can_cast_types(&self.as_arrow_type(), &to_type.as_arrow_type()),
+        }
     }
 
     /// Try to cast data type as a [`DurationType`].
@@ -673,7 +678,7 @@ impl ConcreteDataType {
     }
 
     pub fn json_native_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {
-        ConcreteDataType::Json(JsonType::new(JsonFormat::Native(Box::new(inner_type))))
+        ConcreteDataType::Json(JsonType::new_native((&inner_type).into()))
     }
 }
 

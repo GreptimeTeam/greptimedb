@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field};
@@ -46,13 +47,22 @@ impl TryFrom<&Fields> for StructType {
     }
 }
 
+impl<const N: usize> From<[StructField; N]> for StructType {
+    fn from(value: [StructField; N]) -> Self {
+        let value: Box<[StructField]> = Box::new(value);
+        Self {
+            fields: Arc::new(value.into_vec()),
+        }
+    }
+}
+
 impl DataType for StructType {
     fn name(&self) -> String {
         format!(
             "Struct<{}>",
             self.fields
                 .iter()
-                .map(|f| f.name())
+                .map(|f| format!(r#""{}": {}"#, f.name(), f.data_type()))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -108,6 +118,7 @@ pub struct StructField {
     name: String,
     data_type: ConcreteDataType,
     nullable: bool,
+    metadata: BTreeMap<String, String>,
 }
 
 impl StructField {
@@ -116,6 +127,7 @@ impl StructField {
             name,
             data_type,
             nullable,
+            metadata: BTreeMap::new(),
         }
     }
 
@@ -135,11 +147,26 @@ impl StructField {
         self.nullable
     }
 
+    pub(crate) fn insert_metadata(&mut self, key: impl ToString, value: impl ToString) {
+        self.metadata.insert(key.to_string(), value.to_string());
+    }
+
+    #[expect(unused)]
+    pub(crate) fn metadata(&self, key: &str) -> Option<&str> {
+        self.metadata.get(key).map(String::as_str)
+    }
+
     pub fn to_df_field(&self) -> Field {
+        let metadata = self
+            .metadata
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         Field::new(
             self.name.clone(),
             self.data_type.as_arrow_type(),
             self.nullable,
         )
+        .with_metadata(metadata)
     }
 }

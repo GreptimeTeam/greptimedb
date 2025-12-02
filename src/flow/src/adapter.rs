@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
+use common_base::memory_limit::MemoryLimit;
 use common_config::Configurable;
 use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
@@ -132,6 +133,7 @@ impl Default for FlownodeOptions {
             query: QueryOptions {
                 parallelism: 1,
                 allow_query_fallback: false,
+                memory_pool_size: MemoryLimit::default(),
             },
             user_provider: None,
             memory: MemoryOptions::default(),

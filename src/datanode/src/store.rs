@@ -47,10 +47,7 @@ pub(crate) async fn new_object_store_without_cache(
     Ok(object_store)
 }
 
-pub(crate) async fn new_object_store(
-    store: ObjectStoreConfig,
-    data_home: &str,
-) -> Result<ObjectStore> {
+pub async fn new_object_store(store: ObjectStoreConfig, data_home: &str) -> Result<ObjectStore> {
     let object_store = new_raw_object_store(&store, data_home)
         .await
         .context(error::ObjectStoreSnafu)?;
@@ -59,7 +56,7 @@ pub(crate) async fn new_object_store(
         let object_store = {
             // It's safe to unwrap here because we already checked above.
             let cache_config = store.cache_config().unwrap();
-            if let Some(cache_layer) = build_cache_layer(cache_config).await? {
+            if let Some(cache_layer) = build_cache_layer(cache_config, data_home).await? {
                 // Adds cache layer
                 object_store.layer(cache_layer)
             } else {
@@ -79,17 +76,22 @@ pub(crate) async fn new_object_store(
 
 async fn build_cache_layer(
     cache_config: &ObjectStorageCacheConfig,
+    data_home: &str,
 ) -> Result<Option<LruCacheLayer<impl Access>>> {
     // No need to build cache layer if read cache is disabled.
     if !cache_config.enable_read_cache {
         return Ok(None);
     }
-
-    let atomic_temp_dir = join_dir(&cache_config.cache_path, ATOMIC_WRITE_DIR);
+    let cache_base_dir = if cache_config.cache_path.is_empty() {
+        data_home
+    } else {
+        &cache_config.cache_path
+    };
+    let atomic_temp_dir = join_dir(cache_base_dir, ATOMIC_WRITE_DIR);
     clean_temp_dir(&atomic_temp_dir).context(error::ObjectStoreSnafu)?;
 
     let cache_store = Fs::default()
-        .root(&cache_config.cache_path)
+        .root(cache_base_dir)
         .atomic_write_dir(&atomic_temp_dir)
         .build()
         .context(error::BuildCacheStoreSnafu)?;

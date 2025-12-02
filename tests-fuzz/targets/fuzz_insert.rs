@@ -42,8 +42,8 @@ use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::utils::{
-    Connections, flush_memtable, get_gt_fuzz_input_max_columns, get_gt_fuzz_input_max_rows,
-    init_greptime_connections_via_env,
+    Connections, flush_memtable, get_fuzz_override, get_gt_fuzz_input_max_columns,
+    get_gt_fuzz_input_max_rows, init_greptime_connections_via_env,
 };
 use tests_fuzz::validator;
 
@@ -66,12 +66,14 @@ struct FuzzInput {
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
+        let seed = get_fuzz_override::<u64>("SEED").unwrap_or(u.int_in_range(u64::MIN..=u64::MAX)?);
         let mut rng = ChaChaRng::seed_from_u64(seed);
         let max_columns = get_gt_fuzz_input_max_columns();
-        let columns = rng.random_range(2..max_columns);
+        let columns = get_fuzz_override::<usize>("COLUMNS")
+            .unwrap_or_else(|| rng.random_range(2..max_columns));
         let max_row = get_gt_fuzz_input_max_rows();
-        let rows = rng.random_range(1..max_row);
+        let rows =
+            get_fuzz_override::<usize>("ROWS").unwrap_or_else(|| rng.random_range(1..max_row));
         Ok(FuzzInput {
             columns,
             rows,

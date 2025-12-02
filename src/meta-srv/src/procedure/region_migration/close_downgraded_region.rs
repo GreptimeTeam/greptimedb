@@ -19,7 +19,6 @@ use api::v1::meta::MailboxMessage;
 use common_meta::RegionIdent;
 use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
-use common_meta::key::datanode_table::RegionInfo;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -47,12 +46,12 @@ impl State for CloseDowngradedRegion {
     ) -> Result<(Box<dyn State>, Status)> {
         if let Err(err) = self.close_downgraded_leader_region(ctx).await {
             let downgrade_leader_datanode = &ctx.persistent_ctx.from_peer;
-            let region_id = ctx.region_id();
-            warn!(err; "Failed to close downgraded leader region: {region_id} on datanode {:?}", downgrade_leader_datanode);
+            let region_ids = &ctx.persistent_ctx.region_ids;
+            warn!(err; "Failed to close downgraded leader regions: {region_ids:?} on datanode {:?}", downgrade_leader_datanode);
         }
         info!(
-            "Region migration is finished: region_id: {}, from_peer: {}, to_peer: {}, trigger_reason: {}, {}",
-            ctx.region_id(),
+            "Region migration is finished: regions: {:?}, from_peer: {}, to_peer: {}, trigger_reason: {}, {}",
+            ctx.persistent_ctx.region_ids,
             ctx.persistent_ctx.from_peer,
             ctx.persistent_ctx.to_peer,
             ctx.persistent_ctx.trigger_reason,
@@ -74,28 +73,30 @@ impl CloseDowngradedRegion {
     async fn build_close_region_instruction(&self, ctx: &mut Context) -> Result<Instruction> {
         let pc = &ctx.persistent_ctx;
         let downgrade_leader_datanode_id = pc.from_peer.id;
-        let table_id = pc.region_id.table_id();
-        let region_number = pc.region_id.region_number();
-        let datanode_table_value = ctx.get_from_peer_datanode_table_value().await?;
+        let region_ids = &ctx.persistent_ctx.region_ids;
+        let mut idents = Vec::with_capacity(region_ids.len());
 
-        let RegionInfo { engine, .. } = datanode_table_value.region_info.clone();
+        for region_id in region_ids {
+            idents.push(RegionIdent {
+                datanode_id: downgrade_leader_datanode_id,
+                table_id: region_id.table_id(),
+                region_number: region_id.region_number(),
+                // The `engine` field is not used for closing region.
+                engine: String::new(),
+            });
+        }
 
-        Ok(Instruction::CloseRegions(vec![RegionIdent {
-            datanode_id: downgrade_leader_datanode_id,
-            table_id,
-            region_number,
-            engine,
-        }]))
+        Ok(Instruction::CloseRegions(idents))
     }
 
     /// Closes the downgraded leader region.
     async fn close_downgraded_leader_region(&self, ctx: &mut Context) -> Result<()> {
         let close_instruction = self.build_close_region_instruction(ctx).await?;
-        let region_id = ctx.region_id();
+        let region_ids = &ctx.persistent_ctx.region_ids;
         let pc = &ctx.persistent_ctx;
         let downgrade_leader_datanode = &pc.from_peer;
         let msg = MailboxMessage::json_message(
-            &format!("Close downgraded region: {}", region_id),
+            &format!("Close downgraded regions: {:?}", region_ids),
             &format!("Metasrv@{}", ctx.server_addr()),
             &format!(
                 "Datanode-{}@{}",
@@ -118,8 +119,8 @@ impl CloseDowngradedRegion {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
                 info!(
-                    "Received close downgraded leade region reply: {:?}, region: {}",
-                    reply, region_id
+                    "Received close downgraded leade region reply: {:?}, region: {:?}",
+                    reply, region_ids
                 );
                 let InstructionReply::CloseRegions(SimpleReply { result, error }) = reply else {
                     return error::UnexpectedInstructionReplySnafu {
@@ -134,7 +135,7 @@ impl CloseDowngradedRegion {
                 } else {
                     error::UnexpectedSnafu {
                         violated: format!(
-                            "Failed to close downgraded leader region: {region_id} on datanode {:?}, error: {error:?}",
+                            "Failed to close downgraded leader region: {region_ids:?} on datanode {:?}, error: {error:?}",
                             downgrade_leader_datanode,
                         ),
                     }

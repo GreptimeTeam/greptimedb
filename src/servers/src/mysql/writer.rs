@@ -16,22 +16,18 @@ use std::time::Duration;
 
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::{
-    Date32Type, Decimal128Type, DurationMicrosecondType, DurationMillisecondType,
-    DurationNanosecondType, DurationSecondType, Float32Type, Float64Type, Int8Type, Int16Type,
-    Int32Type, Int64Type, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType,
-    Time32MillisecondType, Time32SecondType, Time64MicrosecondType, Time64NanosecondType,
-    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
-    TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+    Date32Type, Decimal128Type, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type,
+    Int64Type, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType, UInt8Type,
+    UInt16Type, UInt32Type, UInt64Type,
 };
-use arrow_schema::{DataType, IntervalUnit, TimeUnit};
+use arrow_schema::{DataType, IntervalUnit};
 use common_decimal::Decimal128;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::{debug, error};
-use common_time::time::Time;
-use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp};
+use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
@@ -40,6 +36,7 @@ use futures::StreamExt;
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
 };
+use session::SessionRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use tokio::io::AsyncWrite;
@@ -51,9 +48,18 @@ use crate::metrics::*;
 pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
     w: QueryResultWriter<'_, W>,
     query_context: QueryContextRef,
+    session: SessionRef,
     outputs: Vec<Result<Output>>,
 ) -> Result<()> {
-    let mut writer = Some(MysqlResultWriter::new(w, query_context.clone()));
+    if let Some(warning) = query_context.warning() {
+        session.add_warning(warning);
+    }
+
+    let mut writer = Some(MysqlResultWriter::new(
+        w,
+        query_context.clone(),
+        session.clone(),
+    ));
     for output in outputs {
         let result_writer = writer.take().context(error::InternalSnafu {
             err_msg: "Sending multiple result set is unsupported",
@@ -98,16 +104,19 @@ struct QueryResult {
 pub struct MysqlResultWriter<'a, W: AsyncWrite + Unpin> {
     writer: QueryResultWriter<'a, W>,
     query_context: QueryContextRef,
+    session: SessionRef,
 }
 
 impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     pub fn new(
         writer: QueryResultWriter<'a, W>,
         query_context: QueryContextRef,
+        session: SessionRef,
     ) -> MysqlResultWriter<'a, W> {
         MysqlResultWriter::<'a, W> {
             writer,
             query_context,
+            session,
         }
     }
 
@@ -135,10 +144,12 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Self::write_query_result(query_result, self.writer, self.query_context).await?;
                 }
                 OutputData::AffectedRows(rows) => {
-                    let next_writer = Self::write_affected_rows(self.writer, rows).await?;
+                    let next_writer =
+                        Self::write_affected_rows(self.writer, rows, &self.session).await?;
                     return Ok(Some(MysqlResultWriter::new(
                         next_writer,
                         self.query_context,
+                        self.session,
                     )));
                 }
             },
@@ -156,10 +167,14 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     async fn write_affected_rows(
         w: QueryResultWriter<'a, W>,
         rows: usize,
+        session: &SessionRef,
     ) -> Result<QueryResultWriter<'a, W>> {
+        let warnings = session.warnings_count() as u16;
+
         let next_writer = w
             .complete_one(OkResponse {
                 affected_rows: rows as u64,
+                warnings,
                 ..Default::default()
             })
             .await?;
@@ -312,26 +327,8 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                         let v = Date::new(array.value(i));
                         row_writer.write_col(v.to_chrono_date())?;
                     }
-                    DataType::Timestamp(time_unit, _) => {
-                        let v = match time_unit {
-                            TimeUnit::Second => {
-                                let array = column.as_primitive::<TimestampSecondType>();
-                                array.value(i)
-                            }
-                            TimeUnit::Millisecond => {
-                                let array = column.as_primitive::<TimestampMillisecondType>();
-                                array.value(i)
-                            }
-                            TimeUnit::Microsecond => {
-                                let array = column.as_primitive::<TimestampMicrosecondType>();
-                                array.value(i)
-                            }
-                            TimeUnit::Nanosecond => {
-                                let array = column.as_primitive::<TimestampNanosecondType>();
-                                array.value(i)
-                            }
-                        };
-                        let v = Timestamp::new(v, time_unit.into());
+                    DataType::Timestamp(_, _) => {
+                        let v = datatypes::arrow_array::timestamp_array_value(column, i);
                         let v = v.to_chrono_datetime_with_timezone(Some(&query_context.timezone()));
                         row_writer.write_col(v)?;
                     }
@@ -352,28 +349,11 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                             row_writer.write_col(v.to_iso8601_string())?;
                         }
                     },
-                    DataType::Duration(time_unit) => match time_unit {
-                        TimeUnit::Second => {
-                            let array = column.as_primitive::<DurationSecondType>();
-                            let v = array.value(i);
-                            row_writer.write_col(Duration::from_secs(v as u64))?;
-                        }
-                        TimeUnit::Millisecond => {
-                            let array = column.as_primitive::<DurationMillisecondType>();
-                            let v = array.value(i);
-                            row_writer.write_col(Duration::from_millis(v as u64))?;
-                        }
-                        TimeUnit::Microsecond => {
-                            let array = column.as_primitive::<DurationMicrosecondType>();
-                            let v = array.value(i);
-                            row_writer.write_col(Duration::from_micros(v as u64))?;
-                        }
-                        TimeUnit::Nanosecond => {
-                            let array = column.as_primitive::<DurationNanosecondType>();
-                            let v = array.value(i);
-                            row_writer.write_col(Duration::from_nanos(v as u64))?;
-                        }
-                    },
+                    DataType::Duration(_) => {
+                        let v: Duration =
+                            datatypes::arrow_array::duration_array_value(column, i).into();
+                        row_writer.write_col(v)?;
+                    }
                     DataType::List(_) => {
                         let v = ScalarValue::try_from_array(column, i).context(DataFusionSnafu)?;
                         row_writer.write_col(v.to_string())?;
@@ -382,37 +362,8 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                         let v = ScalarValue::try_from_array(column, i).context(DataFusionSnafu)?;
                         row_writer.write_col(v.to_string())?;
                     }
-                    DataType::Time32(time_unit) => {
-                        let time = match time_unit {
-                            TimeUnit::Second => {
-                                let array = column.as_primitive::<Time32SecondType>();
-                                Time::new_second(array.value(i) as i64)
-                            }
-                            TimeUnit::Millisecond => {
-                                let array = column.as_primitive::<Time32MillisecondType>();
-                                Time::new_millisecond(array.value(i) as i64)
-                            }
-                            _ => unreachable!(
-                                "`DataType::Time32` has only second and millisecond time units"
-                            ),
-                        };
-                        let v = time.to_timezone_aware_string(Some(&query_context.timezone()));
-                        row_writer.write_col(v)?;
-                    }
-                    DataType::Time64(time_unit) => {
-                        let time = match time_unit {
-                            TimeUnit::Microsecond => {
-                                let array = column.as_primitive::<Time64MicrosecondType>();
-                                Time::new_microsecond(array.value(i))
-                            }
-                            TimeUnit::Nanosecond => {
-                                let array = column.as_primitive::<Time64NanosecondType>();
-                                Time::new_nanosecond(array.value(i))
-                            }
-                            _ => unreachable!(
-                                "`DataType::Time64` has only microsecond and nanosecond time units"
-                            ),
-                        };
+                    DataType::Time32(_) | DataType::Time64(_) => {
+                        let time = datatypes::arrow_array::time_array_value(column, i);
                         let v = time.to_timezone_aware_string(Some(&query_context.timezone()));
                         row_writer.write_col(v)?;
                     }
@@ -498,10 +449,10 @@ pub(crate) fn create_mysql_column(
     column_type.map(|column_type| Column {
         column: column_name.to_string(),
         coltype: column_type,
-
         // TODO(LFC): Currently "table" and "colflags" are not relevant in MySQL server
         //   implementation, will revisit them again in the future.
         table: String::default(),
+        collen: 0, // 0 means "use default".
         colflags,
     })
 }

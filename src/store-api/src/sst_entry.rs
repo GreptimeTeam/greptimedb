@@ -47,6 +47,8 @@ pub struct ManifestSstEntry {
     pub region_sequence: RegionSeq,
     /// Engine-specific file identifier (string form).
     pub file_id: String,
+    /// Engine-specific index file identifier (string form).
+    pub index_file_id: Option<String>,
     /// SST level.
     pub level: u8,
     /// Full path of the SST file in object store.
@@ -61,6 +63,8 @@ pub struct ManifestSstEntry {
     pub num_rows: u64,
     /// Number of row groups in the SST.
     pub num_row_groups: u64,
+    /// Number of series in the SST.
+    pub num_series: Option<u64>,
     /// Min timestamp.
     pub min_ts: Timestamp,
     /// Max timestamp.
@@ -87,6 +91,7 @@ impl ManifestSstEntry {
             ColumnSchema::new("region_group", Ty::uint8_datatype(), false),
             ColumnSchema::new("region_sequence", Ty::uint32_datatype(), false),
             ColumnSchema::new("file_id", Ty::string_datatype(), false),
+            ColumnSchema::new("index_file_id", Ty::string_datatype(), true),
             ColumnSchema::new("level", Ty::uint8_datatype(), false),
             ColumnSchema::new("file_path", Ty::string_datatype(), false),
             ColumnSchema::new("file_size", Ty::uint64_datatype(), false),
@@ -94,6 +99,7 @@ impl ManifestSstEntry {
             ColumnSchema::new("index_file_size", Ty::uint64_datatype(), true),
             ColumnSchema::new("num_rows", Ty::uint64_datatype(), false),
             ColumnSchema::new("num_row_groups", Ty::uint64_datatype(), false),
+            ColumnSchema::new("num_series", Ty::uint64_datatype(), true),
             ColumnSchema::new("min_ts", Ty::timestamp_nanosecond_datatype(), true),
             ColumnSchema::new("max_ts", Ty::timestamp_nanosecond_datatype(), true),
             ColumnSchema::new("sequence", Ty::uint64_datatype(), true),
@@ -113,6 +119,7 @@ impl ManifestSstEntry {
         let region_groups = entries.iter().map(|e| e.region_group);
         let region_sequences = entries.iter().map(|e| e.region_sequence);
         let file_ids = entries.iter().map(|e| e.file_id.as_str());
+        let index_file_ids = entries.iter().map(|e| e.index_file_id.as_ref());
         let levels = entries.iter().map(|e| e.level);
         let file_paths = entries.iter().map(|e| e.file_path.as_str());
         let file_sizes = entries.iter().map(|e| e.file_size);
@@ -120,6 +127,7 @@ impl ManifestSstEntry {
         let index_file_sizes = entries.iter().map(|e| e.index_file_size);
         let num_rows = entries.iter().map(|e| e.num_rows);
         let num_row_groups = entries.iter().map(|e| e.num_row_groups);
+        let num_series = entries.iter().map(|e| e.num_series);
         let min_ts = entries.iter().map(|e| {
             e.min_ts
                 .convert_to(TimeUnit::Nanosecond)
@@ -143,6 +151,7 @@ impl ManifestSstEntry {
             Arc::new(UInt8Array::from_iter_values(region_groups)),
             Arc::new(UInt32Array::from_iter_values(region_sequences)),
             Arc::new(StringArray::from_iter_values(file_ids)),
+            Arc::new(StringArray::from_iter(index_file_ids)),
             Arc::new(UInt8Array::from_iter_values(levels)),
             Arc::new(StringArray::from_iter_values(file_paths)),
             Arc::new(UInt64Array::from_iter_values(file_sizes)),
@@ -150,6 +159,7 @@ impl ManifestSstEntry {
             Arc::new(UInt64Array::from_iter(index_file_sizes)),
             Arc::new(UInt64Array::from_iter_values(num_rows)),
             Arc::new(UInt64Array::from_iter_values(num_row_groups)),
+            Arc::new(UInt64Array::from_iter(num_series)),
             Arc::new(TimestampNanosecondArray::from_iter(min_ts)),
             Arc::new(TimestampNanosecondArray::from_iter(max_ts)),
             Arc::new(UInt64Array::from_iter(sequences)),
@@ -427,6 +437,7 @@ mod tests {
                 region_group: region_group1,
                 region_sequence: region_seq1,
                 file_id: "f1".to_string(),
+                index_file_id: None,
                 level: 1,
                 file_path: "/p1".to_string(),
                 file_size: 100,
@@ -434,6 +445,7 @@ mod tests {
                 index_file_size: None,
                 num_rows: 10,
                 num_row_groups: 2,
+                num_series: Some(5),
                 min_ts: Timestamp::new_millisecond(1000), // 1s -> 1_000_000_000ns
                 max_ts: Timestamp::new_second(2),         // 2s -> 2_000_000_000ns
                 sequence: None,
@@ -449,6 +461,7 @@ mod tests {
                 region_group: region_group2,
                 region_sequence: region_seq2,
                 file_id: "f2".to_string(),
+                index_file_id: Some("idx".to_string()),
                 level: 3,
                 file_path: "/p2".to_string(),
                 file_size: 200,
@@ -456,6 +469,7 @@ mod tests {
                 index_file_size: Some(11),
                 num_rows: 20,
                 num_row_groups: 4,
+                num_series: None,
                 min_ts: Timestamp::new_nanosecond(5),     // 5ns
                 max_ts: Timestamp::new_microsecond(2000), // 2ms -> 2_000_000ns
                 sequence: Some(9),
@@ -534,8 +548,16 @@ mod tests {
         assert_eq!("f1", file_ids.value(0));
         assert_eq!("f2", file_ids.value(1));
 
-        let levels = batch
+        let index_file_ids = batch
             .column(7)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(index_file_ids.is_null(0));
+        assert_eq!("idx", index_file_ids.value(1));
+
+        let levels = batch
+            .column(8)
             .as_any()
             .downcast_ref::<UInt8Array>()
             .unwrap();
@@ -543,7 +565,7 @@ mod tests {
         assert_eq!(3, levels.value(1));
 
         let file_paths = batch
-            .column(8)
+            .column(9)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -551,7 +573,7 @@ mod tests {
         assert_eq!("/p2", file_paths.value(1));
 
         let file_sizes = batch
-            .column(9)
+            .column(10)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -559,7 +581,7 @@ mod tests {
         assert_eq!(200, file_sizes.value(1));
 
         let index_file_paths = batch
-            .column(10)
+            .column(11)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -567,7 +589,7 @@ mod tests {
         assert_eq!("idx", index_file_paths.value(1));
 
         let index_file_sizes = batch
-            .column(11)
+            .column(12)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -575,7 +597,7 @@ mod tests {
         assert_eq!(11, index_file_sizes.value(1));
 
         let num_rows = batch
-            .column(12)
+            .column(13)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -583,15 +605,23 @@ mod tests {
         assert_eq!(20, num_rows.value(1));
 
         let num_row_groups = batch
-            .column(13)
+            .column(14)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
         assert_eq!(2, num_row_groups.value(0));
         assert_eq!(4, num_row_groups.value(1));
 
+        let num_series = batch
+            .column(15)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(5, num_series.value(0));
+        assert!(num_series.is_null(1));
+
         let min_ts = batch
-            .column(14)
+            .column(16)
             .as_any()
             .downcast_ref::<TimestampNanosecondArray>()
             .unwrap();
@@ -599,7 +629,7 @@ mod tests {
         assert_eq!(5, min_ts.value(1));
 
         let max_ts = batch
-            .column(15)
+            .column(17)
             .as_any()
             .downcast_ref::<TimestampNanosecondArray>()
             .unwrap();
@@ -607,7 +637,7 @@ mod tests {
         assert_eq!(2_000_000, max_ts.value(1));
 
         let sequences = batch
-            .column(16)
+            .column(18)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -615,7 +645,7 @@ mod tests {
         assert_eq!(9, sequences.value(1));
 
         let origin_region_ids = batch
-            .column(17)
+            .column(19)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -623,7 +653,7 @@ mod tests {
         assert_eq!(region_id2.as_u64(), origin_region_ids.value(1));
 
         let node_ids = batch
-            .column(18)
+            .column(20)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -631,7 +661,7 @@ mod tests {
         assert!(node_ids.is_null(1));
 
         let visible = batch
-            .column(19)
+            .column(21)
             .as_any()
             .downcast_ref::<BooleanArray>()
             .unwrap();

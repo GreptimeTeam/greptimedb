@@ -23,8 +23,8 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use table::requests::{
-    CompactTableRequest, DeleteRequest as TableDeleteRequest, FlushTableRequest,
-    InsertRequest as TableInsertRequest,
+    BuildIndexTableRequest, CompactTableRequest, DeleteRequest as TableDeleteRequest,
+    FlushTableRequest, InsertRequest as TableInsertRequest,
 };
 
 use crate::delete::DeleterRef;
@@ -92,6 +92,18 @@ impl TableMutationHandler for TableMutationOperator {
     ) -> QueryResult<AffectedRows> {
         self.requester
             .handle_table_compaction(request, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn build_index(
+        &self,
+        request: BuildIndexTableRequest,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_table_build_index(request, ctx)
             .await
             .map_err(BoxedError::new)
             .context(query_error::TableMutationSnafu)

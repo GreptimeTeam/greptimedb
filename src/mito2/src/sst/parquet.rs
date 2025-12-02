@@ -84,6 +84,8 @@ pub struct SstInfo {
     pub file_metadata: Option<Arc<ParquetMetaData>>,
     /// Index Meta Data
     pub index_metadata: IndexOutput,
+    /// Number of series
+    pub num_series: u64,
 }
 
 #[cfg(test)]
@@ -179,13 +181,14 @@ mod tests {
             ..Default::default()
         };
 
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
             IndexConfig::default(),
             NoopIndexBuilder,
             file_path,
-            Metrics::new(WriteType::Flush),
+            &mut metrics,
         )
         .await;
 
@@ -241,6 +244,7 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
@@ -249,7 +253,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            Metrics::new(WriteType::Flush),
+            &mut metrics,
         )
         .await;
 
@@ -327,6 +331,7 @@ mod tests {
 
         // write the sst file and get sst info
         // sst info contains the parquet metadata, which is converted from FileMetaData
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
@@ -335,7 +340,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            Metrics::new(WriteType::Flush),
+            &mut metrics,
         )
         .await;
 
@@ -376,6 +381,7 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
@@ -384,7 +390,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            Metrics::new(WriteType::Flush),
+            &mut metrics,
         )
         .await;
         writer
@@ -435,6 +441,7 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
@@ -443,7 +450,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            Metrics::new(WriteType::Flush),
+            &mut metrics,
         )
         .await;
         writer
@@ -479,6 +486,7 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
@@ -487,7 +495,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            Metrics::new(WriteType::Flush),
+            &mut metrics,
         )
         .await;
 
@@ -637,13 +645,14 @@ mod tests {
             table_dir: "test".to_string(),
             path_type: PathType::Bare,
         };
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
             IndexConfig::default(),
             NoopIndexBuilder,
             path_provider,
-            Metrics::new(WriteType::Flush),
+            &mut metrics,
         )
         .await;
 
@@ -714,13 +723,14 @@ mod tests {
             bloom_filter_index_config: Default::default(),
         };
 
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
             IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
-            Metrics::new(WriteType::Flush),
+            &mut metrics,
         )
         .await;
 
@@ -757,7 +767,9 @@ mod tests {
                 level: 0,
                 file_size: info.file_size,
                 available_indexes: info.index_metadata.build_available_indexes(),
+                indexes: info.index_metadata.build_indexes(),
                 index_file_size: info.index_metadata.file_size,
+                index_file_id: None,
                 num_row_groups: info.num_row_groups,
                 num_rows: info.num_rows as u64,
                 sequence: None,
@@ -766,6 +778,7 @@ mod tests {
                         .expect("partition expression should be valid JSON"),
                     None => None,
                 },
+                num_series: 0,
             },
             Arc::new(NoopFilePurger),
         );
@@ -839,8 +852,8 @@ mod tests {
             object_store.clone(),
         )
         .predicate(Some(Predicate::new(preds)))
-        .inverted_index_applier(inverted_index_applier.clone())
-        .bloom_filter_index_applier(bloom_filter_applier.clone())
+        .inverted_index_appliers([inverted_index_applier.clone(), None])
+        .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
@@ -895,8 +908,8 @@ mod tests {
             object_store.clone(),
         )
         .predicate(Some(Predicate::new(preds)))
-        .inverted_index_applier(inverted_index_applier.clone())
-        .bloom_filter_index_applier(bloom_filter_applier.clone())
+        .inverted_index_appliers([inverted_index_applier.clone(), None])
+        .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
@@ -952,8 +965,8 @@ mod tests {
             object_store.clone(),
         )
         .predicate(Some(Predicate::new(preds)))
-        .inverted_index_applier(inverted_index_applier.clone())
-        .bloom_filter_index_applier(bloom_filter_applier.clone())
+        .inverted_index_appliers([inverted_index_applier.clone(), None])
+        .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
@@ -1089,13 +1102,14 @@ mod tests {
             bloom_filter_index_config: Default::default(),
         };
 
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
             IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
-            Metrics::new(WriteType::Flush),
+            &mut metrics,
         )
         .await;
 
@@ -1145,13 +1159,14 @@ mod tests {
             ..Default::default()
         };
 
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
             IndexConfig::default(),
             NoopIndexBuilder,
             file_path,
-            Metrics::new(WriteType::Flush),
+            &mut metrics,
         )
         .await;
 

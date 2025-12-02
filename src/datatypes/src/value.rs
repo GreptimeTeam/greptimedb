@@ -36,6 +36,7 @@ use crate::error::{
     self, ConvertArrowArrayToScalarsSnafu, ConvertScalarToArrowArraySnafu, Error,
     InconsistentStructFieldsAndItemsSnafu, Result, TryFromValueSnafu,
 };
+use crate::json::value::{JsonValue, JsonValueRef};
 use crate::prelude::*;
 use crate::type_id::LogicalTypeId;
 use crate::types::{IntervalType, ListType, StructType};
@@ -86,7 +87,7 @@ pub enum Value {
     Struct(StructValue),
 
     // Json Logical types:
-    Json(Box<Value>),
+    Json(Box<JsonValue>),
 }
 
 impl Display for Value {
@@ -197,7 +198,7 @@ macro_rules! define_data_type_func {
                 $struct::Struct(struct_value) => {
                     ConcreteDataType::struct_datatype(struct_value.struct_type().clone())
                 }
-                $struct::Json(v) => ConcreteDataType::json_native_datatype(v.data_type()),
+                $struct::Json(v) => v.data_type(),
             }
         }
     };
@@ -220,7 +221,6 @@ impl Value {
         match self {
             Value::Null => Ok(None),
             Value::List(v) => Ok(Some(v)),
-            Value::Json(inner) => inner.as_list(),
             other => error::CastTypeSnafu {
                 msg: format!("Failed to cast {other:?} to list value"),
             }
@@ -232,7 +232,6 @@ impl Value {
         match self {
             Value::Null => Ok(None),
             Value::Struct(v) => Ok(Some(v)),
-            Value::Json(inner) => inner.as_struct(),
             other => error::CastTypeSnafu {
                 msg: format!("Failed to cast {other:?} to struct value"),
             }
@@ -267,7 +266,7 @@ impl Value {
             Value::Duration(v) => ValueRef::Duration(*v),
             Value::Decimal128(v) => ValueRef::Decimal128(*v),
             Value::Struct(v) => ValueRef::Struct(StructValueRef::Ref(v)),
-            Value::Json(v) => ValueRef::Json(Box::new(v.as_value_ref())),
+            Value::Json(v) => ValueRef::Json(Box::new((**v).as_ref())),
         }
     }
 
@@ -391,7 +390,7 @@ impl Value {
     /// Extract the inner JSON value from a JSON type.
     pub fn into_json_inner(self) -> Option<Value> {
         match self {
-            Value::Json(v) => Some(*v),
+            Value::Json(v) => Some((*v).into_value()),
             _ => None,
         }
     }
@@ -501,7 +500,12 @@ impl Value {
                 let struct_type = output_type.as_struct().unwrap();
                 struct_value.try_to_scalar_value(struct_type)?
             }
-            Value::Json(v) => v.try_to_scalar_value(output_type)?,
+            Value::Json(_) => {
+                return error::ToScalarValueSnafu {
+                    reason: "unsupported for json value",
+                }
+                .fail();
+            }
         };
 
         Ok(scalar_value)
@@ -554,13 +558,12 @@ impl Value {
             Value::IntervalDayTime(x) => Some(Value::IntervalDayTime(x.negative())),
             Value::IntervalMonthDayNano(x) => Some(Value::IntervalMonthDayNano(x.negative())),
 
-            Value::Json(v) => v.try_negative().map(|neg| Value::Json(Box::new(neg))),
-
             Value::Binary(_)
             | Value::String(_)
             | Value::Boolean(_)
             | Value::List(_)
-            | Value::Struct(_) => None,
+            | Value::Struct(_)
+            | Value::Json(_) => None,
         }
     }
 }
@@ -873,6 +876,12 @@ impl From<&[u8]> for Value {
     }
 }
 
+impl From<()> for Value {
+    fn from(_: ()) -> Self {
+        Value::Null
+    }
+}
+
 impl TryFrom<Value> for serde_json::Value {
     type Error = serde_json::Error;
 
@@ -923,7 +932,7 @@ impl TryFrom<Value> for serde_json::Value {
                     .collect::<serde_json::Result<Map<String, serde_json::Value>>>()?;
                 serde_json::Value::Object(map)
             }
-            Value::Json(v) => serde_json::Value::try_from(*v)?,
+            Value::Json(v) => (*v).into(),
         };
 
         Ok(json_value)
@@ -1257,7 +1266,7 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::List(v) => v.to_value(),
             ValueRef::Decimal128(v) => Value::Decimal128(v),
             ValueRef::Struct(v) => v.to_value(),
-            ValueRef::Json(v) => Value::Json(Box::new(Value::from(*v))),
+            ValueRef::Json(v) => Value::Json(Box::new(JsonValue::from(*v))),
         }
     }
 }
@@ -1301,7 +1310,7 @@ pub enum ValueRef<'a> {
     List(ListValueRef<'a>),
     Struct(StructValueRef<'a>),
 
-    Json(Box<ValueRef<'a>>),
+    Json(Box<JsonValueRef<'a>>),
 }
 
 macro_rules! impl_as_for_value_ref {
@@ -1309,18 +1318,6 @@ macro_rules! impl_as_for_value_ref {
         match $value {
             ValueRef::Null => Ok(None),
             ValueRef::$Variant(v) => Ok(Some(v.clone())),
-            ValueRef::Json(v) => match v.as_ref() {
-                ValueRef::Null => Ok(None),
-                ValueRef::$Variant(v) => Ok(Some(v.clone())),
-                other => error::CastTypeSnafu {
-                    msg: format!(
-                        "Failed to cast value ref {:?} to {}",
-                        other,
-                        stringify!($Variant)
-                    ),
-                }
-                .fail(),
-            },
             other => error::CastTypeSnafu {
                 msg: format!(
                     "Failed to cast value ref {:?} to {}",
@@ -1396,7 +1393,7 @@ impl<'a> ValueRef<'a> {
         match self {
             ValueRef::Null => Ok(None),
             ValueRef::Float32(f) => Ok(Some(f.0)),
-            ValueRef::Json(v) => v.try_into_f32(),
+            ValueRef::Json(v) => Ok(v.as_f32()),
             other => error::CastTypeSnafu {
                 msg: format!("Failed to cast value ref {:?} to ValueRef::Float32", other,),
             }
@@ -1408,7 +1405,7 @@ impl<'a> ValueRef<'a> {
         match self {
             ValueRef::Null => Ok(None),
             ValueRef::Float64(f) => Ok(Some(f.0)),
-            ValueRef::Json(v) => v.try_into_f64(),
+            ValueRef::Json(v) => Ok(v.as_f64()),
             other => error::CastTypeSnafu {
                 msg: format!("Failed to cast value ref {:?} to ValueRef::Float64", other,),
             }
@@ -1740,6 +1737,7 @@ pub(crate) mod tests {
     use num_traits::Float;
 
     use super::*;
+    use crate::json::value::{JsonVariant, JsonVariantRef};
     use crate::types::StructField;
     use crate::vectors::ListVectorBuilder;
 
@@ -2275,19 +2273,48 @@ pub(crate) mod tests {
 
         check_type_and_value(
             &ConcreteDataType::json_native_datatype(ConcreteDataType::boolean_datatype()),
-            &Value::Json(Box::new(Value::Boolean(true))),
+            &Value::Json(Box::new(true.into())),
         );
 
         check_type_and_value(
             &ConcreteDataType::json_native_datatype(build_list_type()),
-            &Value::Json(Box::new(Value::List(build_list_value()))),
+            &Value::Json(Box::new([true].into())),
         );
 
         check_type_and_value(
             &ConcreteDataType::json_native_datatype(ConcreteDataType::struct_datatype(
-                build_struct_type(),
+                StructType::new(Arc::new(vec![
+                    StructField::new(
+                        "address".to_string(),
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    StructField::new("age".to_string(), ConcreteDataType::uint64_datatype(), true),
+                    StructField::new(
+                        "awards".to_string(),
+                        ConcreteDataType::list_datatype(Arc::new(
+                            ConcreteDataType::boolean_datatype(),
+                        )),
+                        true,
+                    ),
+                    StructField::new("id".to_string(), ConcreteDataType::int64_datatype(), true),
+                    StructField::new(
+                        "name".to_string(),
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                ])),
             )),
-            &Value::Json(Box::new(Value::Struct(build_struct_value()))),
+            &Value::Json(Box::new(
+                [
+                    ("id", JsonVariant::from(1i64)),
+                    ("name", "Alice".into()),
+                    ("age", 1u64.into()),
+                    ("address", "blah".into()),
+                    ("awards", [true, false].into()),
+                ]
+                .into(),
+            )),
         );
     }
 
@@ -2429,25 +2456,27 @@ pub(crate) mod tests {
 
         // string wrapped in json
         assert_eq!(
-            serde_json::Value::try_from(Value::Json(Box::new(Value::String("hello".into()))))
-                .unwrap(),
+            serde_json::Value::try_from(Value::Json(Box::new("hello".into()))).unwrap(),
             serde_json::json!("hello")
         );
 
         // list wrapped in json
         assert_eq!(
-            serde_json::Value::try_from(Value::Json(Box::new(Value::List(ListValue::new(
-                vec![Value::Int32(1), Value::Int32(2), Value::Int32(3),],
-                Arc::new(ConcreteDataType::int32_datatype())
-            )))))
-            .unwrap(),
+            serde_json::Value::try_from(Value::Json(Box::new([1i64, 2, 3,].into()))).unwrap(),
             serde_json::json!([1, 2, 3])
         );
 
         // struct wrapped in json
         assert_eq!(
-            serde_json::Value::try_from(Value::Json(Box::new(Value::Struct(struct_value))))
-                .unwrap(),
+            serde_json::Value::try_from(Value::Json(Box::new(
+                [
+                    ("num".to_string(), JsonVariant::from(42i64)),
+                    ("name".to_string(), "tomcat".into()),
+                    ("yes_or_no".to_string(), true.into()),
+                ]
+                .into()
+            )))
+            .unwrap(),
             serde_json::json!({
                 "num": 42,
                 "name": "tomcat",
@@ -2459,7 +2488,7 @@ pub(crate) mod tests {
     #[test]
     fn test_null_value() {
         assert!(Value::Null.is_null());
-        assert!(Value::Json(Box::new(Value::Null)).is_null());
+        assert!(Value::Json(Box::new(JsonValue::null())).is_null());
         assert!(!Value::Boolean(true).is_null());
         assert!(Value::Null < Value::Boolean(false));
         assert!(Value::Boolean(true) > Value::Null);
@@ -2537,13 +2566,6 @@ pub(crate) mod tests {
         assert_eq!(
             ValueRef::Struct(StructValueRef::Ref(&struct_value)),
             Value::Struct(struct_value.clone()).as_value_ref()
-        );
-
-        assert_eq!(
-            ValueRef::Json(Box::new(ValueRef::Struct(StructValueRef::Ref(
-                &struct_value
-            )))),
-            Value::Json(Box::new(Value::Struct(struct_value.clone()))).as_value_ref()
         );
     }
 
@@ -2669,8 +2691,18 @@ pub(crate) mod tests {
         );
 
         assert_eq!(
-            Value::Json(Box::new(Value::Struct(build_struct_value()))).to_string(),
-            "Json({ id: 1, name: tom, age: 25, address: 94038, awards: Boolean[true, false] })"
+            Value::Json(Box::new(
+                [
+                    ("id", JsonVariant::from(1i64)),
+                    ("name", "tom".into()),
+                    ("age", 25u64.into()),
+                    ("address", "94038".into()),
+                    ("awards", [true, false].into()),
+                ]
+                .into()
+            ))
+            .to_string(),
+            "Json({ address: 94038, age: 25, awards: [true, false], id: 1, name: tom })"
         )
     }
 
@@ -3161,10 +3193,17 @@ pub(crate) mod tests {
         );
 
         check_value_ref_size_eq(
-            &ValueRef::Json(Box::new(ValueRef::Struct(StructValueRef::Ref(
-                &build_struct_value(),
-            )))),
-            31,
+            &ValueRef::Json(Box::new(
+                [
+                    ("id", JsonVariantRef::from(1i64)),
+                    ("name", "tom".into()),
+                    ("age", 25u64.into()),
+                    ("address", "94038".into()),
+                    ("awards", [true, false].into()),
+                ]
+                .into(),
+            )),
+            48,
         );
     }
 

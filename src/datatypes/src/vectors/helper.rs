@@ -465,6 +465,14 @@ impl Helper {
 }
 
 #[cfg(test)]
+pub(crate) fn pretty_print(vector: VectorRef) -> String {
+    let array = vector.to_arrow_array();
+    arrow::util::pretty::pretty_format_columns(&vector.vector_type_name(), &[array])
+        .map(|x| x.to_string())
+        .unwrap_or_else(|e| e.to_string())
+}
+
+#[cfg(test)]
 mod tests {
     use arrow::array::{
         ArrayRef, BooleanArray, Date32Array, Float32Array, Float64Array, Int8Array, Int16Array,

@@ -161,13 +161,14 @@ impl VersionControl {
     }
 
     /// Mark all opened files as deleted and set the delete marker in [VersionControlData]
-    pub(crate) fn mark_dropped(&self, memtable_builder: &MemtableBuilderRef) {
+    pub(crate) fn mark_dropped(&self) {
         let version = self.current().version;
         let part_duration = Some(version.memtables.mutable.part_duration());
         let next_memtable_id = version.memtables.mutable.next_memtable_id();
+        let memtable_builder = version.memtables.mutable.memtable_builder().clone();
         let new_mutable = Arc::new(TimePartitions::new(
             version.metadata.clone(),
-            memtable_builder.clone(),
+            memtable_builder,
             next_memtable_id,
             part_duration,
         ));
@@ -185,13 +186,14 @@ impl VersionControl {
     ///
     /// It replaces existing mutable memtable with a memtable that uses the
     /// new schema. Memtables of the version must be empty.
-    pub(crate) fn alter_schema(&self, metadata: RegionMetadataRef, builder: &MemtableBuilderRef) {
+    pub(crate) fn alter_schema(&self, metadata: RegionMetadataRef) {
         let version = self.current().version;
         let part_duration = Some(version.memtables.mutable.part_duration());
         let next_memtable_id = version.memtables.mutable.next_memtable_id();
+        let memtable_builder = version.memtables.mutable.memtable_builder().clone();
         let new_mutable = Arc::new(TimePartitions::new(
             metadata.clone(),
-            builder.clone(),
+            memtable_builder,
             next_memtable_id,
             part_duration,
         ));
@@ -208,19 +210,50 @@ impl VersionControl {
         version_data.version = new_version;
     }
 
-    /// Truncate current version.
-    pub(crate) fn truncate(
+    /// Alter schema and format of the region.
+    ///
+    /// It replaces existing mutable memtable with a memtable that uses the
+    /// new format. Memtables of the version must be empty.
+    pub(crate) fn alter_schema_and_format(
         &self,
-        truncate_kind: TruncateKind,
-        memtable_builder: &MemtableBuilderRef,
+        metadata: RegionMetadataRef,
+        options: RegionOptions,
+        memtable_builder: MemtableBuilderRef,
     ) {
+        let version = self.current().version;
+        let part_duration = Some(version.memtables.mutable.part_duration());
+        let next_memtable_id = version.memtables.mutable.next_memtable_id();
+        // Use the new metadata to build `TimePartitions`.
+        let new_mutable = Arc::new(TimePartitions::new(
+            metadata.clone(),
+            memtable_builder,
+            next_memtable_id,
+            part_duration,
+        ));
+        debug_assert!(version.memtables.mutable.is_empty());
+        debug_assert!(version.memtables.immutables().is_empty());
+        let new_version = Arc::new(
+            VersionBuilder::from_version(version)
+                .metadata(metadata)
+                .options(options)
+                .memtables(MemtableVersion::new(new_mutable))
+                .build(),
+        );
+
+        let mut version_data = self.data.write().unwrap();
+        version_data.version = new_version;
+    }
+
+    /// Truncate current version.
+    pub(crate) fn truncate(&self, truncate_kind: TruncateKind) {
         let version = self.current().version;
 
         let part_duration = version.memtables.mutable.part_duration();
         let next_memtable_id = version.memtables.mutable.next_memtable_id();
+        let memtable_builder = version.memtables.mutable.memtable_builder().clone();
         let new_mutable = Arc::new(TimePartitions::new(
             version.metadata.clone(),
-            memtable_builder.clone(),
+            memtable_builder,
             next_memtable_id,
             Some(part_duration),
         ));
@@ -230,7 +263,9 @@ impl VersionControl {
                 truncated_sequence,
             } => {
                 let new_version = Arc::new(
-                    VersionBuilder::new(version.metadata.clone(), new_mutable)
+                    VersionBuilder::from_version(version)
+                        .memtables(MemtableVersion::new(new_mutable))
+                        .clear_files()
                         .flushed_entry_id(truncated_entry_id)
                         .flushed_sequence(truncated_sequence)
                         .truncated_entry_id(Some(truncated_entry_id))
@@ -453,6 +488,12 @@ impl VersionBuilder {
         ssts.remove_files(files);
         self.ssts = Arc::new(ssts);
 
+        self
+    }
+
+    /// Clear all files in the builder.
+    pub(crate) fn clear_files(mut self) -> Self {
+        self.ssts = Arc::new(SstVersion::new());
         self
     }
 

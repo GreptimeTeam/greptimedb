@@ -23,7 +23,6 @@ use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions
 use meta_client::MetaClientOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
-use servers::export_metrics::{ExportMetricsOption, ExportMetricsTask};
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
@@ -34,7 +33,6 @@ use crate::error;
 use crate::error::Result;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::Instance;
-use crate::instance::prom_store::ExportMetricHandler;
 use crate::service_config::{
     InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
     PromStoreOptions,
@@ -45,6 +43,7 @@ use crate::service_config::{
 pub struct FrontendOptions {
     pub node_id: Option<String>,
     pub default_timezone: Option<String>,
+    pub default_column_prefix: Option<String>,
     pub heartbeat: HeartbeatOptions,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
@@ -62,7 +61,6 @@ pub struct FrontendOptions {
     pub logging: LoggingOptions,
     pub datanode: DatanodeClientOptions,
     pub user_provider: Option<String>,
-    pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
     pub max_in_flight_write_bytes: Option<ReadableSize>,
@@ -77,6 +75,7 @@ impl Default for FrontendOptions {
         Self {
             node_id: None,
             default_timezone: None,
+            default_column_prefix: None,
             heartbeat: HeartbeatOptions::frontend_default(),
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),
@@ -92,7 +91,6 @@ impl Default for FrontendOptions {
             logging: LoggingOptions::default(),
             datanode: DatanodeClientOptions::default(),
             user_provider: None,
-            export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
             max_in_flight_write_bytes: None,
@@ -115,24 +113,12 @@ pub struct Frontend {
     pub instance: Arc<Instance>,
     pub servers: ServerHandlers,
     pub heartbeat_task: Option<HeartbeatTask>,
-    pub export_metrics_task: Option<ExportMetricsTask>,
 }
 
 impl Frontend {
     pub async fn start(&mut self) -> Result<()> {
         if let Some(t) = &self.heartbeat_task {
             t.start().await?;
-        }
-
-        if let Some(t) = self.export_metrics_task.as_ref() {
-            if t.send_by_handler {
-                let inserter = self.instance.inserter().clone();
-                let statement_executor = self.instance.statement_executor().clone();
-                let handler = ExportMetricHandler::new_handler(inserter, statement_executor);
-                t.start(Some(handler)).context(error::StartServerSnafu)?
-            } else {
-                t.start(None).context(error::StartServerSnafu)?;
-            }
         }
 
         self.servers

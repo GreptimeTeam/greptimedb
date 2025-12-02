@@ -46,12 +46,13 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
 use common_query::Output;
-use common_telemetry::tracing;
+use common_telemetry::{debug, tracing, warn};
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use humantime::format_duration;
+use itertools::Itertools;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::QueryEngineRef;
 use query::parser::QueryStatement;
@@ -87,6 +88,22 @@ use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
 use crate::statement::set::set_allow_query_fallback;
 
+/// A configurator that customizes or enhances a [`StatementExecutor`].
+#[async_trait::async_trait]
+pub trait StatementExecutorConfigurator: Send + Sync {
+    async fn configure(
+        &self,
+        executor: StatementExecutor,
+        ctx: ExecutorConfigureContext,
+    ) -> std::result::Result<StatementExecutor, BoxedError>;
+}
+
+pub type StatementExecutorConfiguratorRef = Arc<dyn StatementExecutorConfigurator>;
+
+pub struct ExecutorConfigureContext {
+    pub kv_backend: KvBackendRef,
+}
+
 #[derive(Clone)]
 pub struct StatementExecutor {
     catalog_manager: CatalogManagerRef,
@@ -104,15 +121,6 @@ pub struct StatementExecutor {
 }
 
 pub type StatementExecutorRef = Arc<StatementExecutor>;
-
-/// Trait for creating [`TriggerQuerier`] instance.
-#[cfg(feature = "enterprise")]
-pub trait TriggerQuerierFactory: Send + Sync {
-    fn create(&self, kv_backend: KvBackendRef) -> TriggerQuerierRef;
-}
-
-#[cfg(feature = "enterprise")]
-pub type TriggerQuerierFactoryRef = Arc<dyn TriggerQuerierFactory>;
 
 /// Trait for querying trigger info, such as `SHOW CREATE TRIGGER` etc.
 #[cfg(feature = "enterprise")]
@@ -452,6 +460,13 @@ impl StatementExecutor {
     fn set_variables(&self, set_var: SetVariables, query_ctx: QueryContextRef) -> Result<Output> {
         let var_name = set_var.variable.to_string().to_uppercase();
 
+        debug!(
+            "Trying to set {}={} for session: {} ",
+            var_name,
+            set_var.value.iter().map(|e| e.to_string()).join(", "),
+            query_ctx.conn_info()
+        );
+
         match var_name.as_str() {
             "READ_PREFERENCE" => set_read_preference(set_var.value, query_ctx)?,
 
@@ -473,6 +488,11 @@ impl StatementExecutor {
             "@@SESSION.MAX_EXECUTION_TIME" | "MAX_EXECUTION_TIME" => match query_ctx.channel() {
                 Channel::Mysql => set_query_timeout(set_var.value, query_ctx)?,
                 Channel::Postgres => {
+                    warn!(
+                        "Unsupported set variable {} for channel {:?}",
+                        var_name,
+                        query_ctx.channel()
+                    );
                     query_ctx.set_warning(format!("Unsupported set variable {}", var_name))
                 }
                 _ => {
@@ -482,16 +502,23 @@ impl StatementExecutor {
                     .fail();
                 }
             },
-            "STATEMENT_TIMEOUT" => {
-                if query_ctx.channel() == Channel::Postgres {
-                    set_query_timeout(set_var.value, query_ctx)?
-                } else {
+            "STATEMENT_TIMEOUT" => match query_ctx.channel() {
+                Channel::Postgres => set_query_timeout(set_var.value, query_ctx)?,
+                Channel::Mysql => {
+                    warn!(
+                        "Unsupported set variable {} for channel {:?}",
+                        var_name,
+                        query_ctx.channel()
+                    );
+                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
+                }
+                _ => {
                     return NotSupportedSnafu {
                         feat: format!("Unsupported set variable {}", var_name),
                     }
                     .fail();
                 }
-            }
+            },
             "SEARCH_PATH" => {
                 if query_ctx.channel() == Channel::Postgres {
                     set_search_path(set_var.value, query_ctx)?
@@ -503,14 +530,16 @@ impl StatementExecutor {
                 }
             }
             _ => {
-                // for postgres, we give unknown SET statements a warning with
-                //  success, this is prevent the SET call becoming a blocker
-                //  of connection establishment
-                //
-                if query_ctx.channel() == Channel::Postgres {
-                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
-                } else if query_ctx.channel() == Channel::Mysql && var_name.starts_with("@@") {
-                    // Just ignore `SET @@` commands for MySQL
+                if query_ctx.channel() == Channel::Postgres || query_ctx.channel() == Channel::Mysql
+                {
+                    // For unknown SET statements, we give a warning with success.
+                    // This prevents the SET call from becoming a blocker of MySQL/Postgres clients'
+                    // connection establishment.
+                    warn!(
+                        "Unsupported set variable {} for channel {:?}",
+                        var_name,
+                        query_ctx.channel()
+                    );
                     query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
                 } else {
                     return NotSupportedSnafu {

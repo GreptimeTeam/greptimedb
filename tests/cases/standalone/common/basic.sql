@@ -47,10 +47,9 @@ INSERT INTO t1 VALUES ('host1',0, 0), ('host2', 1, 1,);
 
 SELECT * from t1;
 
--- issue #4649 should fail (do not support delete from logical table for now)
 delete from t1;
 
--- issue #4649 should succeed
+-- do not support DELETE FROM physical table for now
 delete from phy;
 
 CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");

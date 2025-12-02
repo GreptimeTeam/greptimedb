@@ -18,12 +18,12 @@ mod tests;
 use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer};
-use common_config::utils::ResourceSpec;
 use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMessage};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
+use common_stat::ResourceStatRef;
 use common_telemetry::{debug, error, info, warn};
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
 use servers::addrs;
@@ -47,7 +47,7 @@ pub struct HeartbeatTask {
     retry_interval: Duration,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     start_time_ms: u64,
-    resource_spec: ResourceSpec,
+    resource_stat: ResourceStatRef,
 }
 
 impl HeartbeatTask {
@@ -56,6 +56,7 @@ impl HeartbeatTask {
         meta_client: Arc<MetaClient>,
         heartbeat_opts: HeartbeatOptions,
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
+        resource_stat: ResourceStatRef,
     ) -> Self {
         HeartbeatTask {
             // if internal grpc is configured, use its address as the peer address
@@ -71,7 +72,7 @@ impl HeartbeatTask {
             retry_interval: heartbeat_opts.retry_interval,
             resp_handler_executor,
             start_time_ms: common_time::util::current_time_millis() as u64,
-            resource_spec: Default::default(),
+            resource_stat,
         }
     }
 
@@ -103,6 +104,9 @@ impl HeartbeatTask {
                 match resp_stream.message().await {
                     Ok(Some(resp)) => {
                         debug!("Receiving heartbeat response: {:?}", resp);
+                        if let Some(message) = &resp.mailbox_message {
+                            info!("Received mailbox message: {message:?}");
+                        }
                         let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), resp);
                         if let Err(e) = capture_self.handle_response(ctx).await {
                             error!(e; "Error while handling heartbeat response");
@@ -133,6 +137,8 @@ impl HeartbeatTask {
     fn new_heartbeat_request(
         heartbeat_request: &HeartbeatRequest,
         message: Option<OutgoingMessage>,
+        cpu_usage: i64,
+        memory_usage: i64,
     ) -> Option<HeartbeatRequest> {
         let mailbox_message = match message.map(outgoing_message_to_mailbox_message) {
             Some(Ok(message)) => Some(message),
@@ -143,21 +149,38 @@ impl HeartbeatTask {
             None => None,
         };
 
-        Some(HeartbeatRequest {
+        let mut heartbeat_request = HeartbeatRequest {
             mailbox_message,
             ..heartbeat_request.clone()
-        })
+        };
+
+        if let Some(info) = heartbeat_request.info.as_mut() {
+            info.memory_usage_bytes = memory_usage;
+            info.cpu_usage_millicores = cpu_usage;
+        }
+
+        Some(heartbeat_request)
     }
 
-    fn build_node_info(start_time_ms: u64, cpus: u32, memory_bytes: u64) -> Option<NodeInfo> {
+    #[allow(deprecated)]
+    fn build_node_info(
+        start_time_ms: u64,
+        total_cpu_millicores: i64,
+        total_memory_bytes: i64,
+    ) -> Option<NodeInfo> {
         let build_info = common_version::build_info();
 
         Some(NodeInfo {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms,
-            cpus,
-            memory_bytes,
+            total_cpu_millicores,
+            total_memory_bytes,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
+            // TODO(zyy17): Remove these deprecated fields when the deprecated fields are removed from the proto.
+            cpus: total_cpu_millicores as u32,
+            memory_bytes: total_memory_bytes as u64,
             hostname: hostname::get()
                 .unwrap_or_default()
                 .to_string_lossy()
@@ -177,16 +200,20 @@ impl HeartbeatTask {
             id: 0,
             addr: self.peer_addr.clone(),
         });
-        let cpus = self.resource_spec.cpus as u32;
-        let memory_bytes = self.resource_spec.memory.unwrap_or_default().as_bytes();
-
+        let total_cpu_millicores = self.resource_stat.get_total_cpu_millicores();
+        let total_memory_bytes = self.resource_stat.get_total_memory_bytes();
+        let resource_stat = self.resource_stat.clone();
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
 
             let heartbeat_request = HeartbeatRequest {
                 peer: self_peer,
-                info: Self::build_node_info(start_time_ms, cpus, memory_bytes),
+                info: Self::build_node_info(
+                    start_time_ms,
+                    total_cpu_millicores,
+                    total_memory_bytes,
+                ),
                 ..Default::default()
             };
 
@@ -194,7 +221,7 @@ impl HeartbeatTask {
                 let req = tokio::select! {
                     message = outgoing_rx.recv() => {
                         if let Some(message) = message {
-                            Self::new_heartbeat_request(&heartbeat_request, Some(message))
+                            Self::new_heartbeat_request(&heartbeat_request, Some(message), 0, 0)
                         } else {
                             warn!("Sender has been dropped, exiting the heartbeat loop");
                             // Receives None that means Sender was dropped, we need to break the current loop
@@ -202,8 +229,8 @@ impl HeartbeatTask {
                         }
                     }
                     _ = &mut sleep => {
-                        sleep.as_mut().reset(Instant::now() + report_interval);
-                       Self::new_heartbeat_request(&heartbeat_request, None)
+                       sleep.as_mut().reset(Instant::now() + report_interval);
+                       Self::new_heartbeat_request(&heartbeat_request, None, resource_stat.get_cpu_usage_millicores(), resource_stat.get_memory_usage_bytes())
                     }
                 };
 

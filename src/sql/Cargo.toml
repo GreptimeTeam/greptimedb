@@ -29,6 +29,7 @@ datafusion-expr.workspace = true
 datafusion-physical-expr.workspace = true
 datafusion-sql.workspace = true
 datatypes.workspace = true
+either.workspace = true
 hex = "0.4"
 humantime.workspace = true
 iso8601 = "0.6.1"

@@ -323,6 +323,26 @@ impl StructVectorBuilder {
         }
         self.null_buffer.append_null();
     }
+
+    pub(crate) fn struct_type(&self) -> &StructType {
+        &self.fields
+    }
+
+    pub(crate) fn value_builders(&self) -> &[Box<dyn MutableVector>] {
+        &self.value_builders
+    }
+
+    pub(crate) fn mut_value_builders(&mut self) -> &mut [Box<dyn MutableVector>] {
+        &mut self.value_builders
+    }
+
+    pub(crate) fn null_buffer(&self) -> &NullBufferBuilder {
+        &self.null_buffer
+    }
+
+    pub(crate) fn mut_null_buffer(&mut self) -> &mut NullBufferBuilder {
+        &mut self.null_buffer
+    }
 }
 
 impl MutableVector for StructVectorBuilder {
@@ -359,10 +379,8 @@ impl MutableVector for StructVectorBuilder {
                 },
                 StructValueRef::Ref(val) => self.push_struct_value(val)?,
                 StructValueRef::RefList { val, fields } => {
-                    let struct_value = StructValue::try_new(
-                        val.iter().map(|v| Value::from(v.clone())).collect(),
-                        fields.clone(),
-                    )?;
+                    let struct_value =
+                        StructValue::try_new(val.into_iter().map(Value::from).collect(), fields)?;
                     self.push_struct_value(&struct_value)?;
                 }
             }
@@ -409,12 +427,17 @@ impl ScalarVectorBuilder for StructVectorBuilder {
             .value_builders
             .iter_mut()
             .map(|b| b.to_vector().to_arrow_array())
-            .collect();
-        let struct_array = StructArray::new(
-            self.fields.as_arrow_fields(),
-            arrays,
-            self.null_buffer.finish(),
-        );
+            .collect::<Vec<_>>();
+
+        let struct_array = if arrays.is_empty() {
+            StructArray::new_empty_fields(self.len(), self.null_buffer.finish())
+        } else {
+            StructArray::new(
+                self.fields.as_arrow_fields(),
+                arrays,
+                self.null_buffer.finish(),
+            )
+        };
 
         StructVector::try_new(self.fields.clone(), struct_array).unwrap()
     }

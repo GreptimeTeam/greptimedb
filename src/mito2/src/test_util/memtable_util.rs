@@ -38,9 +38,8 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::partition_tree::data::{DataBatch, DataBuffer, timestamp_array_to_i64_slice};
 use crate::memtable::{
     BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRanges,
-    MemtableRef, MemtableStats,
+    MemtableRef, MemtableStats, RangesOptions,
 };
-use crate::read::scan_region::PredicateGroup;
 
 /// Empty memtable for test.
 #[derive(Debug, Default)]
@@ -97,9 +96,7 @@ impl Memtable for EmptyMemtable {
     fn ranges(
         &self,
         _projection: Option<&[ColumnId]>,
-        _predicate: PredicateGroup,
-        _sequence: Option<SequenceRange>,
-        _for_flush: bool,
+        _options: RangesOptions,
     ) -> Result<MemtableRanges> {
         Ok(MemtableRanges::default())
     }

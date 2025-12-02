@@ -17,6 +17,7 @@
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, Row, SemanticType, Value};
 use common_meta::ddl::utils::parse_column_metadatas;
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::debug;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -75,6 +76,17 @@ impl TestEnv {
         }
     }
 
+    /// Returns a new env with specific `prefix` and `mito_env` for test.
+    pub async fn with_mito_env(mut mito_env: MitoTestEnv) -> Self {
+        let mito = mito_env.create_engine(MitoConfig::default()).await;
+        let metric = MetricEngine::try_new(mito.clone(), EngineConfig::default()).unwrap();
+        Self {
+            mito_env,
+            mito,
+            metric,
+        }
+    }
+
     pub fn data_home(&self) -> String {
         let env_root = self.mito_env.data_home().to_string_lossy().to_string();
         join_dir(&env_root, "data")
@@ -124,7 +136,12 @@ impl TestEnv {
     }
 
     /// Create regions in [MetricEngine] with specific `physical_region_id`.
-    pub async fn create_physical_region(&self, physical_region_id: RegionId, table_dir: &str) {
+    pub async fn create_physical_region(
+        &self,
+        physical_region_id: RegionId,
+        table_dir: &str,
+        options: Vec<(String, String)>,
+    ) {
         let region_create_request = RegionCreateRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
             column_metadatas: vec![
@@ -132,7 +149,7 @@ impl TestEnv {
                     column_id: 0,
                     semantic_type: SemanticType::Timestamp,
                     column_schema: ColumnSchema::new(
-                        "greptime_timestamp",
+                        greptime_timestamp(),
                         ConcreteDataType::timestamp_millisecond_datatype(),
                         false,
                     ),
@@ -141,7 +158,7 @@ impl TestEnv {
                     column_id: 1,
                     semantic_type: SemanticType::Field,
                     column_schema: ColumnSchema::new(
-                        "greptime_value",
+                        greptime_value(),
                         ConcreteDataType::float64_datatype(),
                         false,
                     ),
@@ -150,6 +167,7 @@ impl TestEnv {
             primary_key: vec![],
             options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
                 .into_iter()
+                .chain(options.into_iter())
                 .collect(),
             table_dir: table_dir.to_string(),
             path_type: PathType::Bare, // Use Bare path type for engine regions
@@ -204,8 +222,8 @@ impl TestEnv {
         assert_eq!(
             column_names,
             vec![
-                "greptime_timestamp",
-                "greptime_value",
+                greptime_timestamp(),
+                greptime_value(),
                 "__table_id",
                 "__tsid",
                 "job",
@@ -230,7 +248,7 @@ impl TestEnv {
     /// under [`default_logical_region_id`].
     pub async fn init_metric_region(&self) {
         let physical_region_id = self.default_physical_region_id();
-        self.create_physical_region(physical_region_id, &Self::default_table_dir())
+        self.create_physical_region(physical_region_id, &Self::default_table_dir(), vec![])
             .await;
         let logical_region_id = self.default_logical_region_id();
         self.create_logical_region(physical_region_id, logical_region_id)
@@ -300,7 +318,7 @@ pub fn create_logical_region_request(
             column_id: 0,
             semantic_type: SemanticType::Timestamp,
             column_schema: ColumnSchema::new(
-                "greptime_timestamp",
+                greptime_timestamp(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             ),
@@ -309,7 +327,7 @@ pub fn create_logical_region_request(
             column_id: 1,
             semantic_type: SemanticType::Field,
             column_schema: ColumnSchema::new(
-                "greptime_value",
+                greptime_value(),
                 ConcreteDataType::float64_datatype(),
                 false,
             ),
@@ -372,14 +390,14 @@ pub fn alter_logical_region_request(tags: &[&str]) -> RegionAlterRequest {
 pub fn row_schema_with_tags(tags: &[&str]) -> Vec<PbColumnSchema> {
     let mut schema = vec![
         PbColumnSchema {
-            column_name: "greptime_timestamp".to_string(),
+            column_name: greptime_timestamp().to_string(),
             datatype: ColumnDataType::TimestampMillisecond as i32,
             semantic_type: SemanticType::Timestamp as _,
             datatype_extension: None,
             options: None,
         },
         PbColumnSchema {
-            column_name: "greptime_value".to_string(),
+            column_name: greptime_value().to_string(),
             datatype: ColumnDataType::Float64 as i32,
             semantic_type: SemanticType::Field as _,
             datatype_extension: None,
@@ -421,6 +439,22 @@ pub fn build_rows(num_tags: usize, num_rows: usize) -> Vec<Row> {
         rows.push(Row { values });
     }
     rows
+}
+
+#[macro_export]
+/// Skip the test if the environment variable `GT_KAFKA_ENDPOINTS` is not set.
+///
+/// The format of the environment variable is:
+/// ```text
+/// GT_KAFKA_ENDPOINTS=localhost:9092,localhost:9093
+/// ```
+macro_rules! maybe_skip_kafka_log_store_integration_test {
+    () => {
+        if std::env::var("GT_KAFKA_ENDPOINTS").is_err() {
+            common_telemetry::warn!("The kafka endpoints is empty, skipping the test");
+            return;
+        }
+    };
 }
 
 #[cfg(test)]

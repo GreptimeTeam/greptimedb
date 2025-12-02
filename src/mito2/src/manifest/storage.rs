@@ -24,6 +24,7 @@ use crc32fast::Hasher;
 use futures::TryStreamExt;
 use futures::future::try_join_all;
 use lazy_static::lazy_static;
+use object_store::util::join_dir;
 use object_store::{Entry, ErrorKind, Lister, ObjectStore, util};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,11 @@ const DEFAULT_MANIFEST_COMPRESSION_TYPE: CompressionType = CompressionType::Gzip
 /// So when we encounter problems, we need to fall back to `FALL_BACK_COMPRESS_TYPE` for processing.
 const FALL_BACK_COMPRESS_TYPE: CompressionType = CompressionType::Uncompressed;
 const FETCH_MANIFEST_PARALLELISM: usize = 16;
+
+/// Returns the directory to the manifest files.
+pub fn manifest_dir(region_dir: &str) -> String {
+    join_dir(region_dir, "manifest")
+}
 
 /// Returns the [CompressionType] according to whether to compress manifest files.
 pub const fn manifest_compress_type(compress: bool) -> CompressionType {

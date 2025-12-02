@@ -19,13 +19,19 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use common_error::ext::BoxedError;
-use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{
+    DfRecordBatch, DfSendableRecordBatchStream, MemoryPermit, MemoryTrackedStream,
+    SendableRecordBatchStream,
+};
 use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::warn;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::filter_pushdown::{
+    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation,
+};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
@@ -46,7 +52,6 @@ use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 use crate::table::metrics::StreamMetrics;
 
 /// A plan to read multiple partitions from a region of a table.
-#[derive(Debug)]
 pub struct RegionScanExec {
     scanner: Arc<Mutex<RegionScannerRef>>,
     arrow_schema: ArrowSchemaRef,
@@ -60,10 +65,32 @@ pub struct RegionScanExec {
     // TODO(ruihang): handle TimeWindowed dist via this parameter
     distribution: Option<TimeSeriesDistribution>,
     explain_verbose: bool,
+    query_memory_permit: Option<Arc<MemoryPermit>>,
+}
+
+impl std::fmt::Debug for RegionScanExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegionScanExec")
+            .field("scanner", &self.scanner)
+            .field("arrow_schema", &self.arrow_schema)
+            .field("output_ordering", &self.output_ordering)
+            .field("metric", &self.metric)
+            .field("properties", &self.properties)
+            .field("append_mode", &self.append_mode)
+            .field("total_rows", &self.total_rows)
+            .field("is_partition_set", &self.is_partition_set)
+            .field("distribution", &self.distribution)
+            .field("explain_verbose", &self.explain_verbose)
+            .finish()
+    }
 }
 
 impl RegionScanExec {
-    pub fn new(scanner: RegionScannerRef, request: ScanRequest) -> DfResult<Self> {
+    pub fn new(
+        scanner: RegionScannerRef,
+        request: ScanRequest,
+        query_memory_permit: Option<Arc<MemoryPermit>>,
+    ) -> DfResult<Self> {
         let arrow_schema = scanner.schema().arrow_schema().clone();
         let scanner_props = scanner.properties();
         let mut num_output_partition = scanner_props.num_partitions();
@@ -167,6 +194,7 @@ impl RegionScanExec {
             is_partition_set: false,
             distribution: request.distribution,
             explain_verbose: false,
+            query_memory_permit,
         })
     }
 
@@ -193,6 +221,11 @@ impl RegionScanExec {
 
     pub fn is_partition_set(&self) -> bool {
         self.is_partition_set
+    }
+
+    pub fn scanner_type(&self) -> String {
+        let scanner = self.scanner.lock().unwrap();
+        scanner.name().to_string()
     }
 
     /// Update the partition ranges of underlying scanner.
@@ -234,6 +267,7 @@ impl RegionScanExec {
             is_partition_set: true,
             distribution: self.distribution,
             explain_verbose: self.explain_verbose,
+            query_memory_permit: self.query_memory_permit.clone(),
         })
     }
 
@@ -317,6 +351,13 @@ impl ExecutionPlan for RegionScanExec {
             .unwrap()
             .scan_partition(&ctx, &self.metric, partition)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        let stream = if let Some(permit) = &self.query_memory_permit {
+            Box::pin(MemoryTrackedStream::new(stream, permit.clone()))
+        } else {
+            stream
+        };
+
         let stream_metrics = StreamMetrics::new(&self.metric, partition);
         Ok(Box::pin(StreamWithMetricWrapper {
             stream,
@@ -335,30 +376,41 @@ impl ExecutionPlan for RegionScanExec {
             return Ok(Statistics::new_unknown(self.schema().as_ref()));
         }
 
-        let statistics = if self.append_mode && !self.scanner.lock().unwrap().has_predicate() {
-            let column_statistics = self
-                .arrow_schema
-                .fields
-                .iter()
-                .map(|_| ColumnStatistics {
-                    distinct_count: Precision::Exact(self.total_rows),
-                    null_count: Precision::Exact(0), // all null rows are counted for append-only table
-                    ..Default::default()
-                })
-                .collect();
-            Statistics {
-                num_rows: Precision::Exact(self.total_rows),
-                total_byte_size: Default::default(),
-                column_statistics,
-            }
-        } else {
-            Statistics::new_unknown(&self.arrow_schema)
-        };
+        let statistics =
+            if self.append_mode && !self.scanner.lock().unwrap().has_predicate_without_region() {
+                let column_statistics = self
+                    .arrow_schema
+                    .fields
+                    .iter()
+                    .map(|_| ColumnStatistics {
+                        distinct_count: Precision::Exact(self.total_rows),
+                        null_count: Precision::Exact(0), // all null rows are counted for append-only table
+                        ..Default::default()
+                    })
+                    .collect();
+                Statistics {
+                    num_rows: Precision::Exact(self.total_rows),
+                    total_byte_size: Default::default(),
+                    column_statistics,
+                }
+            } else {
+                Statistics::new_unknown(&self.arrow_schema)
+            };
         Ok(statistics)
     }
 
     fn name(&self) -> &str {
         "RegionScanExec"
+    }
+
+    fn handle_child_pushdown_result(
+        &self,
+        _phase: FilterPushdownPhase,
+        child_pushdown_result: ChildPushdownResult,
+        _config: &datafusion::config::ConfigOptions,
+    ) -> DfResult<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
+        // TODO(discord9): use the pushdown result to update the scanner's predicate
+        Ok(FilterPushdownPropagation::if_all(child_pushdown_result))
     }
 }
 
@@ -397,14 +449,10 @@ impl Stream for StreamWithMetricWrapper {
                 }
                 match result {
                     Ok(record_batch) => {
-                        let batch_mem_size = record_batch
-                            .columns()
-                            .iter()
-                            .map(|vec_ref| vec_ref.memory_size())
-                            .sum::<usize>();
                         // we don't record elapsed time here
                         // since it's calling storage api involving I/O ops
-                        this.metric.record_mem_usage(batch_mem_size);
+                        this.metric
+                            .record_mem_usage(record_batch.buffer_memory_size());
                         this.metric.record_output(record_batch.num_rows());
                         Poll::Ready(Some(Ok(record_batch.into_df_record_batch())))
                     }
@@ -497,7 +545,7 @@ mod test {
         let region_metadata = Arc::new(builder.build().unwrap());
 
         let scanner = Box::new(SinglePartitionScanner::new(stream, false, region_metadata));
-        let plan = RegionScanExec::new(scanner, ScanRequest::default()).unwrap();
+        let plan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
         let actual: SchemaRef = Arc::new(
             plan.properties
                 .eq_properties

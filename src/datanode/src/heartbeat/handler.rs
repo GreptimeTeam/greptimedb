@@ -13,60 +13,69 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use common_meta::RegionIdent;
 use common_meta::error::{InvalidHeartbeatResponseSnafu, Result as MetaResult};
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
 use common_meta::instruction::{Instruction, InstructionReply};
 use common_telemetry::error;
-use futures::future::BoxFuture;
 use snafu::OptionExt;
-use store_api::storage::RegionId;
+use store_api::storage::GcReport;
 
 mod close_region;
 mod downgrade_region;
+mod file_ref;
 mod flush_region;
+mod gc_worker;
 mod open_region;
 mod upgrade_region;
 
+use crate::heartbeat::handler::close_region::CloseRegionsHandler;
+use crate::heartbeat::handler::downgrade_region::DowngradeRegionsHandler;
+use crate::heartbeat::handler::file_ref::GetFileRefsHandler;
+use crate::heartbeat::handler::flush_region::FlushRegionsHandler;
+use crate::heartbeat::handler::gc_worker::GcRegionsHandler;
+use crate::heartbeat::handler::open_region::OpenRegionsHandler;
+use crate::heartbeat::handler::upgrade_region::UpgradeRegionsHandler;
 use crate::heartbeat::task_tracker::TaskTracker;
 use crate::region_server::RegionServer;
 
-/// Handler for [Instruction::OpenRegion] and [Instruction::CloseRegion].
+/// The handler for [`Instruction`]s.
 #[derive(Clone)]
 pub struct RegionHeartbeatResponseHandler {
     region_server: RegionServer,
-    catchup_tasks: TaskTracker<()>,
     downgrade_tasks: TaskTracker<()>,
     flush_tasks: TaskTracker<()>,
     open_region_parallelism: usize,
+    gc_tasks: TaskTracker<GcReport>,
 }
 
-/// Handler of the instruction.
-pub type InstructionHandler =
-    Box<dyn FnOnce(HandlerContext) -> BoxFuture<'static, Option<InstructionReply>> + Send>;
+#[async_trait::async_trait]
+pub trait InstructionHandler: Send + Sync {
+    type Instruction;
+    async fn handle(
+        &self,
+        ctx: &HandlerContext,
+        instruction: Self::Instruction,
+    ) -> Option<InstructionReply>;
+}
 
 #[derive(Clone)]
 pub struct HandlerContext {
     region_server: RegionServer,
-    catchup_tasks: TaskTracker<()>,
     downgrade_tasks: TaskTracker<()>,
     flush_tasks: TaskTracker<()>,
+    gc_tasks: TaskTracker<GcReport>,
 }
 
 impl HandlerContext {
-    fn region_ident_to_region_id(region_ident: &RegionIdent) -> RegionId {
-        RegionId::new(region_ident.table_id, region_ident.region_number)
-    }
-
     #[cfg(test)]
     pub fn new_for_test(region_server: RegionServer) -> Self {
         Self {
             region_server,
-            catchup_tasks: TaskTracker::new(),
             downgrade_tasks: TaskTracker::new(),
             flush_tasks: TaskTracker::new(),
+            gc_tasks: TaskTracker::new(),
         }
     }
 }
@@ -76,11 +85,11 @@ impl RegionHeartbeatResponseHandler {
     pub fn new(region_server: RegionServer) -> Self {
         Self {
             region_server,
-            catchup_tasks: TaskTracker::new(),
             downgrade_tasks: TaskTracker::new(),
             flush_tasks: TaskTracker::new(),
             // Default to half of the number of CPUs.
             open_region_parallelism: (num_cpus::get() / 2).max(1),
+            gc_tasks: TaskTracker::new(),
         }
     }
 
@@ -90,54 +99,114 @@ impl RegionHeartbeatResponseHandler {
         self
     }
 
-    /// Builds the [InstructionHandler].
-    fn build_handler(&self, instruction: Instruction) -> MetaResult<InstructionHandler> {
+    fn build_handler(&self, instruction: &Instruction) -> MetaResult<Box<InstructionHandlers>> {
         match instruction {
-            Instruction::OpenRegions(open_regions) => {
-                let open_region_parallelism = self.open_region_parallelism;
-                Ok(Box::new(move |handler_context| {
-                    handler_context
-                        .handle_open_regions_instruction(open_regions, open_region_parallelism)
-                }))
-            }
-            Instruction::CloseRegions(close_regions) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_close_regions_instruction(close_regions)
-            })),
-            Instruction::DowngradeRegion(downgrade_region) => {
-                Ok(Box::new(move |handler_context| {
-                    handler_context.handle_downgrade_region_instruction(downgrade_region)
-                }))
-            }
-            Instruction::UpgradeRegion(upgrade_region) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_upgrade_region_instruction(upgrade_region)
-            })),
+            Instruction::CloseRegions(_) => Ok(Box::new(CloseRegionsHandler.into())),
+            Instruction::OpenRegions(_) => Ok(Box::new(
+                OpenRegionsHandler {
+                    open_region_parallelism: self.open_region_parallelism,
+                }
+                .into(),
+            )),
+            Instruction::FlushRegions(_) => Ok(Box::new(FlushRegionsHandler.into())),
+            Instruction::DowngradeRegions(_) => Ok(Box::new(DowngradeRegionsHandler.into())),
+            Instruction::UpgradeRegions(_) => Ok(Box::new(
+                UpgradeRegionsHandler {
+                    upgrade_region_parallelism: self.open_region_parallelism,
+                }
+                .into(),
+            )),
+            Instruction::GetFileRefs(_) => Ok(Box::new(GetFileRefsHandler.into())),
+            Instruction::GcRegions(_) => Ok(Box::new(GcRegionsHandler.into())),
             Instruction::InvalidateCaches(_) => InvalidHeartbeatResponseSnafu.fail(),
-            Instruction::FlushRegions(flush_regions) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_flush_regions_instruction(flush_regions)
-            })),
         }
     }
 }
 
+#[allow(clippy::enum_variant_names)]
+pub enum InstructionHandlers {
+    CloseRegions(CloseRegionsHandler),
+    OpenRegions(OpenRegionsHandler),
+    FlushRegions(FlushRegionsHandler),
+    DowngradeRegions(DowngradeRegionsHandler),
+    UpgradeRegions(UpgradeRegionsHandler),
+    GetFileRefs(GetFileRefsHandler),
+    GcRegions(GcRegionsHandler),
+}
+
+macro_rules! impl_from_handler {
+    ($($handler:ident => $variant:ident),*) => {
+        $(
+            impl From<$handler> for InstructionHandlers {
+                fn from(handler: $handler) -> Self {
+                    InstructionHandlers::$variant(handler)
+                }
+            }
+        )*
+    };
+}
+
+impl_from_handler!(
+    CloseRegionsHandler => CloseRegions,
+    OpenRegionsHandler => OpenRegions,
+    FlushRegionsHandler => FlushRegions,
+    DowngradeRegionsHandler => DowngradeRegions,
+    UpgradeRegionsHandler => UpgradeRegions,
+    GetFileRefsHandler => GetFileRefs,
+    GcRegionsHandler => GcRegions
+);
+
+macro_rules! dispatch_instr {
+    (
+        $( $instr_variant:ident => $handler_variant:ident ),* $(,)?
+    ) => {
+        impl InstructionHandlers {
+            pub async fn handle(
+                &self,
+                ctx: &HandlerContext,
+                instruction: Instruction,
+            ) -> Option<InstructionReply> {
+                match (self, instruction) {
+                    $(
+                        (
+                            InstructionHandlers::$handler_variant(handler),
+                            Instruction::$instr_variant(instr),
+                        ) => handler.handle(ctx, instr).await,
+                    )*
+                    // Safety: must be used in pairs with `build_handler`.
+                    _ => unreachable!(),
+                }
+            }
+            /// Check whether this instruction is acceptable by any handler.
+            pub fn is_acceptable(instruction: &Instruction) -> bool {
+                matches!(
+                    instruction,
+                    $(
+                        Instruction::$instr_variant { .. }
+                    )|*
+                )
+            }
+        }
+    };
+}
+
+dispatch_instr!(
+    CloseRegions => CloseRegions,
+    OpenRegions => OpenRegions,
+    FlushRegions => FlushRegions,
+    DowngradeRegions => DowngradeRegions,
+    UpgradeRegions => UpgradeRegions,
+    GetFileRefs => GetFileRefs,
+    GcRegions => GcRegions,
+);
+
 #[async_trait]
 impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
-        matches!(ctx.incoming_message.as_ref(), |Some((
-            _,
-            Instruction::DowngradeRegion { .. },
-        ))| Some((
-            _,
-            Instruction::UpgradeRegion { .. }
-        )) | Some((
-            _,
-            Instruction::FlushRegions { .. }
-        )) | Some((
-            _,
-            Instruction::OpenRegions { .. }
-        )) | Some((
-            _,
-            Instruction::CloseRegions { .. }
-        )))
+        if let Some((_, instruction)) = ctx.incoming_message.as_ref() {
+            return InstructionHandlers::is_acceptable(instruction);
+        }
+        false
     }
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
@@ -148,18 +217,22 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
 
         let mailbox = ctx.mailbox.clone();
         let region_server = self.region_server.clone();
-        let catchup_tasks = self.catchup_tasks.clone();
         let downgrade_tasks = self.downgrade_tasks.clone();
         let flush_tasks = self.flush_tasks.clone();
-        let handler = self.build_handler(instruction)?;
+        let gc_tasks = self.gc_tasks.clone();
+        let handler = self.build_handler(&instruction)?;
         let _handle = common_runtime::spawn_global(async move {
-            let reply = handler(HandlerContext {
-                region_server,
-                catchup_tasks,
-                downgrade_tasks,
-                flush_tasks,
-            })
-            .await;
+            let reply = handler
+                .handle(
+                    &HandlerContext {
+                        region_server,
+                        downgrade_tasks,
+                        flush_tasks,
+                        gc_tasks,
+                    },
+                    instruction,
+                )
+                .await;
 
             if let Some(reply) = reply
                 && let Err(e) = mailbox.send((meta, reply)).await
@@ -179,6 +252,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use common_meta::RegionIdent;
     use common_meta::heartbeat::mailbox::{
         HeartbeatMailbox, IncomingMessage, MailboxRef, MessageMeta,
     };
@@ -249,20 +323,20 @@ mod tests {
         );
 
         // Downgrade region
-        let instruction = Instruction::DowngradeRegion(DowngradeRegion {
+        let instruction = Instruction::DowngradeRegions(vec![DowngradeRegion {
             region_id: RegionId::new(2048, 1),
             flush_timeout: Some(Duration::from_secs(1)),
-        });
+        }]);
         assert!(
             heartbeat_handler
                 .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction)))
         );
 
         // Upgrade region
-        let instruction = Instruction::UpgradeRegion(UpgradeRegion {
+        let instruction = Instruction::UpgradeRegions(vec![UpgradeRegion {
             region_id,
             ..Default::default()
-        });
+        }]);
         assert!(
             heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((meta, instruction)))
         );
@@ -447,10 +521,10 @@ mod tests {
         // Should be ok, if we try to downgrade it twice.
         for _ in 0..2 {
             let meta = MessageMeta::new_test(1, "test", "dn-1", "me-0");
-            let instruction = Instruction::DowngradeRegion(DowngradeRegion {
+            let instruction = Instruction::DowngradeRegions(vec![DowngradeRegion {
                 region_id,
                 flush_timeout: Some(Duration::from_secs(1)),
-            });
+            }]);
 
             let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
             let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
@@ -458,33 +532,27 @@ mod tests {
 
             let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
-            if let InstructionReply::DowngradeRegion(reply) = reply {
-                assert!(reply.exists);
-                assert!(reply.error.is_none());
-                assert_eq!(reply.last_entry_id.unwrap(), 0);
-            } else {
-                unreachable!()
-            }
+            let reply = &reply.expect_downgrade_regions_reply()[0];
+            assert!(reply.exists);
+            assert!(reply.error.is_none());
+            assert_eq!(reply.last_entry_id.unwrap(), 0);
         }
 
         // Downgrades a not exists region.
         let meta = MessageMeta::new_test(1, "test", "dn-1", "me-0");
-        let instruction = Instruction::DowngradeRegion(DowngradeRegion {
+        let instruction = Instruction::DowngradeRegions(vec![DowngradeRegion {
             region_id: RegionId::new(2048, 1),
             flush_timeout: Some(Duration::from_secs(1)),
-        });
+        }]);
         let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
         assert_matches!(control, HandleControl::Continue);
 
         let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
-        if let InstructionReply::DowngradeRegion(reply) = reply {
-            assert!(!reply.exists);
-            assert!(reply.error.is_none());
-            assert!(reply.last_entry_id.is_none());
-        } else {
-            unreachable!()
-        }
+        let reply = reply.expect_downgrade_regions_reply();
+        assert!(!reply[0].exists);
+        assert!(reply[0].error.is_none());
+        assert!(reply[0].last_entry_id.is_none());
     }
 }

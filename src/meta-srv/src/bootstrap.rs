@@ -29,8 +29,7 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
 use either::Either;
-use servers::configurator::ConfiguratorRef;
-use servers::export_metrics::ExportMetricsTask;
+use servers::configurator::GrpcRouterConfiguratorRef;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
@@ -45,6 +44,7 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::election::etcd::EtcdElection;
+use crate::error::OtherSnafu;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{
     BackendImpl, ElectionRef, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
@@ -70,8 +70,6 @@ pub struct MetasrvInstance {
 
     plugins: Plugins,
 
-    export_metrics_task: Option<ExportMetricsTask>,
-
     /// gRPC serving state receiver. Only present if the gRPC server is started.
     serve_state: Arc<Mutex<Option<oneshot::Receiver<Result<()>>>>>,
 
@@ -95,15 +93,12 @@ impl MetasrvInstance {
 
         // put metasrv into plugins for later use
         plugins.insert::<Arc<Metasrv>>(metasrv.clone());
-        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
-            .context(error::InitExportMetricsTaskSnafu)?;
         Ok(MetasrvInstance {
             metasrv,
             http_server: Either::Left(Some(builder)),
             opts,
             signal_sender: None,
             plugins,
-            export_metrics_task,
             serve_state: Default::default(),
             bind_addr: None,
         })
@@ -131,18 +126,21 @@ impl MetasrvInstance {
 
         self.metasrv.try_start().await?;
 
-        if let Some(t) = self.export_metrics_task.as_ref() {
-            t.start(None).context(error::InitExportMetricsTaskSnafu)?
-        }
-
         let (tx, rx) = mpsc::channel::<()>(1);
 
         self.signal_sender = Some(tx);
 
         // Start gRPC server with admin services for backward compatibility
         let mut router = router(self.metasrv.clone());
-        if let Some(configurator) = self.metasrv.plugins().get::<ConfiguratorRef>() {
-            router = configurator.config_grpc(router);
+        if let Some(configurator) = self
+            .metasrv
+            .plugins()
+            .get::<GrpcRouterConfiguratorRef<()>>()
+        {
+            router = configurator
+                .configure_grpc_router(router, ())
+                .await
+                .context(OtherSnafu)?;
         }
 
         let (serve_state_tx, serve_state_rx) = oneshot::channel();

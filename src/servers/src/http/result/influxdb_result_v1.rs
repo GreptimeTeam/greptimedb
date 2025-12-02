@@ -19,10 +19,10 @@ use common_query::{Output, OutputData};
 use common_recordbatch::{RecordBatch, util};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::ResultExt;
 
-use crate::error::{Error, ToJsonSnafu};
+use crate::error::{Error, Result};
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
+use crate::http::result::HttpOutputWriter;
 use crate::http::result::error_result::ErrorResponse;
 use crate::http::{Epoch, HttpResponse, ResponseFormat};
 
@@ -66,8 +66,8 @@ impl TryFrom<(Option<Epoch>, Vec<RecordBatch>)> for InfluxdbRecordsOutput {
         } else {
             // Safety: ensured by previous empty check
             let first = &recordbatches[0];
-            let columns = first
-                .schema
+            let schema = first.schema.clone();
+            let columns = schema
                 .column_schemas()
                 .iter()
                 .map(|cs| cs.name.clone())
@@ -76,28 +76,24 @@ impl TryFrom<(Option<Epoch>, Vec<RecordBatch>)> for InfluxdbRecordsOutput {
             let mut rows =
                 Vec::with_capacity(recordbatches.iter().map(|r| r.num_rows()).sum::<usize>());
 
-            for recordbatch in recordbatches {
-                for row in recordbatch.rows() {
-                    let value_row = row
-                        .into_iter()
-                        .map(|value| {
-                            let value = match (epoch, &value) {
-                                (Some(epoch), datatypes::value::Value::Timestamp(ts)) => {
-                                    if let Some(timestamp) = epoch.convert_timestamp(*ts) {
-                                        datatypes::value::Value::Timestamp(timestamp)
-                                    } else {
-                                        value
-                                    }
-                                }
-                                _ => value,
-                            };
-                            Value::try_from(value)
-                        })
-                        .collect::<Result<Vec<Value>, _>>()
-                        .context(ToJsonSnafu)?;
+            let value_transformer =
+                move |value: datatypes::value::Value| -> datatypes::value::Value {
+                    match (value, epoch) {
+                        (datatypes::value::Value::Timestamp(ts), Some(epoch)) => {
+                            if let Some(converted) = epoch.convert_timestamp(ts) {
+                                datatypes::value::Value::Timestamp(converted)
+                            } else {
+                                datatypes::value::Value::Timestamp(ts)
+                            }
+                        }
+                        (value, _) => value,
+                    }
+                };
 
-                    rows.push(value_row);
-                }
+            for recordbatch in recordbatches {
+                let mut writer =
+                    HttpOutputWriter::new(schema.num_columns(), Some(Box::new(value_transformer)));
+                writer.write(recordbatch, &mut rows)?;
             }
 
             Ok(InfluxdbRecordsOutput::new(columns, rows))

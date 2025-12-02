@@ -74,7 +74,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.18.0"
+version = "1.0.0-beta.2"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -118,9 +118,10 @@ bitflags = "2.4.1"
 bytemuck = "1.12"
 bytes = { version = "1.7", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10.1"
+chrono-tz = { version = "0.10.1", features = ["case-insensitive"] }
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
+const_format = "0.2"
 crossbeam-utils = "0.8"
 dashmap = "6.1"
 datafusion = "50"
@@ -130,7 +131,7 @@ datafusion-functions = "50"
 datafusion-functions-aggregate-common = "50"
 datafusion-optimizer = "50"
 datafusion-orc = "0.5"
-datafusion-pg-catalog = "0.11"
+datafusion-pg-catalog = "0.12.2"
 datafusion-physical-expr = "50"
 datafusion-physical-plan = "50"
 datafusion-sql = "50"
@@ -147,7 +148,7 @@ etcd-client = { git = "https://github.com/GreptimeTeam/etcd-client", rev = "f62d
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "72a0d22e0f5f716b2ee21bca091f87a88c36e5ca" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "0df99f09f1d6785055b2d9da96fc4ecc2bdf6803" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -191,7 +192,7 @@ prost-types = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.9"
 ratelimit = "0.10"
-regex = "1.8"
+regex = "1.12"
 regex-automata = "0.4"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
@@ -218,12 +219,7 @@ similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
 sqlparser = { version = "0.58.0", default-features = false, features = ["std", "visitor", "serde"] }
-sqlx = { version = "0.8", features = [
-    "runtime-tokio-rustls",
-    "mysql",
-    "postgres",
-    "chrono",
-] }
+sqlx = { version = "0.8", default-features = false, features = ["any", "macros", "json", "runtime-tokio-rustls"] }
 strum = { version = "0.27", features = ["derive"] }
 sysinfo = "0.33"
 tempfile = "3"
@@ -238,6 +234,7 @@ tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
 tracing-appender = "0.2"
+tracing-opentelemetry = "0.31.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
 uuid = { version = "1.17", features = ["serde", "v4", "fast-rng"] }

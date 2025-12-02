@@ -36,6 +36,7 @@ pub const STAGING_TYPE: &str = "index_staging";
 /// Recycle bin type label.
 pub const RECYCLE_TYPE: &str = "recycle_bin";
 
+// Write metrics.
 lazy_static! {
     /// Global write buffer size in bytes.
     pub static ref WRITE_BUFFER_BYTES: IntGauge =
@@ -114,10 +115,10 @@ lazy_static! {
         &[TYPE_LABEL]
     )
     .unwrap();
-    // ------ End of write related metrics
+}
 
-
-    // Compaction metrics
+// Compaction metrics.
+lazy_static! {
     /// Timer of different stages in compaction.
     /// - pick
     /// - merge (in parallel)
@@ -156,8 +157,10 @@ lazy_static! {
             "greptime_mito_inflight_compaction_count",
             "inflight compaction count",
         ).unwrap();
+}
 
-    // Query metrics.
+// Query metrics.
+lazy_static! {
     /// Timer of different stages in query.
     pub static ref READ_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_mito_read_stage_elapsed",
@@ -207,9 +210,20 @@ lazy_static! {
         "Number of rows returned in a scan task",
         exponential_buckets(100.0, 10.0, 7).unwrap(),
     ).unwrap();
-    // ------- End of query metrics.
+    /// Gauge for scan memory usage in bytes.
+    pub static ref SCAN_MEMORY_USAGE_BYTES: IntGauge = register_int_gauge!(
+        "greptime_mito_scan_memory_usage_bytes",
+        "current scan memory usage in bytes"
+    ).unwrap();
+    /// Counter of rejected scan requests due to memory limit.
+    pub static ref SCAN_REQUESTS_REJECTED_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_scan_requests_rejected_total",
+        "total number of scan requests rejected due to memory limit"
+    ).unwrap();
+}
 
-    // Cache related metrics.
+// Cache metrics.
+lazy_static! {
     /// Cache hit counter.
     pub static ref CACHE_HIT: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_cache_hit",
@@ -261,8 +275,10 @@ lazy_static! {
         "mito cache eviction",
         &[TYPE_LABEL, CACHE_EVICTION_CAUSE]
     ).unwrap();
-    // ------- End of cache metrics.
+}
 
+// Index metrics.
+lazy_static! {
     // Index metrics.
     /// Timer of index application.
     pub static ref INDEX_APPLY_ELAPSED: HistogramVec = register_histogram_vec!(
@@ -359,8 +375,9 @@ lazy_static! {
     /// Counter of flush operations on intermediate files.
     pub static ref INDEX_INTERMEDIATE_FLUSH_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
         .with_label_values(&["flush", "intermediate"]);
-    // ------- End of index metrics.
+}
 
+lazy_static! {
     /// Partition tree memtable data buffer freeze metrics
     pub static ref PARTITION_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_partition_tree_buffer_freeze_stage_elapsed",
@@ -405,7 +422,6 @@ lazy_static! {
 
 }
 
-// Use another block to avoid reaching the recursion limit.
 lazy_static! {
     /// Counter for compaction input file size.
     pub static ref COMPACTION_INPUT_BYTES: Counter = register_counter!(
@@ -437,7 +453,7 @@ lazy_static! {
             "mito stalled write request in each worker",
             &[WORKER_LABEL]
         ).unwrap();
-    /// Number of ref files per table
+    /// Number of ref files
     pub static ref GC_REF_FILE_CNT: IntGauge = register_int_gauge!(
             "greptime_gc_ref_file_count",
             "gc ref file count",
@@ -458,11 +474,23 @@ lazy_static! {
         .unwrap();
 
     /// Counter for the number of files deleted by the GC worker.
-    pub static ref GC_FILE_CNT: IntGauge =
+    pub static ref GC_DELETE_FILE_CNT: IntGauge =
         register_int_gauge!(
-            "greptime_mito_gc_file_count",
+            "greptime_mito_gc_delete_file_count",
             "mito gc deleted file count",
         ).unwrap();
+
+    /// Total number of files downloaded during cache fill on region open.
+    pub static ref CACHE_FILL_DOWNLOADED_FILES: IntCounter = register_int_counter!(
+        "mito_cache_fill_downloaded_files",
+        "mito cache fill downloaded files count",
+    ).unwrap();
+
+    /// Number of files pending download during cache fill on region open.
+    pub static ref CACHE_FILL_PENDING_FILES: IntGauge = register_int_gauge!(
+        "mito_cache_fill_pending_files",
+        "mito cache fill pending files count",
+    ).unwrap();
 }
 
 /// Stager notifier to collect metrics.

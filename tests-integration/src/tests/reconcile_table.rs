@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, OutputData};
 use common_meta::reconciliation::ResolveStrategy;
 use common_meta::reconciliation::manager::ReconciliationManagerRef;
@@ -22,8 +24,8 @@ use table::table_reference::TableReference;
 
 use crate::cluster::GreptimeDbClusterBuilder;
 use crate::tests::test_util::{
-    MockInstance, MockInstanceBuilder, RebuildableMockInstance, TestContext, dump_kvbackend,
-    execute_sql, restore_kvbackend, try_execute_sql, wait_procedure,
+    MockInstanceBuilder, RebuildableMockInstance, TestContext, dump_kvbackend, execute_sql,
+    restore_kvbackend, try_execute_sql, wait_procedure,
 };
 
 const CREATE_MONITOR_TABLE_SQL: &str = r#"
@@ -165,6 +167,8 @@ async fn test_reconcile_dropped_column() {
         "grpc_latencies",
     )
     .await;
+    // Try best effort to wait for the cache to be invalidated.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Now we should able to query table again.
     let output = execute_sql(&frontend, "SELECT * FROM grpc_latencies ORDER BY host").await;
@@ -268,6 +272,8 @@ async fn test_reconcile_added_column() {
         "grpc_latencies",
     )
     .await;
+    // Try best effort to wait for the cache to be invalidated.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Now the column cloud_provider is available.
     let output = execute_sql(&frontend, "SELECT * FROM grpc_latencies ORDER BY host").await;
@@ -342,6 +348,8 @@ async fn test_reconcile_modify_column_type() {
         "grpc_latencies",
     )
     .await;
+    // Try best effort to wait for the cache to be invalidated.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Now we can query the table again.
     let output = execute_sql(&frontend, "SELECT * FROM grpc_latencies ORDER BY host").await;
@@ -401,11 +409,11 @@ async fn test_recover_metadata_failed() {
 
     // Only grpc_latencies table is visible.
     let output = execute_sql(&test_context.frontend(), "show tables;").await;
-    let expected = r#"+---------+
-| Tables  |
-+---------+
-| numbers |
-+---------+"#;
+    let expected = r#"+------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
++------------------+"#;
     check_output_stream(output.data, expected).await;
 
     // Expect table creation to fail because the region directory already exists.
@@ -466,12 +474,12 @@ async fn test_dropped_table() {
     test_context.rebuild().await;
 
     let output = execute_sql(&test_context.frontend(), "show tables;").await;
-    let expected = r#"+----------------+
-| Tables         |
-+----------------+
-| grpc_latencies |
-| numbers        |
-+----------------+"#;
+    let expected = r#"+------------------+
+| Tables_in_public |
++------------------+
+| grpc_latencies   |
+| numbers          |
++------------------+"#;
     check_output_stream(output.data, expected).await;
 
     // We can't query the table because the table is dropped.
@@ -523,12 +531,12 @@ async fn test_renamed_table() {
     check_output_stream(output.data, expected).await;
 
     let output = execute_sql(&test_context.frontend(), "show tables;").await;
-    let expected = r#"+----------------+
-| Tables         |
-+----------------+
-| grpc_latencies |
-| numbers        |
-+----------------+"#;
+    let expected = r#"+------------------+
+| Tables_in_public |
++------------------+
+| grpc_latencies   |
+| numbers          |
++------------------+"#;
     check_output_stream(output.data, expected).await;
 }
 

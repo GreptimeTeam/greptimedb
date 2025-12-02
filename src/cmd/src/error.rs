@@ -99,13 +99,6 @@ pub enum Error {
         source: flow::Error,
     },
 
-    #[snafu(display("Servers error"))]
-    Servers {
-        #[snafu(implicit)]
-        location: Location,
-        source: servers::error::Error,
-    },
-
     #[snafu(display("Failed to start frontend"))]
     StartFrontend {
         #[snafu(implicit)]
@@ -336,7 +329,6 @@ impl ErrorExt for Error {
             Error::ShutdownFrontend { source, .. } => source.status_code(),
             Error::StartMetaServer { source, .. } => source.status_code(),
             Error::ShutdownMetaServer { source, .. } => source.status_code(),
-            Error::Servers { source, .. } => source.status_code(),
             Error::BuildMetaServer { source, .. } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
             Error::BuildCli { source, .. } => source.status_code(),

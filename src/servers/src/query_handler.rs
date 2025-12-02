@@ -198,8 +198,6 @@ pub trait JaegerQueryHandler {
         ctx: QueryContextRef,
         service_name: &str,
         span_kind: Option<&str>,
-        start_time: Option<i64>,
-        end_time: Option<i64>,
     ) -> Result<Output>;
 
     /// Retrieves a trace by its unique identifier.
@@ -212,6 +210,7 @@ pub trait JaegerQueryHandler {
         trace_id: &str,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        limit: Option<usize>,
     ) -> Result<Output>;
 
     /// Find traces by query params. It's used for `/api/traces` API.

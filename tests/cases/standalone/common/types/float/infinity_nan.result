@@ -1,0 +1,184 @@
+-- Migrated from DuckDB test: test/sql/types/float/infinity_test.test, nan_aggregate.test
+-- Test infinity and NaN handling
+-- Note: it doesn't follow the IEEE standard, but follows PG instead: https://www.postgresql.org/docs/current/datatype-numeric.html
+-- Test infinity operations
+CREATE TABLE inf_test(val DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO inf_test VALUES
+    ('inf'::DOUBLE, 1000),
+    ('-inf'::DOUBLE, 2000),
+    (1.0, 3000),
+    (-1.0, 4000),
+    (0.0, 5000);
+
+Affected Rows: 5
+
+-- Test infinity comparisons
+SELECT val, val > 0 FROM inf_test ORDER BY ts;
+
++------+-------------------------+
+| val  | inf_test.val > Int64(0) |
++------+-------------------------+
+| inf  | true                    |
+| -inf | false                   |
+| 1.0  | true                    |
+| -1.0 | false                   |
+| 0.0  | false                   |
++------+-------------------------+
+
+SELECT val, val < 0 FROM inf_test ORDER BY ts;
+
++------+-------------------------+
+| val  | inf_test.val < Int64(0) |
++------+-------------------------+
+| inf  | false                   |
+| -inf | true                    |
+| 1.0  | false                   |
+| -1.0 | true                    |
+| 0.0  | false                   |
++------+-------------------------+
+
+SELECT val, val = 'inf'::DOUBLE FROM inf_test ORDER BY ts;
+
++------+----------------------------+
+| val  | inf_test.val = Utf8("inf") |
++------+----------------------------+
+| inf  | true                       |
+| -inf | false                      |
+| 1.0  | false                      |
+| -1.0 | false                      |
+| 0.0  | false                      |
++------+----------------------------+
+
+-- Test infinity in aggregates
+SELECT MAX(val), MIN(val) FROM inf_test;
+
++-------------------+-------------------+
+| max(inf_test.val) | min(inf_test.val) |
++-------------------+-------------------+
+| inf               | -inf              |
++-------------------+-------------------+
+
+SELECT SUM(val), AVG(val) FROM inf_test;
+
++-------------------+-------------------+
+| sum(inf_test.val) | avg(inf_test.val) |
++-------------------+-------------------+
+| NaN               | NaN               |
++-------------------+-------------------+
+
+-- Test NaN behavior
+CREATE TABLE nan_test(val DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO nan_test VALUES
+    ('nan'::DOUBLE, 1000),
+    (1.0, 2000),
+    (2.0, 3000),
+    ('nan'::DOUBLE, 4000),
+    (3.0, 5000);
+
+Affected Rows: 5
+
+-- Test NaN in aggregates
+SELECT COUNT(*), COUNT(val) FROM nan_test;
+
++----------+---------------------+
+| count(*) | count(nan_test.val) |
++----------+---------------------+
+| 5        | 5                   |
++----------+---------------------+
+
+SELECT MAX(val), MIN(val) FROM nan_test;
+
++-------------------+-------------------+
+| max(nan_test.val) | min(nan_test.val) |
++-------------------+-------------------+
+| NaN               | 1.0               |
++-------------------+-------------------+
+
+SELECT SUM(val), AVG(val) FROM nan_test;
+
++-------------------+-------------------+
+| sum(nan_test.val) | avg(nan_test.val) |
++-------------------+-------------------+
+| NaN               | NaN               |
++-------------------+-------------------+
+
+-- Test NaN comparisons
+SELECT val, val = val FROM nan_test ORDER BY ts;
+
++-----+-----------------------------+
+| val | nan_test.val = nan_test.val |
++-----+-----------------------------+
+| NaN | true                        |
+| 1.0 | true                        |
+| 2.0 | true                        |
+| NaN | true                        |
+| 3.0 | true                        |
++-----+-----------------------------+
+
+SELECT val, val IS NULL FROM nan_test ORDER BY ts;
+
++-----+----------------------+
+| val | nan_test.val IS NULL |
++-----+----------------------+
+| NaN | false                |
+| 1.0 | false                |
+| 2.0 | false                |
+| NaN | false                |
+| 3.0 | false                |
++-----+----------------------+
+
+-- Test arithmetic with infinity and NaN
+SELECT 'inf'::DOUBLE + 1;
+
++------------------------+
+| Utf8("inf") + Int64(1) |
++------------------------+
+| inf                    |
++------------------------+
+
+SELECT 'inf'::DOUBLE - 'inf'::DOUBLE;
+
++---------------------------+
+| Utf8("inf") - Utf8("inf") |
++---------------------------+
+| NaN                       |
++---------------------------+
+
+SELECT 'inf'::DOUBLE * 0;
+
++------------------------+
+| Utf8("inf") * Int64(0) |
++------------------------+
+| NaN                    |
++------------------------+
+
+SELECT 'nan'::DOUBLE + 1;
+
++------------------------+
+| Utf8("nan") + Int64(1) |
++------------------------+
+| NaN                    |
++------------------------+
+
+SELECT 'nan'::DOUBLE * 0;
+
++------------------------+
+| Utf8("nan") * Int64(0) |
++------------------------+
+| NaN                    |
++------------------------+
+
+DROP TABLE inf_test;
+
+Affected Rows: 0
+
+DROP TABLE nan_test;
+
+Affected Rows: 0
+

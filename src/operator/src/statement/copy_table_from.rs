@@ -20,8 +20,9 @@ use std::sync::Arc;
 use client::{Output, OutputData, OutputMeta};
 use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::CsvFormat;
+use common_datasource::file_format::json::JsonFormat;
 use common_datasource::file_format::orc::{ReaderAdapter, infer_orc_schema, new_orc_stream_reader};
-use common_datasource::file_format::{FileFormat, Format};
+use common_datasource::file_format::{FileFormat, Format, file_to_stream};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{FS_SCHEMA, build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
@@ -29,14 +30,9 @@ use common_query::{OutputCost, OutputRows};
 use common_recordbatch::DfSendableRecordBatchStream;
 use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
 use common_telemetry::{debug, tracing};
-use datafusion::datasource::listing::PartitionedFile;
-use datafusion::datasource::object_store::ObjectStoreUrl;
-use datafusion::datasource::physical_plan::{
-    CsvSource, FileGroup, FileScanConfigBuilder, FileSource, FileStream, JsonSource,
-};
+use datafusion::datasource::physical_plan::{CsvSource, FileSource, JsonSource};
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datafusion::parquet::arrow::arrow_reader::ArrowReaderMetadata;
-use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
@@ -55,6 +51,7 @@ use crate::statement::StatementExecutor;
 
 const DEFAULT_BATCH_SIZE: usize = 8192;
 const DEFAULT_READ_BUFFER: usize = 256 * 1024;
+
 enum FileMetadata {
     Parquet {
         schema: SchemaRef,
@@ -67,6 +64,7 @@ enum FileMetadata {
     },
     Json {
         schema: SchemaRef,
+        format: JsonFormat,
         path: String,
     },
     Csv {
@@ -147,6 +145,7 @@ impl StatementExecutor {
                         .await
                         .context(error::InferSchemaSnafu { path: &path })?,
                 ),
+                format,
                 path,
             }),
             Format::Parquet(_) => {
@@ -195,33 +194,6 @@ impl StatementExecutor {
         }
     }
 
-    async fn build_file_stream(
-        &self,
-        store: &ObjectStore,
-        filename: &str,
-        file_schema: SchemaRef,
-        file_source: Arc<dyn FileSource>,
-        projection: Option<Vec<usize>>,
-    ) -> Result<DfSendableRecordBatchStream> {
-        let config = FileScanConfigBuilder::new(
-            ObjectStoreUrl::local_filesystem(),
-            file_schema,
-            file_source.clone(),
-        )
-        .with_file_group(FileGroup::new(vec![PartitionedFile::new(filename, 0)]))
-        .with_projection(projection)
-        .build();
-
-        let store = Arc::new(object_store_opendal::OpendalStore::new(store.clone()));
-        let file_opener = file_source
-            .with_projection(&config)
-            .create_file_opener(store, &config, 0);
-        let stream = FileStream::new(&config, 0, file_opener, &ExecutionPlanMetricsSet::new())
-            .context(error::BuildFileStreamSnafu)?;
-
-        Ok(Box::pin(stream))
-    }
-
     async fn build_read_stream(
         &self,
         compat_schema: SchemaRef,
@@ -245,16 +217,16 @@ impl StatementExecutor {
                 let csv_source = CsvSource::new(format.has_header, format.delimiter, b'"')
                     .with_schema(schema.clone())
                     .with_batch_size(DEFAULT_BATCH_SIZE);
-
-                let stream = self
-                    .build_file_stream(
-                        object_store,
-                        path,
-                        schema.clone(),
-                        csv_source,
-                        Some(projection),
-                    )
-                    .await?;
+                let stream = file_to_stream(
+                    object_store,
+                    path,
+                    schema.clone(),
+                    csv_source,
+                    Some(projection),
+                    format.compression_type,
+                )
+                .await
+                .context(error::BuildFileStreamSnafu)?;
 
                 Ok(Box::pin(
                     // The projection is already applied in the CSV reader when we created the stream,
@@ -264,7 +236,11 @@ impl StatementExecutor {
                         .context(error::PhysicalExprSnafu)?,
                 ))
             }
-            FileMetadata::Json { path, schema } => {
+            FileMetadata::Json {
+                path,
+                format,
+                schema,
+            } => {
                 let output_schema = Arc::new(
                     compat_schema
                         .project(&projection)
@@ -274,16 +250,16 @@ impl StatementExecutor {
                 let json_source = JsonSource::new()
                     .with_schema(schema.clone())
                     .with_batch_size(DEFAULT_BATCH_SIZE);
-
-                let stream = self
-                    .build_file_stream(
-                        object_store,
-                        path,
-                        schema.clone(),
-                        json_source,
-                        Some(projection),
-                    )
-                    .await?;
+                let stream = file_to_stream(
+                    object_store,
+                    path,
+                    schema.clone(),
+                    json_source,
+                    Some(projection),
+                    format.compression_type,
+                )
+                .await
+                .context(error::BuildFileStreamSnafu)?;
 
                 Ok(Box::pin(
                     // The projection is already applied in the JSON reader when we created the stream,

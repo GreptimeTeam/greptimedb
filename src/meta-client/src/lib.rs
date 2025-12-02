@@ -101,7 +101,7 @@ pub async fn create_meta_client(
 
     if let MetaClientType::Frontend = client_type {
         let ddl_config = base_config.clone().timeout(meta_client_options.ddl_timeout);
-        builder = builder.ddl_channel_manager(ChannelManager::with_config(ddl_config));
+        builder = builder.ddl_channel_manager(ChannelManager::with_config(ddl_config, None));
         if let Some(plugins) = plugins {
             let region_follower = plugins.get::<RegionFollowerClientRef>();
             if let Some(region_follower) = region_follower {
@@ -112,8 +112,8 @@ pub async fn create_meta_client(
     }
 
     builder = builder
-        .channel_manager(ChannelManager::with_config(base_config))
-        .heartbeat_channel_manager(ChannelManager::with_config(heartbeat_config));
+        .channel_manager(ChannelManager::with_config(base_config, None))
+        .heartbeat_channel_manager(ChannelManager::with_config(heartbeat_config, None));
 
     let mut meta_client = builder.build();
 

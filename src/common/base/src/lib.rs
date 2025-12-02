@@ -15,10 +15,12 @@
 pub mod bit_vec;
 pub mod bytes;
 pub mod cancellation;
+pub mod memory_limit;
 pub mod plugins;
 pub mod range_read;
 #[allow(clippy::all)]
 pub mod readable_size;
+pub mod regex_pattern;
 pub mod secrets;
 pub mod serde;
 
