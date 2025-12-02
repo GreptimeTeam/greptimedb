@@ -997,8 +997,8 @@ impl FlushScheduler {
             }
         };
 
-        // Schedule next flush job.
-        self.schedule_next_flush(ScheduleNextFlushReason::Success(region_id));
+        // Schedule pending flush tasks.
+        self.schedule_pending_flush_tasks(ScheduleFlushReason::Success(region_id));
 
         pending_requests
     }
@@ -1017,8 +1017,8 @@ impl FlushScheduler {
         // Fast fail: cancels all pending tasks and sends error to their waiters.
         flush_status.on_failure(err);
 
-        // Still tries to schedule a new flush.
-        self.schedule_next_flush(ScheduleNextFlushReason::Failed(region_id));
+        // Still tries to schedule pending flush tasks.
+        self.schedule_pending_flush_tasks(ScheduleFlushReason::Failed(region_id));
     }
 
     /// Notifies the scheduler that the region is dropped.
@@ -1090,8 +1090,8 @@ impl FlushScheduler {
             .unwrap_or(false)
     }
 
-    /// Schedules a new flush task when the scheduler can submit next task.
-    pub(crate) fn schedule_next_flush(&mut self, reason: ScheduleNextFlushReason) {
+    /// Schedules pending flush tasks.
+    pub(crate) fn schedule_pending_flush_tasks(&mut self, reason: ScheduleFlushReason) {
         debug_assert!(
             self.region_status
                 .values()
@@ -1114,13 +1114,13 @@ impl FlushScheduler {
             let region_id = task.region_id;
             if let Err(err) = self.schedule_flush(region_id, &version_control, task) {
                 match reason {
-                    ScheduleNextFlushReason::Success(previous_region_id) => {
+                    ScheduleFlushReason::Success(previous_region_id) => {
                         error!(
                             err;
                             "Flush succeeded for region {previous_region_id}, but failed to schedule next flush for region {region_id}."
                         );
                     }
-                    ScheduleNextFlushReason::Failed(previous_region_id) => {
+                    ScheduleFlushReason::Failed(previous_region_id) => {
                         error!(
                             err;
                             "Flush failed for region {previous_region_id}, and also failed to schedule next flush for region {region_id}."
@@ -1132,9 +1132,11 @@ impl FlushScheduler {
     }
 }
 
-/// Reason for scheduling next flush.
-pub(crate) enum ScheduleNextFlushReason {
+/// Reason for scheduling flush tasks.
+pub(crate) enum ScheduleFlushReason {
+    /// The previous flush task succeeded.
     Success(RegionId),
+    /// The previous flush task failed.
     Failed(RegionId),
 }
 
