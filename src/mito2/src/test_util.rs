@@ -1020,9 +1020,15 @@ pub struct MockWriteBufferManager {
     should_stall: AtomicBool,
     memory_used: AtomicUsize,
     memory_active: AtomicUsize,
+    flush_limit: usize,
 }
 
 impl MockWriteBufferManager {
+    /// Set flush limit.
+    pub fn set_flush_limit(&mut self, flush_limit: usize) {
+        self.flush_limit = flush_limit;
+    }
+
     /// Set whether to flush the engine.
     pub fn set_should_flush(&self, value: bool) {
         self.should_flush.store(value, Ordering::Relaxed);
@@ -1063,6 +1069,10 @@ impl WriteBufferManager for MockWriteBufferManager {
 
     fn memory_usage(&self) -> usize {
         self.memory_used.load(Ordering::Relaxed)
+    }
+
+    fn flush_limit(&self) -> usize {
+        self.flush_limit
     }
 }
 
