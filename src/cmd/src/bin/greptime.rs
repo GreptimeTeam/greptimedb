@@ -23,6 +23,13 @@ use common_base::Plugins;
 use common_version::{verbose_version, version};
 use servers::install_ring_crypto_provider;
 
+#[cfg(unix)]
+use nix::sys::wait::waitpid;
+#[cfg(unix)]
+use nix::unistd::{chdir, close, dup2, fork, setsid, ForkResult};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+
 #[derive(Parser)]
 #[command(name = "greptime", author, version, long_version = verbose_version(), about)]
 #[command(propagate_version = true)]
@@ -95,10 +102,75 @@ async fn main() -> Result<()> {
     main_body().await
 }
 
+/// Daemonize the process
+fn daemonize() -> Result<()> {
+    #[cfg(unix)]
+    {
+        // Fork the first child
+        match unsafe { fork().map_err(|e| cmd::error::OtherSnafu { source: e.into() }.build())? } {
+            ForkResult::Parent { child, .. } => {
+                // Wait for the child to initialize
+                waitpid(child, None).map_err(|e| cmd::error::OtherSnafu { source: e.into() }.build())?;
+                std::process::exit(0);
+            }
+            ForkResult::Child => {
+                // Create a new session
+                setsid().map_err(|e| cmd::error::OtherSnafu { source: e.into() }.build())?;
+                
+                // Fork the second child to avoid acquiring a controlling terminal
+                match unsafe { fork().map_err(|e| cmd::error::OtherSnafu { source: e.into() }.build())? } {
+                    ForkResult::Parent { .. } => std::process::exit(0),
+                    ForkResult::Child => {
+                        // Change working directory to root
+                        chdir("/").map_err(|e| cmd::error::OtherSnafu { source: e.into() }.build())?;
+                        
+                        // Close standard file descriptors
+                        close(0).map_err(|e| cmd::error::OtherSnafu { source: e.into() }.build())?;
+                        close(1).map_err(|e| cmd::error::OtherSnafu { source: e.into() }.build())?;
+                        close(2).map_err(|e| cmd::error::OtherSnafu { source: e.into() }.build())?;
+                        
+                        // Open /dev/null and duplicate it to stdin, stdout, stderr
+                        let dev_null = OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open("/dev/null")
+                            .context(cmd::error::FileIoSnafu)?;
+                        let dev_null_fd = dev_null.as_raw_fd();
+                        dup2(dev_null_fd, 0).map_err(|e| cmd::error::OtherSnafu { source: e.into() }.build())?;
+                        dup2(dev_null_fd, 1).map_err(|e| cmd::error::OtherSnafu { source: e.into() }.build())?;
+                        dup2(dev_null_fd, 2).map_err(|e| cmd::error::OtherSnafu { source: e.into() }.build())?;
+                        
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+    
+    #[cfg(windows)]
+    {
+        // Daemon mode is not supported on Windows
+        // Just return Ok for now, could be enhanced with Windows service support in the future
+        Ok(())
+    }
+}
+
 async fn main_body() -> Result<()> {
     setup_human_panic();
     install_ring_crypto_provider().map_err(|msg| InitTlsProviderSnafu { msg }.build())?;
-    start(Command::parse()).await
+    
+    let cli = Command::parse();
+    
+    // Check if daemon mode is enabled
+    if let Command { subcmd: SubCommand::Standalone(standalone_cmd), .. } = &cli {
+        if let standalone::SubCommand::Start(start_cmd) = &standalone_cmd.subcmd {
+            if start_cmd.daemon {
+                daemonize()?;
+            }
+        }
+    }
+    
+    start(cli).await
 }
 
 async fn start(cli: Command) -> Result<()> {
@@ -113,31 +185,31 @@ async fn start(cli: Command) -> Result<()> {
             datanode::SubCommand::Objbench(ref bench) => bench.run().await,
         },
         SubCommand::Flownode(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
+            cmd.build(cmd.load_options(&cli.global_options)?) 
                 .await?
                 .run()
                 .await
         }
         SubCommand::Frontend(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
+            cmd.build(cmd.load_options(&cli.global_options)?) 
                 .await?
                 .run()
                 .await
         }
         SubCommand::Metasrv(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
+            cmd.build(cmd.load_options(&cli.global_options)?) 
                 .await?
                 .run()
                 .await
         }
         SubCommand::Standalone(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
+            cmd.build(cmd.load_options(&cli.global_options)?) 
                 .await?
                 .run()
                 .await
         }
         SubCommand::Cli(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
+            cmd.build(cmd.load_options(&cli.global_options)?) 
                 .await?
                 .run()
                 .await
