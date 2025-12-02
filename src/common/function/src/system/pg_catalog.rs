@@ -386,6 +386,7 @@ impl PGCatalogFunction {
         registry.register(pg_catalog::create_pg_total_relation_size_udf());
         registry.register(pg_catalog::create_pg_stat_get_numscans());
         registry.register(pg_catalog::create_pg_get_constraintdef());
+        registry.register(pg_catalog::create_pg_get_partition_ancestors_udf());
         registry.register_scalar(ObjDescriptionFunction::new());
         registry.register_scalar(ColDescriptionFunction::new());
         registry.register_scalar(ShobjDescriptionFunction::new());
