@@ -883,21 +883,6 @@ impl FlushScheduler {
         self.region_status.contains_key(&region_id)
     }
 
-    /// Schedules the pending task for the region.
-    ///
-    /// # Panics
-    /// Panic if the flush status is not set.
-    /// Panic if the pending task is not set.
-    pub(crate) fn schedule_pending_task(&mut self, region_id: RegionId) -> Result<()> {
-        debug!("Scheduling pending flush task for region {}", region_id);
-        let flush_status = self.region_status.get_mut(&region_id).unwrap();
-        let task = flush_status.pending_task.take().unwrap();
-        let version_control = flush_status.version_control.clone();
-        self.schedule_flush_task(&version_control, task)?;
-
-        Ok(())
-    }
-
     fn schedule_flush_task(
         &mut self,
         version_control: &VersionControlRef,
@@ -1000,13 +985,11 @@ impl FlushScheduler {
             let task = flush_status.pending_task.take().unwrap();
             // The region has nothing to flush. We can notify pending task.
             task.on_success();
-            // `schedule_next_flush()` may pick up the same region to flush, so we must remove
-            // it from the status to avoid leaking pending requests.
-            // Safety: The flush status must exist.
             debug!(
                 "Region {} has nothing to flush, removing it from the status",
                 region_id
             );
+            // Safety: The flush status must exist.
             let flush_status = self.region_status.remove(&region_id).unwrap();
             return Some((
                 flush_status.pending_ddls,
@@ -1016,7 +999,11 @@ impl FlushScheduler {
         }
 
         // If region has pending task and has something to flush, we need to schedule it.
-        if let Err(err) = self.schedule_pending_task(region_id) {
+        debug!("Scheduling pending flush task for region {}", region_id);
+        // Safety: The flush status must exist.
+        let task = flush_status.pending_task.take().unwrap();
+        let version_control = flush_status.version_control.clone();
+        if let Err(err) = self.schedule_flush_task(&version_control, task) {
             error!(
                 err;
                 "Flush succeeded for region {region_id}, but failed to schedule next flush for it."
