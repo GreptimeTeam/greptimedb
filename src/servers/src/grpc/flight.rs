@@ -233,6 +233,7 @@ impl FlightCraft for GreptimeRequestHandler {
             limiter,
         )
         .await?;
+        // Ack to the first schema message when we successfully built the stream.
         let _ = tx.send(Ok(DoPutResponse::new(0, 0, 0.0))).await;
         self.put_record_batches(stream, tx, query_ctx).await;
 
@@ -380,15 +381,18 @@ impl PutRecordBatchRequestStream {
         })
     }
 
+    /// Returns the table name extracted from the flight descriptor.
     pub fn table_name(&self) -> &TableName {
         &self.table_name
     }
 
+    /// Returns the Arrow schema decoded from the first flight message.
     pub fn schema(&self) -> &SchemaRef {
         &self.schema
     }
 
-    pub fn schema_bytes(&self) -> &bytes::Bytes {
+    /// Returns the raw schema bytes in IPC format.
+    pub fn schema_bytes(&self) -> &Bytes {
         &self.schema_bytes
     }
 }

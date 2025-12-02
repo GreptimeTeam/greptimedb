@@ -353,7 +353,8 @@ impl GrpcQueryHandler for Instance {
                         // Convert tonic::Status to Error
                         let error_msg = format!("Stream error: {}", e);
                         yield Err(IncompleteGrpcRequestSnafu { err_msg: error_msg }.build());
-                        continue;
+                        // Terminate the stream
+                        return;
                     }
                 };
 

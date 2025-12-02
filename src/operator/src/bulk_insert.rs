@@ -23,6 +23,7 @@ use api::v1::region::{
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use common_base::AffectedRows;
+use common_grpc::FlightData;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
@@ -95,7 +96,13 @@ impl Inserter {
                 .start_timer();
             let mut encoder = FlightEncoder::default();
             let encoded = encoder.encode(FlightMessage::RecordBatch(record_batch.clone()));
-            let flight_data = encoded.first();
+
+            // Safety: encoded must contain at least one element because it's a Vec1.
+            let FlightData {
+                data_header,
+                data_body,
+                ..
+            } = encoded.into_iter().next().unwrap();
             encode_timer.observe_duration();
 
             let request = RegionRequest {
@@ -107,8 +114,8 @@ impl Inserter {
                     region_id: region_id.as_u64(),
                     body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                         schema: schema_bytes.clone(),
-                        data_header: flight_data.data_header.clone(),
-                        payload: flight_data.data_body.clone(),
+                        data_header,
+                        payload: data_body,
                     })),
                 })),
             };
@@ -156,11 +163,12 @@ impl Inserter {
             .start_timer();
         let mut encoder = FlightEncoder::default();
         let encoded = encoder.encode(FlightMessage::RecordBatch(record_batch.clone()));
-        let flight_data = encoded.first();
-        let raw_data_bytes = (
-            flight_data.data_header.clone(),
-            flight_data.data_body.clone(),
-        );
+        let FlightData {
+            data_header,
+            data_body,
+            ..
+        } = encoded.into_iter().next().unwrap();
+        let raw_data_bytes = (data_header, data_body);
         encode_timer.observe_duration();
 
         for (peer, masks) in mask_per_datanode {
