@@ -397,7 +397,7 @@ impl ParquetReaderBuilder {
         // Tries to get from cache with metrics tracking.
         if let Some(metadata) = self
             .cache_strategy
-            .get_parquet_meta_data_with_metrics(file_id, cache_metrics)
+            .get_parquet_meta_data(file_id, cache_metrics)
             .await
         {
             cache_metrics.metadata_load_cost += start.elapsed();
