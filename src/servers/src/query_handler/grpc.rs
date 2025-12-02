@@ -21,6 +21,7 @@ use common_base::AffectedRows;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_query::Output;
 use futures::Stream;
+use futures_util::StreamExt;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use table::TableRef;
@@ -54,7 +55,7 @@ pub trait GrpcQueryHandler {
         &self,
         stream: PutRecordBatchRequestStream,
         ctx: QueryContextRef,
-    ) -> Pin<Box<dyn Stream<Item = std::result::Result<(i64, AffectedRows), Self::Error>> + Send>>;
+    ) -> Pin<Box<dyn Stream<Item = (i64, std::result::Result<AffectedRows, Self::Error>)> + Send>>;
 }
 
 pub struct ServerGrpcQueryHandlerAdapter<E>(GrpcQueryHandlerRef<E>);
@@ -97,16 +98,17 @@ where
         &self,
         stream: PutRecordBatchRequestStream,
         ctx: QueryContextRef,
-    ) -> Pin<Box<dyn Stream<Item = Result<(i64, AffectedRows)>> + Send>> {
-        use futures_util::StreamExt;
+    ) -> Pin<Box<dyn Stream<Item = (i64, Result<AffectedRows>)> + Send>> {
         Box::pin(
             self.0
                 .handle_put_record_batch_stream(stream, ctx)
-                .map(|result| {
-                    result
-                        .map_err(|e| BoxedError::new(e))
-                        .context(error::ExecuteGrpcRequestSnafu)
-                        .and_then(|(id, rows)| Ok((id, rows)))
+                .map(|(id, result)| {
+                    (
+                        id,
+                        result
+                            .map_err(|e| BoxedError::new(e))
+                            .context(error::ExecuteGrpcRequestSnafu),
+                    )
                 }),
         )
     }

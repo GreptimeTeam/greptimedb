@@ -22,7 +22,6 @@ use api::v1::region::{
 };
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
-use bytes;
 use common_base::AffectedRows;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_telemetry::error;

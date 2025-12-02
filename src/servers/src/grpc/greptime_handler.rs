@@ -145,15 +145,10 @@ impl GreptimeRequestHandler {
         runtime.spawn(async move {
             let mut result_stream = handler.handle_put_record_batch_stream(stream, query_ctx);
 
-            while let Some(result) = result_stream.next().await {
-                let (request_id, affected_rows_result) = match result {
-                    Ok((request_id, affected_rows)) => {
-                        (request_id, Ok(DoPutResponse::new(request_id, affected_rows)))
-                    }
-                    Err(e) => {
-                        // For errors, we don't have a request_id, so use 0
-                        (0, Err(Status::from_error(Box::new(e))))
-                    }
+            while let Some((request_id, result)) = result_stream.next().await {
+                let affected_rows_result = match result {
+                    Ok(affected_rows) => Ok(DoPutResponse::new(request_id, affected_rows)),
+                    Err(e) => Err(Status::from_error(Box::new(e))),
                 };
 
                 let timer = metrics::GRPC_BULK_INSERT_ELAPSED.start_timer();
@@ -161,7 +156,6 @@ impl GreptimeRequestHandler {
                     .inspect_err(|e| error!(e; "Failed to handle flight record batches"));
                 timer.observe_duration();
 
-                let send_result = send_result.map_err(Into::into);
                 if let Err(e) = result_sender.try_send(send_result)
                     && let TrySendError::Closed(_) = e {
                     warn!(r#""DoPut" client with request_id {} maybe unreachable, abort handling its message"#, request_id);

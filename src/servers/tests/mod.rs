@@ -175,7 +175,7 @@ impl GrpcQueryHandler for DummyInstance {
         _ctx: QueryContextRef,
     ) -> std::pin::Pin<
         Box<
-            dyn futures::Stream<Item = std::result::Result<(i64, AffectedRows), Self::Error>>
+            dyn futures::Stream<Item = (i64, std::result::Result<AffectedRows, Self::Error>)>
                 + Send,
         >,
     > {

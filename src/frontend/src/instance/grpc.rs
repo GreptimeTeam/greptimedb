@@ -293,7 +293,7 @@ impl GrpcQueryHandler for Instance {
         &self,
         mut stream: servers::grpc::flight::PutRecordBatchRequestStream,
         ctx: QueryContextRef,
-    ) -> Pin<Box<dyn Stream<Item = Result<(i64, AffectedRows)>> + Send>> {
+    ) -> Pin<Box<dyn Stream<Item = (i64, Result<AffectedRows>)> + Send>> {
         // Resolve table once for the stream
         // Clone all necessary data to make it 'static
         let catalog_manager = self.catalog_manager().clone();
@@ -320,7 +320,8 @@ impl GrpcQueryHandler for Instance {
                 }) {
                 Ok(table) => table,
                 Err(e) => {
-                    yield Err(e);
+                    // For initial errors before we have a request, use 0 as request_id
+                    yield (0, Err(e));
                     return;
                 }
             };
@@ -329,7 +330,7 @@ impl GrpcQueryHandler for Instance {
             let interceptor_ref = plugins.get::<GrpcQueryInterceptorRef<Error>>();
             let interceptor = interceptor_ref.as_ref();
             if let Err(e) = interceptor.pre_bulk_insert(table_ref.clone(), ctx.clone()) {
-                yield Err(e);
+                yield (0, Err(e));
                 return;
             }
 
@@ -339,7 +340,7 @@ impl GrpcQueryHandler for Instance {
                 .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
                 .context(PermissionSnafu)
             {
-                yield Err(e);
+                yield (0, Err(e));
                 return;
             }
 
@@ -348,9 +349,9 @@ impl GrpcQueryHandler for Instance {
                 let request = match request_result {
                     Ok(request) => request,
                     Err(e) => {
-                        // Convert tonic::Status to Error
+                        // We don't have a request_id here, so use 0
                         let error_msg = format!("Stream error: {}", e);
-                        yield Err(IncompleteGrpcRequestSnafu { err_msg: error_msg }.build());
+                        yield (0, Err(IncompleteGrpcRequestSnafu { err_msg: error_msg }.build()));
                         continue;
                     }
                 };
@@ -366,7 +367,7 @@ impl GrpcQueryHandler for Instance {
                     .await
                     .context(TableOperationSnafu);
 
-                yield result.map(|rows| (request_id, rows));
+                yield (request_id, result);
             }
         })
     }

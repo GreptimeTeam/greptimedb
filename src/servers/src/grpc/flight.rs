@@ -334,11 +334,9 @@ impl PutRecordBatchRequestStream {
         }
 
         // Wait for the first message which must be a Schema message
-        let first_message = flight_data_stream
-            .next()
-            .await
-            .ok_or_else(|| Status::failed_precondition("flight data stream ended unexpectedly"))?
-            .map_err(Status::from)?;
+        let first_message = flight_data_stream.next().await.ok_or_else(|| {
+            Status::failed_precondition("flight data stream ended unexpectedly")
+        })??;
 
         let flight_descriptor = first_message
             .flight_descriptor
@@ -451,7 +449,7 @@ impl Stream for PutRecordBatchRequestStream {
                     }
                 }
                 Some(Err(e)) => {
-                    return Poll::Ready(Some(Err(Status::from(e))));
+                    return Poll::Ready(Some(Err(e)));
                 }
                 None => {
                     return Poll::Ready(None);
