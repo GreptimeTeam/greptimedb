@@ -43,7 +43,7 @@ use tonic::Status;
 use crate::error::{InvalidQuerySnafu, JoinTaskSnafu, Result, UnknownHintSnafu};
 use crate::grpc::flight::PutRecordBatchRequestStream;
 use crate::grpc::{FlightCompression, TonicResult, context_auth};
-use crate::metrics::METRIC_SERVER_GRPC_DB_REQUEST_TIMER;
+use crate::metrics::{self, METRIC_SERVER_GRPC_DB_REQUEST_TIMER};
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
 #[derive(Clone)]
@@ -145,10 +145,15 @@ impl GreptimeRequestHandler {
             let mut result_stream = handler.handle_put_record_batch_stream(stream, query_ctx);
 
             while let Some(result) = result_stream.next().await {
-                // let timer = metrics::GRPC_BULK_INSERT_ELAPSED.start_timer();
-                // let send_result = affected_rows_result
-                //     .inspect_err(|e| error!(e; "Failed to handle flight record batches"));
-                // timer.observe_duration();
+                match &result {
+                    Ok(response) => {
+                        // Record the elapsed time metric from the response
+                        metrics::GRPC_BULK_INSERT_ELAPSED.observe(response.elapsed_secs());
+                    }
+                    Err(e) => {
+                        error!(e; "Failed to handle flight record batches");
+                    }
+                }
 
                 if let Err(e) =
                     result_sender.try_send(result.map_err(|e| Status::from_error(Box::new(e))))

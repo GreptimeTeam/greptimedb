@@ -14,6 +14,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 use api::helper::from_pb_time_ranges;
 use api::v1::ddl_request::{Expr as DdlExpr, Expr};
@@ -357,6 +358,7 @@ impl GrpcQueryHandler for Instance {
                 };
 
                 let request_id = request.request_id;
+                let start = Instant::now();
                 let result = inserter
                     .handle_bulk_insert(
                         table_ref.clone(),
@@ -366,9 +368,10 @@ impl GrpcQueryHandler for Instance {
                     )
                     .await
                     .context(TableOperationSnafu);
+                let elapsed_secs = start.elapsed().as_secs_f64();
 
                 yield result.map(|rows| {
-                    DoPutResponse::new(request_id, rows)
+                    DoPutResponse::new(request_id, rows, elapsed_secs)
                 });
             }
         })

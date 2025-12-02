@@ -233,7 +233,7 @@ impl FlightCraft for GreptimeRequestHandler {
             limiter,
         )
         .await?;
-        let _ = tx.send(Ok(DoPutResponse::new(0, 0))).await;
+        let _ = tx.send(Ok(DoPutResponse::new(0, 0, 0.0))).await;
         self.put_record_batches(stream, tx, query_ctx).await;
 
         let response = ReceiverStream::new(rx)
