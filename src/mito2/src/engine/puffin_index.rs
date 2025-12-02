@@ -104,7 +104,9 @@ pub(crate) async fn collect_index_entries_from_puffin(
             Some(BlobIndexTypeTargetKey::BloomFilter(target_key)) => {
                 let bloom_meta = try_read_bloom_meta(
                     &reader,
-                    region_index_id.file_id, // FIXME(discord9): confirm correctness
+                    // version is not needed here since rebuild index would be another type of index(and this one will invalidate)
+                    // and building a new index also wouldn't be in the cache
+                    region_index_id.file_id,
                     blob.blob_type.as_str(),
                     target_key,
                     bloom_filter_cache.as_ref(),
@@ -130,7 +132,9 @@ pub(crate) async fn collect_index_entries_from_puffin(
             Some(BlobIndexTypeTargetKey::FulltextBloom(target_key)) => {
                 let bloom_meta = try_read_bloom_meta(
                     &reader,
-                    region_index_id.file_id, // FIXME(discord9): confirm correctness
+                    // version is not needed here since rebuild index would be another type of index(and this one will invalidate)
+                    // and building a new index also wouldn't be in the cache
+                    region_index_id.file_id,
                     blob.blob_type.as_str(),
                     target_key,
                     bloom_filter_cache.as_ref(),
@@ -172,7 +176,9 @@ pub(crate) async fn collect_index_entries_from_puffin(
             Some(BlobIndexTypeTargetKey::Inverted) => {
                 let mut inverted_entries = collect_inverted_entries(
                     &reader,
-                    region_index_id.file_id, // FIXME(discord9): confirm correctness
+                    // version is not needed here since rebuild index would be another type of index(and this one will invalidate)
+                    // and building a new index also wouldn't be in the cache
+                    region_index_id.file_id,
                     inverted_index_cache.as_ref(),
                     &context,
                 )
