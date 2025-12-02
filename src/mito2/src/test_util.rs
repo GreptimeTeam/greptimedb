@@ -1024,6 +1024,11 @@ pub struct MockWriteBufferManager {
 }
 
 impl MockWriteBufferManager {
+    /// Set flush limit.
+    pub fn set_flush_limit(&mut self, flush_limit: usize) {
+        self.flush_limit = flush_limit;
+    }
+
     /// Set whether to flush the engine.
     pub fn set_should_flush(&self, value: bool) {
         self.should_flush.store(value, Ordering::Relaxed);

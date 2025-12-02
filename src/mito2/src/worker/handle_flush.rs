@@ -92,7 +92,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     &region.version_control,
                     task,
                 )?;
-            } else {
+            } else if region_memtable_size > 0 {
+                // We should only consider regions with memtable size > 0 to flush.
                 pending_regions.push((region, region_memtable_size));
             }
         }
@@ -103,9 +104,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let target_memory_usage = self.write_buffer_manager.flush_limit();
         let mut memory_usage = self.write_buffer_manager.memory_usage();
 
+        #[cfg(test)]
+        {
+            debug!(
+                "Flushing regions on engine full, target memory usage: {}, memory usage: {}, pending regions: {:?}",
+                target_memory_usage,
+                memory_usage,
+                pending_regions
+                    .iter()
+                    .map(|(region, mem_size)| (region.region_id, mem_size))
+                    .collect::<Vec<_>>()
+            );
+        }
         // Iterate over pending regions in descending order of their memory size and schedule flush tasks
         // for each region until the overall memory usage drops below the flush limit.
         for (region, region_mem_size) in pending_regions.into_iter() {
+            // Make sure the first region is always flushed.
             if memory_usage < target_memory_usage {
                 // Stop flushing regions if memory usage is already below the flush limit
                 break;
@@ -117,6 +131,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.config.clone(),
                 region.is_staging(),
             );
+            debug!("Scheduling flush task for region {}", region.region_id);
             // Schedule a flush task for the current region
             self.flush_scheduler
                 .schedule_flush(region.region_id, &region.version_control, task)?;

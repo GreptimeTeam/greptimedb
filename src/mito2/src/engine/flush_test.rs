@@ -515,6 +515,7 @@ async fn test_flush_workers() {
 }
 
 async fn test_flush_workers_with_format(flat_format: bool) {
+    common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let listener = Arc::new(FlushListener::default());
@@ -574,7 +575,7 @@ async fn test_flush_workers_with_format(flat_format: bool) {
     put_rows(&engine, region_id0, rows).await;
 
     // Waits until flush is finished.
-    while listener.success_count() < 2 {
+    while listener.success_count() < 3 {
         listener.wait().await;
     }
 
