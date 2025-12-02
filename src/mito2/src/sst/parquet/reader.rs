@@ -1051,12 +1051,10 @@ impl ReaderFilterMetrics {
 pub(crate) struct MetadataCacheMetrics {
     /// Number of memory cache hits for parquet metadata.
     pub(crate) mem_cache_hit: usize,
-    /// Number of memory cache misses for parquet metadata.
-    pub(crate) mem_cache_miss: usize,
     /// Number of file cache hits for parquet metadata.
     pub(crate) file_cache_hit: usize,
-    /// Number of file cache misses for parquet metadata.
-    pub(crate) file_cache_miss: usize,
+    /// Number of cache misses for parquet metadata.
+    pub(crate) cache_miss: usize,
     /// Duration to load parquet metadata.
     pub(crate) metadata_load_cost: Duration,
 }
@@ -1070,13 +1068,6 @@ impl std::fmt::Debug for MetadataCacheMetrics {
             write!(f, "\"mem_cache_hit\":{}", self.mem_cache_hit)?;
             first = false;
         }
-        if self.mem_cache_miss > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"mem_cache_miss\":{}", self.mem_cache_miss)?;
-            first = false;
-        }
         if self.file_cache_hit > 0 {
             if !first {
                 write!(f, ", ")?;
@@ -1084,11 +1075,11 @@ impl std::fmt::Debug for MetadataCacheMetrics {
             write!(f, "\"file_cache_hit\":{}", self.file_cache_hit)?;
             first = false;
         }
-        if self.file_cache_miss > 0 {
+        if self.cache_miss > 0 {
             if !first {
                 write!(f, ", ")?;
             }
-            write!(f, "\"file_cache_miss\":{}", self.file_cache_miss)?;
+            write!(f, "\"cache_miss\":{}", self.cache_miss)?;
             first = false;
         }
         if !self.metadata_load_cost.is_zero() {
@@ -1110,9 +1101,8 @@ impl MetadataCacheMetrics {
     /// Adds `other` metrics to this metrics.
     pub(crate) fn merge_from(&mut self, other: &MetadataCacheMetrics) {
         self.mem_cache_hit += other.mem_cache_hit;
-        self.mem_cache_miss += other.mem_cache_miss;
         self.file_cache_hit += other.file_cache_hit;
-        self.file_cache_miss += other.file_cache_miss;
+        self.cache_miss += other.cache_miss;
         self.metadata_load_cost += other.metadata_load_cost;
     }
 }

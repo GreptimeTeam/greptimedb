@@ -90,8 +90,7 @@ impl CacheStrategy {
                 cache_manager.get_parquet_meta_data(file_id, metrics).await
             }
             CacheStrategy::Disabled => {
-                metrics.mem_cache_miss += 1;
-                metrics.file_cache_miss += 1;
+                metrics.cache_miss += 1;
                 None
             }
         }
@@ -310,7 +309,6 @@ impl CacheManager {
             metrics.mem_cache_hit += 1;
             return Some(metadata);
         }
-        metrics.mem_cache_miss += 1;
 
         // Try to get metadata from write cache
         let key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
@@ -323,7 +321,7 @@ impl CacheManager {
             self.put_parquet_meta_data(file_id, metadata.clone());
             return Some(metadata);
         };
-        metrics.file_cache_miss += 1;
+        metrics.cache_miss += 1;
 
         None
     }
