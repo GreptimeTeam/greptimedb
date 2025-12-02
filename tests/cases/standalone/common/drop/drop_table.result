@@ -40,12 +40,12 @@ Error: 4001(TableNotFound), Table not found: greptime.public.bar
 
 SHOW TABLES;
 
-+---------+
-| Tables  |
-+---------+
-| foo     |
-| numbers |
-+---------+
++------------------+
+| Tables_in_public |
++------------------+
+| foo              |
+| numbers          |
++------------------+
 
 DROP TABLE IF EXISTS foo, bar;
 

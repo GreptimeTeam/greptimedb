@@ -339,6 +339,16 @@ pub struct FlushRegions {
     pub error_strategy: FlushErrorStrategy,
 }
 
+impl Display for FlushRegions {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "FlushRegions(region_ids={:?}, strategy={:?}, error_strategy={:?})",
+            self.region_ids, self.strategy, self.error_strategy
+        )
+    }
+}
+
 impl FlushRegions {
     /// Create synchronous single-region flush
     pub fn sync_single(region_id: RegionId) -> Self {

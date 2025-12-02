@@ -133,6 +133,8 @@ impl Drop for RequestMemoryGuard {
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::Barrier;
+
     use super::*;
 
     #[test]
@@ -188,21 +190,33 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_limiter_concurrent() {
         let limiter = RequestMemoryLimiter::new(1000);
+        let barrier = Arc::new(Barrier::new(11)); // 10 tasks + main
         let mut handles = vec![];
 
         // Spawn 10 tasks each trying to acquire 200 bytes
         for _ in 0..10 {
             let limiter_clone = limiter.clone();
-            let handle = tokio::spawn(async move { limiter_clone.try_acquire(200) });
+            let barrier_clone = barrier.clone();
+            let handle = tokio::spawn(async move {
+                barrier_clone.wait().await;
+                limiter_clone.try_acquire(200)
+            });
             handles.push(handle);
         }
 
+        // Let all tasks start together
+        barrier.wait().await;
+
         let mut success_count = 0;
         let mut fail_count = 0;
+        let mut guards = Vec::new();
 
         for handle in handles {
             match handle.await.unwrap() {
-                Ok(Some(_)) => success_count += 1,
+                Ok(Some(guard)) => {
+                    success_count += 1;
+                    guards.push(guard);
+                }
                 Err(_) => fail_count += 1,
                 Ok(None) => unreachable!(),
             }
@@ -211,5 +225,6 @@ mod tests {
         // Only 5 tasks should succeed (5 * 200 = 1000)
         assert_eq!(success_count, 5);
         assert_eq!(fail_count, 5);
+        drop(guards);
     }
 }

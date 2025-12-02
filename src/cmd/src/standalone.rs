@@ -32,7 +32,7 @@ use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
-use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerConfigureContext};
+use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef};
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -58,6 +58,10 @@ use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
+use plugins::frontend::context::{
+    CatalogManagerConfigureContext, StandaloneCatalogManagerConfigureContext,
+};
+use plugins::standalone::context::DdlManagerConfigureContext;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
 use standalone::StandaloneInformationExtension;
@@ -414,9 +418,10 @@ impl StartCommand {
         let builder = if let Some(configurator) =
             plugins.get::<CatalogManagerConfiguratorRef<CatalogManagerConfigureContext>>()
         {
-            let ctx = CatalogManagerConfigureContext {
+            let ctx = StandaloneCatalogManagerConfigureContext {
                 fe_client: frontend_client.clone(),
             };
+            let ctx = CatalogManagerConfigureContext::Standalone(ctx);
             configurator
                 .configure(builder, ctx)
                 .await
@@ -506,9 +511,13 @@ impl StartCommand {
         let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager.clone(), true)
             .context(error::InitDdlManagerSnafu)?;
 
-        let ddl_manager = if let Some(configurator) = plugins.get::<DdlManagerConfiguratorRef>() {
+        let ddl_manager = if let Some(configurator) =
+            plugins.get::<DdlManagerConfiguratorRef<DdlManagerConfigureContext>>()
+        {
             let ctx = DdlManagerConfigureContext {
                 kv_backend: kv_backend.clone(),
+                fe_client: frontend_client.clone(),
+                catalog_manager: catalog_manager.clone(),
             };
             configurator
                 .configure(ddl_manager, ctx)
@@ -593,11 +602,6 @@ impl StartCommand {
 
         Ok(table_metadata_manager)
     }
-}
-
-/// The context for [`CatalogManagerConfigratorRef`] in standalone.
-pub struct CatalogManagerConfigureContext {
-    pub fe_client: Arc<FrontendClient>,
 }
 
 #[cfg(test)]

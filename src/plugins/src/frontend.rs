@@ -40,3 +40,25 @@ pub async fn setup_frontend_plugins(
 pub async fn start_frontend_plugins(_plugins: Plugins) -> Result<()> {
     Ok(())
 }
+
+pub mod context {
+    use std::sync::Arc;
+
+    use flow::FrontendClient;
+    use meta_client::MetaClientRef;
+
+    /// The context for [`catalog::kvbackend::CatalogManagerConfiguratorRef`] in standalone or
+    /// distributed.
+    pub enum CatalogManagerConfigureContext {
+        Distributed(DistributedCatalogManagerConfigureContext),
+        Standalone(StandaloneCatalogManagerConfigureContext),
+    }
+
+    pub struct DistributedCatalogManagerConfigureContext {
+        pub meta_client: MetaClientRef,
+    }
+
+    pub struct StandaloneCatalogManagerConfigureContext {
+        pub fe_client: Arc<FrontendClient>,
+    }
+}

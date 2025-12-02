@@ -32,7 +32,12 @@ impl Plugins {
 
     pub fn insert<T: 'static + Send + Sync>(&self, value: T) {
         let last = self.write().insert(value);
-        assert!(last.is_none(), "each type of plugins must be one and only");
+        if last.is_some() {
+            panic!(
+                "Plugin of type {} already exists",
+                std::any::type_name::<T>()
+            );
+        }
     }
 
     pub fn get<T: 'static + Send + Sync + Clone>(&self) -> Option<T> {
@@ -140,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "each type of plugins must be one and only")]
+    #[should_panic(expected = "Plugin of type i32 already exists")]
     fn test_plugin_uniqueness() {
         let plugins = Plugins::new();
         plugins.insert(1i32);

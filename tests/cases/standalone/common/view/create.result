@@ -45,23 +45,23 @@ Affected Rows: 0
 
 SHOW TABLES;
 
-+------------+
-| Tables     |
-+------------+
-| numbers    |
-| test_table |
-| test_view  |
-+------------+
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
+| test_table       |
+| test_view        |
++------------------+
 
 SHOW FULL TABLES;
 
-+------------+-----------------+
-| Tables     | Table_type      |
-+------------+-----------------+
-| numbers    | LOCAL TEMPORARY |
-| test_table | BASE TABLE      |
-| test_view  | VIEW            |
-+------------+-----------------+
++------------------+-----------------+
+| Tables_in_public | Table_type      |
++------------------+-----------------+
+| numbers          | LOCAL TEMPORARY |
+| test_table       | BASE TABLE      |
+| test_view        | VIEW            |
++------------------+-----------------+
 
 -- psql: \dv
 SELECT n.nspname as "Schema",
@@ -182,11 +182,11 @@ Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public
 
 SHOW TABLES;
 
-+---------+
-| Tables  |
-+---------+
-| numbers |
-+---------+
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
++------------------+
 
 -- psql: \dv
 SELECT n.nspname as "Schema",

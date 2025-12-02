@@ -166,3 +166,38 @@ drop table my_db.foo;
 
 -- SQLNESS PROTOCOL POSTGRES
 use public;
+
+-- PostgreSQL description functions - placeholder returning NULL for compatibility
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT obj_description((SELECT oid FROM pg_class LIMIT 1), 'pg_class') IS NULL AS is_null;
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT obj_description((SELECT oid FROM pg_class LIMIT 1)) IS NULL AS is_null;
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT col_description((SELECT oid FROM pg_class LIMIT 1), 1) IS NULL AS is_null;
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT shobj_description(1, 'pg_database') IS NULL AS is_null;
+
+-- pg_my_temp_schema returns 0 (no temp schema support)
+-- SQLNESS PROTOCOL POSTGRES
+SELECT pg_my_temp_schema();
+
+-- Issue 7313
+-- SQLNESS PROTOCOL POSTGRES
+-- SQLNESS REPLACE (\d+\s*) OID
+SELECT
+	oid
+	,nspname
+	,nspname = ANY (current_schemas(true)) AS is_on_search_path
+	
+	    ,obj_description(oid, 'pg_namespace') AS comment
+	
+FROM pg_namespace; SELECT
+oid
+,nspname
+FROM pg_namespace
+WHERE oid = pg_my_temp_schema();
+

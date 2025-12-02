@@ -54,6 +54,7 @@ log-query = { workspace = true }
 loki-proto.workspace = true
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
+mito2.workspace = true
 moka.workspace = true
 mysql_async = { version = "0.35", default-features = false, features = [
     "time",

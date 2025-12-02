@@ -9501,6 +9501,7 @@ name = "plugins"
 version = "1.0.0-beta.2"
 dependencies = [
  "auth",
+ "catalog",
  "clap 4.5.40",
  "cli",
  "common-base",
@@ -9509,6 +9510,7 @@ dependencies = [
  "datanode",
  "flow",
  "frontend",
+ "meta-client",
  "meta-srv",
  "serde",
  "snafu 0.8.6",
@@ -13065,6 +13067,7 @@ dependencies = [
  "loki-proto",
  "meta-client",
  "meta-srv",
+ "mito2",
  "moka",
  "mysql_async",
  "object-store",

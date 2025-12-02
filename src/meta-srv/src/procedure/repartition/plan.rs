@@ -21,6 +21,6 @@ use store_api::storage::RegionId;
 pub struct RegionDescriptor {
     /// The region id of the region involved in the plan.
     pub region_id: RegionId,
-    /// The partition expression of the region.
+    /// The new partition expression of the region.
     pub partition_expr: PartitionExpr,
 }
