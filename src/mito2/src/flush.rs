@@ -90,9 +90,10 @@ pub trait WriteBufferManager: Send + Sync + std::fmt::Debug {
     /// Returns the total memory used by memtables.
     fn memory_usage(&self) -> usize;
 
-    /// Returns the limit for flushing memtables.
+    /// Returns the mutable memtable memory limit.
     ///
-    /// The write buffer manager should flush memtables when the memory usage is greater than the flush limit.
+    /// The write buffer manager should flush memtables when the mutable memory usage
+    /// exceeds this limit.
     fn flush_limit(&self) -> usize;
 }
 

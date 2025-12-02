@@ -92,14 +92,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 pending_regions.push((region, region_memtable_size));
             }
         }
-        pending_regions.sort_unstable_by_key(|(_, size)| *size);
-        let flush_limit = self.write_buffer_manager.flush_limit();
+        pending_regions.sort_unstable_by_key(|(_, size)| std::cmp::Reverse(*size));
+        // The flush target is the mutable memtable limit (half of the global buffer).
+        // When memory is full, we aggressively flush regions until usage drops below this target,
+        // not just below the full limit.
+        let target_memory_usage = self.write_buffer_manager.flush_limit();
         let mut memory_usage = self.write_buffer_manager.memory_usage();
 
         // Iterate over pending regions in descending order of their memory size and schedule flush tasks
         // for each region until the overall memory usage drops below the flush limit.
-        for (region, region_mem_size) in pending_regions.into_iter().rev() {
-            if memory_usage < flush_limit {
+        for (region, region_mem_size) in pending_regions.into_iter() {
+            if memory_usage < target_memory_usage {
                 // Stop flushing regions if memory usage is already below the flush limit
                 break;
             }
