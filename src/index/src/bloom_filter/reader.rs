@@ -159,26 +159,7 @@ pub trait BloomFilterReader: Sync {
         &self,
         ranges: &[Range<u64>],
         metrics: Option<&mut BloomFilterReadMetrics>,
-    ) -> Result<Vec<Bytes>> {
-        let start = metrics.as_ref().map(|_| Instant::now());
-
-        let mut results = Vec::with_capacity(ranges.len());
-        for range in ranges {
-            let size = (range.end - range.start) as u32;
-            let data = self.range_read(range.start, size, None).await?;
-            results.push(data);
-        }
-
-        if let Some(m) = metrics {
-            m.total_ranges += ranges.len();
-            m.total_bytes += ranges.iter().map(|r| r.end - r.start).sum::<u64>();
-            if let Some(start) = start {
-                m.fetch_elapsed += start.elapsed();
-            }
-        }
-
-        Ok(results)
-    }
+    ) -> Result<Vec<Bytes>>;
 
     /// Reads the meta information of the bloom filter.
     async fn metadata(

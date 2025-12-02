@@ -114,21 +114,7 @@ pub trait InvertedIndexReader: Send + Sync {
         &self,
         ranges: &[Range<u64>],
         metrics: Option<&'a mut InvertedIndexReadMetrics>,
-    ) -> Result<Vec<Bytes>> {
-        let mut metrics = metrics;
-        let mut result = Vec::with_capacity(ranges.len());
-        for range in ranges {
-            let data = self
-                .range_read(
-                    range.start,
-                    (range.end - range.start) as u32,
-                    metrics.as_deref_mut(),
-                )
-                .await?;
-            result.push(Bytes::from(data));
-        }
-        Ok(result)
-    }
+    ) -> Result<Vec<Bytes>>;
 
     /// Retrieves metadata of all inverted indices stored within the blob.
     async fn metadata<'a>(
