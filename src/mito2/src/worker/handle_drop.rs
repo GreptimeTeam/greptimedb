@@ -121,12 +121,12 @@ where
             }
 
             // Clean manifest cache for the region
-            if let Some(write_cache) = cache_manager.write_cache() {
-                if let Some(manifest_cache) = write_cache.manifest_cache() {
-                    // We pass the table dir so we can remove the table dir in manifest cache
-                    // when the last region in the same host is dropped.
-                    manifest_cache.clean_manifests(&table_dir).await;
-                }
+            if let Some(write_cache) = cache_manager.write_cache()
+                && let Some(manifest_cache) = write_cache.manifest_cache()
+            {
+                // We pass the table dir so we can remove the table dir in manifest cache
+                // when the last region in the same host is dropped.
+                manifest_cache.clean_manifests(&table_dir).await;
             }
 
             listener.on_later_drop_end(region_id, removed);

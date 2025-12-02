@@ -503,7 +503,7 @@ mod tests {
         let cache = ManifestCache::new(local_store.clone(), ReadableSize::mb(10), None).await;
 
         // Write some manifest files with different paths
-        let keys = vec![
+        let keys = [
             "region_1/manifest/00000000000000000001.json",
             "region_1/manifest/00000000000000000002.json",
             "region_1/manifest/00000000000000000001.checkpoint",
