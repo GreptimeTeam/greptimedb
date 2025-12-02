@@ -26,10 +26,9 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_base::AffectedRows;
 use common_error::ext::BoxedError;
-use common_grpc::FlightData;
-use common_grpc::flight::FlightDecoder;
 use common_query::Output;
 use common_query::logical_plan::add_insert_to_logical_plan;
+use common_recordbatch::DfRecordBatch;
 use common_telemetry::tracing::{self};
 use datafusion::datasource::DefaultTableSource;
 use query::parser::PromQuery;
@@ -240,10 +239,8 @@ impl GrpcQueryHandler for Instance {
 
     async fn put_record_batch(
         &self,
-        table_name: &TableName,
+        request: servers::grpc::flight::PutRecordBatchRequest,
         table_ref: &mut Option<TableRef>,
-        decoder: &mut FlightDecoder,
-        data: FlightData,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
         let table = if let Some(table) = table_ref {
@@ -252,15 +249,15 @@ impl GrpcQueryHandler for Instance {
             let table = self
                 .catalog_manager()
                 .table(
-                    &table_name.catalog_name,
-                    &table_name.schema_name,
-                    &table_name.table_name,
+                    &request.table_name.catalog_name,
+                    &request.table_name.schema_name,
+                    &request.table_name.table_name,
                     None,
                 )
                 .await
                 .context(CatalogSnafu)?
                 .with_context(|| TableNotFoundSnafu {
-                    table_name: table_name.to_string(),
+                    table_name: request.table_name.to_string(),
                 })?;
             *table_ref = Some(table.clone());
             table
@@ -279,7 +276,12 @@ impl GrpcQueryHandler for Instance {
         // do we check limit for bulk insert?
 
         self.inserter
-            .handle_bulk_insert(table, decoder, data)
+            .handle_bulk_insert(
+                table,
+                request.record_batch,
+                request.schema_bytes,
+                request.body_size,
+            )
             .await
             .context(TableOperationSnafu)
     }

@@ -16,12 +16,10 @@ use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
-use arrow_flight::FlightData;
 use async_trait::async_trait;
 use catalog::memory::MemoryCatalogManager;
 use common_base::AffectedRows;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_grpc::flight::FlightDecoder;
 use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use query::options::QueryOptions;
@@ -165,10 +163,8 @@ impl GrpcQueryHandler for DummyInstance {
 
     async fn put_record_batch(
         &self,
-        _table_name: &TableName,
+        _request: servers::grpc::flight::PutRecordBatchRequest,
         _table_ref: &mut Option<TableRef>,
-        _decoder: &mut FlightDecoder,
-        _data: FlightData,
         _ctx: QueryContextRef,
     ) -> std::result::Result<AffectedRows, Self::Error> {
         unimplemented!()

@@ -24,7 +24,6 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_grpc::flight::FlightDecoder;
 use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
 use common_runtime::Runtime;
@@ -147,7 +146,6 @@ impl GreptimeRequestHandler {
             // Cached table ref
             let mut table_ref: Option<TableRef> = None;
 
-            let mut decoder = FlightDecoder::default();
             while let Some(request) = stream.next().await {
                 let request = match request {
                     Ok(request) => request,
@@ -156,16 +154,12 @@ impl GreptimeRequestHandler {
                         break;
                     }
                 };
-                let PutRecordBatchRequest {
-                    table_name,
-                    request_id,
-                    data,
-                    _guard,
-                } = request;
+                let request_id = request.request_id;
+
 
                 let timer = metrics::GRPC_BULK_INSERT_ELAPSED.start_timer();
                 let result = handler
-                    .put_record_batch(&table_name, &mut table_ref, &mut decoder, data, query_ctx.clone())
+                    .put_record_batch(request, &mut table_ref, query_ctx.clone())
                     .await
                     .inspect_err(|e| error!(e; "Failed to handle flight record batches"));
                 timer.observe_duration();
