@@ -514,7 +514,7 @@ impl CompactionScheduler {
         let limit_bytes = self.memory_manager.limit_bytes();
 
         // Check if request exceeds total capacity
-        if self.exceeds_memory_limit(requested_bytes) {
+        if limit_bytes > 0 && requested_bytes > limit_bytes
             warn!(
                 "Region {} compaction requires {} bytes but total limit is {} bytes; \
                  request exceeds capacity, policy: {:?}",
