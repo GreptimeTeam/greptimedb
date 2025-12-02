@@ -45,7 +45,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// worker to flush.
     pub(crate) fn maybe_flush_worker(&mut self) {
         if !self.write_buffer_manager.should_flush_engine() {
-            info!("No need to flush worker");
+            debug!("No need to flush worker");
             // No need to flush worker.
             return;
         }

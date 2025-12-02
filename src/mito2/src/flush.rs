@@ -150,7 +150,7 @@ impl WriteBufferManagerImpl {
 impl WriteBufferManager for WriteBufferManagerImpl {
     fn should_flush_engine(&self) -> bool {
         let mutable_memtable_memory_usage = self.memory_active.load(Ordering::Relaxed);
-        if mutable_memtable_memory_usage > self.mutable_limit {
+        if mutable_memtable_memory_usage >= self.mutable_limit {
             debug!(
                 "Engine should flush (over mutable limit), mutable_usage: {}, memory_usage: {}, mutable_limit: {}, global_limit: {}",
                 mutable_memtable_memory_usage,
@@ -162,15 +162,6 @@ impl WriteBufferManager for WriteBufferManagerImpl {
         }
 
         let memory_usage = self.memory_used.load(Ordering::Relaxed);
-        if mutable_memtable_memory_usage >= self.global_write_buffer_size / 2 {
-            debug!(
-                "Engine should flush (over total limit), memory_usage: {}, global_write_buffer_size: {}, \
-             mutable_usage: {}.",
-                memory_usage, self.global_write_buffer_size, mutable_memtable_memory_usage
-            );
-            return true;
-        }
-
         if memory_usage >= self.global_write_buffer_size {
             return true;
         }
@@ -1106,14 +1097,20 @@ impl FlushScheduler {
                 .all(|status| status.flushing || status.pending_task.is_some())
         );
 
-        let pending_flush_statuses = self
+        let tasks = self
             .region_status
-            .extract_if(|_, status| status.pending_task.is_some())
+            .iter_mut()
+            .filter_map(|(_, status)| match status.pending_task.take() {
+                Some(pending_task) => {
+                    debug_assert!(!status.flushing);
+                    Some((pending_task, status.version_control.clone()))
+                }
+                None => None,
+            })
             .collect::<Vec<_>>();
-        for (region_id, mut flush_status) in pending_flush_statuses {
-            debug_assert!(!flush_status.flushing);
-            let task = flush_status.pending_task.take().unwrap();
-            let version_control = flush_status.version_control.clone();
+
+        for (task, version_control) in tasks {
+            let region_id = task.region_id;
             if let Err(err) = self.schedule_flush(region_id, &version_control, task) {
                 match reason {
                     ScheduleNextFlushReason::Success(previous_region_id) => {
