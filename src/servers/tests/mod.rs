@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use catalog::memory::MemoryCatalogManager;
 use common_base::AffectedRows;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use query::options::QueryOptions;
@@ -174,10 +175,7 @@ impl GrpcQueryHandler for DummyInstance {
         _stream: servers::grpc::flight::PutRecordBatchRequestStream,
         _ctx: QueryContextRef,
     ) -> std::pin::Pin<
-        Box<
-            dyn futures::Stream<Item = (i64, std::result::Result<AffectedRows, Self::Error>)>
-                + Send,
-        >,
+        Box<dyn futures::Stream<Item = std::result::Result<DoPutResponse, Self::Error>> + Send>,
     > {
         unimplemented!()
     }

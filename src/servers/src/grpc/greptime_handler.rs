@@ -43,7 +43,6 @@ use tonic::Status;
 use crate::error::{InvalidQuerySnafu, JoinTaskSnafu, Result, UnknownHintSnafu};
 use crate::grpc::flight::PutRecordBatchRequestStream;
 use crate::grpc::{FlightCompression, TonicResult, context_auth};
-use crate::metrics;
 use crate::metrics::METRIC_SERVER_GRPC_DB_REQUEST_TIMER;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
@@ -145,20 +144,17 @@ impl GreptimeRequestHandler {
         runtime.spawn(async move {
             let mut result_stream = handler.handle_put_record_batch_stream(stream, query_ctx);
 
-            while let Some((request_id, result)) = result_stream.next().await {
-                let affected_rows_result = match result {
-                    Ok(affected_rows) => Ok(DoPutResponse::new(request_id, affected_rows)),
-                    Err(e) => Err(Status::from_error(Box::new(e))),
-                };
+            while let Some(result) = result_stream.next().await {
+                // let timer = metrics::GRPC_BULK_INSERT_ELAPSED.start_timer();
+                // let send_result = affected_rows_result
+                //     .inspect_err(|e| error!(e; "Failed to handle flight record batches"));
+                // timer.observe_duration();
 
-                let timer = metrics::GRPC_BULK_INSERT_ELAPSED.start_timer();
-                let send_result = affected_rows_result
-                    .inspect_err(|e| error!(e; "Failed to handle flight record batches"));
-                timer.observe_duration();
-
-                if let Err(e) = result_sender.try_send(send_result)
-                    && let TrySendError::Closed(_) = e {
-                    warn!(r#""DoPut" client with request_id {} maybe unreachable, abort handling its message"#, request_id);
+                if let Err(e) =
+                    result_sender.try_send(result.map_err(|e| Status::from_error(Box::new(e))))
+                    && let TrySendError::Closed(_) = e
+                {
+                    warn!(r#""DoPut" client maybe unreachable, abort handling its message"#);
                     break;
                 }
             }

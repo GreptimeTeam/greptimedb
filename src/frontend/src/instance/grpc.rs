@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_base::AffectedRows;
 use common_error::ext::BoxedError;
+use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
 use common_query::logical_plan::add_insert_to_logical_plan;
 use common_telemetry::tracing::{self};
@@ -293,7 +294,7 @@ impl GrpcQueryHandler for Instance {
         &self,
         mut stream: servers::grpc::flight::PutRecordBatchRequestStream,
         ctx: QueryContextRef,
-    ) -> Pin<Box<dyn Stream<Item = (i64, Result<AffectedRows>)> + Send>> {
+    ) -> Pin<Box<dyn Stream<Item = Result<DoPutResponse>> + Send>> {
         // Resolve table once for the stream
         // Clone all necessary data to make it 'static
         let catalog_manager = self.catalog_manager().clone();
@@ -320,8 +321,7 @@ impl GrpcQueryHandler for Instance {
                 }) {
                 Ok(table) => table,
                 Err(e) => {
-                    // For initial errors before we have a request, use 0 as request_id
-                    yield (0, Err(e));
+                    yield Err(e);
                     return;
                 }
             };
@@ -330,7 +330,7 @@ impl GrpcQueryHandler for Instance {
             let interceptor_ref = plugins.get::<GrpcQueryInterceptorRef<Error>>();
             let interceptor = interceptor_ref.as_ref();
             if let Err(e) = interceptor.pre_bulk_insert(table_ref.clone(), ctx.clone()) {
-                yield (0, Err(e));
+                yield Err(e);
                 return;
             }
 
@@ -340,7 +340,7 @@ impl GrpcQueryHandler for Instance {
                 .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
                 .context(PermissionSnafu)
             {
-                yield (0, Err(e));
+                yield Err(e);
                 return;
             }
 
@@ -349,9 +349,9 @@ impl GrpcQueryHandler for Instance {
                 let request = match request_result {
                     Ok(request) => request,
                     Err(e) => {
-                        // We don't have a request_id here, so use 0
+                        // Convert tonic::Status to Error
                         let error_msg = format!("Stream error: {}", e);
-                        yield (0, Err(IncompleteGrpcRequestSnafu { err_msg: error_msg }.build()));
+                        yield Err(IncompleteGrpcRequestSnafu { err_msg: error_msg }.build());
                         continue;
                     }
                 };
@@ -367,7 +367,9 @@ impl GrpcQueryHandler for Instance {
                     .await
                     .context(TableOperationSnafu);
 
-                yield (request_id, result);
+                yield result.map(|rows| {
+                    DoPutResponse::new(request_id, rows)
+                });
             }
         })
     }
