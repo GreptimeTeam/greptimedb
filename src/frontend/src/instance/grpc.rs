@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
 use api::helper::from_pb_time_ranges;
@@ -22,15 +23,17 @@ use api::v1::{
     DeleteRequests, DropFlowExpr, InsertIntoPlan, InsertRequests, RowDeleteRequests,
     RowInsertRequests,
 };
+use async_stream::stream;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_base::AffectedRows;
 use common_error::ext::BoxedError;
 use common_query::Output;
 use common_query::logical_plan::add_insert_to_logical_plan;
-use common_recordbatch::DfRecordBatch;
 use common_telemetry::tracing::{self};
 use datafusion::datasource::DefaultTableSource;
+use futures::Stream;
+use futures::stream::StreamExt;
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -284,6 +287,88 @@ impl GrpcQueryHandler for Instance {
             )
             .await
             .context(TableOperationSnafu)
+    }
+
+    fn handle_put_record_batch_stream(
+        &self,
+        mut stream: servers::grpc::flight::PutRecordBatchRequestStream,
+        ctx: QueryContextRef,
+    ) -> Pin<Box<dyn Stream<Item = Result<(i64, AffectedRows)>> + Send>> {
+        // Resolve table once for the stream
+        // Clone all necessary data to make it 'static
+        let catalog_manager = self.catalog_manager().clone();
+        let plugins = self.plugins.clone();
+        let inserter = self.inserter.clone();
+        let table_name = stream.table_name().clone();
+        let ctx = ctx.clone();
+
+        Box::pin(stream! {
+            // Cache for resolved table reference - resolve once and reuse
+            let table_ref = match catalog_manager
+                .table(
+                    &table_name.catalog_name,
+                    &table_name.schema_name,
+                    &table_name.table_name,
+                    None,
+                )
+                .await
+                .context(CatalogSnafu)
+                .and_then(|opt| {
+                    opt.with_context(|| TableNotFoundSnafu {
+                        table_name: table_name.to_string(),
+                    })
+                }) {
+                Ok(table) => table,
+                Err(e) => {
+                    yield Err(e);
+                    return;
+                }
+            };
+
+            // Check permissions once for the stream
+            let interceptor_ref = plugins.get::<GrpcQueryInterceptorRef<Error>>();
+            let interceptor = interceptor_ref.as_ref();
+            if let Err(e) = interceptor.pre_bulk_insert(table_ref.clone(), ctx.clone()) {
+                yield Err(e);
+                return;
+            }
+
+            if let Err(e) = plugins
+                .get::<PermissionCheckerRef>()
+                .as_ref()
+                .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
+                .context(PermissionSnafu)
+            {
+                yield Err(e);
+                return;
+            }
+
+            // Process each request in the stream
+            while let Some(request_result) = stream.next().await {
+                let request = match request_result {
+                    Ok(request) => request,
+                    Err(e) => {
+                        // Convert tonic::Status to Error
+                        let error_msg = format!("Stream error: {}", e);
+                        yield Err(IncompleteGrpcRequestSnafu { err_msg: error_msg }.build());
+                        continue;
+                    }
+                };
+
+                let request_id = request.request_id;
+                let result = inserter
+                    .handle_bulk_insert(
+                        table_ref.clone(),
+                        request.record_batch,
+                        request.schema_bytes,
+                        request.body_size,
+                    )
+                    .await
+                    .context(TableOperationSnafu);
+
+                yield result.map(|rows| (request_id, rows));
+            }
+        })
     }
 }
 

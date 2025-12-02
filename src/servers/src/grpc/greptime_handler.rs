@@ -36,12 +36,12 @@ use futures_util::StreamExt;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
-use table::TableRef;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
+use tonic::Status;
 
 use crate::error::{InvalidQuerySnafu, JoinTaskSnafu, Result, UnknownHintSnafu};
-use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
+use crate::grpc::flight::PutRecordBatchRequestStream;
 use crate::grpc::{FlightCompression, TonicResult, context_auth};
 use crate::metrics;
 use crate::metrics::METRIC_SERVER_GRPC_DB_REQUEST_TIMER;
@@ -133,7 +133,7 @@ impl GreptimeRequestHandler {
 
     pub(crate) async fn put_record_batches(
         &self,
-        mut stream: PutRecordBatchRequestStream,
+        stream: PutRecordBatchRequestStream,
         result_sender: mpsc::Sender<TonicResult<DoPutResponse>>,
         query_ctx: QueryContextRef,
     ) {
@@ -143,30 +143,26 @@ impl GreptimeRequestHandler {
             .clone()
             .unwrap_or_else(common_runtime::global_runtime);
         runtime.spawn(async move {
-            // Cached table ref
-            let mut table_ref: Option<TableRef> = None;
+            let mut result_stream = handler.handle_put_record_batch_stream(stream, query_ctx);
 
-            while let Some(request) = stream.next().await {
-                let request = match request {
-                    Ok(request) => request,
+            while let Some(result) = result_stream.next().await {
+                let (request_id, affected_rows_result) = match result {
+                    Ok((request_id, affected_rows)) => {
+                        (request_id, Ok(DoPutResponse::new(request_id, affected_rows)))
+                    }
                     Err(e) => {
-                        let _ = result_sender.try_send(Err(e));
-                        break;
+                        // For errors, we don't have a request_id, so use 0
+                        (0, Err(Status::from_error(Box::new(e))))
                     }
                 };
-                let request_id = request.request_id;
-
 
                 let timer = metrics::GRPC_BULK_INSERT_ELAPSED.start_timer();
-                let result = handler
-                    .put_record_batch(request, &mut table_ref, query_ctx.clone())
-                    .await
+                let send_result = affected_rows_result
                     .inspect_err(|e| error!(e; "Failed to handle flight record batches"));
                 timer.observe_duration();
-                let result = result
-                    .map(|x| DoPutResponse::new(request_id, x))
-                    .map_err(Into::into);
-                if let Err(e)= result_sender.try_send(result)
+
+                let send_result = send_result.map_err(Into::into);
+                if let Err(e) = result_sender.try_send(send_result)
                     && let TrySendError::Closed(_) = e {
                     warn!(r#""DoPut" client with request_id {} maybe unreachable, abort handling its message"#, request_id);
                     break;

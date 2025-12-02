@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
@@ -19,13 +20,13 @@ use async_trait::async_trait;
 use common_base::AffectedRows;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_query::Output;
+use futures::Stream;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use table::TableRef;
-use table::table_name::TableName;
 
 use crate::error::{self, Result};
-use crate::grpc::flight::PutRecordBatchRequest;
+use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
 
 pub type GrpcQueryHandlerRef<E> = Arc<dyn GrpcQueryHandler<Error = E> + Send + Sync>;
 pub type ServerGrpcQueryHandlerRef = GrpcQueryHandlerRef<error::Error>;
@@ -48,6 +49,12 @@ pub trait GrpcQueryHandler {
         table_ref: &mut Option<TableRef>,
         ctx: QueryContextRef,
     ) -> std::result::Result<AffectedRows, Self::Error>;
+
+    fn handle_put_record_batch_stream(
+        &self,
+        stream: PutRecordBatchRequestStream,
+        ctx: QueryContextRef,
+    ) -> Pin<Box<dyn Stream<Item = std::result::Result<(i64, AffectedRows), Self::Error>> + Send>>;
 }
 
 pub struct ServerGrpcQueryHandlerAdapter<E>(GrpcQueryHandlerRef<E>);
@@ -84,5 +91,23 @@ where
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcRequestSnafu)
+    }
+
+    fn handle_put_record_batch_stream(
+        &self,
+        stream: PutRecordBatchRequestStream,
+        ctx: QueryContextRef,
+    ) -> Pin<Box<dyn Stream<Item = Result<(i64, AffectedRows)>> + Send>> {
+        use futures_util::StreamExt;
+        Box::pin(
+            self.0
+                .handle_put_record_batch_stream(stream, ctx)
+                .map(|result| {
+                    result
+                        .map_err(|e| BoxedError::new(e))
+                        .context(error::ExecuteGrpcRequestSnafu)
+                        .and_then(|(id, rows)| Ok((id, rows)))
+                }),
+        )
     }
 }

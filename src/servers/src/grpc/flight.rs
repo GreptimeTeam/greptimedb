@@ -233,6 +233,7 @@ impl FlightCraft for GreptimeRequestHandler {
             limiter,
         )
         .await?;
+        let _ = tx.send(Ok(DoPutResponse::new(0, 0))).await;
         self.put_record_batches(stream, tx, query_ctx).await;
 
         let response = ReceiverStream::new(rx)
@@ -298,7 +299,7 @@ impl PutRecordBatchRequest {
     }
 }
 
-pub(crate) struct PutRecordBatchRequestStream {
+pub struct PutRecordBatchRequestStream {
     flight_data_stream: Streaming<FlightData>,
     table_name: TableName,
     schema: SchemaRef,

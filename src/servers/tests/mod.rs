@@ -33,7 +33,6 @@ use session::context::QueryContextRef;
 use snafu::ensure;
 use sql::statements::statement::Statement;
 use table::TableRef;
-use table::table_name::TableName;
 
 mod http;
 mod interceptor;
@@ -167,6 +166,19 @@ impl GrpcQueryHandler for DummyInstance {
         _table_ref: &mut Option<TableRef>,
         _ctx: QueryContextRef,
     ) -> std::result::Result<AffectedRows, Self::Error> {
+        unimplemented!()
+    }
+
+    fn handle_put_record_batch_stream(
+        &self,
+        _stream: servers::grpc::flight::PutRecordBatchRequestStream,
+        _ctx: QueryContextRef,
+    ) -> std::pin::Pin<
+        Box<
+            dyn futures::Stream<Item = std::result::Result<(i64, AffectedRows), Self::Error>>
+                + Send,
+        >,
+    > {
         unimplemented!()
     }
 }
