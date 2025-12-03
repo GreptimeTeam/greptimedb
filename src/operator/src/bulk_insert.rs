@@ -22,6 +22,7 @@ use api::v1::region::{
 };
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
+use bytes::Bytes;
 use common_base::AffectedRows;
 use common_grpc::FlightData;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
@@ -40,9 +41,9 @@ impl Inserter {
     pub async fn handle_bulk_insert(
         &self,
         table: TableRef,
+        raw_flight_data: FlightData,
         record_batch: RecordBatch,
-        schema_bytes: bytes::Bytes,
-        body_size: usize,
+        schema_bytes: Bytes,
     ) -> error::Result<AffectedRows> {
         let table_info = table.table_info();
         let table_id = table_info.table_id();
@@ -52,6 +53,7 @@ impl Inserter {
             return Ok(0);
         }
 
+        let body_size = raw_flight_data.data_body.len();
         // TODO(yingwen): Fill record batch impure default values.
         // notify flownode to update dirty timestamps if flow is configured.
         self.maybe_update_flow_dirty_window(table_info.clone(), record_batch.clone());
@@ -90,20 +92,6 @@ impl Inserter {
                 .find_region_leader(region_id)
                 .await
                 .context(error::FindRegionLeaderSnafu)?;
-            // Re-encode the record batch for sending to datanode
-            let encode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
-                .with_label_values(&["encode"])
-                .start_timer();
-            let mut encoder = FlightEncoder::default();
-            let encoded = encoder.encode(FlightMessage::RecordBatch(record_batch.clone()));
-
-            // Safety: encoded must contain at least one element because it's a Vec1.
-            let FlightData {
-                data_header,
-                data_body,
-                ..
-            } = encoded.into_iter().next().unwrap();
-            encode_timer.observe_duration();
 
             let request = RegionRequest {
                 header: Some(RegionRequestHeader {
@@ -114,8 +102,8 @@ impl Inserter {
                     region_id: region_id.as_u64(),
                     body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                         schema: schema_bytes.clone(),
-                        data_header,
-                        payload: data_body,
+                        data_header: raw_flight_data.data_header,
+                        payload: raw_flight_data.data_body,
                     })),
                 })),
             };

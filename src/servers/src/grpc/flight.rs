@@ -258,7 +258,7 @@ pub struct PutRecordBatchRequest {
     pub request_id: i64,
     pub record_batch: DfRecordBatch,
     pub schema_bytes: Bytes,
-    pub body_size: usize,
+    pub flight_data: FlightData,
     pub(crate) _guard: Option<RequestMemoryGuard>,
 }
 
@@ -267,16 +267,19 @@ impl PutRecordBatchRequest {
         table_name: TableName,
         record_batch: DfRecordBatch,
         request_id: i64,
-        schema_bytes: bytes::Bytes,
-        body_size: usize,
+        schema_bytes: Bytes,
+        flight_data: FlightData,
         limiter: Option<&RequestMemoryLimiter>,
     ) -> Result<Self> {
-        // Use body_size for memory limit tracking
+        let memory_usage = flight_data.data_body.len()
+            + flight_data.app_metadata.len()
+            + flight_data.data_header.len();
+
         let _guard = limiter
             .filter(|limiter| limiter.is_enabled())
             .map(|limiter| {
                 limiter
-                    .try_acquire(body_size)
+                    .try_acquire(memory_usage)
                     .map(|guard| {
                         guard.inspect(|g| {
                             METRIC_GRPC_MEMORY_USAGE_BYTES.set(g.current_usage() as i64);
@@ -294,7 +297,7 @@ impl PutRecordBatchRequest {
             request_id,
             record_batch,
             schema_bytes,
-            body_size,
+            flight_data,
             _guard,
         })
     }
@@ -304,7 +307,7 @@ pub struct PutRecordBatchRequestStream {
     flight_data_stream: Streaming<FlightData>,
     table_name: TableName,
     schema: SchemaRef,
-    schema_bytes: bytes::Bytes,
+    schema_bytes: Bytes,
     decoder: FlightDecoder,
     limiter: Option<RequestMemoryLimiter>,
 }
@@ -415,7 +418,6 @@ impl Stream for PutRecordBatchRequestStream {
                     } else {
                         0
                     };
-                    let body_size = flight_data.data_body.len();
 
                     // Decode FlightData to RecordBatch
                     match self.decoder.try_decode(&flight_data) {
@@ -429,7 +431,7 @@ impl Stream for PutRecordBatchRequestStream {
                                     record_batch,
                                     request_id,
                                     schema_bytes,
-                                    body_size,
+                                    flight_data,
                                     limiter.as_ref(),
                                 )
                                 .map_err(|e| Status::invalid_argument(e.to_string())),

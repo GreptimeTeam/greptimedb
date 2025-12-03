@@ -24,7 +24,7 @@ use api::v1::{
     DeleteRequests, DropFlowExpr, InsertIntoPlan, InsertRequests, RowDeleteRequests,
     RowInsertRequests,
 };
-use async_stream::stream;
+use async_stream::try_stream;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_base::AffectedRows;
@@ -283,9 +283,9 @@ impl GrpcQueryHandler for Instance {
         self.inserter
             .handle_bulk_insert(
                 table,
+                request.flight_data,
                 request.record_batch,
                 request.schema_bytes,
-                request.body_size,
             )
             .await
             .context(TableOperationSnafu)
@@ -304,18 +304,14 @@ impl GrpcQueryHandler for Instance {
         let table_name = stream.table_name().clone();
         let ctx = ctx.clone();
 
-        Box::pin(stream! {
-            if let Err(e) = plugins
+        Box::pin(try_stream! {
+            plugins
                 .get::<PermissionCheckerRef>()
                 .as_ref()
                 .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
-                .context(PermissionSnafu)
-            {
-                yield Err(e);
-                return;
-            }
+                .context(PermissionSnafu)?;
             // Cache for resolved table reference - resolve once and reuse
-            let table_ref = match catalog_manager
+            let table_ref = catalog_manager
                 .table(
                     &table_name.catalog_name,
                     &table_name.schema_name,
@@ -328,51 +324,33 @@ impl GrpcQueryHandler for Instance {
                     opt.with_context(|| TableNotFoundSnafu {
                         table_name: table_name.to_string(),
                     })
-                }) {
-                Ok(table) => table,
-                Err(e) => {
-                    yield Err(e);
-                    return;
-                }
-            };
+                })?;
 
             // Check permissions once for the stream
             let interceptor_ref = plugins.get::<GrpcQueryInterceptorRef<Error>>();
             let interceptor = interceptor_ref.as_ref();
-            if let Err(e) = interceptor.pre_bulk_insert(table_ref.clone(), ctx.clone()) {
-                yield Err(e);
-                return;
-            }
+            interceptor.pre_bulk_insert(table_ref.clone(), ctx.clone())?;
 
             // Process each request in the stream
             while let Some(request_result) = stream.next().await {
-                let request = match request_result {
-                    Ok(request) => request,
-                    Err(e) => {
-                        // Convert tonic::Status to Error
-                        let error_msg = format!("Stream error: {}", e);
-                        yield Err(IncompleteGrpcRequestSnafu { err_msg: error_msg }.build());
-                        // Terminate the stream
-                        return;
-                    }
-                };
+                let request = request_result.map_err(|e|{
+                    let error_msg = format!("Stream error: {:?}", e);
+                    IncompleteGrpcRequestSnafu { err_msg: error_msg }.build()
+                })?;
 
                 let request_id = request.request_id;
                 let start = Instant::now();
-                let result = inserter
+                let rows = inserter
                     .handle_bulk_insert(
                         table_ref.clone(),
+                        request.flight_data,
                         request.record_batch,
                         request.schema_bytes,
-                        request.body_size,
                     )
                     .await
-                    .context(TableOperationSnafu);
+                    .context(TableOperationSnafu)?;
                 let elapsed_secs = start.elapsed().as_secs_f64();
-
-                yield result.map(|rows| {
-                    DoPutResponse::new(request_id, rows, elapsed_secs)
-                });
+                yield DoPutResponse::new(request_id, rows, elapsed_secs);
             }
         })
     }
