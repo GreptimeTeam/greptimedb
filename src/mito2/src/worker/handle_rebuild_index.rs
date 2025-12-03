@@ -68,6 +68,7 @@ impl<S> RegionWorkerLoop<S> {
             row_group_size: WriteOptions::default().row_group_size,
             intermediate_manager,
             puffin_manager,
+            write_cache_enabled: self.cache_manager.write_cache().is_some(),
         });
 
         IndexBuildTask {

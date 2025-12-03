@@ -298,6 +298,7 @@ impl AccessLayer {
                 puffin_manager: self
                     .puffin_manager_factory
                     .build(store, path_provider.clone()),
+                write_cache_enabled: false,
                 intermediate_manager: self.intermediate_manager.clone(),
                 index_options: request.index_options,
                 inverted_index_config: request.inverted_index_config,

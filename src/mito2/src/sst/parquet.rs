@@ -715,6 +715,7 @@ mod tests {
             metadata: metadata.clone(),
             row_group_size,
             puffin_manager,
+            write_cache_enabled: false,
             intermediate_manager,
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {
@@ -1094,6 +1095,7 @@ mod tests {
             metadata: metadata.clone(),
             row_group_size,
             puffin_manager,
+            write_cache_enabled: false,
             intermediate_manager,
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {

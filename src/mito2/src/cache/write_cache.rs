@@ -215,6 +215,7 @@ impl WriteCache {
             puffin_manager: self
                 .puffin_manager_factory
                 .build(store.clone(), path_provider.clone()),
+            write_cache_enabled: true,
             intermediate_manager: self.intermediate_manager.clone(),
             index_options: write_request.index_options,
             inverted_index_config: write_request.inverted_index_config,
