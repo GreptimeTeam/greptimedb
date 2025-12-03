@@ -214,7 +214,17 @@ impl DatanodeBuilder {
         self
     }
 
-    pub async fn build(mut self) -> Result<Datanode> {
+    pub async fn build(self) -> Result<Datanode> {
+        let object_store_manager = Self::build_object_store_manager(&self.opts.storage).await?;
+        self.build_with_object_store_manager(object_store_manager)
+            .await
+    }
+
+    /// Build Datanode with provided [ObjectStoreManager].
+    pub async fn build_with_object_store_manager(
+        mut self,
+        object_store_manager: ObjectStoreManagerRef,
+    ) -> Result<Datanode> {
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
         set_default_prefix(self.opts.default_column_prefix.as_deref())
             .map_err(BoxedError::new)
@@ -247,9 +257,10 @@ impl DatanodeBuilder {
         let file_ref_manager = Arc::new(FileReferenceManager::new(Some(node_id)));
         let region_server = self
             .new_region_server(
-                schema_metadata_manager,
+                schema_metadata_manager.clone(),
                 region_event_listener,
-                file_ref_manager,
+                file_ref_manager.clone(),
+                object_store_manager,
             )
             .await?;
 
@@ -385,6 +396,7 @@ impl DatanodeBuilder {
         schema_metadata_manager: SchemaMetadataManagerRef,
         event_listener: RegionServerEventListenerRef,
         file_ref_manager: FileReferenceManagerRef,
+        object_store_manager: ObjectStoreManagerRef,
     ) -> Result<RegionServer> {
         let opts: &DatanodeOptions = &self.opts;
 
@@ -418,7 +430,6 @@ impl DatanodeBuilder {
             opts.grpc.flight_compression,
         );
 
-        let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;
         let engines = self
             .build_store_engines(
                 object_store_manager,
