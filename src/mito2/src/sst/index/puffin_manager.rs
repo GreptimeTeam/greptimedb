@@ -137,6 +137,10 @@ impl ObjectStorePuffinFileAccessor {
         }
     }
 
+    pub fn store(&self) -> &InstrumentedStore {
+        &self.object_store
+    }
+
     /// Cleans the puffin file identified by the given `index_id`.
     pub async fn clean_by_index_id(&self, index_id: &RegionIndexId) -> PuffinResult<()> {
         let file_path = self

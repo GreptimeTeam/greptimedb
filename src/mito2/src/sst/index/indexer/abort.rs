@@ -14,6 +14,7 @@
 
 use common_telemetry::warn;
 
+use crate::access_layer::TempFileCleaner;
 use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::index::Indexer;
 
@@ -99,21 +100,8 @@ impl Indexer {
         let fs_handle = RegionIndexId::new(
             RegionFileId::new(self.region_id, self.file_id),
             self.index_version,
-        );
-        let Err(err) = fs_accessor.clean_by_index_id(&fs_handle).await else {
-            return;
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to clean fs temp dir, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to clean fs temp dir, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
+        )
+        .to_string();
+        TempFileCleaner::clean_atomic_dir_files(&fs_accessor.store().store(), &[&fs_handle]).await;
     }
 }
