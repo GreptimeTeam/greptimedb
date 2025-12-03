@@ -82,6 +82,8 @@ pub type Level = u8;
 pub const MAX_LEVEL: Level = 2;
 /// Type to store index types for a column.
 pub type IndexTypes = SmallVec<[IndexType; 4]>;
+/// Index version
+pub type IndexVersion = u64;
 
 /// Cross-region file id.
 ///
@@ -121,11 +123,11 @@ impl fmt::Display for RegionFileId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RegionIndexId {
     pub file_id: RegionFileId,
-    pub version: u64,
+    pub version: IndexVersion,
 }
 
 impl RegionIndexId {
-    pub fn new(file_id: RegionFileId, version: u64) -> Self {
+    pub fn new(file_id: RegionFileId, version: IndexVersion) -> Self {
         Self { file_id, version }
     }
 

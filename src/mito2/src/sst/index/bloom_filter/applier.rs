@@ -242,6 +242,7 @@ impl BloomFilterIndexApplier {
                 }
                 let reader = CachedBloomFilterIndexBlobReader::new(
                     file_id.file_id(),
+                    file_id.version,
                     *column_id,
                     Tag::Skipping,
                     blob_size,

@@ -222,6 +222,7 @@ impl InvertedIndexApplier {
         let result = if let Some(index_cache) = &self.inverted_index_cache {
             let mut index_reader = CachedInvertedIndexBlobReader::new(
                 file_id.file_id(),
+                file_id.version,
                 blob_size,
                 InvertedIndexBlobReader::new(blob),
                 index_cache.clone(),

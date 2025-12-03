@@ -957,9 +957,17 @@ mod tests {
         let result_cache = cache.index_result_cache().unwrap();
         let puffin_metadata_cache = cache.puffin_metadata_cache().unwrap().clone();
 
-        let bloom_key = (index_id.file_id(), column_id, Tag::Skipping);
+        let bloom_key = (
+            index_id.file_id(),
+            index_id.version,
+            column_id,
+            Tag::Skipping,
+        );
         bloom_cache.put_metadata(bloom_key, Arc::new(BloomFilterMeta::default()));
-        inverted_cache.put_metadata(index_id.file_id(), Arc::new(InvertedIndexMetas::default()));
+        inverted_cache.put_metadata(
+            (index_id.file_id(), index_id.version),
+            Arc::new(InvertedIndexMetas::default()),
+        );
         let predicate = PredicateKey::new_bloom(Arc::new(BTreeMap::new()));
         let selection = Arc::new(RowGroupSelection::default());
         result_cache.put(predicate.clone(), index_id.file_id(), selection);
@@ -971,20 +979,31 @@ mod tests {
         puffin_metadata_cache.put_metadata(file_id_str.clone(), metadata);
 
         assert!(bloom_cache.get_metadata(bloom_key).is_some());
-        assert!(inverted_cache.get_metadata(index_id.file_id()).is_some());
+        assert!(
+            inverted_cache
+                .get_metadata((index_id.file_id(), index_id.version))
+                .is_some()
+        );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_some());
         assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_some());
 
         cache.evict_puffin_cache(index_id).await;
 
         assert!(bloom_cache.get_metadata(bloom_key).is_none());
-        assert!(inverted_cache.get_metadata(index_id.file_id()).is_none());
+        assert!(
+            inverted_cache
+                .get_metadata((index_id.file_id(), index_id.version))
+                .is_none()
+        );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_none());
         assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
 
         // Refill caches and evict via CacheStrategy to ensure delegation works.
         bloom_cache.put_metadata(bloom_key, Arc::new(BloomFilterMeta::default()));
-        inverted_cache.put_metadata(index_id.file_id(), Arc::new(InvertedIndexMetas::default()));
+        inverted_cache.put_metadata(
+            (index_id.file_id(), index_id.version),
+            Arc::new(InvertedIndexMetas::default()),
+        );
         result_cache.put(
             predicate.clone(),
             index_id.file_id(),
@@ -1002,7 +1021,11 @@ mod tests {
         strategy.evict_puffin_cache(index_id).await;
 
         assert!(bloom_cache.get_metadata(bloom_key).is_none());
-        assert!(inverted_cache.get_metadata(index_id.file_id()).is_none());
+        assert!(
+            inverted_cache
+                .get_metadata((index_id.file_id(), index_id.version))
+                .is_none()
+        );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_none());
         assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
     }
