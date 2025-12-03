@@ -102,6 +102,6 @@ impl Indexer {
             self.index_version,
         )
         .to_string();
-        TempFileCleaner::clean_atomic_dir_files(&fs_accessor.store().store(), &[&fs_handle]).await;
+        TempFileCleaner::clean_atomic_dir_files(fs_accessor.store().store(), &[&fs_handle]).await;
     }
 }
