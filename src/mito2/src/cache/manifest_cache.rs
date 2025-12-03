@@ -388,6 +388,10 @@ impl ManifestCache {
             }
             Err(e) => return Err(e),
         };
+
+        let mut is_empty = true;
+        // Iterates all entries under the directory.
+        // We have to check all entries to clean up all empty subdirectories.
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
@@ -401,15 +405,18 @@ impl ManifestCache {
                     && elapsed < Duration::from_secs(3600)
                 {
                     common_telemetry::debug!("Skip directory by mtime, elapsed: {:?}", elapsed);
-                    // Only removes if not modified for at least 1 hour
-                    return Ok(false);
+                    // Only removes if not modified for at least 1 hour.
+                    is_empty = false;
+                    continue;
                 }
 
                 let subdir_empty = Self::remove_empty_dirs_recursive_sync(&path, check_mtime)?;
                 if subdir_empty {
-                    if let Err(e) = std::fs::remove_dir(&path) {
+                    if let Err(e) = std::fs::remove_dir(&path)
+                        && e.kind() != std::io::ErrorKind::NotFound
+                    {
                         warn!(e; "Failed to remove empty directory {}", path.display());
-                        return Ok(false);
+                        is_empty = false;
                     } else {
                         info!(
                             "Removed empty directory {} from manifest cache",
@@ -417,14 +424,14 @@ impl ManifestCache {
                         );
                     }
                 } else {
-                    return Ok(false);
+                    is_empty = false;
                 }
             } else {
-                return Ok(false);
+                is_empty = false;
             }
         }
 
-        Ok(true)
+        Ok(is_empty)
     }
 }
 
