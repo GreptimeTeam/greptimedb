@@ -65,10 +65,7 @@ impl<'a> ParallelFstValuesMapper<'a> {
         }
 
         common_telemetry::debug!("fetch ranges: {:?}", fetch_ranges);
-        let mut bitmaps = self
-            .reader
-            .bitmap_deque(&fetch_ranges, metrics)
-            .await?;
+        let mut bitmaps = self.reader.bitmap_deque(&fetch_ranges, metrics).await?;
         let mut output = Vec::with_capacity(groups.len());
 
         for counter in groups {
