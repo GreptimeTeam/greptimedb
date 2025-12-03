@@ -305,6 +305,15 @@ impl GrpcQueryHandler for Instance {
         let ctx = ctx.clone();
 
         Box::pin(stream! {
+            if let Err(e) = plugins
+                .get::<PermissionCheckerRef>()
+                .as_ref()
+                .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
+                .context(PermissionSnafu)
+            {
+                yield Err(e);
+                return;
+            }
             // Cache for resolved table reference - resolve once and reuse
             let table_ref = match catalog_manager
                 .table(
@@ -331,16 +340,6 @@ impl GrpcQueryHandler for Instance {
             let interceptor_ref = plugins.get::<GrpcQueryInterceptorRef<Error>>();
             let interceptor = interceptor_ref.as_ref();
             if let Err(e) = interceptor.pre_bulk_insert(table_ref.clone(), ctx.clone()) {
-                yield Err(e);
-                return;
-            }
-
-            if let Err(e) = plugins
-                .get::<PermissionCheckerRef>()
-                .as_ref()
-                .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
-                .context(PermissionSnafu)
-            {
                 yield Err(e);
                 return;
             }
