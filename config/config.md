@@ -275,7 +275,6 @@
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
-| `meta_client.heartbeat_timeout` | String | `500ms` | Heartbeat timeout. |
 | `meta_client.ddl_timeout` | String | `10s` | DDL timeout. |
 | `meta_client.connect_timeout` | String | `1s` | Connect server timeout. |
 | `meta_client.tcp_nodelay` | Bool | `true` | `TCP_NODELAY` option for accepted connections. |
@@ -441,7 +440,6 @@
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
-| `meta_client.heartbeat_timeout` | String | `500ms` | Heartbeat timeout. |
 | `meta_client.ddl_timeout` | String | `10s` | DDL timeout. |
 | `meta_client.connect_timeout` | String | `1s` | Connect server timeout. |
 | `meta_client.tcp_nodelay` | Bool | `true` | `TCP_NODELAY` option for accepted connections. |
@@ -604,7 +602,6 @@
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
-| `meta_client.heartbeat_timeout` | String | `500ms` | Heartbeat timeout. |
 | `meta_client.ddl_timeout` | String | `10s` | DDL timeout. |
 | `meta_client.connect_timeout` | String | `1s` | Connect server timeout. |
 | `meta_client.tcp_nodelay` | Bool | `true` | `TCP_NODELAY` option for accepted connections. |

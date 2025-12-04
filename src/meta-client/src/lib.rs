@@ -18,6 +18,7 @@ use std::time::Duration;
 use client::RegionFollowerClientRef;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_telemetry::{debug, info};
 use serde::{Deserialize, Serialize};
 
@@ -33,8 +34,6 @@ pub struct MetaClientOptions {
     pub metasrv_addrs: Vec<String>,
     #[serde(with = "humantime_serde")]
     pub timeout: Duration,
-    #[serde(with = "humantime_serde")]
-    pub heartbeat_timeout: Duration,
     #[serde(with = "humantime_serde")]
     pub ddl_timeout: Duration,
     #[serde(with = "humantime_serde")]
@@ -52,7 +51,6 @@ impl Default for MetaClientOptions {
         Self {
             metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
             timeout: Duration::from_millis(3_000u64),
-            heartbeat_timeout: Duration::from_millis(500u64),
             ddl_timeout: Duration::from_millis(10_000u64),
             connect_timeout: Duration::from_millis(1_000u64),
             tcp_nodelay: true,
@@ -97,7 +95,11 @@ pub async fn create_meta_client(
         .timeout(meta_client_options.timeout)
         .connect_timeout(meta_client_options.connect_timeout)
         .tcp_nodelay(meta_client_options.tcp_nodelay);
-    let heartbeat_config = base_config.clone();
+    let heartbeat_config = base_config
+        .clone()
+        .timeout(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1))
+        .http2_keep_alive_interval(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1))
+        .http2_keep_alive_timeout(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1));
 
     if let MetaClientType::Frontend = client_type {
         let ddl_config = base_config.clone().timeout(meta_client_options.ddl_timeout);
