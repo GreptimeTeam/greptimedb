@@ -254,6 +254,7 @@ mod test {
         );
 
         let base = file_id.as_bytes().len()
+            + std::mem::size_of::<IndexVersion>()
             + std::mem::size_of::<ColumnId>()
             + std::mem::size_of::<Tag>()
             + std::mem::size_of::<BloomFilterMeta>();
