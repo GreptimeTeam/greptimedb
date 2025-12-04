@@ -73,51 +73,40 @@ pub struct FulltextIndexApplyMetrics {
 
 impl std::fmt::Debug for FulltextIndexApplyMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{{")?;
-        let mut first = true;
+        let Self {
+            apply_elapsed,
+            blob_cache_miss,
+            dir_cache_hit,
+            dir_cache_miss,
+            dir_init_elapsed,
+            bloom_filter_read_metrics,
+        } = self;
 
-        if !self.apply_elapsed.is_zero() {
-            write!(f, "\"apply_elapsed\":\"{:?}\"", self.apply_elapsed)?;
-            first = false;
+        // If apply_elapsed is 0, we didn't apply anything.
+        if apply_elapsed.is_zero() {
+            return write!(f, "{{}}");
         }
-        if self.blob_cache_miss > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"blob_cache_miss\":{}", self.blob_cache_miss)?;
-            first = false;
+        write!(f, "{{")?;
+
+        write!(f, "\"apply_elapsed\":\"{:?}\"", apply_elapsed)?;
+
+        if *blob_cache_miss > 0 {
+            write!(f, ", \"blob_cache_miss\":{}", blob_cache_miss)?;
         }
-        if self.dir_cache_hit > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"dir_cache_hit\":{}", self.dir_cache_hit)?;
-            first = false;
+        if *dir_cache_hit > 0 {
+            write!(f, ", \"dir_cache_hit\":{}", dir_cache_hit)?;
         }
-        if self.dir_cache_miss > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"dir_cache_miss\":{}", self.dir_cache_miss)?;
-            first = false;
+        if *dir_cache_miss > 0 {
+            write!(f, ", \"dir_cache_miss\":{}", dir_cache_miss)?;
         }
-        if !self.dir_init_elapsed.is_zero() {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"dir_init_elapsed\":\"{:?}\"", self.dir_init_elapsed)?;
-            first = false;
+        if !dir_init_elapsed.is_zero() {
+            write!(f, ", \"dir_init_elapsed\":\"{:?}\"", dir_init_elapsed)?;
         }
-        if !self.apply_elapsed.is_zero() {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(
-                f,
-                "\"bloom_filter_read_metrics\":{:?}",
-                self.bloom_filter_read_metrics
-            )?;
-        }
+        write!(
+            f,
+            ", \"bloom_filter_read_metrics\":{:?}",
+            bloom_filter_read_metrics
+        )?;
 
         write!(f, "}}")
     }
