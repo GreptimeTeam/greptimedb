@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Instant;
+
 use common_base::range_read::RangeReader;
 use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexMetas};
 use prost::Message;
@@ -23,6 +25,7 @@ use crate::inverted_index::error::{
     UnexpectedZeroSegmentRowCountSnafu,
 };
 use crate::inverted_index::format::FOOTER_PAYLOAD_SIZE_SIZE;
+use crate::inverted_index::format::reader::InvertedIndexReadMetrics;
 
 pub const DEFAULT_PREFETCH_SIZE: u64 = 8192; // 8KiB
 
@@ -54,11 +57,16 @@ impl<R> InvertedIndexFooterReader<R> {
 }
 
 impl<R: RangeReader> InvertedIndexFooterReader<R> {
-    pub async fn metadata(&mut self) -> Result<InvertedIndexMetas> {
+    pub async fn metadata(
+        &mut self,
+        mut metrics: Option<&mut InvertedIndexReadMetrics>,
+    ) -> Result<InvertedIndexMetas> {
         ensure!(
             self.blob_size >= FOOTER_PAYLOAD_SIZE_SIZE,
             BlobSizeTooSmallSnafu
         );
+
+        let start = metrics.as_ref().map(|_| Instant::now());
 
         let footer_start = self.blob_size.saturating_sub(self.prefetch_size());
         let suffix = self
@@ -73,19 +81,36 @@ impl<R: RangeReader> InvertedIndexFooterReader<R> {
         let footer_size = FOOTER_PAYLOAD_SIZE_SIZE;
 
         // Did not fetch the entire file metadata in the initial read, need to make a second request.
-        if length > suffix_len as u64 - footer_size {
+        let result = if length > suffix_len as u64 - footer_size {
             let metadata_start = self.blob_size - length - footer_size;
             let meta = self
                 .source
                 .read(metadata_start..self.blob_size - footer_size)
                 .await
                 .context(CommonIoSnafu)?;
+
+            if let Some(m) = metrics.as_deref_mut() {
+                m.total_bytes += self.blob_size.min(self.prefetch_size()) + length;
+                m.total_ranges += 2;
+            }
+
             self.parse_payload(&meta, length)
         } else {
+            if let Some(m) = metrics.as_deref_mut() {
+                m.total_bytes += self.blob_size.min(self.prefetch_size());
+                m.total_ranges += 1;
+            }
+
             let metadata_start = self.blob_size - length - footer_size - footer_start;
             let meta = &suffix[metadata_start as usize..suffix_len - footer_size as usize];
             self.parse_payload(meta, length)
+        };
+
+        if let Some(m) = metrics {
+            m.fetch_elapsed += start.unwrap().elapsed();
         }
+
+        result
     }
 
     fn read_tailing_four_bytes(suffix: &[u8]) -> Result<[u8; 4]> {
@@ -186,7 +211,7 @@ mod tests {
                 reader = reader.with_prefetch_size(prefetch);
             }
 
-            let metas = reader.metadata().await.unwrap();
+            let metas = reader.metadata(None).await.unwrap();
             assert_eq!(metas.metas.len(), 1);
             let index_meta = &metas.metas.get("test").unwrap();
             assert_eq!(index_meta.name, "test");
@@ -210,7 +235,7 @@ mod tests {
                 reader = reader.with_prefetch_size(prefetch);
             }
 
-            let result = reader.metadata().await;
+            let result = reader.metadata(None).await;
             assert_matches!(result, Err(Error::UnexpectedFooterPayloadSize { .. }));
         }
     }
@@ -233,7 +258,7 @@ mod tests {
                 reader = reader.with_prefetch_size(prefetch);
             }
 
-            let result = reader.metadata().await;
+            let result = reader.metadata(None).await;
             assert_matches!(result, Err(Error::UnexpectedOffsetSize { .. }));
         }
     }

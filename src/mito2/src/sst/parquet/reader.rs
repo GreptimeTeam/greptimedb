@@ -52,15 +52,21 @@ use crate::metrics::{
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
-use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
-use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
-use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
+use crate::sst::index::bloom_filter::applier::{
+    BloomFilterIndexApplierRef, BloomFilterIndexApplyMetrics,
+};
+use crate::sst::index::fulltext_index::applier::{
+    FulltextIndexApplierRef, FulltextIndexApplyMetrics,
+};
+use crate::sst::index::inverted_index::applier::{
+    InvertedIndexApplierRef, InvertedIndexApplyMetrics,
+};
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PreFilterMode, row_group_contains_delete,
 };
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
-use crate::sst::parquet::row_group::InMemoryRowGroup;
+use crate::sst::parquet::row_group::{InMemoryRowGroup, ParquetFetchMetrics};
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
@@ -253,7 +259,9 @@ impl ParquetReaderBuilder {
         let file_size = self.file_handle.meta_ref().file_size;
 
         // Loads parquet metadata of the file.
-        let parquet_meta = self.read_parquet_metadata(&file_path, file_size).await?;
+        let parquet_meta = self
+            .read_parquet_metadata(&file_path, file_size, &mut metrics.metadata_cache_metrics)
+            .await?;
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
         // Gets the metadata stored in the SST.
@@ -378,25 +386,34 @@ impl ParquetReaderBuilder {
         &self,
         file_path: &str,
         file_size: u64,
+        cache_metrics: &mut MetadataCacheMetrics,
     ) -> Result<Arc<ParquetMetaData>> {
+        let start = Instant::now();
         let _t = READ_STAGE_ELAPSED
             .with_label_values(&["read_parquet_metadata"])
             .start_timer();
 
         let file_id = self.file_handle.file_id();
-        // Tries to get from global cache.
-        if let Some(metadata) = self.cache_strategy.get_parquet_meta_data(file_id).await {
+        // Tries to get from cache with metrics tracking.
+        if let Some(metadata) = self
+            .cache_strategy
+            .get_parquet_meta_data(file_id, cache_metrics)
+            .await
+        {
+            cache_metrics.metadata_load_cost += start.elapsed();
             return Ok(metadata);
         }
 
         // Cache miss, load metadata directly.
         let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);
         let metadata = metadata_loader.load().await?;
+
         let metadata = Arc::new(metadata);
         // Cache the metadata.
         self.cache_strategy
             .put_parquet_meta_data(file_id, metadata.clone());
 
+        cache_metrics.metadata_load_cost += start.elapsed();
         Ok(metadata)
     }
 
@@ -527,7 +544,11 @@ impl ParquetReaderBuilder {
             // Slow path: apply the index from the file.
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let apply_res = index_applier
-                .apply_fine(self.file_handle.file_id(), Some(file_size_hint))
+                .apply_fine(
+                    self.file_handle.file_id(),
+                    Some(file_size_hint),
+                    metrics.fulltext_index_apply_metrics.as_mut(),
+                )
                 .await;
             let selection = match apply_res {
                 Ok(Some(res)) => {
@@ -595,13 +616,17 @@ impl ParquetReaderBuilder {
             // Slow path: apply the index from the file.
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let apply_res = index_applier
-                .apply(self.file_handle.file_id(), Some(file_size_hint))
+                .apply(
+                    self.file_handle.file_id(),
+                    Some(file_size_hint),
+                    metrics.inverted_index_apply_metrics.as_mut(),
+                )
                 .await;
             let selection = match apply_res {
-                Ok(output) => RowGroupSelection::from_inverted_index_apply_output(
+                Ok(apply_output) => RowGroupSelection::from_inverted_index_apply_output(
                     row_group_size,
                     num_row_groups,
-                    output,
+                    apply_output,
                 ),
                 Err(err) => {
                     handle_index_error!(err, self.file_handle, INDEX_TYPE_INVERTED);
@@ -670,7 +695,12 @@ impl ParquetReaderBuilder {
                 )
             });
             let apply_res = index_applier
-                .apply(self.file_handle.file_id(), Some(file_size_hint), rgs)
+                .apply(
+                    self.file_handle.file_id(),
+                    Some(file_size_hint),
+                    rgs,
+                    metrics.bloom_filter_apply_metrics.as_mut(),
+                )
                 .await;
             let mut selection = match apply_res {
                 Ok(apply_output) => {
@@ -748,7 +778,12 @@ impl ParquetReaderBuilder {
                 )
             });
             let apply_res = index_applier
-                .apply_coarse(self.file_handle.file_id(), Some(file_size_hint), rgs)
+                .apply_coarse(
+                    self.file_handle.file_id(),
+                    Some(file_size_hint),
+                    rgs,
+                    metrics.fulltext_index_apply_metrics.as_mut(),
+                )
                 .await;
             let mut selection = match apply_res {
                 Ok(Some(apply_output)) => {
@@ -892,7 +927,7 @@ fn all_required_row_groups_searched(
 }
 
 /// Metrics of filtering rows groups and rows.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ReaderFilterMetrics {
     /// Number of row groups before filtering.
     pub(crate) rg_total: usize,
@@ -915,6 +950,13 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) rows_bloom_filtered: usize,
     /// Number of rows filtered by precise filter.
     pub(crate) rows_precise_filtered: usize,
+
+    /// Optional metrics for inverted index applier.
+    pub(crate) inverted_index_apply_metrics: Option<InvertedIndexApplyMetrics>,
+    /// Optional metrics for bloom filter index applier.
+    pub(crate) bloom_filter_apply_metrics: Option<BloomFilterIndexApplyMetrics>,
+    /// Optional metrics for fulltext index applier.
+    pub(crate) fulltext_index_apply_metrics: Option<FulltextIndexApplyMetrics>,
 }
 
 impl ReaderFilterMetrics {
@@ -931,6 +973,23 @@ impl ReaderFilterMetrics {
         self.rows_inverted_filtered += other.rows_inverted_filtered;
         self.rows_bloom_filtered += other.rows_bloom_filtered;
         self.rows_precise_filtered += other.rows_precise_filtered;
+
+        // Merge optional applier metrics
+        if let Some(other_metrics) = &other.inverted_index_apply_metrics {
+            self.inverted_index_apply_metrics
+                .get_or_insert_with(Default::default)
+                .merge_from(other_metrics);
+        }
+        if let Some(other_metrics) = &other.bloom_filter_apply_metrics {
+            self.bloom_filter_apply_metrics
+                .get_or_insert_with(Default::default)
+                .merge_from(other_metrics);
+        }
+        if let Some(other_metrics) = &other.fulltext_index_apply_metrics {
+            self.fulltext_index_apply_metrics
+                .get_or_insert_with(Default::default)
+                .merge_from(other_metrics);
+        }
     }
 
     /// Reports metrics.
@@ -987,6 +1046,64 @@ impl ReaderFilterMetrics {
     }
 }
 
+/// Metrics for parquet metadata cache operations.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct MetadataCacheMetrics {
+    /// Number of memory cache hits for parquet metadata.
+    pub(crate) mem_cache_hit: usize,
+    /// Number of file cache hits for parquet metadata.
+    pub(crate) file_cache_hit: usize,
+    /// Number of cache misses for parquet metadata.
+    pub(crate) cache_miss: usize,
+    /// Duration to load parquet metadata.
+    pub(crate) metadata_load_cost: Duration,
+}
+
+impl std::fmt::Debug for MetadataCacheMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            mem_cache_hit,
+            file_cache_hit,
+            cache_miss,
+            metadata_load_cost,
+        } = self;
+
+        if self.is_empty() {
+            return write!(f, "{{}}");
+        }
+        write!(f, "{{")?;
+
+        write!(f, "\"metadata_load_cost\":\"{:?}\"", metadata_load_cost)?;
+
+        if *mem_cache_hit > 0 {
+            write!(f, ", \"mem_cache_hit\":{}", mem_cache_hit)?;
+        }
+        if *file_cache_hit > 0 {
+            write!(f, ", \"file_cache_hit\":{}", file_cache_hit)?;
+        }
+        if *cache_miss > 0 {
+            write!(f, ", \"cache_miss\":{}", cache_miss)?;
+        }
+
+        write!(f, "}}")
+    }
+}
+
+impl MetadataCacheMetrics {
+    /// Returns true if the metrics are empty (contain no meaningful data).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.metadata_load_cost.is_zero()
+    }
+
+    /// Adds `other` metrics to this metrics.
+    pub(crate) fn merge_from(&mut self, other: &MetadataCacheMetrics) {
+        self.mem_cache_hit += other.mem_cache_hit;
+        self.file_cache_hit += other.file_cache_hit;
+        self.cache_miss += other.cache_miss;
+        self.metadata_load_cost += other.metadata_load_cost;
+    }
+}
+
 /// Parquet reader metrics.
 #[derive(Debug, Default, Clone)]
 pub struct ReaderMetrics {
@@ -1002,6 +1119,10 @@ pub struct ReaderMetrics {
     pub(crate) num_batches: usize,
     /// Number of rows read.
     pub(crate) num_rows: usize,
+    /// Metrics for parquet metadata cache.
+    pub(crate) metadata_cache_metrics: MetadataCacheMetrics,
+    /// Optional metrics for page/row group fetch operations.
+    pub(crate) fetch_metrics: Option<Arc<ParquetFetchMetrics>>,
 }
 
 impl ReaderMetrics {
@@ -1013,6 +1134,15 @@ impl ReaderMetrics {
         self.num_record_batches += other.num_record_batches;
         self.num_batches += other.num_batches;
         self.num_rows += other.num_rows;
+        self.metadata_cache_metrics
+            .merge_from(&other.metadata_cache_metrics);
+        if let Some(other_fetch) = &other.fetch_metrics {
+            if let Some(self_fetch) = &self.fetch_metrics {
+                self_fetch.merge_from(other_fetch);
+            } else {
+                self.fetch_metrics = Some(other_fetch.clone());
+            }
+        }
     }
 
     /// Reports total rows.
@@ -1067,7 +1197,10 @@ impl RowGroupReaderBuilder {
         &self,
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
+        fetch_metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<ParquetRecordBatchReader> {
+        let fetch_start = Instant::now();
+
         let mut row_group = InMemoryRowGroup::create(
             self.file_handle.region_id(),
             self.file_handle.file_id().file_id(),
@@ -1079,11 +1212,16 @@ impl RowGroupReaderBuilder {
         );
         // Fetches data into memory.
         row_group
-            .fetch(&self.projection, row_selection.as_ref())
+            .fetch(&self.projection, row_selection.as_ref(), fetch_metrics)
             .await
             .context(ReadParquetSnafu {
                 path: &self.file_path,
             })?;
+
+        // Record total fetch elapsed time.
+        if let Some(metrics) = fetch_metrics {
+            metrics.data.lock().unwrap().total_fetch_elapsed += fetch_start.elapsed();
+        }
 
         // Builds the parquet reader.
         // Now the row selection is None.
@@ -1228,6 +1366,8 @@ pub struct ParquetReader {
     selection: RowGroupSelection,
     /// Reader of current row group.
     reader_state: ReaderState,
+    /// Metrics for tracking row group fetch operations.
+    fetch_metrics: ParquetFetchMetrics,
 }
 
 #[async_trait]
@@ -1247,7 +1387,11 @@ impl BatchReader for ParquetReader {
             let parquet_reader = self
                 .context
                 .reader_builder()
-                .build(row_group_idx, Some(row_selection))
+                .build(
+                    row_group_idx,
+                    Some(row_selection),
+                    Some(&self.fetch_metrics),
+                )
                 .await?;
 
             // Resets the parquet reader.
@@ -1303,11 +1447,12 @@ impl ParquetReader {
         context: FileRangeContextRef,
         mut selection: RowGroupSelection,
     ) -> Result<Self> {
+        let fetch_metrics = ParquetFetchMetrics::default();
         // No more items in current row group, reads next row group.
         let reader_state = if let Some((row_group_idx, row_selection)) = selection.pop_first() {
             let parquet_reader = context
                 .reader_builder()
-                .build(row_group_idx, Some(row_selection))
+                .build(row_group_idx, Some(row_selection), Some(&fetch_metrics))
                 .await?;
             // Compute skip_fields once for this row group
             let skip_fields = context.should_skip_fields(row_group_idx);
@@ -1324,6 +1469,7 @@ impl ParquetReader {
             context,
             selection,
             reader_state,
+            fetch_metrics,
         })
     }
 

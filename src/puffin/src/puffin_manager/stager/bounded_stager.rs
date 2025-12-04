@@ -41,7 +41,7 @@ use crate::error::{
 use crate::puffin_manager::stager::{
     BoxWriter, DirWriterProvider, InitBlobFn, InitDirFn, Stager, StagerNotifier,
 };
-use crate::puffin_manager::{BlobGuard, DirGuard};
+use crate::puffin_manager::{BlobGuard, DirGuard, DirMetrics};
 
 const DELETE_QUEUE_SIZE: usize = 10240;
 const TMP_EXTENSION: &str = "tmp";
@@ -203,7 +203,7 @@ impl<H: ToString + Clone + Send + Sync> Stager for BoundedStager<H> {
         handle: &Self::FileHandle,
         key: &str,
         init_fn: Box<dyn InitDirFn + Send + Sync + 'a>,
-    ) -> Result<Self::Dir> {
+    ) -> Result<(Self::Dir, DirMetrics)> {
         let handle_str = handle.to_string();
 
         let cache_key = Self::encode_cache_key(&handle_str, key);
@@ -242,15 +242,22 @@ impl<H: ToString + Clone + Send + Sync> Stager for BoundedStager<H> {
             .await
             .context(CacheGetSnafu)?;
 
+        let dir_size = v.size();
         if let Some(notifier) = self.notifier.as_ref() {
             if miss {
-                notifier.on_cache_miss(v.size());
+                notifier.on_cache_miss(dir_size);
             } else {
-                notifier.on_cache_hit(v.size());
+                notifier.on_cache_hit(dir_size);
             }
         }
+
+        let metrics = DirMetrics {
+            cache_hit: !miss,
+            dir_size,
+        };
+
         match v {
-            CacheValue::Dir(guard) => Ok(guard),
+            CacheValue::Dir(guard) => Ok((guard, metrics)),
             _ => unreachable!(),
         }
     }
@@ -882,7 +889,7 @@ mod tests {
 
         let puffin_file_name = "test_get_dir".to_string();
         let key = "key";
-        let dir_path = stager
+        let (dir_path, metrics) = stager
             .get_dir(
                 &puffin_file_name,
                 key,
@@ -900,6 +907,9 @@ mod tests {
             )
             .await
             .unwrap();
+
+        assert!(!metrics.cache_hit);
+        assert!(metrics.dir_size > 0);
 
         for (rel_path, content) in &files_in_dir {
             let file_path = dir_path.path().join(rel_path);
@@ -974,7 +984,7 @@ mod tests {
         ];
 
         let dir_key = "dir_key";
-        let guard = stager
+        let (guard, _metrics) = stager
             .get_dir(
                 &puffin_file_name,
                 dir_key,
@@ -1016,7 +1026,7 @@ mod tests {
         let buf = reader.read(0..m.content_length).await.unwrap();
         assert_eq!(&*buf, b"hello world");
 
-        let dir_path = stager
+        let (dir_path, metrics) = stager
             .get_dir(
                 &puffin_file_name,
                 dir_key,
@@ -1024,6 +1034,9 @@ mod tests {
             )
             .await
             .unwrap();
+
+        assert!(metrics.cache_hit);
+        assert!(metrics.dir_size > 0);
         for (rel_path, content) in &files_in_dir {
             let file_path = dir_path.path().join(rel_path);
             let mut file = tokio::fs::File::open(&file_path).await.unwrap();
@@ -1151,7 +1164,7 @@ mod tests {
         ];
 
         // First time to get the directory
-        let guard_0 = stager
+        let (guard_0, _metrics) = stager
             .get_dir(
                 &puffin_file_name,
                 dir_key,
@@ -1198,7 +1211,7 @@ mod tests {
         );
 
         // Second time to get the directory
-        let guard_1 = stager
+        let (guard_1, _metrics) = stager
             .get_dir(
                 &puffin_file_name,
                 dir_key,
@@ -1237,7 +1250,7 @@ mod tests {
         // Third time to get the directory and all guards are dropped
         drop(guard_0);
         drop(guard_1);
-        let guard_2 = stager
+        let (guard_2, _metrics) = stager
             .get_dir(
                 &puffin_file_name,
                 dir_key,
@@ -1390,7 +1403,7 @@ mod tests {
         ];
 
         let dir_key = "dir_key";
-        let guard = stager
+        let (guard, _metrics) = stager
             .get_dir(
                 &puffin_file_name,
                 dir_key,

@@ -41,10 +41,14 @@ use crate::read::range::{RangeBuilderList, RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::{Batch, BoxedBatchStream, BoxedRecordBatchStream, ScannerMetrics, Source};
 use crate::sst::file::FileTimeRange;
+use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplyMetrics;
+use crate::sst::index::fulltext_index::applier::FulltextIndexApplyMetrics;
+use crate::sst::index::inverted_index::applier::InvertedIndexApplyMetrics;
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::flat_format::time_index_column_index;
-use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
+use crate::sst::parquet::reader::{MetadataCacheMetrics, ReaderFilterMetrics, ReaderMetrics};
+use crate::sst::parquet::row_group::ParquetFetchMetrics;
 
 /// Verbose scan metrics for a partition.
 #[derive(Default)]
@@ -81,6 +85,8 @@ pub(crate) struct ScanMetricsSet {
     // SST related metrics:
     /// Duration to build file ranges.
     build_parts_cost: Duration,
+    /// Duration to scan SST files.
+    sst_scan_cost: Duration,
     /// Number of row groups before filtering.
     rg_total: usize,
     /// Number of row groups filtered by fulltext index.
@@ -126,6 +132,18 @@ pub(crate) struct ScanMetricsSet {
 
     /// The stream reached EOF
     stream_eof: bool,
+
+    // Optional verbose metrics:
+    /// Inverted index apply metrics.
+    inverted_index_apply_metrics: Option<InvertedIndexApplyMetrics>,
+    /// Bloom filter index apply metrics.
+    bloom_filter_apply_metrics: Option<BloomFilterIndexApplyMetrics>,
+    /// Fulltext index apply metrics.
+    fulltext_index_apply_metrics: Option<FulltextIndexApplyMetrics>,
+    /// Parquet fetch metrics.
+    fetch_metrics: Option<ParquetFetchMetrics>,
+    /// Metadata cache metrics.
+    metadata_cache_metrics: Option<MetadataCacheMetrics>,
 }
 
 impl fmt::Debug for ScanMetricsSet {
@@ -141,6 +159,7 @@ impl fmt::Debug for ScanMetricsSet {
             num_mem_ranges,
             num_file_ranges,
             build_parts_cost,
+            sst_scan_cost,
             rg_total,
             rg_fulltext_filtered,
             rg_inverted_filtered,
@@ -166,6 +185,11 @@ impl fmt::Debug for ScanMetricsSet {
             mem_rows,
             mem_batches,
             mem_series,
+            inverted_index_apply_metrics,
+            bloom_filter_apply_metrics,
+            fulltext_index_apply_metrics,
+            fetch_metrics,
+            metadata_cache_metrics,
         } = self;
 
         // Write core metrics
@@ -181,6 +205,7 @@ impl fmt::Debug for ScanMetricsSet {
             \"num_mem_ranges\":{num_mem_ranges}, \
             \"num_file_ranges\":{num_file_ranges}, \
             \"build_parts_cost\":\"{build_parts_cost:?}\", \
+            \"sst_scan_cost\":\"{sst_scan_cost:?}\", \
             \"rg_total\":{rg_total}, \
             \"rows_before_filter\":{rows_before_filter}, \
             \"num_sst_record_batches\":{num_sst_record_batches}, \
@@ -255,6 +280,33 @@ impl fmt::Debug for ScanMetricsSet {
             write!(f, ", \"mem_scan_cost\":\"{mem_scan_cost:?}\"")?;
         }
 
+        // Write optional verbose metrics if they are not empty
+        if let Some(metrics) = inverted_index_apply_metrics
+            && !metrics.is_empty()
+        {
+            write!(f, ", \"inverted_index_apply_metrics\":{:?}", metrics)?;
+        }
+        if let Some(metrics) = bloom_filter_apply_metrics
+            && !metrics.is_empty()
+        {
+            write!(f, ", \"bloom_filter_apply_metrics\":{:?}", metrics)?;
+        }
+        if let Some(metrics) = fulltext_index_apply_metrics
+            && !metrics.is_empty()
+        {
+            write!(f, ", \"fulltext_index_apply_metrics\":{:?}", metrics)?;
+        }
+        if let Some(metrics) = fetch_metrics
+            && !metrics.is_empty()
+        {
+            write!(f, ", \"fetch_metrics\":{:?}", metrics)?;
+        }
+        if let Some(metrics) = metadata_cache_metrics
+            && !metrics.is_empty()
+        {
+            write!(f, ", \"metadata_cache_metrics\":{:?}", metrics)?;
+        }
+
         write!(f, ", \"stream_eof\":{stream_eof}}}")
     }
 }
@@ -304,14 +356,20 @@ impl ScanMetricsSet {
                     rows_inverted_filtered,
                     rows_bloom_filtered,
                     rows_precise_filtered,
+                    inverted_index_apply_metrics,
+                    bloom_filter_apply_metrics,
+                    fulltext_index_apply_metrics,
                 },
             num_record_batches,
             num_batches,
             num_rows,
-            scan_cost: _,
+            scan_cost,
+            metadata_cache_metrics,
+            fetch_metrics,
         } = other;
 
         self.build_parts_cost += *build_cost;
+        self.sst_scan_cost += *scan_cost;
 
         self.rg_total += *rg_total;
         self.rg_fulltext_filtered += *rg_fulltext_filtered;
@@ -328,6 +386,31 @@ impl ScanMetricsSet {
         self.num_sst_record_batches += *num_record_batches;
         self.num_sst_batches += *num_batches;
         self.num_sst_rows += *num_rows;
+
+        // Merge optional verbose metrics
+        if let Some(metrics) = inverted_index_apply_metrics {
+            self.inverted_index_apply_metrics
+                .get_or_insert_with(InvertedIndexApplyMetrics::default)
+                .merge_from(metrics);
+        }
+        if let Some(metrics) = bloom_filter_apply_metrics {
+            self.bloom_filter_apply_metrics
+                .get_or_insert_with(BloomFilterIndexApplyMetrics::default)
+                .merge_from(metrics);
+        }
+        if let Some(metrics) = fulltext_index_apply_metrics {
+            self.fulltext_index_apply_metrics
+                .get_or_insert_with(FulltextIndexApplyMetrics::default)
+                .merge_from(metrics);
+        }
+        if let Some(metrics) = fetch_metrics {
+            self.fetch_metrics
+                .get_or_insert_with(ParquetFetchMetrics::default)
+                .merge_from(metrics);
+        }
+        self.metadata_cache_metrics
+            .get_or_insert_with(MetadataCacheMetrics::default)
+            .merge_from(metadata_cache_metrics);
     }
 
     /// Sets distributor metrics.
@@ -615,6 +698,11 @@ impl PartitionMetrics {
         let mut metrics_set = self.0.metrics.lock().unwrap();
         metrics_set.set_distributor_metrics(metrics);
     }
+
+    /// Returns whether verbose explain is enabled.
+    pub(crate) fn explain_verbose(&self) -> bool {
+        self.0.explain_verbose
+    }
 }
 
 impl fmt::Debug for PartitionMetrics {
@@ -768,6 +856,21 @@ fn can_split_series(num_rows: u64, num_series: u64) -> bool {
     num_series < NUM_SERIES_THRESHOLD || num_rows / num_series >= BATCH_SIZE_THRESHOLD
 }
 
+/// Creates a new [ReaderFilterMetrics] with optional apply metrics initialized
+/// based on the `explain_verbose` flag.
+fn new_filter_metrics(explain_verbose: bool) -> ReaderFilterMetrics {
+    if explain_verbose {
+        ReaderFilterMetrics {
+            inverted_index_apply_metrics: Some(InvertedIndexApplyMetrics::default()),
+            bloom_filter_apply_metrics: Some(BloomFilterIndexApplyMetrics::default()),
+            fulltext_index_apply_metrics: Some(FulltextIndexApplyMetrics::default()),
+            ..Default::default()
+        }
+    } else {
+        ReaderFilterMetrics::default()
+    }
+}
+
 /// Scans file ranges at `index`.
 pub(crate) async fn scan_file_ranges(
     stream_ctx: Arc<StreamContext>,
@@ -776,7 +879,10 @@ pub(crate) async fn scan_file_ranges(
     read_type: &'static str,
     range_builder: Arc<RangeBuilderList>,
 ) -> Result<impl Stream<Item = Result<Batch>>> {
-    let mut reader_metrics = ReaderMetrics::default();
+    let mut reader_metrics = ReaderMetrics {
+        filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
+        ..Default::default()
+    };
     let ranges = range_builder
         .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
         .await?;
@@ -799,7 +905,10 @@ pub(crate) async fn scan_flat_file_ranges(
     read_type: &'static str,
     range_builder: Arc<RangeBuilderList>,
 ) -> Result<impl Stream<Item = Result<RecordBatch>>> {
-    let mut reader_metrics = ReaderMetrics::default();
+    let mut reader_metrics = ReaderMetrics {
+        filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
+        ..Default::default()
+    };
     let ranges = range_builder
         .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
         .await?;
@@ -822,10 +931,18 @@ pub fn build_file_range_scan_stream(
     ranges: SmallVec<[FileRange; 2]>,
 ) -> impl Stream<Item = Result<Batch>> {
     try_stream! {
-        let reader_metrics = &mut ReaderMetrics::default();
+        let fetch_metrics = if part_metrics.explain_verbose() {
+            Some(Arc::new(ParquetFetchMetrics::default()))
+        } else {
+            None
+        };
+        let reader_metrics = &mut ReaderMetrics {
+            fetch_metrics: fetch_metrics.clone(),
+            ..Default::default()
+        };
         for range in ranges {
             let build_reader_start = Instant::now();
-            let reader = range.reader(stream_ctx.input.series_row_selector).await?;
+            let reader = range.reader(stream_ctx.input.series_row_selector, fetch_metrics.as_deref()).await?;
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
             let compat_batch = range.compat_batch();
@@ -857,10 +974,18 @@ pub fn build_flat_file_range_scan_stream(
     ranges: SmallVec<[FileRange; 2]>,
 ) -> impl Stream<Item = Result<RecordBatch>> {
     try_stream! {
-        let reader_metrics = &mut ReaderMetrics::default();
+        let fetch_metrics = if part_metrics.explain_verbose() {
+            Some(Arc::new(ParquetFetchMetrics::default()))
+        } else {
+            None
+        };
+        let reader_metrics = &mut ReaderMetrics {
+            fetch_metrics: fetch_metrics.clone(),
+            ..Default::default()
+        };
         for range in ranges {
             let build_reader_start = Instant::now();
-            let mut reader = range.flat_reader().await?;
+            let mut reader = range.flat_reader(fetch_metrics.as_deref()).await?;
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
 

@@ -233,7 +233,7 @@ async fn collect_inverted_entries(
             InvertedIndexBlobReader::new(blob_reader),
             cache.clone(),
         );
-        match reader.metadata().await {
+        match reader.metadata(None).await {
             Ok(metas) => metas,
             Err(err) => {
                 warn!(
@@ -247,7 +247,7 @@ async fn collect_inverted_entries(
         }
     } else {
         let reader = InvertedIndexBlobReader::new(blob_reader);
-        match reader.metadata().await {
+        match reader.metadata(None).await {
             Ok(metas) => metas,
             Err(err) => {
                 warn!(
@@ -318,10 +318,10 @@ async fn try_read_bloom_meta(
                             bloom_reader,
                             cache.clone(),
                         )
-                        .metadata()
+                        .metadata(None)
                         .await
                     }
-                    _ => bloom_reader.metadata().await,
+                    _ => bloom_reader.metadata(None).await,
                 };
 
                 match result {

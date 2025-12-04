@@ -14,12 +14,13 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use api::v1::index::{BloomFilterLoc, BloomFilterMeta};
 use async_trait::async_trait;
 use bytes::Bytes;
 use index::bloom_filter::error::Result;
-use index::bloom_filter::reader::BloomFilterReader;
+use index::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReader};
 use store_api::storage::{ColumnId, FileId};
 
 use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache, PageKey};
@@ -114,51 +115,93 @@ impl<R> CachedBloomFilterIndexBlobReader<R> {
 
 #[async_trait]
 impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBlobReader<R> {
-    async fn range_read(&self, offset: u64, size: u32) -> Result<Bytes> {
+    async fn range_read(
+        &self,
+        offset: u64,
+        size: u32,
+        metrics: Option<&mut BloomFilterReadMetrics>,
+    ) -> Result<Bytes> {
+        let start = metrics.as_ref().map(|_| Instant::now());
         let inner = &self.inner;
-        self.cache
+        let (result, cache_metrics) = self
+            .cache
             .get_or_load(
                 (self.file_id, self.column_id, self.tag),
                 self.blob_size,
                 offset,
                 size,
-                move |ranges| async move { inner.read_vec(&ranges).await },
+                move |ranges| async move { inner.read_vec(&ranges, None).await },
             )
-            .await
-            .map(|b| b.into())
+            .await?;
+
+        if let Some(m) = metrics {
+            m.total_ranges += cache_metrics.num_pages;
+            m.total_bytes += cache_metrics.page_bytes;
+            m.cache_hit += cache_metrics.cache_hit;
+            m.cache_miss += cache_metrics.cache_miss;
+            if let Some(start) = start {
+                m.fetch_elapsed += start.elapsed();
+            }
+        }
+
+        Ok(result.into())
     }
 
-    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn read_vec(
+        &self,
+        ranges: &[Range<u64>],
+        metrics: Option<&mut BloomFilterReadMetrics>,
+    ) -> Result<Vec<Bytes>> {
+        let start = metrics.as_ref().map(|_| Instant::now());
+
         let mut pages = Vec::with_capacity(ranges.len());
+        let mut total_cache_metrics = crate::cache::index::IndexCacheMetrics::default();
         for range in ranges {
             let inner = &self.inner;
-            let page = self
+            let (page, cache_metrics) = self
                 .cache
                 .get_or_load(
                     (self.file_id, self.column_id, self.tag),
                     self.blob_size,
                     range.start,
                     (range.end - range.start) as u32,
-                    move |ranges| async move { inner.read_vec(&ranges).await },
+                    move |ranges| async move { inner.read_vec(&ranges, None).await },
                 )
                 .await?;
 
+            total_cache_metrics.merge(&cache_metrics);
             pages.push(Bytes::from(page));
+        }
+
+        if let Some(m) = metrics {
+            m.total_ranges += total_cache_metrics.num_pages;
+            m.total_bytes += total_cache_metrics.page_bytes;
+            m.cache_hit += total_cache_metrics.cache_hit;
+            m.cache_miss += total_cache_metrics.cache_miss;
+            if let Some(start) = start {
+                m.fetch_elapsed += start.elapsed();
+            }
         }
 
         Ok(pages)
     }
 
     /// Reads the meta information of the bloom filter.
-    async fn metadata(&self) -> Result<BloomFilterMeta> {
+    async fn metadata(
+        &self,
+        metrics: Option<&mut BloomFilterReadMetrics>,
+    ) -> Result<BloomFilterMeta> {
         if let Some(cached) = self
             .cache
             .get_metadata((self.file_id, self.column_id, self.tag))
         {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
+            if let Some(m) = metrics {
+                m.cache_hit += 1;
+            }
             Ok((*cached).clone())
         } else {
-            let meta = self.inner.metadata().await?;
+            let meta = self.inner.metadata(metrics).await?;
             self.cache.put_metadata(
                 (self.file_id, self.column_id, self.tag),
                 Arc::new(meta.clone()),

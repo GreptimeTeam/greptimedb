@@ -245,7 +245,7 @@ mod tests {
         let bs = blob_reader.read(0..meta.content_length).await.unwrap();
         assert_eq!(&*bs, raw_data);
 
-        let dir_guard = reader.dir(dir_key).await.unwrap();
+        let (dir_guard, _metrics) = reader.dir(dir_key).await.unwrap();
         let file = dir_guard.path().join("hello");
         let data = tokio::fs::read(file).await.unwrap();
         assert_eq!(data, raw_data);
