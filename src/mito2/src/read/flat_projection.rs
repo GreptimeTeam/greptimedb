@@ -30,7 +30,7 @@ use store_api::storage::ColumnId;
 
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::sst::parquet::flat_format::sst_column_id_indices;
-use crate::sst::parquet::format::FormatProjection;
+use crate::sst::parquet::format::{FormatProjection, InternalProjection};
 use crate::sst::{
     FlatSchemaOptions, internal_fields, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema,
 };
@@ -108,6 +108,7 @@ impl FlatProjectionMapper {
             // All columns with internal columns.
             metadata.column_metadatas.len() + 3,
             column_ids.iter().copied(),
+            InternalProjection::default(),
         );
 
         let batch_schema = flat_projected_columns(metadata, &format_projection);

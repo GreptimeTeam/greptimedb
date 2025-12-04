@@ -52,8 +52,8 @@ use crate::error::{
     NewRecordBatchSnafu, Result,
 };
 use crate::sst::parquet::format::{
-    FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray, PrimaryKeyReadFormat, ReadFormat,
-    StatValues,
+    FormatProjection, INTERNAL_COLUMN_NUM, InternalProjection, PrimaryKeyArray,
+    PrimaryKeyReadFormat, ReadFormat, StatValues,
 };
 use crate::sst::{
     FlatSchemaOptions, flat_sst_arrow_schema_column_num, tag_maybe_to_dictionary_field,
@@ -398,6 +398,7 @@ impl ParquetPrimaryKeyToFlat {
             &id_to_index,
             sst_column_num,
             column_ids.iter().copied(),
+            InternalProjection::default(),
         );
         let codec = build_primary_key_codec(&metadata);
         let convert_format = if skip_auto_convert {
@@ -406,7 +407,11 @@ impl ParquetPrimaryKeyToFlat {
             FlatConvertFormat::new(Arc::clone(&metadata), &format_projection, codec)
         };
 
-        let format = PrimaryKeyReadFormat::new(metadata.clone(), column_ids.iter().copied());
+        let format = PrimaryKeyReadFormat::new(
+            metadata.clone(),
+            column_ids.iter().copied(),
+            InternalProjection::default(),
+        );
 
         Self {
             format,
@@ -444,8 +449,12 @@ impl ParquetFlat {
         let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
         let sst_column_num =
             flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
-        let format_projection =
-            FormatProjection::compute_format_projection(&id_to_index, sst_column_num, column_ids);
+        let format_projection = FormatProjection::compute_format_projection(
+            &id_to_index,
+            sst_column_num,
+            column_ids,
+            InternalProjection::default(),
+        );
 
         Self {
             metadata,

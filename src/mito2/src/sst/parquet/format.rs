@@ -30,11 +30,12 @@ use std::borrow::Borrow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use api::v1::SemanticType;
+use api::v1::{OpType, SemanticType};
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use datatypes::arrow::array::{
-    ArrayRef, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, UInt32Array, UInt64Array,
+    ArrayRef, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, UInt8Array, UInt32Array,
+    UInt64Array,
 };
 use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -153,7 +154,24 @@ impl ReadFormat {
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
     ) -> Self {
-        ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(metadata, column_ids))
+        ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(
+            metadata,
+            column_ids,
+            InternalProjection::default(),
+        ))
+    }
+
+    /// Creates a helper to read the primary key format with a custom internal projection.
+    pub(crate) fn new_primary_key_with_internal(
+        metadata: RegionMetadataRef,
+        column_ids: impl Iterator<Item = ColumnId>,
+        internal_projection: InternalProjection,
+    ) -> Self {
+        ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(
+            metadata,
+            column_ids,
+            internal_projection,
+        ))
     }
 
     /// Creates a helper to read the flat format.
@@ -182,6 +200,27 @@ impl ReadFormat {
         file_path: &str,
         skip_auto_convert: bool,
     ) -> Result<ReadFormat> {
+        Self::new_with_internal_projection(
+            region_metadata,
+            projection,
+            flat_format,
+            num_columns,
+            file_path,
+            skip_auto_convert,
+            InternalProjection::default(),
+        )
+    }
+
+    /// Creates a new read format with custom internal projection.
+    pub(crate) fn new_with_internal_projection(
+        region_metadata: RegionMetadataRef,
+        projection: Option<&[ColumnId]>,
+        flat_format: bool,
+        num_columns: Option<usize>,
+        file_path: &str,
+        skip_auto_convert: bool,
+        internal_projection: InternalProjection,
+    ) -> Result<ReadFormat> {
         if flat_format {
             if let Some(column_ids) = projection {
                 ReadFormat::new_flat(
@@ -205,18 +244,20 @@ impl ReadFormat {
                 )
             }
         } else if let Some(column_ids) = projection {
-            Ok(ReadFormat::new_primary_key(
+            Ok(ReadFormat::new_primary_key_with_internal(
                 region_metadata,
                 column_ids.iter().copied(),
+                internal_projection,
             ))
         } else {
             // No projection, lists all column ids to read.
-            Ok(ReadFormat::new_primary_key(
+            Ok(ReadFormat::new_primary_key_with_internal(
                 region_metadata.clone(),
                 region_metadata
                     .column_metadatas
                     .iter()
                     .map(|col| col.column_id),
+                internal_projection,
             ))
         }
     }
@@ -404,8 +445,10 @@ pub struct PrimaryKeyReadFormat {
     /// Field column id to its index in `schema` (SST schema).
     /// In SST schema, fields are stored in the front of the schema.
     field_id_to_index: HashMap<ColumnId, usize>,
-    /// Indices of columns to read from the SST. It contains all internal columns.
+    /// Indices of columns to read from the SST.
     projection_indices: Vec<usize>,
+    /// Positions of projected fixed columns in the output record batch.
+    projected_fixed_positions: ProjectedFixedPositions,
     /// Field column id to their index in the projected schema (
     /// the schema of [Batch]).
     field_id_to_projected_index: HashMap<ColumnId, usize>,
@@ -413,11 +456,46 @@ pub struct PrimaryKeyReadFormat {
     override_sequence: Option<SequenceNumber>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ProjectedFixedPositions {
+    time_index: usize,
+    primary_key: usize,
+    sequence: Option<usize>,
+    op_type: Option<usize>,
+}
+
+impl ProjectedFixedPositions {
+    fn new(sst_column_num: usize, projection_indices: &[usize]) -> Self {
+        let time_index = projected_index(projection_indices, sst_column_num - FIXED_POS_COLUMN_NUM)
+            .expect("time index must be projected");
+        let primary_key =
+            projected_index(projection_indices, sst_column_num - 3).expect("primary key missing");
+        let sequence = projected_index(projection_indices, sst_column_num - 2);
+        let op_type = projected_index(projection_indices, sst_column_num - 1);
+
+        Self {
+            time_index,
+            primary_key,
+            sequence,
+            op_type,
+        }
+    }
+
+    fn projected_column_num(&self) -> usize {
+        2 + usize::from(self.sequence.is_some()) + usize::from(self.op_type.is_some())
+    }
+}
+
+fn projected_index(indices: &[usize], sst_index: usize) -> Option<usize> {
+    indices.iter().position(|idx| *idx == sst_index)
+}
+
 impl PrimaryKeyReadFormat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
-    pub fn new(
+    pub(crate) fn new(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
+        internal_projection: InternalProjection,
     ) -> PrimaryKeyReadFormat {
         let field_id_to_index: HashMap<_, _> = metadata
             .field_columns()
@@ -430,13 +508,18 @@ impl PrimaryKeyReadFormat {
             &field_id_to_index,
             arrow_schema.fields.len(),
             column_ids,
+            internal_projection,
         );
+        let projection_indices = format_projection.projection_indices;
+        let projected_fixed_positions =
+            ProjectedFixedPositions::new(arrow_schema.fields.len(), &projection_indices);
 
         PrimaryKeyReadFormat {
             metadata,
             arrow_schema,
             field_id_to_index,
-            projection_indices: format_projection.projection_indices,
+            projection_indices,
+            projected_fixed_positions,
             field_id_to_projected_index: format_projection.column_id_to_projected_index,
             override_sequence: None,
         }
@@ -483,27 +566,38 @@ impl PrimaryKeyReadFormat {
     ) -> Result<()> {
         debug_assert!(batches.is_empty());
 
-        // The record batch must has time index and internal columns.
+        let field_column_num = self.field_id_to_projected_index.len();
+        let expected_columns =
+            field_column_num + self.projected_fixed_positions.projected_column_num();
         ensure!(
-            record_batch.num_columns() >= FIXED_POS_COLUMN_NUM,
+            record_batch.num_columns() >= expected_columns,
             InvalidRecordBatchSnafu {
                 reason: format!(
-                    "record batch only has {} columns",
-                    record_batch.num_columns()
+                    "record batch only has {} columns, expect at least {}",
+                    record_batch.num_columns(),
+                    expected_columns,
                 ),
             }
         );
 
-        let mut fixed_pos_columns = record_batch
-            .columns()
-            .iter()
-            .rev()
-            .take(FIXED_POS_COLUMN_NUM);
-        // Safety: We have checked the column number.
-        let op_type_array = fixed_pos_columns.next().unwrap();
-        let mut sequence_array = fixed_pos_columns.next().unwrap().clone();
-        let pk_array = fixed_pos_columns.next().unwrap();
-        let ts_array = fixed_pos_columns.next().unwrap();
+        let ts_array = record_batch
+            .column(self.projected_fixed_positions.time_index)
+            .clone();
+        let pk_array = record_batch.column(self.projected_fixed_positions.primary_key);
+        let mut sequence_array: ArrayRef =
+            if let Some(index) = self.projected_fixed_positions.sequence {
+                record_batch.column(index).clone()
+            } else {
+                Arc::new(UInt64Array::from_value(0, record_batch.num_rows()))
+            };
+        let op_type_array: ArrayRef = if let Some(index) = self.projected_fixed_positions.op_type {
+            record_batch.column(index).clone()
+        } else {
+            Arc::new(UInt8Array::from_value(
+                OpType::Put as u8,
+                record_batch.num_rows(),
+            ))
+        };
         let field_batch_columns = self.get_field_batch_columns(record_batch)?;
 
         // Override sequence array if provided.
@@ -648,11 +742,12 @@ impl PrimaryKeyReadFormat {
 
     /// Get fields from `record_batch`.
     fn get_field_batch_columns(&self, record_batch: &RecordBatch) -> Result<Vec<BatchColumn>> {
+        let field_column_num = self.field_id_to_projected_index.len();
         record_batch
             .columns()
             .iter()
             .zip(record_batch.schema().fields())
-            .take(record_batch.num_columns() - FIXED_POS_COLUMN_NUM) // Take all field columns.
+            .take(field_column_num) // Take all projected field columns.
             .map(|(array, field)| {
                 let vector = Helper::try_into_vector(array.clone()).context(ConvertVectorSnafu)?;
                 let column = self
@@ -772,9 +867,56 @@ impl PrimaryKeyReadFormat {
     }
 }
 
+/// Controls which internal columns should be projected.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InternalProjection {
+    pub(crate) time_index: bool,
+    pub(crate) primary_key: bool,
+    pub(crate) sequence: bool,
+    pub(crate) op_type: bool,
+}
+
+impl Default for InternalProjection {
+    fn default() -> Self {
+        Self {
+            time_index: true,
+            primary_key: true,
+            sequence: true,
+            op_type: true,
+        }
+    }
+}
+
+impl InternalProjection {
+    /// Skips sequence and op_type columns.
+    pub(crate) fn without_dedup_columns() -> Self {
+        Self {
+            sequence: false,
+            op_type: false,
+            ..Default::default()
+        }
+    }
+
+    fn projected_indices(&self, sst_column_num: usize) -> impl Iterator<Item = usize> {
+        let time_index_pos = sst_column_num - FIXED_POS_COLUMN_NUM;
+        let primary_key_pos = sst_column_num - 3;
+        let sequence_pos = sst_column_num - 2;
+        let op_type_pos = sst_column_num - 1;
+
+        [
+            (self.time_index, time_index_pos),
+            (self.primary_key, primary_key_pos),
+            (self.sequence, sequence_pos),
+            (self.op_type, op_type_pos),
+        ]
+        .into_iter()
+        .filter_map(|(include, index)| include.then_some(index))
+    }
+}
+
 /// Helper to compute the projection for the SST.
 pub(crate) struct FormatProjection {
-    /// Indices of columns to read from the SST. It contains all internal columns.
+    /// Indices of columns to read from the SST.
     pub(crate) projection_indices: Vec<usize>,
     /// Column id to their index in the projected schema (
     /// the schema after projection).
@@ -791,6 +933,7 @@ impl FormatProjection {
         id_to_index: &HashMap<ColumnId, usize>,
         sst_column_num: usize,
         column_ids: impl Iterator<Item = ColumnId>,
+        internal_projection: InternalProjection,
     ) -> Self {
         // Maps column id of a projected column to its index in SST.
         // It also ignores columns not in the SST.
@@ -814,8 +957,8 @@ impl FormatProjection {
         let mut projection_indices: Vec<_> = projected_schema
             .iter()
             .map(|(_column_id, index)| *index)
-            // We need to add all fixed position columns.
-            .chain(sst_column_num - FIXED_POS_COLUMN_NUM..sst_column_num)
+            // We need to add fixed position columns based on the projection.
+            .chain(internal_projection.projected_indices(sst_column_num))
             .collect();
         projection_indices.sort_unstable();
         // Removes duplications.
@@ -866,6 +1009,7 @@ impl PrimaryKeyReadFormat {
         Self::new(
             Arc::clone(&metadata),
             metadata.column_metadatas.iter().map(|c| c.column_id),
+            InternalProjection::default(),
         )
     }
 }
@@ -1192,6 +1336,52 @@ mod tests {
     }
 
     #[test]
+    fn test_projection_without_dedup_columns() {
+        let metadata = build_test_region_metadata();
+        let column_ids: Vec<_> = metadata.primary_key.to_vec();
+        let read_format = PrimaryKeyReadFormat::new(
+            metadata,
+            column_ids.iter().copied(),
+            InternalProjection::without_dedup_columns(),
+        );
+        assert_eq!(&[2, 3], read_format.projection_indices());
+
+        let ts_array = TimestampMillisecondArray::from(vec![1, 2]);
+        let pk_array = build_test_pk_array(&[(b"one".to_vec(), 2)]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                ArrowDataType::Dictionary(
+                    Box::new(ArrowDataType::UInt32),
+                    Box::new(ArrowDataType::Binary),
+                ),
+                false,
+            ),
+        ]));
+        let record_batch =
+            RecordBatch::try_new(schema, vec![Arc::new(ts_array), pk_array]).unwrap();
+        let mut batches = VecDeque::new();
+        read_format
+            .convert_record_batch(&record_batch, None, &mut batches)
+            .unwrap();
+
+        let batch = batches.pop_front().unwrap();
+        assert_eq!(
+            Arc::new(UInt64Vector::from_vec(vec![0, 0])),
+            batch.sequences().clone()
+        );
+        assert_eq!(
+            Arc::new(UInt8Vector::from_vec(vec![OpType::Put as u8; 2])),
+            batch.op_types().clone()
+        );
+    }
+
+    #[test]
     fn test_empty_primary_key_offsets() {
         let array = build_test_pk_array(&[]);
         assert!(primary_key_offsets(&array).unwrap().is_empty());
@@ -1234,7 +1424,11 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format = PrimaryKeyReadFormat::new(metadata, column_ids.iter().copied());
+        let read_format = PrimaryKeyReadFormat::new(
+            metadata,
+            column_ids.iter().copied(),
+            InternalProjection::default(),
+        );
         assert_eq!(arrow_schema, *read_format.arrow_schema());
 
         let record_batch = RecordBatch::new_empty(arrow_schema);
@@ -1253,7 +1447,11 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format = PrimaryKeyReadFormat::new(metadata, column_ids.iter().copied());
+        let read_format = PrimaryKeyReadFormat::new(
+            metadata,
+            column_ids.iter().copied(),
+            InternalProjection::default(),
+        );
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1

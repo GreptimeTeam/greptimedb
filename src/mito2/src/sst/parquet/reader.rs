@@ -58,7 +58,7 @@ use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PreFilterMode, row_group_contains_delete,
 };
-use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
+use crate::sst::parquet::format::{InternalProjection, ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
 use crate::sst::parquet::row_selection::RowGroupSelection;
@@ -121,6 +121,8 @@ pub struct ParquetReaderBuilder {
     compaction: bool,
     /// Mode to pre-filter columns.
     pre_filter_mode: PreFilterMode,
+    /// Whether to skip projecting dedup-related internal columns.
+    skip_dedup_columns: bool,
 }
 
 impl ParquetReaderBuilder {
@@ -146,6 +148,7 @@ impl ParquetReaderBuilder {
             flat_format: false,
             compaction: false,
             pre_filter_mode: PreFilterMode::All,
+            skip_dedup_columns: false,
         }
     }
 
@@ -223,6 +226,13 @@ impl ParquetReaderBuilder {
         self
     }
 
+    /// Skip dedup-related internal columns if set to true.
+    #[must_use]
+    pub(crate) fn skip_dedup_columns(mut self, skip_dedup_columns: bool) -> Self {
+        self.skip_dedup_columns = skip_dedup_columns;
+        self
+    }
+
     /// Sets the pre-filter mode.
     #[must_use]
     pub(crate) fn pre_filter_mode(mut self, pre_filter_mode: PreFilterMode) -> Self {
@@ -258,14 +268,21 @@ impl ParquetReaderBuilder {
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
         // Gets the metadata stored in the SST.
         let region_meta = Arc::new(Self::get_region_metadata(&file_path, key_value_meta)?);
+        let internal_projection = if self.flat_format || self.compaction || !self.skip_dedup_columns
+        {
+            InternalProjection::default()
+        } else {
+            InternalProjection::without_dedup_columns()
+        };
         let mut read_format = if let Some(column_ids) = &self.projection {
-            ReadFormat::new(
+            ReadFormat::new_with_internal_projection(
                 region_meta.clone(),
                 Some(column_ids),
                 self.flat_format,
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
                 self.compaction,
+                internal_projection,
             )?
         } else {
             // Lists all column ids to read, we always use the expected metadata if possible.
@@ -275,13 +292,14 @@ impl ParquetReaderBuilder {
                 .iter()
                 .map(|col| col.column_id)
                 .collect();
-            ReadFormat::new(
+            ReadFormat::new_with_internal_projection(
                 region_meta.clone(),
                 Some(&column_ids),
                 self.flat_format,
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
                 self.compaction,
+                internal_projection,
             )?
         };
         if need_override_sequence(&parquet_meta) {

@@ -950,6 +950,21 @@ impl ScanInput {
         }
     }
 
+    fn can_skip_dedup_columns(&self) -> bool {
+        if self.flat_format || self.compaction {
+            return false;
+        }
+        if !self.append_mode || self.filter_deleted {
+            return false;
+        }
+
+        let Some(mapper) = self.mapper.as_primary_key() else {
+            return false;
+        };
+
+        mapper.batch_fields().is_empty()
+    }
+
     /// Prunes a file to scan and returns the builder to build readers.
     pub async fn prune_file(
         &self,
@@ -970,6 +985,7 @@ impl ScanInput {
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .flat_format(self.flat_format)
             .compaction(self.compaction)
+            .skip_dedup_columns(self.can_skip_dedup_columns())
             .pre_filter_mode(filter_mode)
             .build_reader_input(reader_metrics)
             .await;
