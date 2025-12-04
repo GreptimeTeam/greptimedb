@@ -187,7 +187,7 @@ impl Categorizer {
                 if partition_cols.is_empty() {
                     Commutativity::Commutative
                 } else {
-                    Commutativity::Unimplemented
+                    Commutativity::PartialCommutative
                 }
             }
             LogicalPlan::Unnest(_) => Commutativity::Commutative,
