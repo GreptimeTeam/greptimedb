@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_telemetry::debug;
 use common_test_util::temp_dir::create_temp_dir;
 use datanode::store::new_object_store;
 use object_store::config::ObjectStoreConfig;
@@ -121,6 +122,7 @@ impl<A: Access> LayeredAccess for DelayedAccessor<A> {
         args: OpList,
     ) -> Result<(RpList, Self::Lister), object_store::Error> {
         // Inject delay before listing operation
+        debug!("Delaying list operation by {:?}", self.list_delay);
         sleep(self.list_delay).await;
 
         let (rp_list, lister) = self.inner.list(path, args).await?;
