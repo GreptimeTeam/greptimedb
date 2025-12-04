@@ -52,7 +52,6 @@ fn test_load_datanode_example_config() {
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
-                heartbeat_timeout: Duration::from_millis(500),
                 ddl_timeout: Duration::from_secs(10),
                 connect_timeout: Duration::from_secs(1),
                 tcp_nodelay: true,
@@ -118,7 +117,6 @@ fn test_load_frontend_example_config() {
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
-                heartbeat_timeout: Duration::from_millis(500),
                 ddl_timeout: Duration::from_secs(10),
                 connect_timeout: Duration::from_secs(1),
                 tcp_nodelay: true,
@@ -241,7 +239,6 @@ fn test_load_flownode_example_config() {
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
-                heartbeat_timeout: Duration::from_millis(500),
                 ddl_timeout: Duration::from_secs(10),
                 connect_timeout: Duration::from_secs(1),
                 tcp_nodelay: true,
