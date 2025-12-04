@@ -427,7 +427,7 @@ transform:
     );
     let stats = input_value.into();
 
-    let row = pipeline
+    let rows_with_suffix = pipeline
         .exec_mut(stats, &pipeline_ctx, &mut schema_info)
         .expect("failed to exec pipeline")
         .into_transformed()
@@ -435,7 +435,7 @@ transform:
 
     let output = Rows {
         schema: pipeline.schemas().unwrap().clone(),
-        rows: row.0,
+        rows: rows_with_suffix.into_iter().map(|(r, _)| r).collect(),
     };
 
     assert_eq!(output.rows.len(), 1);
@@ -501,14 +501,13 @@ transform:
     );
 
     let status = input_value.into();
-    let mut row = pipeline
+    let mut rows_with_suffix = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
+    let (row, _) = rows_with_suffix.swap_remove(0);
     let r = row
-        .0
-        .swap_remove(0)
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -617,15 +616,14 @@ transform:
     );
 
     let status = input_value.into();
-    let mut row = pipeline
+    let mut rows_with_suffix = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
 
+    let (row, _) = rows_with_suffix.swap_remove(0);
     let r = row
-        .0
-        .swap_remove(0)
         .values
         .clone()
         .into_iter()
@@ -691,14 +689,13 @@ transform:
     );
 
     let status = input_value.into();
-    let mut row = pipeline
+    let mut rows_with_suffix = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
+    let (row, _) = rows_with_suffix.swap_remove(0);
     let r = row
-        .0
-        .swap_remove(0)
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -738,15 +735,14 @@ transform:
     );
 
     let status = input_value.into();
-    let mut row = pipeline
+    let mut rows_with_suffix = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
 
+    let (row, _) = rows_with_suffix.swap_remove(0);
     let r = row
-        .0
-        .swap_remove(0)
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -804,15 +800,14 @@ transform:
     );
 
     let status = input_value.into();
-    let mut row = pipeline
+    let mut rows_with_suffix = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
 
+    let (row, _) = rows_with_suffix.swap_remove(0);
     let mut r = row
-        .0
-        .swap_remove(0)
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -852,13 +847,14 @@ transform:
     );
 
     let status = input_value.into();
-    let mut row = pipeline
+    let mut rows_with_suffix = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
 
-    row.0.swap_remove(0).values.into_iter().for_each(|v| {
+    let (row, _) = rows_with_suffix.swap_remove(0);
+    row.values.into_iter().for_each(|v| {
         if let ValueData::TimestampNanosecondValue(v) = v.value_data.unwrap() {
             let now = chrono::Utc::now().timestamp_nanos_opt().unwrap();
             assert!(now - v < 5_000_000);
@@ -929,14 +925,13 @@ transform:
     assert_eq!(dispatched_to.pipeline.unwrap(), "access_log_pipeline");
 
     let status = input_value2.into();
-    let mut row = pipeline
+    let mut rows_with_suffix = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
+    let (row, _) = rows_with_suffix.swap_remove(0);
     let r = row
-        .0
-        .swap_remove(0)
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -995,8 +990,8 @@ table_suffix: _${logger}
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap();
 
-    let (mut row, table_name) = exec_re.into_transformed().unwrap();
-    let values = row.swap_remove(0).values;
+    let mut rows_with_suffix = exec_re.into_transformed().unwrap();
+    let (row, table_suffix) = rows_with_suffix.swap_remove(0);
     let expected_values = vec![
         Value {
             value_data: Some(ValueData::StringValue("hello world".into())),
@@ -1005,8 +1000,8 @@ table_suffix: _${logger}
             value_data: Some(ValueData::TimestampNanosecondValue(1716668197217000000)),
         },
     ];
-    assert_eq!(expected_values, values);
-    assert_eq!(table_name, Some("_http".to_string()));
+    assert_eq!(expected_values, row.values);
+    assert_eq!(table_suffix, Some("_http".to_string()));
 }
 
 /// Test one-to-many pipeline expansion using VRL processor that returns an array
@@ -1056,47 +1051,56 @@ transform:
     );
 
     let status = input_value.into();
-    let (rows, _table_suffix) = pipeline
+    let rows_with_suffix = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .expect("failed to exec pipeline")
         .into_transformed()
         .expect("expect transformed result");
 
     // Should produce 3 rows from the single input
-    assert_eq!(rows.len(), 3);
+    assert_eq!(rows_with_suffix.len(), 3);
 
     // Row 0: click event
     assert_eq!(
-        rows[0].values[0].value_data,
+        rows_with_suffix[0].0.values[0].value_data,
         Some(StringValue("req-123".into()))
     );
     assert_eq!(
-        rows[0].values[1].value_data,
+        rows_with_suffix[0].0.values[1].value_data,
         Some(StringValue("click".into()))
     );
-    assert_eq!(rows[0].values[2].value_data, Some(U64Value(100)));
+    assert_eq!(
+        rows_with_suffix[0].0.values[2].value_data,
+        Some(U64Value(100))
+    );
 
     // Row 1: scroll event
     assert_eq!(
-        rows[1].values[0].value_data,
+        rows_with_suffix[1].0.values[0].value_data,
         Some(StringValue("req-123".into()))
     );
     assert_eq!(
-        rows[1].values[1].value_data,
+        rows_with_suffix[1].0.values[1].value_data,
         Some(StringValue("scroll".into()))
     );
-    assert_eq!(rows[1].values[2].value_data, Some(U64Value(200)));
+    assert_eq!(
+        rows_with_suffix[1].0.values[2].value_data,
+        Some(U64Value(200))
+    );
 
     // Row 2: submit event
     assert_eq!(
-        rows[2].values[0].value_data,
+        rows_with_suffix[2].0.values[0].value_data,
         Some(StringValue("req-123".into()))
     );
     assert_eq!(
-        rows[2].values[1].value_data,
+        rows_with_suffix[2].0.values[1].value_data,
         Some(StringValue("submit".into()))
     );
-    assert_eq!(rows[2].values[2].value_data, Some(U64Value(300)));
+    assert_eq!(
+        rows_with_suffix[2].0.values[2].value_data,
+        Some(U64Value(300))
+    );
 }
 
 /// Test that single object input still works correctly (backward compatibility)
@@ -1133,16 +1137,16 @@ transform:
     );
 
     let status = input_value.into();
-    let (rows, _table_suffix) = pipeline
+    let rows_with_suffix = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .expect("failed to exec pipeline")
         .into_transformed()
         .expect("expect transformed result");
 
     // Should produce exactly 1 row
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows_with_suffix.len(), 1);
 
-    let row = &rows[0];
+    let (row, _) = &rows_with_suffix[0];
     assert_eq!(row.values[0].value_data, Some(StringValue("Alice".into())));
     assert_eq!(row.values[1].value_data, Some(U32Value(30)));
     assert_eq!(row.values[2].value_data, Some(BoolValue(true)));
@@ -1218,12 +1222,12 @@ transform:
     );
 
     let status = input_value.into();
-    let (rows, _table_suffix) = pipeline
+    let rows_with_suffix = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .expect("failed to exec pipeline")
         .into_transformed()
         .expect("expect transformed result");
 
     // Empty array should produce zero rows
-    assert_eq!(rows.len(), 0);
+    assert_eq!(rows_with_suffix.len(), 0);
 }

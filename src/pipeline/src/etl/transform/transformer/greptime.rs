@@ -363,13 +363,12 @@ fn calc_ts(p_ctx: &PipelineContext, values: &VrlValue) -> Result<Option<ValueDat
     }
 }
 
-/// Converts VRL values to Greptime rows.
+/// Converts VRL values to Greptime rows with per-row table suffixes.
 /// # Returns
-/// A vector of rows. Single object input produces one row, array input produces
-/// one row per array element.
+/// A vector of (row, table_suffix) pairs. Single object input produces one row,
+/// array input produces one row per array element with its own table_suffix.
 ///
 /// # Errors
-/// - `TooManyRowsFromExpansion` if array length exceeds `max_rows_per_input`
 /// - `ArrayElementMustBeObject` if an array element is not an object
 /// - `TransformArrayElement` if transformation fails for a specific element
 pub(crate) fn values_to_rows(
@@ -378,18 +377,22 @@ pub(crate) fn values_to_rows(
     pipeline_ctx: &PipelineContext<'_>,
     row: Option<Vec<GreptimeValue>>,
     need_calc_ts: bool,
-) -> Result<Vec<Row>> {
+    tablesuffix_template: Option<&crate::tablesuffix::TableSuffixTemplate>,
+) -> Result<Vec<(Row, Option<String>)>> {
     use snafu::ResultExt;
 
     use crate::error::{ArrayElementMustBeObjectSnafu, TransformArrayElementSnafu};
+    use crate::etl::ctx_req::ContextOpt;
 
     let VrlValue::Array(arr) = values else {
+        // Single object: extract table_suffix if template provided
+        let table_suffix = tablesuffix_template.and_then(|t| t.apply(&values));
         let row = values_to_row(schema_info, values, pipeline_ctx, row, need_calc_ts)?;
-        return Ok(vec![row]);
+        return Ok(vec![(row, table_suffix)]);
     };
 
     let mut rows = Vec::with_capacity(arr.len());
-    for (index, value) in arr.into_iter().enumerate() {
+    for (index, mut value) in arr.into_iter().enumerate() {
         ensure!(
             value.is_object(),
             ArrayElementMustBeObjectSnafu {
@@ -398,12 +401,18 @@ pub(crate) fn values_to_rows(
             }
         );
 
+        // Extract ContextOpt and table_suffix for this element
+        let mut opt = ContextOpt::from_pipeline_map_to_opt(&mut value)
+            .map_err(Box::new)
+            .context(TransformArrayElementSnafu { index })?;
+        let table_suffix = opt.resolve_table_suffix(tablesuffix_template, &value);
+
         let transformed_row =
             values_to_row(schema_info, value, pipeline_ctx, row.clone(), need_calc_ts)
                 .map_err(Box::new)
                 .context(TransformArrayElementSnafu { index })?;
 
-        rows.push(transformed_row);
+        rows.push((transformed_row, table_suffix));
     }
     Ok(rows)
 }

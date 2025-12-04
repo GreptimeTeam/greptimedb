@@ -35,23 +35,23 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
     match input_value {
         VrlValue::Array(array) => {
             for value in array {
-                let row = pipeline
+                let rows_with_suffix = pipeline
                     .exec_mut(value, &pipeline_ctx, &mut schema_info)
                     .expect("failed to exec pipeline")
                     .into_transformed()
                     .expect("expect transformed result ");
-                for r in row.0 {
+                for (r, _) in rows_with_suffix {
                     rows.push(r);
                 }
             }
         }
         VrlValue::Object(_) => {
-            let row = pipeline
+            let rows_with_suffix = pipeline
                 .exec_mut(input_value, &pipeline_ctx, &mut schema_info)
                 .expect("failed to exec pipeline")
                 .into_transformed()
                 .expect("expect transformed result ");
-            for r in row.0 {
+            for (r, _) in rows_with_suffix {
                 rows.push(r);
             }
         }
