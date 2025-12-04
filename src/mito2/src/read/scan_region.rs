@@ -958,6 +958,7 @@ impl ScanInput {
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
         let filter_mode = pre_filter_mode(self.append_mode, self.merge_mode);
+        let decode_pk_values = !self.compaction && self.mapper.has_tags();
         let res = self
             .access_layer
             .read_sst(file.clone())
@@ -971,6 +972,7 @@ impl ScanInput {
             .flat_format(self.flat_format)
             .compaction(self.compaction)
             .pre_filter_mode(filter_mode)
+            .decode_primary_key_values(decode_pk_values)
             .build_reader_input(reader_metrics)
             .await;
         let (mut file_range_ctx, selection) = match res {

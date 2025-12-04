@@ -28,7 +28,7 @@
 
 use std::borrow::Borrow;
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use api::v1::SemanticType;
 use common_time::Timestamp;
@@ -40,7 +40,10 @@ use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
 use datatypes::vectors::{Helper, Vector};
-use mito_codec::row_converter::{SortField, build_primary_key_codec_with_fields};
+use mito_codec::row_converter::{
+    CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
+    build_primary_key_codec_with_fields,
+};
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -48,7 +51,8 @@ use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{
-    ConvertVectorSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
+    ConvertVectorSnafu, DecodeSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu,
+    NewRecordBatchSnafu, Result,
 };
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::sst::file::{FileMeta, FileTimeRange};
@@ -386,6 +390,13 @@ impl ReadFormat {
         }
     }
 
+    /// Enables or disables eager decoding of primary key values into batches.
+    pub(crate) fn set_decode_primary_key_values(&mut self, decode: bool) {
+        if let ReadFormat::PrimaryKey(format) = self {
+            format.set_decode_primary_key_values(decode);
+        }
+    }
+
     /// Creates a sequence array to override.
     pub(crate) fn new_override_sequence_array(&self, length: usize) -> Option<ArrayRef> {
         match self {
@@ -411,6 +422,10 @@ pub struct PrimaryKeyReadFormat {
     field_id_to_projected_index: HashMap<ColumnId, usize>,
     /// Sequence number to override the sequence read from the SST.
     override_sequence: Option<SequenceNumber>,
+    /// Lazily initialized codec used to decode primary key values.
+    primary_key_codec: OnceLock<Arc<dyn PrimaryKeyCodec>>,
+    /// Whether to decode primary key values and store them in [Batch].
+    decode_primary_key_values: bool,
 }
 
 impl PrimaryKeyReadFormat {
@@ -439,12 +454,19 @@ impl PrimaryKeyReadFormat {
             projection_indices: format_projection.projection_indices,
             field_id_to_projected_index: format_projection.column_id_to_projected_index,
             override_sequence: None,
+            primary_key_codec: OnceLock::new(),
+            decode_primary_key_values: false,
         }
     }
 
     /// Sets the sequence number to override.
     pub(crate) fn set_override_sequence(&mut self, sequence: Option<SequenceNumber>) {
         self.override_sequence = sequence;
+    }
+
+    /// Enables or disables eager decoding of primary key values into batches.
+    pub(crate) fn set_decode_primary_key_values(&mut self, decode: bool) {
+        self.decode_primary_key_values = decode;
     }
 
     /// Gets the arrow schema of the SST file.
@@ -561,7 +583,15 @@ impl PrimaryKeyReadFormat {
                 });
             }
 
-            let batch = builder.build()?;
+            let mut batch = builder.build()?;
+            if self.decode_primary_key_values {
+                let codec = self
+                    .primary_key_codec
+                    .get_or_init(|| build_primary_key_codec(&self.metadata));
+                let pk_values: CompositeValues =
+                    codec.decode(batch.primary_key()).context(DecodeSnafu)?;
+                batch.set_pk_values(pk_values);
+            }
             batches.push_back(batch);
         }
 
