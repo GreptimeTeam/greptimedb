@@ -18,7 +18,10 @@ use std::time::Duration;
 use client::RegionFollowerClientRef;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
+use common_meta::distributed_time_constants::{
+    HEARTBEAT_CHANNEL_KEEP_ALIVE_INTERVAL_SECS, HEARTBEAT_CHANNEL_KEEP_ALIVE_TIMEOUT_SECS,
+    HEARTBEAT_TIMEOUT,
+};
 use common_telemetry::{debug, info};
 use serde::{Deserialize, Serialize};
 
@@ -97,9 +100,9 @@ pub async fn create_meta_client(
         .tcp_nodelay(meta_client_options.tcp_nodelay);
     let heartbeat_config = base_config
         .clone()
-        .timeout(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1))
-        .http2_keep_alive_interval(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1))
-        .http2_keep_alive_timeout(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1));
+        .timeout(HEARTBEAT_TIMEOUT)
+        .http2_keep_alive_interval(HEARTBEAT_CHANNEL_KEEP_ALIVE_INTERVAL_SECS)
+        .http2_keep_alive_timeout(HEARTBEAT_CHANNEL_KEEP_ALIVE_TIMEOUT_SECS);
 
     if let MetaClientType::Frontend = client_type {
         let ddl_config = base_config.clone().timeout(meta_client_options.ddl_timeout);
