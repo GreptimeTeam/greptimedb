@@ -53,11 +53,8 @@ impl VrlProcessor {
         // check if the return value is have regex
         let result_def = program.final_type_info().result;
         let kind = result_def.kind();
-        // Check if the return type could possibly be an object or array.
-        // We use contains_* methods since VRL type inference may return
-        // a Kind that represents multiple possible types.
         ensure!(
-            kind.contains_object() || kind.contains_array(),
+            kind.is_object() || kind.is_array(),
             VrlReturnValueSnafu {
                 result_kind: kind.clone(),
             }

@@ -230,19 +230,10 @@ pub enum PipelineExecOutput {
     Filtered,
 }
 
-/// Output from a successful pipeline transformation.
-///
-/// A single input can produce multiple output rows when the VRL processor
-/// returns an array. Each element in the array becomes a separate row,
-/// enabling one-to-many log expansion.
 #[derive(Debug)]
 pub struct TransformedOutput {
-    /// Context options extracted from the input (e.g., table options, hints)
     pub opt: ContextOpt,
-    /// The transformed rows. Usually contains one row, but can contain multiple
-    /// when the pipeline expands a single input into multiple outputs.
     pub rows: Vec<Row>,
-    /// Optional table suffix for routing to different tables
     pub table_suffix: Option<String>,
 }
 
@@ -307,7 +298,6 @@ impl Pipeline {
 
         let rows = match self.transformer() {
             TransformerMode::GreptimeTransformer(greptime_transformer) => {
-                // Handle one-to-many: if val is an array, transform each element
                 if let Some(arr) = val.as_array_mut() {
                     transform_array_elements(
                         arr,
@@ -378,9 +368,6 @@ impl Pipeline {
 }
 
 /// Transforms an array of VRL values into rows.
-///
-/// This is used for one-to-many pipeline expansion where a VRL processor
-/// returns an array. Each element in the array is transformed separately.
 fn transform_array_elements(
     arr: &mut [VrlValue],
     transformer: &GreptimeTransformer,
@@ -393,7 +380,6 @@ fn transform_array_elements(
     let mut rows = Vec::with_capacity(arr.len());
 
     for (index, element) in arr.iter_mut().enumerate() {
-        // Validate that each element is an object
         if !element.is_object() {
             return ArrayElementMustBeObjectSnafu {
                 index,
@@ -889,5 +875,289 @@ transform:
         assert!(r.is_err());
         let r: Result<Pipeline> = parse(&Content::Yaml(bad_yaml3));
         assert!(r.is_err());
+    }
+
+    /// Test one-to-many VRL pipeline expansion.
+    /// A VRL processor can return an array, which results in multiple output rows.
+    #[test]
+    fn test_one_to_many_vrl_expansion() {
+        let pipeline_yaml = r#"
+processors:
+  - epoch:
+      field: timestamp
+      resolution: ms
+  - vrl:
+      source: |
+        events = del(.events)
+        base_host = del(.host)
+        base_ts = del(.timestamp)
+        map_values(array!(events)) -> |event| {
+            {
+                "host": base_host,
+                "event_type": event.type,
+                "event_value": event.value,
+                "timestamp": base_ts
+            }
+        }
+
+transform:
+  - field: host
+    type: string
+  - field: event_type
+    type: string
+  - field: event_value
+    type: int32
+  - field: timestamp
+    type: timestamp, ms
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
+        // Input with 3 events
+        let input_value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "host": "server1",
+                "timestamp": 1716668197217,
+                "events": [
+                    {"type": "cpu", "value": 80},
+                    {"type": "memory", "value": 60},
+                    {"type": "disk", "value": 45}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let payload = input_value.into();
+        let result = pipeline
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
+            .unwrap()
+            .into_transformed()
+            .unwrap();
+
+        // Should produce 3 rows from 1 input
+        assert_eq!(result.0.len(), 3);
+
+        // Verify each row has correct structure
+        for row in &result.0 {
+            assert_eq!(row.values.len(), 4); // host, event_type, event_value, timestamp
+            // First value should be "server1"
+            assert_eq!(
+                row.values[0].value_data,
+                Some(ValueData::StringValue("server1".to_string()))
+            );
+            // Last value should be the timestamp
+            assert_eq!(
+                row.values[3].value_data,
+                Some(ValueData::TimestampMillisecondValue(1716668197217))
+            );
+        }
+
+        // Verify event types
+        let event_types: Vec<_> = result
+            .0
+            .iter()
+            .map(|r| match &r.values[1].value_data {
+                Some(ValueData::StringValue(s)) => s.clone(),
+                _ => panic!("expected string"),
+            })
+            .collect();
+        assert!(event_types.contains(&"cpu".to_string()));
+        assert!(event_types.contains(&"memory".to_string()));
+        assert!(event_types.contains(&"disk".to_string()));
+    }
+
+    /// Test that single object output still works (backward compatibility)
+    #[test]
+    fn test_single_object_output_unchanged() {
+        let pipeline_yaml = r#"
+processors:
+  - epoch:
+      field: ts
+      resolution: ms
+  - vrl:
+      source: |
+        .processed = true
+        .
+
+transform:
+  - field: name
+    type: string
+  - field: processed
+    type: boolean
+  - field: ts
+    type: timestamp, ms
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
+        let input_value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "name": "test",
+                "ts": 1716668197217
+            }"#,
+        )
+        .unwrap();
+
+        let payload = input_value.into();
+        let result = pipeline
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
+            .unwrap()
+            .into_transformed()
+            .unwrap();
+
+        // Should produce exactly 1 row
+        assert_eq!(result.0.len(), 1);
+        assert_eq!(
+            result.0[0].values[0].value_data,
+            Some(ValueData::StringValue("test".to_string()))
+        );
+        assert_eq!(
+            result.0[0].values[1].value_data,
+            Some(ValueData::BoolValue(true))
+        );
+    }
+
+    /// Test that empty array produces zero rows
+    #[test]
+    fn test_empty_array_produces_zero_rows() {
+        let pipeline_yaml = r#"
+processors:
+  - vrl:
+      source: |
+        .events
+
+transform:
+  - field: value
+    type: int32
+  - field: greptime_timestamp
+    type: timestamp, ns
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
+        let input_value: serde_json::Value = serde_json::from_str(r#"{"events": []}"#).unwrap();
+
+        let payload = input_value.into();
+        let result = pipeline
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
+            .unwrap()
+            .into_transformed()
+            .unwrap();
+
+        // Empty array should produce zero rows
+        assert_eq!(result.0.len(), 0);
+    }
+
+    /// Test that array elements must be objects
+    #[test]
+    fn test_array_element_must_be_object() {
+        let pipeline_yaml = r#"
+processors:
+  - vrl:
+      source: |
+        .items
+
+transform:
+  - field: value
+    type: int32
+  - field: greptime_timestamp
+    type: timestamp, ns
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
+        // Array with non-object elements should fail
+        let input_value: serde_json::Value =
+            serde_json::from_str(r#"{"items": [1, 2, 3]}"#).unwrap();
+
+        let payload = input_value.into();
+        let result = pipeline.exec_mut(payload, &pipeline_ctx, &mut schema_info);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("must be an object"),
+            "Expected error about non-object element, got: {}",
+            err_msg
+        );
+    }
+
+    /// Test one-to-many with table suffix from VRL hint
+    #[test]
+    fn test_one_to_many_with_table_suffix_hint() {
+        let pipeline_yaml = r#"
+processors:
+  - epoch:
+      field: ts
+      resolution: ms
+  - vrl:
+      source: |
+        .greptime_table_suffix = "_" + string!(.category)
+        .
+
+transform:
+  - field: name
+    type: string
+  - field: category
+    type: string
+  - field: ts
+    type: timestamp, ms
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
+        let input_value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "name": "test",
+                "category": "metrics",
+                "ts": 1716668197217
+            }"#,
+        )
+        .unwrap();
+
+        let payload = input_value.into();
+        let result = pipeline
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
+            .unwrap()
+            .into_transformed()
+            .unwrap();
+
+        assert_eq!(result.1, Some("_metrics".to_string()));
+        assert_eq!(result.0.len(), 1);
     }
 }

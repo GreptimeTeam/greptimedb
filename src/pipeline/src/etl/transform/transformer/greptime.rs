@@ -364,18 +364,6 @@ fn calc_ts(p_ctx: &PipelineContext, values: &VrlValue) -> Result<Option<ValueDat
 }
 
 /// Converts VRL values to Greptime rows.
-///
-/// This function supports one-to-many row expansion: if `values` is an array,
-/// each element is transformed into a separate row. This allows a single input
-/// log entry to be expanded into multiple output rows via VRL processors.
-///
-/// # Arguments
-/// * `schema_info` - Schema information that may be updated during transformation
-/// * `values` - The VRL value to transform (can be an object or array of objects)
-/// * `pipeline_ctx` - Pipeline execution context
-/// * `row` - Optional pre-filled row values from transformer
-/// * `need_calc_ts` - Whether to calculate timestamp value
-///
 /// # Returns
 /// A vector of rows. Single object input produces one row, array input produces
 /// one row per array element.
@@ -402,7 +390,6 @@ pub(crate) fn values_to_rows(
 
     let mut rows = Vec::with_capacity(arr.len());
     for (index, value) in arr.into_iter().enumerate() {
-        // Validate that each element is an object
         ensure!(
             value.is_object(),
             ArrayElementMustBeObjectSnafu {
