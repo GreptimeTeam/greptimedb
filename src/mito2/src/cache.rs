@@ -18,6 +18,7 @@ mod cache_size;
 
 pub(crate) mod file_cache;
 pub(crate) mod index;
+pub(crate) mod manifest_cache;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod write_cache;

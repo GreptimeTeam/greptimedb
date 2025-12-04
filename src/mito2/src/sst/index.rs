@@ -1750,6 +1750,7 @@ mod tests {
                 None,
                 factory,
                 intm_manager,
+                ReadableSize::mb(10),
             )
             .await
             .unwrap(),

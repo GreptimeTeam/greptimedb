@@ -55,109 +55,18 @@ pub(crate) const DEFAULT_INDEX_CACHE_PERCENT: u8 = 20;
 /// Minimum capacity for each cache (512MB).
 const MIN_CACHE_CAPACITY: u64 = 512 * 1024 * 1024;
 
-/// A file cache manages files on local store and evict files based
-/// on size.
+/// Inner struct for FileCache that can be used in spawned tasks.
 #[derive(Debug)]
-pub(crate) struct FileCache {
+struct FileCacheInner {
     /// Local store to cache files.
     local_store: ObjectStore,
     /// Index to track cached Parquet files.
     parquet_index: Cache<IndexKey, IndexValue>,
     /// Index to track cached Puffin files.
     puffin_index: Cache<IndexKey, IndexValue>,
-    /// Capacity of the puffin (index) cache in bytes.
-    puffin_capacity: u64,
 }
 
-pub(crate) type FileCacheRef = Arc<FileCache>;
-
-impl FileCache {
-    /// Creates a new file cache.
-    pub(crate) fn new(
-        local_store: ObjectStore,
-        capacity: ReadableSize,
-        ttl: Option<Duration>,
-        index_cache_percent: Option<u8>,
-    ) -> FileCache {
-        // Validate and use the provided percent or default
-        let index_percent = index_cache_percent
-            .filter(|&percent| percent > 0 && percent < 100)
-            .unwrap_or(DEFAULT_INDEX_CACHE_PERCENT);
-        let total_capacity = capacity.as_bytes();
-
-        // Convert percent to ratio and calculate capacity for each cache
-        let index_ratio = index_percent as f64 / 100.0;
-        let puffin_capacity = (total_capacity as f64 * index_ratio) as u64;
-        let parquet_capacity = total_capacity - puffin_capacity;
-
-        // Ensure both capacities are at least 512MB
-        let puffin_capacity = puffin_capacity.max(MIN_CACHE_CAPACITY);
-        let parquet_capacity = parquet_capacity.max(MIN_CACHE_CAPACITY);
-
-        info!(
-            "Initializing file cache with index_percent: {}%, total_capacity: {}, parquet_capacity: {}, puffin_capacity: {}",
-            index_percent,
-            ReadableSize(total_capacity),
-            ReadableSize(parquet_capacity),
-            ReadableSize(puffin_capacity)
-        );
-
-        let parquet_index = Self::build_cache(local_store.clone(), parquet_capacity, ttl, "file");
-        let puffin_index = Self::build_cache(local_store.clone(), puffin_capacity, ttl, "index");
-
-        FileCache {
-            local_store,
-            parquet_index,
-            puffin_index,
-            puffin_capacity,
-        }
-    }
-
-    /// Builds a cache for a specific file type.
-    fn build_cache(
-        local_store: ObjectStore,
-        capacity: u64,
-        ttl: Option<Duration>,
-        label: &'static str,
-    ) -> Cache<IndexKey, IndexValue> {
-        let cache_store = local_store;
-        let mut builder = Cache::builder()
-            .eviction_policy(EvictionPolicy::lru())
-            .weigher(|_key, value: &IndexValue| -> u32 {
-                // We only measure space on local store.
-                value.file_size
-            })
-            .max_capacity(capacity)
-            .async_eviction_listener(move |key, value, cause| {
-                let store = cache_store.clone();
-                // Stores files under FILE_DIR.
-                let file_path = cache_file_path(FILE_DIR, *key);
-                async move {
-                    if let RemovalCause::Replaced = cause {
-                        // The cache is replaced by another file. This is unexpected, we don't remove the same
-                        // file but updates the metrics as the file is already replaced by users.
-                        CACHE_BYTES.with_label_values(&[label]).sub(value.file_size.into());
-                        warn!("Replace existing cache {} for region {} unexpectedly", file_path, key.region_id);
-                        return;
-                    }
-
-                    match store.delete(&file_path).await {
-                        Ok(()) => {
-                            CACHE_BYTES.with_label_values(&[label]).sub(value.file_size.into());
-                        }
-                        Err(e) => {
-                            warn!(e; "Failed to delete cached file {} for region {}", file_path, key.region_id);
-                        }
-                    }
-                }
-                .boxed()
-            });
-        if let Some(ttl) = ttl {
-            builder = builder.time_to_idle(ttl);
-        }
-        builder.build()
-    }
-
+impl FileCacheInner {
     /// Returns the appropriate memory index for the given file type.
     fn memory_index(&self, file_type: FileType) -> &Cache<IndexKey, IndexValue> {
         match file_type {
@@ -166,10 +75,15 @@ impl FileCache {
         }
     }
 
+    /// Returns the cache file path for the key.
+    fn cache_file_path(&self, key: IndexKey) -> String {
+        cache_file_path(FILE_DIR, key)
+    }
+
     /// Puts a file into the cache index.
     ///
     /// The `WriteCache` should ensure the file is in the correct path.
-    pub(crate) async fn put(&self, key: IndexKey, value: IndexValue) {
+    async fn put(&self, key: IndexKey, value: IndexValue) {
         CACHE_BYTES
             .with_label_values(&[key.file_type.metric_label()])
             .add(value.file_size.into());
@@ -180,100 +94,8 @@ impl FileCache {
         index.run_pending_tasks().await;
     }
 
-    pub(crate) async fn get(&self, key: IndexKey) -> Option<IndexValue> {
-        self.memory_index(key.file_type).get(&key).await
-    }
-
-    /// Reads a file from the cache.
-    #[allow(unused)]
-    pub(crate) async fn reader(&self, key: IndexKey) -> Option<Reader> {
-        // We must use `get()` to update the estimator of the cache.
-        // See https://docs.rs/moka/latest/moka/future/struct.Cache.html#method.contains_key
-        let index = self.memory_index(key.file_type);
-        if index.get(&key).await.is_none() {
-            CACHE_MISS
-                .with_label_values(&[key.file_type.metric_label()])
-                .inc();
-            return None;
-        }
-
-        let file_path = self.cache_file_path(key);
-        match self.get_reader(&file_path).await {
-            Ok(Some(reader)) => {
-                CACHE_HIT
-                    .with_label_values(&[key.file_type.metric_label()])
-                    .inc();
-                return Some(reader);
-            }
-            Err(e) => {
-                if e.kind() != ErrorKind::NotFound {
-                    warn!(e; "Failed to get file for key {:?}", key);
-                }
-            }
-            Ok(None) => {}
-        }
-
-        // We removes the file from the index.
-        index.remove(&key).await;
-        CACHE_MISS
-            .with_label_values(&[key.file_type.metric_label()])
-            .inc();
-        None
-    }
-
-    /// Reads ranges from the cache.
-    pub(crate) async fn read_ranges(
-        &self,
-        key: IndexKey,
-        ranges: &[Range<u64>],
-    ) -> Option<Vec<Bytes>> {
-        let index = self.memory_index(key.file_type);
-        if index.get(&key).await.is_none() {
-            CACHE_MISS
-                .with_label_values(&[key.file_type.metric_label()])
-                .inc();
-            return None;
-        }
-
-        let file_path = self.cache_file_path(key);
-        // In most cases, it will use blocking read,
-        // because FileCache is normally based on local file system, which supports blocking read.
-        let bytes_result = fetch_byte_ranges(&file_path, self.local_store.clone(), ranges).await;
-        match bytes_result {
-            Ok(bytes) => {
-                CACHE_HIT
-                    .with_label_values(&[key.file_type.metric_label()])
-                    .inc();
-                Some(bytes)
-            }
-            Err(e) => {
-                if e.kind() != ErrorKind::NotFound {
-                    warn!(e; "Failed to get file for key {:?}", key);
-                }
-
-                // We removes the file from the index.
-                index.remove(&key).await;
-                CACHE_MISS
-                    .with_label_values(&[key.file_type.metric_label()])
-                    .inc();
-                None
-            }
-        }
-    }
-
-    /// Removes a file from the cache explicitly.
-    /// It always tries to remove the file from the local store because we may not have the file
-    /// in the memory index if upload is failed.
-    pub(crate) async fn remove(&self, key: IndexKey) {
-        let file_path = self.cache_file_path(key);
-        self.memory_index(key.file_type).remove(&key).await;
-        // Always delete the file from the local store.
-        if let Err(e) = self.local_store.delete(&file_path).await {
-            warn!(e; "Failed to delete a cached file {}", file_path);
-        }
-    }
-
-    async fn recover_inner(&self) -> Result<()> {
+    /// Recovers the index from local store.
+    async fn recover(&self) -> Result<()> {
         let now = Instant::now();
         let mut lister = self
             .local_store
@@ -341,136 +163,7 @@ impl FileCache {
         Ok(())
     }
 
-    /// Recovers the index from local store.
-    ///
-    /// If `task_receiver` is provided, spawns a background task after recovery
-    /// to process `RegionLoadCacheTask` messages for loading files into the cache.
-    pub(crate) async fn recover(
-        self: &Arc<Self>,
-        sync: bool,
-        task_receiver: Option<UnboundedReceiver<RegionLoadCacheTask>>,
-    ) {
-        let moved_self = self.clone();
-        let handle = tokio::spawn(async move {
-            if let Err(err) = moved_self.recover_inner().await {
-                error!(err; "Failed to recover file cache.")
-            }
-
-            // Spawns background task to process region load cache tasks after recovery.
-            // So it won't block the recovery when `sync` is true.
-            if let Some(mut receiver) = task_receiver {
-                let cache_ref = moved_self.clone();
-                info!("Spawning background task for processing region load cache tasks");
-                tokio::spawn(async move {
-                    while let Some(task) = receiver.recv().await {
-                        let file_cache = cache_ref.clone();
-                        task.fill_cache(file_cache).await;
-                    }
-                    info!("Background task for processing region load cache tasks stopped");
-                });
-            }
-        });
-
-        if sync {
-            let _ = handle.await;
-        }
-    }
-
-    /// Returns the cache file path for the key.
-    pub(crate) fn cache_file_path(&self, key: IndexKey) -> String {
-        cache_file_path(FILE_DIR, key)
-    }
-
-    /// Returns the local store of the file cache.
-    pub(crate) fn local_store(&self) -> ObjectStore {
-        self.local_store.clone()
-    }
-
-    /// Get the parquet metadata in file cache.
-    /// If the file is not in the cache or fail to load metadata, return None.
-    pub(crate) async fn get_parquet_meta_data(&self, key: IndexKey) -> Option<ParquetMetaData> {
-        // Check if file cache contains the key
-        if let Some(index_value) = self.parquet_index.get(&key).await {
-            // Load metadata from file cache
-            let local_store = self.local_store();
-            let file_path = self.cache_file_path(key);
-            let file_size = index_value.file_size as u64;
-            let metadata_loader = MetadataLoader::new(local_store, &file_path, file_size);
-
-            match metadata_loader.load().await {
-                Ok(metadata) => {
-                    CACHE_HIT
-                        .with_label_values(&[key.file_type.metric_label()])
-                        .inc();
-                    Some(metadata)
-                }
-                Err(e) => {
-                    if !e.is_object_not_found() {
-                        warn!(
-                            e; "Failed to get parquet metadata for key {:?}",
-                            key
-                        );
-                    }
-                    // We removes the file from the index.
-                    self.parquet_index.remove(&key).await;
-                    CACHE_MISS
-                        .with_label_values(&[key.file_type.metric_label()])
-                        .inc();
-                    None
-                }
-            }
-        } else {
-            CACHE_MISS
-                .with_label_values(&[key.file_type.metric_label()])
-                .inc();
-            None
-        }
-    }
-
-    async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {
-        if self.local_store.exists(file_path).await? {
-            Ok(Some(self.local_store.reader(file_path).await?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Checks if the key is in the file cache.
-    pub(crate) fn contains_key(&self, key: &IndexKey) -> bool {
-        self.memory_index(key.file_type).contains_key(key)
-    }
-
-    /// Returns the capacity of the puffin (index) cache in bytes.
-    pub(crate) fn puffin_cache_capacity(&self) -> u64 {
-        self.puffin_capacity
-    }
-
-    /// Returns the current weighted size (used bytes) of the puffin (index) cache.
-    pub(crate) fn puffin_cache_size(&self) -> u64 {
-        self.puffin_index.weighted_size()
-    }
-
-    /// Downloads a file in `remote_path` from the remote object store to the local cache
-    /// (specified by `index_key`).
-    pub(crate) async fn download(
-        &self,
-        index_key: IndexKey,
-        remote_path: &str,
-        remote_store: &ObjectStore,
-        file_size: u64,
-    ) -> Result<()> {
-        if let Err(e) = self
-            .download_without_cleaning(index_key, remote_path, remote_store, file_size)
-            .await
-        {
-            let filename = index_key.to_string();
-            TempFileCleaner::clean_atomic_dir_files(&self.local_store, &[&filename]).await;
-
-            return Err(e);
-        }
-        Ok(())
-    }
-
+    /// Downloads a file without cleaning up on error.
     async fn download_without_cleaning(
         &self,
         index_key: IndexKey,
@@ -537,11 +230,360 @@ impl FileCache {
         self.put(index_key, index_value).await;
         Ok(())
     }
+
+    /// Downloads a file from remote store to local cache.
+    async fn download(
+        &self,
+        index_key: IndexKey,
+        remote_path: &str,
+        remote_store: &ObjectStore,
+        file_size: u64,
+    ) -> Result<()> {
+        if let Err(e) = self
+            .download_without_cleaning(index_key, remote_path, remote_store, file_size)
+            .await
+        {
+            let filename = index_key.to_string();
+            TempFileCleaner::clean_atomic_dir_files(&self.local_store, &[&filename]).await;
+
+            return Err(e);
+        }
+
+        Ok(())
+    }
+}
+
+/// A file cache manages files on local store and evict files based
+/// on size.
+#[derive(Debug, Clone)]
+pub(crate) struct FileCache {
+    /// Inner cache state shared with background worker.
+    inner: Arc<FileCacheInner>,
+    /// Capacity of the puffin (index) cache in bytes.
+    puffin_capacity: u64,
+}
+
+pub(crate) type FileCacheRef = Arc<FileCache>;
+
+impl FileCache {
+    /// Creates a new file cache.
+    pub(crate) fn new(
+        local_store: ObjectStore,
+        capacity: ReadableSize,
+        ttl: Option<Duration>,
+        index_cache_percent: Option<u8>,
+    ) -> FileCache {
+        // Validate and use the provided percent or default
+        let index_percent = index_cache_percent
+            .filter(|&percent| percent > 0 && percent < 100)
+            .unwrap_or(DEFAULT_INDEX_CACHE_PERCENT);
+        let total_capacity = capacity.as_bytes();
+
+        // Convert percent to ratio and calculate capacity for each cache
+        let index_ratio = index_percent as f64 / 100.0;
+        let puffin_capacity = (total_capacity as f64 * index_ratio) as u64;
+        let parquet_capacity = total_capacity - puffin_capacity;
+
+        // Ensure both capacities are at least 512MB
+        let puffin_capacity = puffin_capacity.max(MIN_CACHE_CAPACITY);
+        let parquet_capacity = parquet_capacity.max(MIN_CACHE_CAPACITY);
+
+        info!(
+            "Initializing file cache with index_percent: {}%, total_capacity: {}, parquet_capacity: {}, puffin_capacity: {}",
+            index_percent,
+            ReadableSize(total_capacity),
+            ReadableSize(parquet_capacity),
+            ReadableSize(puffin_capacity)
+        );
+
+        let parquet_index = Self::build_cache(local_store.clone(), parquet_capacity, ttl, "file");
+        let puffin_index = Self::build_cache(local_store.clone(), puffin_capacity, ttl, "index");
+
+        // Create inner cache shared with background worker
+        let inner = Arc::new(FileCacheInner {
+            local_store,
+            parquet_index,
+            puffin_index,
+        });
+
+        FileCache {
+            inner,
+            puffin_capacity,
+        }
+    }
+
+    /// Builds a cache for a specific file type.
+    fn build_cache(
+        local_store: ObjectStore,
+        capacity: u64,
+        ttl: Option<Duration>,
+        label: &'static str,
+    ) -> Cache<IndexKey, IndexValue> {
+        let cache_store = local_store;
+        let mut builder = Cache::builder()
+            .eviction_policy(EvictionPolicy::lru())
+            .weigher(|_key, value: &IndexValue| -> u32 {
+                // We only measure space on local store.
+                value.file_size
+            })
+            .max_capacity(capacity)
+            .async_eviction_listener(move |key, value, cause| {
+                let store = cache_store.clone();
+                // Stores files under FILE_DIR.
+                let file_path = cache_file_path(FILE_DIR, *key);
+                async move {
+                    if let RemovalCause::Replaced = cause {
+                        // The cache is replaced by another file. This is unexpected, we don't remove the same
+                        // file but updates the metrics as the file is already replaced by users.
+                        CACHE_BYTES.with_label_values(&[label]).sub(value.file_size.into());
+                        // TODO(yingwen): Don't log warn later.
+                        warn!("Replace existing cache {} for region {} unexpectedly", file_path, key.region_id);
+                        return;
+                    }
+
+                    match store.delete(&file_path).await {
+                        Ok(()) => {
+                            CACHE_BYTES.with_label_values(&[label]).sub(value.file_size.into());
+                        }
+                        Err(e) => {
+                            warn!(e; "Failed to delete cached file {} for region {}", file_path, key.region_id);
+                        }
+                    }
+                }
+                .boxed()
+            });
+        if let Some(ttl) = ttl {
+            builder = builder.time_to_idle(ttl);
+        }
+        builder.build()
+    }
+
+    /// Puts a file into the cache index.
+    ///
+    /// The `WriteCache` should ensure the file is in the correct path.
+    pub(crate) async fn put(&self, key: IndexKey, value: IndexValue) {
+        self.inner.put(key, value).await
+    }
+
+    pub(crate) async fn get(&self, key: IndexKey) -> Option<IndexValue> {
+        self.inner.memory_index(key.file_type).get(&key).await
+    }
+
+    /// Reads a file from the cache.
+    #[allow(unused)]
+    pub(crate) async fn reader(&self, key: IndexKey) -> Option<Reader> {
+        // We must use `get()` to update the estimator of the cache.
+        // See https://docs.rs/moka/latest/moka/future/struct.Cache.html#method.contains_key
+        let index = self.inner.memory_index(key.file_type);
+        if index.get(&key).await.is_none() {
+            CACHE_MISS
+                .with_label_values(&[key.file_type.metric_label()])
+                .inc();
+            return None;
+        }
+
+        let file_path = self.inner.cache_file_path(key);
+        match self.get_reader(&file_path).await {
+            Ok(Some(reader)) => {
+                CACHE_HIT
+                    .with_label_values(&[key.file_type.metric_label()])
+                    .inc();
+                return Some(reader);
+            }
+            Err(e) => {
+                if e.kind() != ErrorKind::NotFound {
+                    warn!(e; "Failed to get file for key {:?}", key);
+                }
+            }
+            Ok(None) => {}
+        }
+
+        // We removes the file from the index.
+        index.remove(&key).await;
+        CACHE_MISS
+            .with_label_values(&[key.file_type.metric_label()])
+            .inc();
+        None
+    }
+
+    /// Reads ranges from the cache.
+    pub(crate) async fn read_ranges(
+        &self,
+        key: IndexKey,
+        ranges: &[Range<u64>],
+    ) -> Option<Vec<Bytes>> {
+        let index = self.inner.memory_index(key.file_type);
+        if index.get(&key).await.is_none() {
+            CACHE_MISS
+                .with_label_values(&[key.file_type.metric_label()])
+                .inc();
+            return None;
+        }
+
+        let file_path = self.inner.cache_file_path(key);
+        // In most cases, it will use blocking read,
+        // because FileCache is normally based on local file system, which supports blocking read.
+        let bytes_result =
+            fetch_byte_ranges(&file_path, self.inner.local_store.clone(), ranges).await;
+        match bytes_result {
+            Ok(bytes) => {
+                CACHE_HIT
+                    .with_label_values(&[key.file_type.metric_label()])
+                    .inc();
+                Some(bytes)
+            }
+            Err(e) => {
+                if e.kind() != ErrorKind::NotFound {
+                    warn!(e; "Failed to get file for key {:?}", key);
+                }
+
+                // We removes the file from the index.
+                index.remove(&key).await;
+                CACHE_MISS
+                    .with_label_values(&[key.file_type.metric_label()])
+                    .inc();
+                None
+            }
+        }
+    }
+
+    /// Removes a file from the cache explicitly.
+    /// It always tries to remove the file from the local store because we may not have the file
+    /// in the memory index if upload is failed.
+    pub(crate) async fn remove(&self, key: IndexKey) {
+        let file_path = self.inner.cache_file_path(key);
+        self.inner.memory_index(key.file_type).remove(&key).await;
+        // Always delete the file from the local store.
+        if let Err(e) = self.inner.local_store.delete(&file_path).await {
+            warn!(e; "Failed to delete a cached file {}", file_path);
+        }
+    }
+
+    /// Recovers the index from local store.
+    ///
+    /// If `task_receiver` is provided, spawns a background task after recovery
+    /// to process `RegionLoadCacheTask` messages for loading files into the cache.
+    pub(crate) async fn recover(
+        &self,
+        sync: bool,
+        task_receiver: Option<UnboundedReceiver<RegionLoadCacheTask>>,
+    ) {
+        let moved_self = self.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(err) = moved_self.inner.recover().await {
+                error!(err; "Failed to recover file cache.")
+            }
+
+            // Spawns background task to process region load cache tasks after recovery.
+            // So it won't block the recovery when `sync` is true.
+            if let Some(mut receiver) = task_receiver {
+                info!("Spawning background task for processing region load cache tasks");
+                tokio::spawn(async move {
+                    while let Some(task) = receiver.recv().await {
+                        task.fill_cache(&moved_self).await;
+                    }
+                    info!("Background task for processing region load cache tasks stopped");
+                });
+            }
+        });
+
+        if sync {
+            let _ = handle.await;
+        }
+    }
+
+    /// Returns the cache file path for the key.
+    pub(crate) fn cache_file_path(&self, key: IndexKey) -> String {
+        self.inner.cache_file_path(key)
+    }
+
+    /// Returns the local store of the file cache.
+    pub(crate) fn local_store(&self) -> ObjectStore {
+        self.inner.local_store.clone()
+    }
+
+    /// Get the parquet metadata in file cache.
+    /// If the file is not in the cache or fail to load metadata, return None.
+    pub(crate) async fn get_parquet_meta_data(&self, key: IndexKey) -> Option<ParquetMetaData> {
+        // Check if file cache contains the key
+        if let Some(index_value) = self.inner.parquet_index.get(&key).await {
+            // Load metadata from file cache
+            let local_store = self.local_store();
+            let file_path = self.inner.cache_file_path(key);
+            let file_size = index_value.file_size as u64;
+            let metadata_loader = MetadataLoader::new(local_store, &file_path, file_size);
+
+            match metadata_loader.load().await {
+                Ok(metadata) => {
+                    CACHE_HIT
+                        .with_label_values(&[key.file_type.metric_label()])
+                        .inc();
+                    Some(metadata)
+                }
+                Err(e) => {
+                    if !e.is_object_not_found() {
+                        warn!(
+                            e; "Failed to get parquet metadata for key {:?}",
+                            key
+                        );
+                    }
+                    // We removes the file from the index.
+                    self.inner.parquet_index.remove(&key).await;
+                    CACHE_MISS
+                        .with_label_values(&[key.file_type.metric_label()])
+                        .inc();
+                    None
+                }
+            }
+        } else {
+            CACHE_MISS
+                .with_label_values(&[key.file_type.metric_label()])
+                .inc();
+            None
+        }
+    }
+
+    async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {
+        if self.inner.local_store.exists(file_path).await? {
+            Ok(Some(self.inner.local_store.reader(file_path).await?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Checks if the key is in the file cache.
+    pub(crate) fn contains_key(&self, key: &IndexKey) -> bool {
+        self.inner.memory_index(key.file_type).contains_key(key)
+    }
+
+    /// Returns the capacity of the puffin (index) cache in bytes.
+    pub(crate) fn puffin_cache_capacity(&self) -> u64 {
+        self.puffin_capacity
+    }
+
+    /// Returns the current weighted size (used bytes) of the puffin (index) cache.
+    pub(crate) fn puffin_cache_size(&self) -> u64 {
+        self.inner.puffin_index.weighted_size()
+    }
+
+    /// Downloads a file in `remote_path` from the remote object store to the local cache
+    /// (specified by `index_key`).
+    pub(crate) async fn download(
+        &self,
+        index_key: IndexKey,
+        remote_path: &str,
+        remote_store: &ObjectStore,
+        file_size: u64,
+    ) -> Result<()> {
+        self.inner
+            .download(index_key, remote_path, remote_store, file_size)
+            .await
+    }
 }
 
 /// Key of file cache index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct IndexKey {
+pub struct IndexKey {
     pub region_id: RegionId,
     pub file_id: FileId,
     pub file_type: FileType,
@@ -683,7 +725,7 @@ mod tests {
         let exist = cache.reader(key).await;
         assert!(exist.is_some());
         tokio::time::sleep(Duration::from_millis(15)).await;
-        cache.parquet_index.run_pending_tasks().await;
+        cache.inner.parquet_index.run_pending_tasks().await;
         let non = cache.reader(key).await;
         assert!(non.is_none());
     }
@@ -721,19 +763,19 @@ mod tests {
         assert_eq!("hello", String::from_utf8(buf).unwrap());
 
         // Get weighted size.
-        cache.parquet_index.run_pending_tasks().await;
-        assert_eq!(5, cache.parquet_index.weighted_size());
+        cache.inner.parquet_index.run_pending_tasks().await;
+        assert_eq!(5, cache.inner.parquet_index.weighted_size());
 
         // Remove the file.
         cache.remove(key).await;
         assert!(cache.reader(key).await.is_none());
 
         // Ensure all pending tasks of the moka cache is done before assertion.
-        cache.parquet_index.run_pending_tasks().await;
+        cache.inner.parquet_index.run_pending_tasks().await;
 
         // The file also not exists.
         assert!(!local_store.exists(&file_path).await.unwrap());
-        assert_eq!(0, cache.parquet_index.weighted_size());
+        assert_eq!(0, cache.inner.parquet_index.weighted_size());
     }
 
     #[tokio::test]
@@ -766,7 +808,7 @@ mod tests {
         // Reader is none.
         assert!(cache.reader(key).await.is_none());
         // Key is removed.
-        assert!(!cache.parquet_index.contains_key(&key));
+        assert!(!cache.inner.parquet_index.contains_key(&key));
     }
 
     #[tokio::test]
@@ -799,12 +841,7 @@ mod tests {
         }
 
         // Recover the cache.
-        let cache = Arc::new(FileCache::new(
-            local_store.clone(),
-            ReadableSize::mb(10),
-            None,
-            None,
-        ));
+        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None, None);
         // No entry before recovery.
         assert!(
             cache
@@ -815,8 +852,11 @@ mod tests {
         cache.recover(true, None).await;
 
         // Check size.
-        cache.parquet_index.run_pending_tasks().await;
-        assert_eq!(total_size, cache.parquet_index.weighted_size() as usize);
+        cache.inner.parquet_index.run_pending_tasks().await;
+        assert_eq!(
+            total_size,
+            cache.inner.parquet_index.weighted_size() as usize
+        );
 
         for (i, file_id) in file_ids.iter().enumerate() {
             let key = IndexKey::new(region_id, *file_id, file_type);

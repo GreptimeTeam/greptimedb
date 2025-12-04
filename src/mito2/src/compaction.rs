@@ -1110,6 +1110,7 @@ mod tests {
                     compress_type: CompressionType::Uncompressed,
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
+                    manifest_cache: None,
                 },
                 FormatType::PrimaryKey,
                 &Default::default(),

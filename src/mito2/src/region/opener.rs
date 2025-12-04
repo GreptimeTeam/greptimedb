@@ -41,7 +41,7 @@ use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
-use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
+use crate::cache::file_cache::{FileCache, FileType, IndexKey};
 use crate::config::MitoConfig;
 use crate::error;
 use crate::error::{
@@ -270,8 +270,14 @@ impl RegionOpener {
             FormatType::PrimaryKey
         };
         // Create a manifest manager for this region and writes regions to the manifest file.
-        let region_manifest_options =
+        let mut region_manifest_options =
             RegionManifestOptions::new(config, &region_dir, &object_store);
+        // Set manifest cache if available
+        region_manifest_options.manifest_cache = self
+            .cache_manager
+            .as_ref()
+            .and_then(|cm| cm.write_cache())
+            .and_then(|wc| wc.manifest_cache());
         // For remote WAL, we need to set flushed_entry_id to current topic's latest entry id.
         let flushed_entry_id = provider.initial_flushed_entry_id::<S>(wal.store());
         let manifest_manager = RegionManifestManager::new(
@@ -407,8 +413,14 @@ impl RegionOpener {
         let now = Instant::now();
         let mut region_options = self.options.as_ref().unwrap().clone();
         let object_storage = get_object_store(&region_options.storage, &self.object_store_manager)?;
-        let region_manifest_options =
+        let mut region_manifest_options =
             RegionManifestOptions::new(config, &self.region_dir(), &object_storage);
+        // Set manifest cache if available
+        region_manifest_options.manifest_cache = self
+            .cache_manager
+            .as_ref()
+            .and_then(|cm| cm.write_cache())
+            .and_then(|wc| wc.manifest_cache());
         let Some(manifest_manager) =
             RegionManifestManager::open(region_manifest_options, &self.stats).await?
         else {
@@ -836,7 +848,7 @@ impl RegionLoadCacheTask {
     }
 
     /// Fills the file cache with index files from the region.
-    pub(crate) async fn fill_cache(&self, file_cache: FileCacheRef) {
+    pub(crate) async fn fill_cache(&self, file_cache: &FileCache) {
         let region_id = self.region.region_id;
         let table_dir = self.region.access_layer.table_dir();
         let path_type = self.region.access_layer.path_type();

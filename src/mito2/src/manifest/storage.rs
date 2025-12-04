@@ -33,6 +33,7 @@ use store_api::ManifestVersion;
 use store_api::storage::RegionId;
 use tokio::sync::Semaphore;
 
+use crate::cache::manifest_cache::ManifestCache;
 use crate::error::{
     ChecksumMismatchSnafu, CompressObjectSnafu, DecompressObjectSnafu, InvalidScanIndexSnafu,
     OpenDalSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
@@ -144,6 +145,8 @@ pub struct ManifestObjectStore {
     /// Stores the size of each manifest file.
     manifest_size_map: Arc<RwLock<HashMap<FileKey, u64>>>,
     total_manifest_size: Arc<AtomicU64>,
+    /// Optional manifest cache for local caching.
+    manifest_cache: Option<ManifestCache>,
 }
 
 impl ManifestObjectStore {
@@ -152,6 +155,7 @@ impl ManifestObjectStore {
         object_store: ObjectStore,
         compress_type: CompressionType,
         total_manifest_size: Arc<AtomicU64>,
+        manifest_cache: Option<ManifestCache>,
     ) -> Self {
         let path = util::normalize_dir(path);
         let staging_path = {
@@ -166,6 +170,7 @@ impl ManifestObjectStore {
             staging_path,
             manifest_size_map: Arc::new(RwLock::new(HashMap::new())),
             total_manifest_size,
+            manifest_cache,
         }
     }
 
@@ -291,9 +296,11 @@ impl ManifestObjectStore {
     }
 
     /// Common implementation for fetching manifests from entries in parallel.
+    /// If `is_staging` is true, cache is skipped.
     async fn fetch_manifests_from_entries(
         &self,
         entries: Vec<(ManifestVersion, Entry)>,
+        is_staging: bool,
     ) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
         if entries.is_empty() {
             return Ok(vec![]);
@@ -306,6 +313,13 @@ impl ManifestObjectStore {
             // Safety: semaphore must exist.
             let _permit = semaphore.acquire().await.unwrap();
 
+            let cache_key = entry.path();
+            // Try to get from cache first
+            if let Some(data) = self.get_from_cache(cache_key, is_staging).await {
+                return Ok((*v, data));
+            }
+
+            // Fetch from remote object store
             let compress_type = file_compress_type(entry.name());
             let bytes = self
                 .object_store
@@ -319,6 +333,11 @@ impl ManifestObjectStore {
                     compress_type,
                     path: entry.path(),
                 })?;
+
+            // Add to cache
+            self.put_to_cache(cache_key.to_string(), &data, is_staging)
+                .await;
+
             Ok((*v, data))
         });
 
@@ -335,7 +354,7 @@ impl ManifestObjectStore {
         end_version: ManifestVersion,
     ) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
         let manifests = self.scan(start_version, end_version).await?;
-        self.fetch_manifests_from_entries(manifests).await
+        self.fetch_manifests_from_entries(manifests, false).await
     }
 
     /// Delete manifest files that version < end.
@@ -405,6 +424,11 @@ impl ManifestObjectStore {
             ret, self.path, end, checkpoint_version, paths,
         );
 
+        // Remove from cache first
+        for (entry, _, _) in &del_entries {
+            self.remove_from_cache(entry.path()).await;
+        }
+
         self.object_store
             .delete_iter(paths)
             .await
@@ -440,11 +464,10 @@ impl ManifestObjectStore {
                 path: &path,
             })?;
         let delta_size = data.len();
-        self.object_store
-            .write(&path, data)
-            .await
-            .context(OpenDalSnafu)?;
+
+        self.write_and_put_cache(&path, data, is_staging).await?;
         self.set_delta_file_size(version, delta_size as u64);
+
         Ok(())
     }
 
@@ -465,10 +488,8 @@ impl ManifestObjectStore {
             })?;
         let checkpoint_size = data.len();
         let checksum = checkpoint_checksum(bytes);
-        self.object_store
-            .write(&path, data)
-            .await
-            .context(OpenDalSnafu)?;
+
+        self.write_and_put_cache(&path, data, false).await?;
         self.set_checkpoint_file_size(version, checkpoint_size as u64);
 
         // Because last checkpoint file only contain size and version, which is tiny, so we don't compress it.
@@ -501,60 +522,80 @@ impl ManifestObjectStore {
     ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let version = metadata.version;
         let path = self.checkpoint_file_path(version);
+
+        // Try to get from cache first
+        if let Some(data) = self.get_from_cache(&path, false).await {
+            verify_checksum(&data, metadata.checksum)?;
+            return Ok(Some((version, data)));
+        }
+
         // Due to backward compatibility, it is possible that the user's checkpoint not compressed,
         // so if we don't find file by compressed type. fall back to checkpoint not compressed find again.
-        let checkpoint_data =
-            match self.object_store.read(&path).await {
-                Ok(checkpoint) => {
-                    let checkpoint_size = checkpoint.len();
-                    let decompress_data = self.compress_type.decode(checkpoint).await.context(
-                        DecompressObjectSnafu {
+        let checkpoint_data = match self.object_store.read(&path).await {
+            Ok(checkpoint) => {
+                let checkpoint_size = checkpoint.len();
+                let decompress_data =
+                    self.compress_type
+                        .decode(checkpoint)
+                        .await
+                        .with_context(|_| DecompressObjectSnafu {
                             compress_type: self.compress_type,
-                            path,
-                        },
-                    )?;
-                    verify_checksum(&decompress_data, metadata.checksum)?;
-                    // set the checkpoint size
-                    self.set_checkpoint_file_size(version, checkpoint_size as u64);
-                    Ok(Some(decompress_data))
-                }
-                Err(e) => {
-                    if e.kind() == ErrorKind::NotFound {
-                        if self.compress_type != FALL_BACK_COMPRESS_TYPE {
-                            let fall_back_path = gen_path(
-                                &self.path,
-                                &checkpoint_file(version),
-                                FALL_BACK_COMPRESS_TYPE,
-                            );
-                            debug!(
-                                "Failed to load checkpoint from path: {}, fall back to path: {}",
-                                path, fall_back_path
-                            );
-                            match self.object_store.read(&fall_back_path).await {
-                                Ok(checkpoint) => {
-                                    let checkpoint_size = checkpoint.len();
-                                    let decompress_data = FALL_BACK_COMPRESS_TYPE
-                                        .decode(checkpoint)
-                                        .await
-                                        .context(DecompressObjectSnafu {
-                                            compress_type: FALL_BACK_COMPRESS_TYPE,
-                                            path,
-                                        })?;
-                                    verify_checksum(&decompress_data, metadata.checksum)?;
-                                    self.set_checkpoint_file_size(version, checkpoint_size as u64);
-                                    Ok(Some(decompress_data))
-                                }
-                                Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-                                Err(e) => Err(e).context(OpenDalSnafu),
+                            path: path.clone(),
+                        })?;
+                verify_checksum(&decompress_data, metadata.checksum)?;
+                // set the checkpoint size
+                self.set_checkpoint_file_size(version, checkpoint_size as u64);
+                // Add to cache
+                self.put_to_cache(path, &decompress_data, false).await;
+                Ok(Some(decompress_data))
+            }
+            Err(e) => {
+                if e.kind() == ErrorKind::NotFound {
+                    if self.compress_type != FALL_BACK_COMPRESS_TYPE {
+                        let fall_back_path = gen_path(
+                            &self.path,
+                            &checkpoint_file(version),
+                            FALL_BACK_COMPRESS_TYPE,
+                        );
+                        debug!(
+                            "Failed to load checkpoint from path: {}, fall back to path: {}",
+                            path, fall_back_path
+                        );
+
+                        // Try to get fallback from cache first
+                        if let Some(data) = self.get_from_cache(&fall_back_path, false).await {
+                            verify_checksum(&data, metadata.checksum)?;
+                            return Ok(Some((version, data)));
+                        }
+
+                        match self.object_store.read(&fall_back_path).await {
+                            Ok(checkpoint) => {
+                                let checkpoint_size = checkpoint.len();
+                                let decompress_data = FALL_BACK_COMPRESS_TYPE
+                                    .decode(checkpoint)
+                                    .await
+                                    .with_context(|_| DecompressObjectSnafu {
+                                        compress_type: FALL_BACK_COMPRESS_TYPE,
+                                        path: fall_back_path.clone(),
+                                    })?;
+                                verify_checksum(&decompress_data, metadata.checksum)?;
+                                self.set_checkpoint_file_size(version, checkpoint_size as u64);
+                                // Add fallback to cache
+                                self.put_to_cache(fall_back_path, &decompress_data, false)
+                                    .await;
+                                Ok(Some(decompress_data))
                             }
-                        } else {
-                            Ok(None)
+                            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+                            Err(e) => Err(e).context(OpenDalSnafu),
                         }
                     } else {
-                        Err(e).context(OpenDalSnafu)
+                        Ok(None)
                     }
+                } else {
+                    Err(e).context(OpenDalSnafu)
                 }
-            }?;
+            }
+        }?;
         Ok(checkpoint_data.map(|data| (version, data)))
     }
 
@@ -562,8 +603,10 @@ impl ManifestObjectStore {
     /// Return manifest version and the raw [RegionCheckpoint](crate::manifest::action::RegionCheckpoint) content if any
     pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let last_checkpoint_path = self.last_checkpoint_path();
+
+        // Fetch from remote object store without cache
         let last_checkpoint_data = match self.object_store.read(&last_checkpoint_path).await {
-            Ok(data) => data,
+            Ok(data) => data.to_vec(),
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 return Ok(None);
             }
@@ -572,7 +615,7 @@ impl ManifestObjectStore {
             }
         };
 
-        let checkpoint_metadata = CheckpointMetadata::decode(&last_checkpoint_data.to_vec())?;
+        let checkpoint_metadata = CheckpointMetadata::decode(&last_checkpoint_data)?;
 
         debug!(
             "Load checkpoint in path: {}, metadata: {:?}",
@@ -702,7 +745,8 @@ impl ManifestObjectStore {
         let mut sorted_entries = manifest_entries;
         Self::sort_manifests(&mut sorted_entries);
 
-        self.fetch_manifests_from_entries(sorted_entries).await
+        self.fetch_manifests_from_entries(sorted_entries, true)
+            .await
     }
 
     /// Clear all staging manifest files.
@@ -718,6 +762,63 @@ impl ManifestObjectStore {
         );
 
         Ok(())
+    }
+
+    /// Gets a manifest file from cache.
+    /// Returns the file data if found in cache, None otherwise.
+    /// If `is_staging` is true, always returns None.
+    async fn get_from_cache(&self, key: &str, is_staging: bool) -> Option<Vec<u8>> {
+        if is_staging {
+            return None;
+        }
+        let cache = self.manifest_cache.as_ref()?;
+        cache.get_file(key).await
+    }
+
+    /// Puts a manifest file into cache.
+    /// If `is_staging` is true, does nothing.
+    async fn put_to_cache(&self, key: String, data: &[u8], is_staging: bool) {
+        if is_staging {
+            return;
+        }
+        let Some(cache) = &self.manifest_cache else {
+            return;
+        };
+
+        cache.put_file(key, data.to_vec()).await;
+    }
+
+    /// Writes data to object store and puts it into cache.
+    /// If `is_staging` is true, cache is skipped.
+    async fn write_and_put_cache(&self, path: &str, data: Vec<u8>, is_staging: bool) -> Result<()> {
+        // Clone data for cache before writing, only if cache is enabled and not staging
+        let cache_data = if !is_staging && self.manifest_cache.is_some() {
+            Some(data.clone())
+        } else {
+            None
+        };
+
+        // Write to object store
+        self.object_store
+            .write(path, data)
+            .await
+            .context(OpenDalSnafu)?;
+
+        // Put to cache if we cloned the data
+        if let Some(data) = cache_data {
+            self.put_to_cache(path.to_string(), &data, is_staging).await;
+        }
+
+        Ok(())
+    }
+
+    /// Removes a manifest file from cache.
+    async fn remove_from_cache(&self, key: &str) {
+        let Some(cache) = &self.manifest_cache else {
+            return;
+        };
+
+        cache.remove(key).await;
     }
 }
 
@@ -762,6 +863,7 @@ mod tests {
             object_store,
             CompressionType::Uncompressed,
             Default::default(),
+            None,
         )
     }
 

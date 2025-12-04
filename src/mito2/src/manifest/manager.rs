@@ -24,6 +24,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::FileId;
 use store_api::{MAX_VERSION, MIN_VERSION, ManifestVersion};
 
+use crate::cache::manifest_cache::ManifestCache;
 use crate::config::MitoConfig;
 use crate::error::{
     self, InstallManifestToSnafu, NoCheckpointSnafu, NoManifestsSnafu, RegionStoppedSnafu, Result,
@@ -52,6 +53,8 @@ pub struct RegionManifestOptions {
     /// Set to 0 to disable checkpoint.
     pub checkpoint_distance: u64,
     pub remove_file_options: RemoveFileOptions,
+    /// Optional cache for manifest files.
+    pub manifest_cache: Option<ManifestCache>,
 }
 
 impl RegionManifestOptions {
@@ -67,6 +70,7 @@ impl RegionManifestOptions {
             remove_file_options: RemoveFileOptions {
                 enable_gc: config.gc.enable,
             },
+            manifest_cache: None,
         }
     }
 }
@@ -174,6 +178,7 @@ impl RegionManifestManager {
             options.object_store.clone(),
             options.compress_type,
             stats.total_manifest_size.clone(),
+            options.manifest_cache.clone(),
         );
         let manifest_version = stats.manifest_version.clone();
 
@@ -256,6 +261,7 @@ impl RegionManifestManager {
             options.object_store.clone(),
             options.compress_type,
             stats.total_manifest_size.clone(),
+            options.manifest_cache.clone(),
         );
         let manifest_version = stats.manifest_version.clone();
 
