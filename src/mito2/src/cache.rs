@@ -305,7 +305,7 @@ impl CacheManager {
         metrics: &mut MetadataCacheMetrics,
     ) -> Option<Arc<ParquetMetaData>> {
         // Try to get metadata from sst meta cache
-        if let Some(metadata) = self.get_parquet_meta_data_from_mem_cache_inner(file_id) {
+        if let Some(metadata) = self.get_parquet_meta_data_from_mem_cache(file_id) {
             metrics.mem_cache_hit += 1;
             return Some(metadata);
         }
@@ -336,17 +336,6 @@ impl CacheManager {
         self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
             let value = sst_meta_cache.get(&SstMetaKey(file_id.region_id(), file_id.file_id()));
             update_hit_miss(value, SST_META_TYPE)
-        })
-    }
-
-    /// Gets cached [ParquetMetaData] from in-memory cache without updating global metrics.
-    /// This is used by `get_parquet_meta_data_with_metrics` to avoid double counting.
-    fn get_parquet_meta_data_from_mem_cache_inner(
-        &self,
-        file_id: RegionFileId,
-    ) -> Option<Arc<ParquetMetaData>> {
-        self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
-            sst_meta_cache.get(&SstMetaKey(file_id.region_id(), file_id.file_id()))
         })
     }
 
