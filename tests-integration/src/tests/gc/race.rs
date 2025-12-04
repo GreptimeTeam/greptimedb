@@ -125,7 +125,7 @@ pub async fn test_manifest_update_during_listing(store_type: &StorageType) {
             mailbox,
             grpc_addr,
             regions_clone,
-            false, // full_file_listing
+            true, // full_file_listing in object store
             region_routes_clone,
             HashMap::new(),          // related_regions
             Duration::from_secs(30), // timeout
