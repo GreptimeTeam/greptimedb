@@ -122,6 +122,7 @@ macro_rules! http_tests {
                 test_pipeline_context,
                 test_pipeline_with_vrl,
                 test_pipeline_with_hint_vrl,
+                test_pipeline_one_to_many_vrl,
                 test_pipeline_2,
                 test_pipeline_skip_error,
                 test_pipeline_filter,
@@ -3279,6 +3280,151 @@ transform:
         &client,
         "show tables",
         "[[\"d_table_2436\"],[\"demo\"],[\"numbers\"]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+/// Test one-to-many VRL pipeline expansion.
+/// This test verifies that a VRL processor can return an array, which results in
+/// multiple output rows from a single input row.
+pub async fn test_pipeline_one_to_many_vrl(storage_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(storage_type, "test_pipeline_one_to_many_vrl").await;
+
+    let client = TestClient::new(app).await;
+
+    // Pipeline that expands events array into multiple rows
+    let pipeline = r#"
+processors:
+  - date:
+      field: timestamp
+      formats:
+        - "%Y-%m-%d %H:%M:%S"
+      ignore_missing: true
+  - vrl:
+      source: |
+        # Extract events array and expand each event into a separate row
+        events = del(.events)
+        base_host = del(.host)
+        base_timestamp = del(.timestamp)
+        
+        # Map each event to a complete row object
+        map_values(array!(events)) -> |event| {
+            {
+                "host": base_host,
+                "event_type": event.type,
+                "event_value": event.value,
+                "timestamp": base_timestamp
+            }
+        }
+
+transform:
+  - field: host
+    type: string
+  - field: event_type
+    type: string
+  - field: event_value
+    type: int32
+  - field: timestamp
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/one_to_many")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. write data - single input with multiple events
+    let data_body = r#"
+[
+  {
+    "host": "server1",
+    "timestamp": "2024-05-25 20:16:37",
+    "events": [
+      {"type": "cpu", "value": 80},
+      {"type": "memory", "value": 60},
+      {"type": "disk", "value": 45}
+    ]
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=metrics&pipeline_name=one_to_many")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 3. verify: one input row should produce three output rows
+    validate_data(
+        "test_pipeline_one_to_many_vrl_count",
+        &client,
+        "select count(*) from metrics",
+        "[[3]]",
+    )
+    .await;
+
+    // 4. verify the actual data
+    validate_data(
+        "test_pipeline_one_to_many_vrl_data",
+        &client,
+        "select host, event_type, event_value from metrics order by event_type",
+        "[[\"server1\",\"cpu\",80],[\"server1\",\"disk\",45],[\"server1\",\"memory\",60]]",
+    )
+    .await;
+
+    // 5. Test with multiple input rows, each producing multiple output rows
+    let data_body2 = r#"
+[
+  {
+    "host": "server2",
+    "timestamp": "2024-05-25 20:17:00",
+    "events": [
+      {"type": "cpu", "value": 90},
+      {"type": "memory", "value": 70}
+    ]
+  },
+  {
+    "host": "server3",
+    "timestamp": "2024-05-25 20:18:00",
+    "events": [
+      {"type": "cpu", "value": 50}
+    ]
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=metrics&pipeline_name=one_to_many")
+        .header("Content-Type", "application/json")
+        .body(data_body2)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 6. verify total count: 3 (from first batch) + 2 + 1 = 6 rows
+    validate_data(
+        "test_pipeline_one_to_many_vrl_total_count",
+        &client,
+        "select count(*) from metrics",
+        "[[6]]",
+    )
+    .await;
+
+    // 7. verify rows per host
+    validate_data(
+        "test_pipeline_one_to_many_vrl_per_host",
+        &client,
+        "select host, count(*) as cnt from metrics group by host order by host",
+        "[[\"server1\",3],[\"server2\",2],[\"server3\",1]]",
     )
     .await;
 
