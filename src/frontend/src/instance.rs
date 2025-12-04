@@ -26,7 +26,8 @@ mod region_query;
 pub mod standalone;
 
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, atomic};
 use std::time::{Duration, SystemTime};
 
 use async_stream::stream;
@@ -69,7 +70,7 @@ use query::query_engine::DescribeResult;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
 use servers::error::{
     self as server_error, AuthSnafu, CommonMetaSnafu, ExecuteQuerySnafu,
-    OtlpMetricModeIncompatibleSnafu, ParsePromQLSnafu, UnexpectedResultSnafu,
+    OtlpMetricModeIncompatibleSnafu, ParsePromQLSnafu, SuspendedSnafu, UnexpectedResultSnafu,
 };
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
@@ -119,6 +120,7 @@ pub struct Instance {
     limiter: Option<LimiterRef>,
     process_manager: ProcessManagerRef,
     slow_query_options: SlowQueryOptions,
+    suspend: Arc<AtomicBool>,
 
     // cache for otlp metrics
     // first layer key: db-string
@@ -170,6 +172,14 @@ impl Instance {
 
     pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
         self.statement_executor.procedure_executor()
+    }
+
+    pub fn suspend(&self) -> Arc<AtomicBool> {
+        self.suspend.clone()
+    }
+
+    fn is_suspend(&self) -> bool {
+        self.suspend.load(atomic::Ordering::Relaxed)
     }
 }
 
@@ -513,6 +523,10 @@ impl SqlQueryHandler for Instance {
 
     #[tracing::instrument(skip_all)]
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        if self.is_suspend() {
+            return vec![error::SuspendedSnafu {}.fail()];
+        }
+
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
@@ -580,6 +594,8 @@ impl SqlQueryHandler for Instance {
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        ensure!(!self.is_suspend(), error::SuspendedSnafu);
+
         if should_capture_statement(stmt.as_ref()) {
             // It's safe to unwrap here because we've already checked the type.
             let stmt = stmt.unwrap();
@@ -655,6 +671,8 @@ impl SqlQueryHandler for Instance {
         stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> Result<Option<DescribeResult>> {
+        ensure!(!self.is_suspend(), error::SuspendedSnafu);
+
         if matches!(
             stmt,
             Statement::Insert(_) | Statement::Query(_) | Statement::Delete(_)
@@ -710,6 +728,8 @@ impl PrometheusHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
+        ensure!(!self.is_suspend(), SuspendedSnafu);
+
         let interceptor = self
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();
@@ -797,6 +817,8 @@ impl PrometheusHandler for Instance {
         matchers: Vec<Matcher>,
         ctx: &QueryContextRef,
     ) -> server_error::Result<Vec<String>> {
+        ensure!(!self.is_suspend(), SuspendedSnafu);
+
         self.handle_query_metric_names(matchers, ctx)
             .await
             .map_err(BoxedError::new)
@@ -812,6 +834,8 @@ impl PrometheusHandler for Instance {
         end: SystemTime,
         ctx: &QueryContextRef,
     ) -> server_error::Result<Vec<String>> {
+        ensure!(!self.is_suspend(), SuspendedSnafu);
+
         self.handle_query_label_values(metric, label_name, matchers, start, end, ctx)
             .await
             .map_err(BoxedError::new)

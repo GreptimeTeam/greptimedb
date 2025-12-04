@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
@@ -242,6 +243,7 @@ impl FrontendBuilder {
             process_manager,
             otlp_metrics_table_legacy_cache: DashMap::new(),
             slow_query_options: self.options.slow_query.clone(),
+            suspend: Arc::new(AtomicBool::new(false)),
         })
     }
 }

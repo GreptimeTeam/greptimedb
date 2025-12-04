@@ -22,13 +22,14 @@ use common_error::ext::BoxedError;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use servers::error::{
-    AuthSnafu, CatalogSnafu, Error, OtherSnafu, TimestampOverflowSnafu, UnexpectedResultSnafu,
+    AuthSnafu, CatalogSnafu, Error, OtherSnafu, SuspendedSnafu, TimestampOverflowSnafu,
+    UnexpectedResultSnafu,
 };
 use servers::influxdb::InfluxdbRequest;
 use servers::interceptor::{LineProtocolInterceptor, LineProtocolInterceptorRef};
 use servers::query_handler::InfluxdbLineProtocolHandler;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::instance::Instance;
 
@@ -39,6 +40,8 @@ impl InfluxdbLineProtocolHandler for Instance {
         request: InfluxdbRequest,
         ctx: QueryContextRef,
     ) -> servers::error::Result<Output> {
+        ensure!(!self.is_suspend(), SuspendedSnafu);
+
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()

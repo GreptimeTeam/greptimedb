@@ -364,6 +364,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Service suspended"))]
+    Suspended {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -439,7 +445,7 @@ impl ErrorExt for Error {
 
             Error::DataFusion { error, .. } => datafusion_status_code::<Self>(error, None),
 
-            Error::Cancelled { .. } => StatusCode::Cancelled,
+            Error::Cancelled { .. } | Error::Suspended { .. } => StatusCode::Cancelled,
 
             Error::StatementTimeout { .. } => StatusCode::Cancelled,
 

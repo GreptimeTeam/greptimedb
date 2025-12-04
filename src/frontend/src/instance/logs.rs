@@ -19,11 +19,11 @@ use client::Output;
 use common_error::ext::BoxedError;
 use log_query::LogQuery;
 use server_error::Result as ServerResult;
-use servers::error::{self as server_error, AuthSnafu, ExecuteQuerySnafu};
+use servers::error::{self as server_error, AuthSnafu, ExecuteQuerySnafu, SuspendedSnafu};
 use servers::interceptor::{LogQueryInterceptor, LogQueryInterceptorRef};
 use servers::query_handler::LogQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use tonic::async_trait;
 
 use crate::instance::Instance;
@@ -31,6 +31,8 @@ use crate::instance::Instance;
 #[async_trait]
 impl LogQueryHandler for Instance {
     async fn query(&self, mut request: LogQuery, ctx: QueryContextRef) -> ServerResult<Output> {
+        ensure!(!self.is_suspend(), SuspendedSnafu);
+
         let interceptor = self
             .plugins
             .get::<LogQueryInterceptorRef<server_error::Error>>();

@@ -24,12 +24,12 @@ use pipeline::pipeline_operator::PipelineOperator;
 use pipeline::{Pipeline, PipelineInfo, PipelineVersion};
 use servers::error::{
     AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, OtherSnafu, PipelineSnafu,
-    Result as ServerResult,
+    Result as ServerResult, SuspendedSnafu,
 };
 use servers::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use servers::query_handler::PipelineHandler;
 use session::context::{QueryContext, QueryContextRef};
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use table::Table;
 
 use crate::instance::Instance;
@@ -37,6 +37,8 @@ use crate::instance::Instance;
 #[async_trait]
 impl PipelineHandler for Instance {
     async fn insert(&self, log: RowInsertRequests, ctx: QueryContextRef) -> ServerResult<Output> {
+        ensure!(!self.is_suspend(), SuspendedSnafu);
+
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -71,6 +73,8 @@ impl PipelineHandler for Instance {
         pipeline: &str,
         query_ctx: QueryContextRef,
     ) -> ServerResult<PipelineInfo> {
+        ensure!(!self.is_suspend(), SuspendedSnafu);
+
         self.pipeline_operator
             .insert_pipeline(name, content_type, pipeline, query_ctx)
             .await
@@ -83,6 +87,8 @@ impl PipelineHandler for Instance {
         version: PipelineVersion,
         ctx: QueryContextRef,
     ) -> ServerResult<Option<()>> {
+        ensure!(!self.is_suspend(), SuspendedSnafu);
+
         self.pipeline_operator
             .delete_pipeline(name, version, ctx)
             .await

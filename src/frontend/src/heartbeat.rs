@@ -196,7 +196,8 @@ impl HeartbeatTask {
         let report_interval = self.report_interval;
         let start_time_ms = self.start_time_ms;
         let self_peer = Some(Peer {
-            // The peer id doesn't make sense for frontend, so we just set it 0.
+            // The node id will be actually calculated from its address (by hashing the address
+            // string) in the metasrv. So it can be set to 0 here, as a placeholder.
             id: 0,
             addr: self.peer_addr.clone(),
         });

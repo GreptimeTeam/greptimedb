@@ -24,6 +24,6 @@ common-telemetry.workspace = true
 common-time.workspace = true
 datafusion-common.workspace = true
 derive_builder.workspace = true
-derive_more = { version = "1", default-features = false, features = ["debug"] }
+derive_more.workspace = true
 snafu.workspace = true
 sql.workspace = true

@@ -24,13 +24,13 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
-use servers::error::{self, AuthSnafu, OtherSnafu, Result as ServerResult};
+use servers::error::{self, AuthSnafu, OtherSnafu, Result as ServerResult, SuspendedSnafu};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
 use servers::query_handler::{OpenTelemetryProtocolHandler, PipelineHandlerRef};
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 
 use crate::instance::Instance;
@@ -44,6 +44,8 @@ impl OpenTelemetryProtocolHandler for Instance {
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
+        ensure!(!self.is_suspend(), SuspendedSnafu);
+
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -123,6 +125,8 @@ impl OpenTelemetryProtocolHandler for Instance {
         table_name: String,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
+        ensure!(!self.is_suspend(), SuspendedSnafu);
+
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -170,6 +174,8 @@ impl OpenTelemetryProtocolHandler for Instance {
         table_name: String,
         ctx: QueryContextRef,
     ) -> ServerResult<Vec<Output>> {
+        ensure!(!self.is_suspend(), SuspendedSnafu);
+
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()

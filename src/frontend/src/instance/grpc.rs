@@ -49,7 +49,7 @@ use table::table_name::TableName;
 use crate::error::{
     CatalogSnafu, DataFusionSnafu, Error, ExternalSnafu, IncompleteGrpcRequestSnafu,
     NotSupportedSnafu, PermissionSnafu, PlanStatementSnafu, Result,
-    SubstraitDecodeLogicalPlanSnafu, TableNotFoundSnafu, TableOperationSnafu,
+    SubstraitDecodeLogicalPlanSnafu, SuspendedSnafu, TableNotFoundSnafu, TableOperationSnafu,
 };
 use crate::instance::{Instance, attach_timer};
 use crate::metrics::{
@@ -61,6 +61,8 @@ impl GrpcQueryHandler for Instance {
     type Error = Error;
 
     async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
+        ensure!(!self.is_suspend(), SuspendedSnafu);
+
         let interceptor_ref = self.plugins.get::<GrpcQueryInterceptorRef<Error>>();
         let interceptor = interceptor_ref.as_ref();
         interceptor.pre_execute(&request, ctx.clone())?;

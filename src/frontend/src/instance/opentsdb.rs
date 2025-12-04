@@ -16,7 +16,9 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_error::ext::BoxedError;
 use common_telemetry::tracing;
-use servers::error::{self as server_error, AuthSnafu, ExecuteGrpcQuerySnafu, OtherSnafu};
+use servers::error::{
+    self as server_error, AuthSnafu, ExecuteGrpcQuerySnafu, OtherSnafu, SuspendedSnafu,
+};
 use servers::opentsdb::codec::DataPoint;
 use servers::opentsdb::data_point_to_grpc_row_insert_requests;
 use servers::query_handler::OpentsdbProtocolHandler;
@@ -33,6 +35,8 @@ impl OpentsdbProtocolHandler for Instance {
         data_points: Vec<DataPoint>,
         ctx: QueryContextRef,
     ) -> server_error::Result<usize> {
+        ensure!(!self.is_suspend(), SuspendedSnafu);
+
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()

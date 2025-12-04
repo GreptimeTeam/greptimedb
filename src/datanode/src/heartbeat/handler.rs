@@ -99,26 +99,30 @@ impl RegionHeartbeatResponseHandler {
         self
     }
 
-    fn build_handler(&self, instruction: &Instruction) -> MetaResult<Box<InstructionHandlers>> {
+    fn build_handler(
+        &self,
+        instruction: &Instruction,
+    ) -> MetaResult<Option<Box<InstructionHandlers>>> {
         match instruction {
-            Instruction::CloseRegions(_) => Ok(Box::new(CloseRegionsHandler.into())),
-            Instruction::OpenRegions(_) => Ok(Box::new(
+            Instruction::CloseRegions(_) => Ok(Some(Box::new(CloseRegionsHandler.into()))),
+            Instruction::OpenRegions(_) => Ok(Some(Box::new(
                 OpenRegionsHandler {
                     open_region_parallelism: self.open_region_parallelism,
                 }
                 .into(),
-            )),
-            Instruction::FlushRegions(_) => Ok(Box::new(FlushRegionsHandler.into())),
-            Instruction::DowngradeRegions(_) => Ok(Box::new(DowngradeRegionsHandler.into())),
-            Instruction::UpgradeRegions(_) => Ok(Box::new(
+            ))),
+            Instruction::FlushRegions(_) => Ok(Some(Box::new(FlushRegionsHandler.into()))),
+            Instruction::DowngradeRegions(_) => Ok(Some(Box::new(DowngradeRegionsHandler.into()))),
+            Instruction::UpgradeRegions(_) => Ok(Some(Box::new(
                 UpgradeRegionsHandler {
                     upgrade_region_parallelism: self.open_region_parallelism,
                 }
                 .into(),
-            )),
-            Instruction::GetFileRefs(_) => Ok(Box::new(GetFileRefsHandler.into())),
-            Instruction::GcRegions(_) => Ok(Box::new(GcRegionsHandler.into())),
+            ))),
+            Instruction::GetFileRefs(_) => Ok(Some(Box::new(GetFileRefsHandler.into()))),
+            Instruction::GcRegions(_) => Ok(Some(Box::new(GcRegionsHandler.into()))),
             Instruction::InvalidateCaches(_) => InvalidHeartbeatResponseSnafu.fail(),
+            Instruction::Suspend => Ok(None),
         }
     }
 }
@@ -216,30 +220,24 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
             .context(InvalidHeartbeatResponseSnafu)?;
 
         let mailbox = ctx.mailbox.clone();
-        let region_server = self.region_server.clone();
-        let downgrade_tasks = self.downgrade_tasks.clone();
-        let flush_tasks = self.flush_tasks.clone();
-        let gc_tasks = self.gc_tasks.clone();
-        let handler = self.build_handler(&instruction)?;
-        let _handle = common_runtime::spawn_global(async move {
-            let reply = handler
-                .handle(
-                    &HandlerContext {
-                        region_server,
-                        downgrade_tasks,
-                        flush_tasks,
-                        gc_tasks,
-                    },
-                    instruction,
-                )
-                .await;
-
-            if let Some(reply) = reply
-                && let Err(e) = mailbox.send((meta, reply)).await
-            {
-                error!(e; "Failed to send reply to mailbox");
-            }
-        });
+        if let Some(handler) = self.build_handler(&instruction)? {
+            let context = HandlerContext {
+                region_server: self.region_server.clone(),
+                downgrade_tasks: self.downgrade_tasks.clone(),
+                flush_tasks: self.flush_tasks.clone(),
+                gc_tasks: self.gc_tasks.clone(),
+            };
+            let _handle = common_runtime::spawn_global(async move {
+                let reply = handler.handle(&context, instruction).await;
+                if let Some(reply) = reply
+                    && let Err(e) = mailbox.send((meta, reply)).await
+                {
+                    let error = e.to_string();
+                    let (meta, reply) = e.0;
+                    error!("Failed to send reply {reply} to {meta:?}: {error}");
+                }
+            });
+        }
 
         Ok(HandleControl::Continue)
     }

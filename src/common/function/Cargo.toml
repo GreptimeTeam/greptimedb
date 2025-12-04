@@ -39,7 +39,7 @@ datafusion-functions-aggregate-common.workspace = true
 datafusion-pg-catalog.workspace = true
 datafusion-physical-expr.workspace = true
 datatypes.workspace = true
-derive_more = { version = "1", default-features = false, features = ["display"] }
+derive_more.workspace = true
 geo = { version = "0.29", optional = true }
 geo-types = { version = "0.7", optional = true }
 geohash = { version = "0.13", optional = true }
