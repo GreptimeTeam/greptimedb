@@ -58,7 +58,7 @@ pub struct ParquetFetchMetrics {
     /// Total size in bytes of pages to fetch from store.
     page_size_to_fetch_store: std::sync::atomic::AtomicU64,
     /// Total size in bytes of pages actually returned.
-    page_size_return: std::sync::atomic::AtomicU64,
+    page_size_needed: std::sync::atomic::AtomicU64,
     /// Elapsed time in microseconds fetching from write cache.
     write_cache_fetch_elapsed: std::sync::atomic::AtomicU64,
     /// Elapsed time in microseconds fetching from object store.
@@ -81,7 +81,7 @@ impl std::fmt::Debug for ParquetFetchMetrics {
         let page_size_to_fetch_write_cache = self.page_size_to_fetch_write_cache();
         let pages_to_fetch_store = self.pages_to_fetch_store();
         let page_size_to_fetch_store = self.page_size_to_fetch_store();
-        let page_size_return = self.page_size_return();
+        let page_size_needed = self.page_size_needed();
         let write_cache_elapsed = self.write_cache_fetch_elapsed();
         let store_elapsed = self.store_fetch_elapsed();
         let total_elapsed = self.total_fetch_elapsed();
@@ -158,11 +158,11 @@ impl std::fmt::Debug for ParquetFetchMetrics {
             )?;
             first = false;
         }
-        if page_size_return > 0 {
+        if page_size_needed > 0 {
             if !first {
                 write!(f, ", ")?;
             }
-            write!(f, "\"page_size_return\":{}", page_size_return)?;
+            write!(f, "\"page_size_needed\":{}", page_size_needed)?;
             first = false;
         }
         if write_cache_elapsed > 0 {
@@ -303,13 +303,13 @@ impl ParquetFetchMetrics {
 
     /// Adds to the page size return counter.
     pub fn add_page_size_return(&self, size: u64) {
-        self.page_size_return
+        self.page_size_needed
             .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Returns the page size returned in bytes.
-    pub fn page_size_return(&self) -> u64 {
-        self.page_size_return
+    pub fn page_size_needed(&self) -> u64 {
+        self.page_size_needed
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -383,8 +383,8 @@ impl ParquetFetchMetrics {
             other.page_size_to_fetch_store(),
             std::sync::atomic::Ordering::Relaxed,
         );
-        self.page_size_return.fetch_add(
-            other.page_size_return(),
+        self.page_size_needed.fetch_add(
+            other.page_size_needed(),
             std::sync::atomic::Ordering::Relaxed,
         );
         self.write_cache_fetch_elapsed.fetch_add(
@@ -662,6 +662,7 @@ impl<'a> InMemoryRowGroup<'a> {
                 metrics.add_pages_to_fetch_mem(ranges.len());
                 let total_size: u64 = ranges.iter().map(|r| r.end - r.start).sum();
                 metrics.add_page_size_to_fetch_mem(total_size);
+                metrics.add_page_size_return(total_size);
             }
             return Ok(pages.compressed.clone());
         }
@@ -682,6 +683,8 @@ impl<'a> InMemoryRowGroup<'a> {
                     metrics.inc_write_cache_hit();
                     metrics.add_pages_to_fetch_write_cache(ranges.len());
                     metrics.add_page_size_to_fetch_write_cache(unaligned_size);
+                    let range_size_needed: u64 = ranges.iter().map(|r| r.end - r.start).sum();
+                    metrics.add_page_size_return(range_size_needed);
                 }
                 data
             }
@@ -703,16 +706,12 @@ impl<'a> InMemoryRowGroup<'a> {
                     metrics.inc_cache_miss();
                     metrics.add_pages_to_fetch_store(ranges.len());
                     metrics.add_page_size_to_fetch_store(unaligned_size);
+                    let range_size_needed: u64 = ranges.iter().map(|r| r.end - r.start).sum();
+                    metrics.add_page_size_return(range_size_needed);
                 }
                 data
             }
         };
-
-        // Track actual size of returned pages.
-        if let Some(metrics) = metrics {
-            let actual_size: usize = pages.iter().map(|b| b.len()).sum();
-            metrics.add_page_size_return(actual_size as u64);
-        }
 
         // Put pages back to the cache.
         let page_value = PageValue::new(pages.clone(), total_range_size);
