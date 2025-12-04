@@ -172,8 +172,6 @@ pub(crate) async fn collect_index_entries_from_puffin(
             Some(BlobIndexTypeTargetKey::Inverted) => {
                 let mut inverted_entries = collect_inverted_entries(
                     &reader,
-                    // version is not needed here since rebuild index would be another type of index(and this one will invalidate)
-                    // and building a new index also wouldn't be in the cache
                     region_index_id,
                     inverted_index_cache.as_ref(),
                     &context,

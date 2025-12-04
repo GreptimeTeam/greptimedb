@@ -476,9 +476,10 @@ impl TempFileCleaner {
     }
 
     /// Removes the SST and index file from the local atomic dir by the file id.
+    /// This only remove the initial index, Since the index version is always 0 for a new SST, this method should be safe to pass 0.
     pub(crate) async fn clean_by_file_id(&self, file_id: FileId) {
         let sst_key = IndexKey::new(self.region_id, file_id, FileType::Parquet).to_string();
-        let index_key = IndexKey::new(self.region_id, file_id, FileType::Puffin(0)).to_string(); // TODO(discord9): confirm correctness
+        let index_key = IndexKey::new(self.region_id, file_id, FileType::Puffin(0)).to_string();
 
         Self::clean_atomic_dir_files(&self.object_store, &[&sst_key, &index_key]).await;
     }

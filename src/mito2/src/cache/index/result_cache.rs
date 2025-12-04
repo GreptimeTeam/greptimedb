@@ -35,8 +35,6 @@ const INDEX_RESULT_TYPE: &str = "index_result";
 ///
 /// Row groups can be partially searched. Row groups that not contained in `RowGroupSelection` are not searched.
 /// User can retrieve the partial results and handle uncontained row groups required by the predicate subsequently.
-///
-/// FIXME(discord9): confirm if this key need version?
 pub struct IndexResultCache {
     cache: Cache<(PredicateKey, FileId), Arc<RowGroupSelection>>,
 }
