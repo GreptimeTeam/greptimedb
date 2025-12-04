@@ -65,33 +65,28 @@ pub struct BloomFilterIndexApplyMetrics {
 
 impl std::fmt::Debug for BloomFilterIndexApplyMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{{")?;
-        let mut first = true;
+        let Self {
+            apply_elapsed,
+            blob_cache_miss,
+            blob_read_bytes,
+            read_metrics,
+        } = self;
 
-        if !self.apply_elapsed.is_zero() {
-            write!(f, "\"apply_elapsed\":\"{:?}\"", self.apply_elapsed)?;
-            first = false;
+        // If apply_elapsed is 0, we didn't apply anything.
+        if apply_elapsed.is_zero() {
+            return write!(f, "{{}}");
         }
-        if self.blob_cache_miss > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"blob_cache_miss\":{}", self.blob_cache_miss)?;
-            first = false;
+        write!(f, "{{")?;
+
+        write!(f, "\"apply_elapsed\":\"{:?}\"", apply_elapsed)?;
+
+        if *blob_cache_miss > 0 {
+            write!(f, ", \"blob_cache_miss\":{}", blob_cache_miss)?;
         }
-        if self.blob_read_bytes > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"blob_read_bytes\":{}", self.blob_read_bytes)?;
-            first = false;
+        if *blob_read_bytes > 0 {
+            write!(f, ", \"blob_read_bytes\":{}", blob_read_bytes)?;
         }
-        if !self.apply_elapsed.is_zero() {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"read_metrics\":{:?}", self.read_metrics)?;
-        }
+        write!(f, ", \"read_metrics\":{:?}", read_metrics)?;
 
         write!(f, "}}")
     }
