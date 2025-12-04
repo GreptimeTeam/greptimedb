@@ -32,6 +32,7 @@ use crate::tests::test_util::{MockInstanceBuilder, TestContext, wait_procedure};
 
 mod basic;
 mod delay_layer;
+mod race;
 
 /// Helper function to get table route information for GC procedure
 pub(crate) async fn get_table_route(
@@ -62,7 +63,7 @@ pub(crate) async fn get_table_route(
 }
 
 /// Helper function to list all SST files
-async fn list_sst_files(test_context: &TestContext) -> HashSet<String> {
+pub(crate) async fn list_sst_files(test_context: &TestContext) -> HashSet<String> {
     let mut sst_files = HashSet::new();
 
     for datanode in test_context.datanodes().values() {

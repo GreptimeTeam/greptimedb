@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_test_util::temp_dir::create_temp_dir;
 use datanode::store::new_object_store;
 use object_store::config::ObjectStoreConfig;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
@@ -22,7 +23,7 @@ use object_store::raw::{Access, Layer, LayeredAccess, OpDelete, OpList, RpDelete
 use object_store::{ObjectStore, ObjectStoreBuilder};
 use tokio::time::sleep;
 
-use crate::test_util::{StorageType, TempDirGuard};
+use crate::test_util::{FileDirGuard, StorageGuard, StorageType, TempDirGuard, TestGuard};
 
 /// A layer that injects delays into storage operations for testing race conditions
 /// and timing-related issues in GC integration tests.
@@ -240,13 +241,24 @@ pub async fn build_object_store_manager_with_delays(
 /// Convenience function to create an object store manager with delay layer for testing
 /// Uses default filesystem configuration
 pub async fn create_test_object_store_manager_with_delays(
-    data_home: &str,
+    store_type: &StorageType,
+    test_name: &str,
     list_delay: Duration,
     delete_delay: Duration,
     list_per_file_delay: Duration,
-) -> Result<(ObjectStoreManagerRef, TempDirGuard), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(ObjectStoreManagerRef, TestGuard), Box<dyn std::error::Error + Send + Sync>> {
+    let data_home_dir = create_temp_dir(&format!("gt_home_{}", &test_name));
+    let data_home = data_home_dir.path().to_str().unwrap().to_string();
     let delay_layer = DelayLayer::new(list_delay, delete_delay, list_per_file_delay);
-    build_object_store_manager_with_delays(&StorageType::File, data_home, delay_layer).await
+    let (mgr, dir_guard) =
+        build_object_store_manager_with_delays(&StorageType::File, &data_home, delay_layer).await?;
+    Ok((
+        mgr,
+        TestGuard {
+            home_guard: FileDirGuard::new(data_home_dir),
+            storage_guards: vec![StorageGuard(dir_guard)],
+        },
+    ))
 }
 
 #[cfg(test)]

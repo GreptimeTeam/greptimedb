@@ -25,29 +25,8 @@ use mito2::gc::GcConfig;
 
 use crate::cluster::GreptimeDbClusterBuilder;
 use crate::test_util::{StorageType, TempDirGuard, get_test_store_config};
-use crate::tests::gc::get_table_route;
+use crate::tests::gc::{get_table_route, list_sst_files};
 use crate::tests::test_util::{MockInstanceBuilder, TestContext, execute_sql, wait_procedure};
-
-/// Helper function to list all SST files
-async fn list_sst_files(test_context: &TestContext) -> HashSet<String> {
-    let mut sst_files = HashSet::new();
-
-    for datanode in test_context.datanodes().values() {
-        let region_server = datanode.region_server();
-        let mito = region_server.mito_engine().unwrap();
-        let all_files = mito
-            .all_ssts_from_storage()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|e| e.file_path)
-            .collect_vec();
-        sst_files.extend(all_files);
-    }
-
-    sst_files
-}
 
 /// Helper function to create a distributed cluster with GC enabled
 async fn distributed_with_gc(store_type: &StorageType) -> (TestContext, TempDirGuard) {
