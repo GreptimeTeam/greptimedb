@@ -1061,36 +1061,29 @@ pub(crate) struct MetadataCacheMetrics {
 
 impl std::fmt::Debug for MetadataCacheMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{{")?;
-        let mut first = true;
+        let Self {
+            mem_cache_hit,
+            file_cache_hit,
+            cache_miss,
+            metadata_load_cost,
+        } = self;
 
-        if self.mem_cache_hit > 0 {
-            write!(f, "\"mem_cache_hit\":{}", self.mem_cache_hit)?;
-            first = false;
+        // If metadata_load_cost is 0, we didn't load metadata.
+        if metadata_load_cost.is_zero() {
+            return write!(f, "{{}}");
         }
-        if self.file_cache_hit > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"file_cache_hit\":{}", self.file_cache_hit)?;
-            first = false;
+        write!(f, "{{")?;
+
+        write!(f, "\"metadata_load_cost\":\"{:?}\"", metadata_load_cost)?;
+
+        if *mem_cache_hit > 0 {
+            write!(f, ", \"mem_cache_hit\":{}", mem_cache_hit)?;
         }
-        if self.cache_miss > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"cache_miss\":{}", self.cache_miss)?;
-            first = false;
+        if *file_cache_hit > 0 {
+            write!(f, ", \"file_cache_hit\":{}", file_cache_hit)?;
         }
-        if !self.metadata_load_cost.is_zero() {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(
-                f,
-                "\"metadata_load_cost\":\"{:?}\"",
-                self.metadata_load_cost
-            )?;
+        if *cache_miss > 0 {
+            write!(f, ", \"cache_miss\":{}", cache_miss)?;
         }
 
         write!(f, "}}")
