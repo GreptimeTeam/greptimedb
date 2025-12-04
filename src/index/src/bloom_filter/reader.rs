@@ -52,39 +52,38 @@ pub struct BloomFilterReadMetrics {
 
 impl std::fmt::Debug for BloomFilterReadMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{{")?;
-        let mut first = true;
+        let Self {
+            total_bytes,
+            total_ranges,
+            fetch_elapsed,
+            cache_hit,
+            cache_miss,
+        } = self;
 
-        if self.total_bytes > 0 {
-            write!(f, "\"total_bytes\":{}", self.total_bytes)?;
-            first = false;
+        // If both total_bytes and cache_hit are 0, we didn't read anything.
+        if *total_bytes == 0 && *cache_hit == 0 {
+            return write!(f, "{{}}");
         }
-        if self.total_ranges > 0 {
-            if !first {
+        write!(f, "{{")?;
+
+        if *total_bytes > 0 {
+            write!(f, "\"total_bytes\":{}", total_bytes)?;
+        }
+        if *cache_hit > 0 {
+            if *total_bytes > 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "\"total_ranges\":{}", self.total_ranges)?;
-            first = false;
+            write!(f, "\"cache_hit\":{}", cache_hit)?;
         }
-        if !self.fetch_elapsed.is_zero() {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"fetch_elapsed\":\"{:?}\"", self.fetch_elapsed)?;
-            first = false;
+
+        if *total_ranges > 0 {
+            write!(f, ", \"total_ranges\":{}", total_ranges)?;
         }
-        if self.cache_hit > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"cache_hit\":{}", self.cache_hit)?;
-            first = false;
+        if !fetch_elapsed.is_zero() {
+            write!(f, ", \"fetch_elapsed\":\"{:?}\"", fetch_elapsed)?;
         }
-        if self.cache_miss > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"cache_miss\":{}", self.cache_miss)?;
+        if *cache_miss > 0 {
+            write!(f, ", \"cache_miss\":{}", cache_miss)?;
         }
 
         write!(f, "}}")
