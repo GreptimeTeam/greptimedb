@@ -23,7 +23,9 @@ use common_telemetry::{info, init_default_ut_logging};
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 
-use crate::gc::mock::{MockSchedulerCtx, mock_candidate, mock_region_stat, new_candidate};
+use crate::gc::mock::{
+    MockSchedulerCtx, TEST_REGION_SIZE_200MB, mock_candidate, mock_region_stat, new_candidate,
+};
 use crate::gc::{GcScheduler, GcSchedulerOptions};
 
 /// Concurrent Processing Tests
@@ -193,7 +195,8 @@ async fn test_region_gc_concurrency_limit() {
 
     for i in 1..=10 {
         let region_id = RegionId::new(table_id, i as u32);
-        let region_stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10); // 200MB
+        let region_stat =
+            mock_region_stat(region_id, RegionRole::Leader, TEST_REGION_SIZE_200MB, 10); // 200MB
         region_stats.push(region_stat);
 
         candidates.push(mock_candidate(region_id));
@@ -297,7 +300,8 @@ async fn test_region_gc_concurrency_with_partial_failures() {
 
     for i in 1..=6 {
         let region_id = RegionId::new(table_id, i as u32);
-        let region_stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10); // 200MB
+        let region_stat =
+            mock_region_stat(region_id, RegionRole::Leader, TEST_REGION_SIZE_200MB, 10); // 200MB
         region_stats.push(region_stat);
 
         candidates.push(mock_candidate(region_id));
@@ -429,7 +433,8 @@ async fn test_region_gc_concurrency_with_retryable_errors() {
 
     for i in 1..=5 {
         let region_id = RegionId::new(table_id, i as u32);
-        let region_stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10); // 200MB
+        let region_stat =
+            mock_region_stat(region_id, RegionRole::Leader, TEST_REGION_SIZE_200MB, 10); // 200MB
         region_stats.push(region_stat);
         candidates.push(mock_candidate(region_id));
     }

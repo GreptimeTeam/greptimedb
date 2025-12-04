@@ -21,7 +21,7 @@ use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 
-use crate::gc::mock::{MockSchedulerCtx, mock_region_stat};
+use crate::gc::mock::{MockSchedulerCtx, TEST_REGION_SIZE_200MB, mock_region_stat};
 use crate::gc::{GcScheduler, GcSchedulerOptions};
 
 /// Configuration Tests
@@ -32,7 +32,8 @@ async fn test_different_gc_weights() {
     let table_id = 1;
     let region_id = RegionId::new(table_id, 1);
 
-    let mut region_stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10); // 200MB to pass size threshold
+    let mut region_stat =
+        mock_region_stat(region_id, RegionRole::Leader, TEST_REGION_SIZE_200MB, 10); // 200MB to pass size threshold
 
     if let RegionManifestInfo::Mito {
         file_removed_cnt, ..
@@ -133,7 +134,7 @@ async fn test_regions_per_table_threshold() {
     // Create many regions
     for i in 1..=10 {
         let region_id = RegionId::new(table_id, i as u32);
-        let mut stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10); // 200MB
+        let mut stat = mock_region_stat(region_id, RegionRole::Leader, TEST_REGION_SIZE_200MB, 10); // 200MB
 
         if let RegionManifestInfo::Mito {
             file_removed_cnt, ..

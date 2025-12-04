@@ -121,7 +121,7 @@ async fn test_multiple_regions_per_table() {
                 vec![
                     (region1, peer.clone()),
                     (region2, peer.clone()),
-                    (region3, peer),
+                    (region3, peer.clone()),
                 ],
             ),
         )])),
@@ -138,9 +138,8 @@ async fn test_multiple_regions_per_table() {
     let candidates = ctx.candidates.lock().unwrap().clone().unwrap_or_default();
 
     // Convert table-based candidates to datanode-based candidates
-    let peer = Peer::new(1, "");
     let datanode_to_candidates = HashMap::from([(
-        peer,
+        peer.clone(),
         candidates
             .into_iter()
             .flat_map(|(table_id, candidates)| candidates.into_iter().map(move |c| (table_id, c)))

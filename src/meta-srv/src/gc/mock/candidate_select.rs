@@ -21,7 +21,7 @@ use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 
-use crate::gc::mock::{MockSchedulerCtx, mock_region_stat};
+use crate::gc::mock::{MockSchedulerCtx, TEST_REGION_SIZE_200MB, mock_region_stat};
 use crate::gc::{GcScheduler, GcSchedulerOptions};
 
 /// Candidate Selection Tests
@@ -33,10 +33,19 @@ async fn test_gc_candidate_filtering_by_role() {
     let leader_region = RegionId::new(table_id, 1);
     let follower_region = RegionId::new(table_id, 2);
 
-    let mut leader_stat = mock_region_stat(leader_region, RegionRole::Leader, 200_000_000, 10); // 200MB
+    let mut leader_stat = mock_region_stat(
+        leader_region,
+        RegionRole::Leader,
+        TEST_REGION_SIZE_200MB,
+        10,
+    ); // 200MB
 
-    let mut follower_stat =
-        mock_region_stat(follower_region, RegionRole::Follower, 200_000_000, 10); // 200MB
+    let mut follower_stat = mock_region_stat(
+        follower_region,
+        RegionRole::Follower,
+        TEST_REGION_SIZE_200MB,
+        10,
+    ); // 200MB
 
     // Set up manifest info for scoring
     if let RegionManifestInfo::Mito {
@@ -117,7 +126,8 @@ async fn test_gc_candidate_size_threshold() {
         *file_removed_cnt = 3;
     }
 
-    let mut large_stat = mock_region_stat(large_region, RegionRole::Leader, 200_000_000, 20); // 200MB
+    let mut large_stat =
+        mock_region_stat(large_region, RegionRole::Leader, TEST_REGION_SIZE_200MB, 20); // 200MB
     if let RegionManifestInfo::Mito {
         file_removed_cnt, ..
     } = &mut large_stat.region_manifest
@@ -187,7 +197,12 @@ async fn test_gc_candidate_scoring() {
     let low_score_region = RegionId::new(table_id, 1);
     let high_score_region = RegionId::new(table_id, 2);
 
-    let mut low_stat = mock_region_stat(low_score_region, RegionRole::Leader, 200_000_000, 5); // 200MB
+    let mut low_stat = mock_region_stat(
+        low_score_region,
+        RegionRole::Leader,
+        TEST_REGION_SIZE_200MB,
+        5,
+    ); // 200MB
     // Set low file removal rate for low_score_region
     if let RegionManifestInfo::Mito {
         file_removed_cnt, ..
@@ -196,7 +211,12 @@ async fn test_gc_candidate_scoring() {
         *file_removed_cnt = 2;
     }
 
-    let mut high_stat = mock_region_stat(high_score_region, RegionRole::Leader, 200_000_000, 50); // 200MB
+    let mut high_stat = mock_region_stat(
+        high_score_region,
+        RegionRole::Leader,
+        TEST_REGION_SIZE_200MB,
+        50,
+    ); // 200MB
     // Set high file removal rate for high_score_region
     if let RegionManifestInfo::Mito {
         file_removed_cnt, ..
@@ -277,7 +297,7 @@ async fn test_gc_candidate_regions_per_table_threshold() {
 
     for i in 0..10 {
         let region_id = RegionId::new(table_id, i + 1);
-        let mut stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 20); // 200MB
+        let mut stat = mock_region_stat(region_id, RegionRole::Leader, TEST_REGION_SIZE_200MB, 20); // 200MB
 
         // Set different file removal rates to create different scores
         // Higher region IDs get higher scores (better GC candidates)

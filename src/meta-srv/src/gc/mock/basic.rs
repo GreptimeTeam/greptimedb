@@ -21,7 +21,9 @@ use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 
-use crate::gc::mock::{MockSchedulerCtx, TestEnv, mock_region_stat, new_candidate};
+use crate::gc::mock::{
+    MockSchedulerCtx, TEST_REGION_SIZE_200MB, TestEnv, mock_region_stat, new_candidate,
+};
 use crate::gc::{GcScheduler, GcSchedulerOptions};
 
 #[tokio::test]
@@ -112,7 +114,7 @@ async fn test_handle_tick() {
                 vec![mock_region_stat(
                     region_id,
                     RegionRole::Leader,
-                    200_000_000,
+                    TEST_REGION_SIZE_200MB,
                     10,
                 )],
             )])))),

@@ -22,7 +22,9 @@ use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 
-use crate::gc::mock::{MockSchedulerCtx, mock_region_stat, new_empty_report_with};
+use crate::gc::mock::{
+    MockSchedulerCtx, TEST_REGION_SIZE_200MB, mock_region_stat, new_empty_report_with,
+};
 use crate::gc::{GcScheduler, GcSchedulerOptions};
 
 // Integration Flow Tests
@@ -35,7 +37,8 @@ async fn test_full_gc_workflow() {
     let region_id = RegionId::new(table_id, 1);
     let peer = Peer::new(1, "");
 
-    let mut region_stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10); // 200MB
+    let mut region_stat =
+        mock_region_stat(region_id, RegionRole::Leader, TEST_REGION_SIZE_200MB, 10); // 200MB
 
     if let RegionManifestInfo::Mito {
         file_removed_cnt, ..
@@ -141,7 +144,8 @@ async fn test_tracker_cleanup() {
     let peer = Peer::new(1, "");
 
     // Create region stat with proper file_removed_cnt to ensure it gets selected as candidate
-    let mut region_stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10); // 200MB
+    let mut region_stat =
+        mock_region_stat(region_id, RegionRole::Leader, TEST_REGION_SIZE_200MB, 10); // 200MB
     if let RegionManifestInfo::Mito {
         file_removed_cnt, ..
     } = &mut region_stat.region_manifest

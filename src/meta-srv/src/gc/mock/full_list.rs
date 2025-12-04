@@ -21,7 +21,7 @@ use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 
-use crate::gc::mock::{MockSchedulerCtx, mock_candidate, mock_region_stat};
+use crate::gc::mock::{MockSchedulerCtx, TEST_REGION_SIZE_200MB, mock_candidate, mock_region_stat};
 use crate::gc::{GcScheduler, GcSchedulerOptions};
 
 // Full File Listing Tests
@@ -34,7 +34,7 @@ async fn test_full_file_listing_first_time_gc() {
     let region_id = RegionId::new(table_id, 1);
     let peer = Peer::new(1, "");
 
-    let region_stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10); // 200MB
+    let region_stat = mock_region_stat(region_id, RegionRole::Leader, TEST_REGION_SIZE_200MB, 10); // 200MB
     let table_stats = HashMap::from([(table_id, vec![region_stat])]);
 
     let gc_report = GcReport {
@@ -101,7 +101,7 @@ async fn test_full_file_listing_interval_enforcement() {
     let region_id = RegionId::new(table_id, 1);
     let peer = Peer::new(1, "");
 
-    let region_stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10); // 200MB
+    let region_stat = mock_region_stat(region_id, RegionRole::Leader, TEST_REGION_SIZE_200MB, 10); // 200MB
     let table_stats = HashMap::from([(table_id, vec![region_stat])]);
 
     let gc_report = GcReport {
@@ -191,7 +191,7 @@ async fn test_full_file_listing_no_interval_passed() {
     let region_id = RegionId::new(table_id, 1);
     let peer = Peer::new(1, "");
 
-    let region_stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10); // 200MB
+    let region_stat = mock_region_stat(region_id, RegionRole::Leader, TEST_REGION_SIZE_200MB, 10); // 200MB
     let table_stats = HashMap::from([(table_id, vec![region_stat])]);
 
     let gc_report = GcReport {

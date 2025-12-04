@@ -43,6 +43,9 @@ use crate::gc::handler::Region2Peers;
 use crate::gc::options::GcSchedulerOptions;
 use crate::gc::scheduler::{Event, GcScheduler};
 
+pub const TEST_REGION_SIZE_200MB: u64 = 200_000_000;
+
+/// Helper function to create an empty GcReport for the given region IDs
 pub fn new_empty_report_with(region_ids: impl IntoIterator<Item = RegionId>) -> GcReport {
     let mut deleted_files = HashMap::new();
     for region_id in region_ids {
@@ -401,6 +404,7 @@ impl TestEnv {
     }
 }
 
+/// Helper function to create a mock GC candidate that will pass the GC threshold
 fn new_candidate(region_id: RegionId, score: f64) -> GcCandidate {
     // will pass threshold for gc
     let region_stat = mock_region_stat(region_id, RegionRole::Leader, 10_000, 10);
@@ -412,9 +416,9 @@ fn new_candidate(region_id: RegionId, score: f64) -> GcCandidate {
     }
 }
 
-// Helper function to create a mock GC candidate
+/// Helper function to create a mock GC candidate
 fn mock_candidate(region_id: RegionId) -> GcCandidate {
-    let region_stat = mock_region_stat(region_id, RegionRole::Leader, 200_000_000, 10);
+    let region_stat = mock_region_stat(region_id, RegionRole::Leader, TEST_REGION_SIZE_200MB, 10);
     GcCandidate {
         region_id,
         score: ordered_float::OrderedFloat(1.0),
@@ -422,6 +426,7 @@ fn mock_candidate(region_id: RegionId) -> GcCandidate {
     }
 }
 
+/// Helper function to create a mock RegionStat
 fn mock_region_stat(
     id: RegionId,
     role: RegionRole,
