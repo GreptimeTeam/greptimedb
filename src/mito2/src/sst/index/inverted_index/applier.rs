@@ -67,8 +67,7 @@ impl std::fmt::Debug for InvertedIndexApplyMetrics {
             inverted_index_read_metrics,
         } = self;
 
-        // If apply_elapsed is 0, we didn't apply anything.
-        if apply_elapsed.is_zero() {
+        if self.is_empty() {
             return write!(f, "{{}}");
         }
         write!(f, "{{")?;
@@ -92,6 +91,11 @@ impl std::fmt::Debug for InvertedIndexApplyMetrics {
 }
 
 impl InvertedIndexApplyMetrics {
+    /// Returns true if the metrics are empty (contain no meaningful data).
+    pub fn is_empty(&self) -> bool {
+        self.apply_elapsed.is_zero()
+    }
+
     /// Merges another metrics into this one.
     pub fn merge_from(&mut self, other: &Self) {
         self.apply_elapsed += other.apply_elapsed;

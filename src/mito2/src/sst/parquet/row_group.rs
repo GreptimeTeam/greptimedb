@@ -83,8 +83,7 @@ impl std::fmt::Debug for ParquetFetchMetrics {
         let store_elapsed = self.store_fetch_elapsed();
         let total_elapsed = self.total_fetch_elapsed();
 
-        // If total_elapsed is 0, we didn't fetch anything.
-        if total_elapsed == 0 {
+        if self.is_empty() {
             return write!(f, "{{}}");
         }
         write!(f, "{{")?;
@@ -157,6 +156,11 @@ impl std::fmt::Debug for ParquetFetchMetrics {
 }
 
 impl ParquetFetchMetrics {
+    /// Returns true if the metrics are empty (contain no meaningful data).
+    pub fn is_empty(&self) -> bool {
+        self.total_fetch_elapsed() == 0
+    }
+
     /// Increments page cache hit counter.
     pub fn inc_page_cache_hit(&self) {
         self.page_cache_hit

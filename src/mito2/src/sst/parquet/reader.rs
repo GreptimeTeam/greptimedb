@@ -1068,8 +1068,7 @@ impl std::fmt::Debug for MetadataCacheMetrics {
             metadata_load_cost,
         } = self;
 
-        // If metadata_load_cost is 0, we didn't load metadata.
-        if metadata_load_cost.is_zero() {
+        if self.is_empty() {
             return write!(f, "{{}}");
         }
         write!(f, "{{")?;
@@ -1091,6 +1090,11 @@ impl std::fmt::Debug for MetadataCacheMetrics {
 }
 
 impl MetadataCacheMetrics {
+    /// Returns true if the metrics are empty (contain no meaningful data).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.metadata_load_cost.is_zero()
+    }
+
     /// Adds `other` metrics to this metrics.
     pub(crate) fn merge_from(&mut self, other: &MetadataCacheMetrics) {
         self.mem_cache_hit += other.mem_cache_hit;

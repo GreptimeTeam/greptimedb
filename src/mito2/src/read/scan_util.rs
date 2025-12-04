@@ -280,20 +280,20 @@ impl fmt::Debug for ScanMetricsSet {
             write!(f, ", \"mem_scan_cost\":\"{mem_scan_cost:?}\"")?;
         }
 
-        // Write optional verbose metrics
-        if let Some(metrics) = inverted_index_apply_metrics {
+        // Write optional verbose metrics if they are not empty
+        if let Some(metrics) = inverted_index_apply_metrics && !metrics.is_empty() {
             write!(f, ", \"inverted_index_apply_metrics\":{:?}", metrics)?;
         }
-        if let Some(metrics) = bloom_filter_apply_metrics {
+        if let Some(metrics) = bloom_filter_apply_metrics && !metrics.is_empty() {
             write!(f, ", \"bloom_filter_apply_metrics\":{:?}", metrics)?;
         }
-        if let Some(metrics) = fulltext_index_apply_metrics {
+        if let Some(metrics) = fulltext_index_apply_metrics && !metrics.is_empty() {
             write!(f, ", \"fulltext_index_apply_metrics\":{:?}", metrics)?;
         }
-        if let Some(metrics) = fetch_metrics {
+        if let Some(metrics) = fetch_metrics && !metrics.is_empty() {
             write!(f, ", \"fetch_metrics\":{:?}", metrics)?;
         }
-        if let Some(metrics) = metadata_cache_metrics {
+        if let Some(metrics) = metadata_cache_metrics && !metrics.is_empty() {
             write!(f, ", \"metadata_cache_metrics\":{:?}", metrics)?;
         }
 

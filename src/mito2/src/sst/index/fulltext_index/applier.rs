@@ -82,8 +82,7 @@ impl std::fmt::Debug for FulltextIndexApplyMetrics {
             bloom_filter_read_metrics,
         } = self;
 
-        // If apply_elapsed is 0, we didn't apply anything.
-        if apply_elapsed.is_zero() {
+        if self.is_empty() {
             return write!(f, "{{}}");
         }
         write!(f, "{{")?;
@@ -113,6 +112,11 @@ impl std::fmt::Debug for FulltextIndexApplyMetrics {
 }
 
 impl FulltextIndexApplyMetrics {
+    /// Returns true if the metrics are empty (contain no meaningful data).
+    pub fn is_empty(&self) -> bool {
+        self.apply_elapsed.is_zero()
+    }
+
     /// Collects metrics from a directory read operation.
     pub fn collect_dir_metrics(
         &mut self,
