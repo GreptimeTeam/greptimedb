@@ -32,7 +32,7 @@ use collect_leader_region_handler::CollectLeaderRegionHandler;
 use collect_stats_handler::CollectStatsHandler;
 use common_base::Plugins;
 use common_meta::datanode::Stat;
-use common_meta::instruction::{Instruction, InstructionReply};
+use common_meta::instruction::InstructionReply;
 use common_meta::sequence::Sequence;
 use common_telemetry::{debug, info, warn};
 use dashmap::DashMap;
@@ -114,16 +114,19 @@ pub enum HandleControl {
 #[derive(Debug, Default)]
 pub struct HeartbeatAccumulator {
     pub header: Option<ResponseHeader>,
-    pub instructions: Vec<Instruction>,
+    mailbox_message: Option<MailboxMessage>,
     pub stat: Option<Stat>,
     pub inactive_region_ids: HashSet<RegionId>,
     pub region_lease: Option<RegionLease>,
 }
 
 impl HeartbeatAccumulator {
-    pub fn into_mailbox_message(self) -> Option<MailboxMessage> {
-        // TODO(jiachun): to HeartbeatResponse payload
-        None
+    pub(crate) fn take_mailbox_message(&mut self) -> Option<MailboxMessage> {
+        self.mailbox_message.take()
+    }
+
+    pub fn set_mailbox_message(&mut self, message: MailboxMessage) {
+        let _ = self.mailbox_message.insert(message);
     }
 }
 
@@ -359,10 +362,11 @@ impl HeartbeatHandlerGroup {
             }
         }
         let header = std::mem::take(&mut acc.header);
+        let mailbox_message = acc.take_mailbox_message();
         let res = HeartbeatResponse {
             header,
             region_lease: acc.region_lease,
-            ..Default::default()
+            mailbox_message,
         };
         Ok(res)
     }
@@ -390,7 +394,9 @@ impl HeartbeatMailbox {
 
     /// Parses the [Instruction] from [MailboxMessage].
     #[cfg(test)]
-    pub fn json_instruction(msg: &MailboxMessage) -> Result<Instruction> {
+    pub(crate) fn json_instruction(
+        msg: &MailboxMessage,
+    ) -> Result<common_meta::instruction::Instruction> {
         let Payload::Json(payload) =
             msg.payload
                 .as_ref()

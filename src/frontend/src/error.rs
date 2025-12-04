@@ -364,6 +364,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Service suspended"))]
+    Suspended {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -444,6 +450,8 @@ impl ErrorExt for Error {
             Error::StatementTimeout { .. } => StatusCode::Cancelled,
 
             Error::AcquireLimiter { .. } => StatusCode::Internal,
+
+            Error::Suspended { .. } => StatusCode::Suspended,
         }
     }
 

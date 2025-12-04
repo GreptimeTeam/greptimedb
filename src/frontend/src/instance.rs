@@ -26,7 +26,8 @@ mod region_query;
 pub mod standalone;
 
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, atomic};
 use std::time::{Duration, SystemTime};
 
 use async_stream::stream;
@@ -119,6 +120,7 @@ pub struct Instance {
     limiter: Option<LimiterRef>,
     process_manager: ProcessManagerRef,
     slow_query_options: SlowQueryOptions,
+    suspend: Arc<AtomicBool>,
 
     // cache for otlp metrics
     // first layer key: db-string
@@ -170,6 +172,14 @@ impl Instance {
 
     pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
         self.statement_executor.procedure_executor()
+    }
+
+    pub fn suspend_state(&self) -> Arc<AtomicBool> {
+        self.suspend.clone()
+    }
+
+    pub(crate) fn is_suspended(&self) -> bool {
+        self.suspend.load(atomic::Ordering::Relaxed)
     }
 }
 
@@ -513,6 +523,10 @@ impl SqlQueryHandler for Instance {
 
     #[tracing::instrument(skip_all)]
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        if self.is_suspended() {
+            return vec![error::SuspendedSnafu {}.fail()];
+        }
+
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
@@ -580,6 +594,8 @@ impl SqlQueryHandler for Instance {
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        ensure!(!self.is_suspended(), error::SuspendedSnafu);
+
         if should_capture_statement(stmt.as_ref()) {
             // It's safe to unwrap here because we've already checked the type.
             let stmt = stmt.unwrap();
@@ -641,6 +657,10 @@ impl SqlQueryHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Vec<Result<Output>> {
+        if self.is_suspended() {
+            return vec![error::SuspendedSnafu {}.fail()];
+        }
+
         // check will be done in prometheus handler's do_query
         let result = PrometheusHandler::do_query(self, query, query_ctx)
             .await
@@ -655,6 +675,8 @@ impl SqlQueryHandler for Instance {
         stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> Result<Option<DescribeResult>> {
+        ensure!(!self.is_suspended(), error::SuspendedSnafu);
+
         if matches!(
             stmt,
             Statement::Insert(_) | Statement::Query(_) | Statement::Delete(_)
