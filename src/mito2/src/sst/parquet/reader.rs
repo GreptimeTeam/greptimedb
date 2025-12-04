@@ -1220,8 +1220,7 @@ impl RowGroupReaderBuilder {
 
         // Record total fetch elapsed time.
         if let Some(metrics) = fetch_metrics {
-            metrics.data.lock().unwrap().total_fetch_elapsed +=
-                fetch_start.elapsed().as_micros() as u64;
+            metrics.data.lock().unwrap().total_fetch_elapsed += fetch_start.elapsed();
         }
 
         // Builds the parquet reader.

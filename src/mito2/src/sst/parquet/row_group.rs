@@ -58,18 +58,18 @@ pub struct ParquetFetchMetricsData {
     pub page_size_to_fetch_store: u64,
     /// Total size in bytes of pages actually returned.
     pub page_size_needed: u64,
-    /// Elapsed time in microseconds fetching from write cache.
-    pub write_cache_fetch_elapsed: u64,
-    /// Elapsed time in microseconds fetching from object store.
-    pub store_fetch_elapsed: u64,
-    /// Total elapsed time in microseconds for fetching row groups.
-    pub total_fetch_elapsed: u64,
+    /// Elapsed time fetching from write cache.
+    pub write_cache_fetch_elapsed: std::time::Duration,
+    /// Elapsed time fetching from object store.
+    pub store_fetch_elapsed: std::time::Duration,
+    /// Total elapsed time for fetching row groups.
+    pub total_fetch_elapsed: std::time::Duration,
 }
 
 impl ParquetFetchMetricsData {
     /// Returns true if the metrics are empty (contain no meaningful data).
     fn is_empty(&self) -> bool {
-        self.total_fetch_elapsed == 0
+        self.total_fetch_elapsed.is_zero()
     }
 }
 
@@ -104,11 +104,7 @@ impl std::fmt::Debug for ParquetFetchMetrics {
 
         write!(f, "{{")?;
 
-        write!(
-            f,
-            "\"total_fetch_elapsed\":\"{:?}\"",
-            std::time::Duration::from_micros(total_fetch_elapsed)
-        )?;
+        write!(f, "\"total_fetch_elapsed\":\"{:?}\"", total_fetch_elapsed)?;
 
         if page_cache_hit > 0 {
             write!(f, ", \"page_cache_hit\":{}", page_cache_hit)?;
@@ -152,19 +148,15 @@ impl std::fmt::Debug for ParquetFetchMetrics {
         if page_size_needed > 0 {
             write!(f, ", \"page_size_needed\":{}", page_size_needed)?;
         }
-        if write_cache_fetch_elapsed > 0 {
+        if !write_cache_fetch_elapsed.is_zero() {
             write!(
                 f,
                 ", \"write_cache_fetch_elapsed\":\"{:?}\"",
-                std::time::Duration::from_micros(write_cache_fetch_elapsed)
+                write_cache_fetch_elapsed
             )?;
         }
-        if store_fetch_elapsed > 0 {
-            write!(
-                f,
-                ", \"store_fetch_elapsed\":\"{:?}\"",
-                std::time::Duration::from_micros(store_fetch_elapsed)
-            )?;
+        if !store_fetch_elapsed.is_zero() {
+            write!(f, ", \"store_fetch_elapsed\":\"{:?}\"", store_fetch_elapsed)?;
         }
 
         write!(f, "}}")
@@ -488,7 +480,7 @@ impl<'a> InMemoryRowGroup<'a> {
             Some(data) => {
                 if let Some(metrics) = metrics {
                     let elapsed = fetch_write_cache_start
-                        .map(|start| start.elapsed().as_micros() as u64)
+                        .map(|start| start.elapsed())
                         .unwrap_or_default();
                     let range_size_needed: u64 = ranges.iter().map(|r| r.end - r.start).sum();
                     let mut metrics_data = metrics.data.lock().unwrap();
@@ -511,9 +503,7 @@ impl<'a> InMemoryRowGroup<'a> {
                     .await
                     .map_err(|e| ParquetError::External(Box::new(e)))?;
                 if let Some(metrics) = metrics {
-                    let elapsed = start
-                        .map(|start| start.elapsed().as_micros() as u64)
-                        .unwrap_or_default();
+                    let elapsed = start.map(|start| start.elapsed()).unwrap_or_default();
                     let range_size_needed: u64 = ranges.iter().map(|r| r.end - r.start).sum();
                     let mut metrics_data = metrics.data.lock().unwrap();
                     metrics_data.store_fetch_elapsed += elapsed;
