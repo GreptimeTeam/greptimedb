@@ -99,9 +99,6 @@ metasrv_addrs = ["127.0.0.1:3002"]
 ## Operation timeout.
 timeout = "3s"
 
-## Heartbeat timeout.
-heartbeat_timeout = "500ms"
-
 ## DDL timeout.
 ddl_timeout = "10s"
 
