@@ -54,7 +54,7 @@ impl Inserter {
         }
 
         let body_size = raw_flight_data.data_body.len();
-        // TODO(yingwen): Fill record batch impure default values.
+        // TODO(yingwen): Fill record batch impure default values. Note that we should override `raw_flight_data` if we have to fill defaults.
         // notify flownode to update dirty timestamps if flow is configured.
         self.maybe_update_flow_dirty_window(table_info.clone(), record_batch.clone());
 
@@ -145,20 +145,6 @@ impl Inserter {
 
         let mut handles = Vec::with_capacity(mask_per_datanode.len());
 
-        // Encode the record batch once for reuse when mask.select_all()
-        let encode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
-            .with_label_values(&["encode"])
-            .start_timer();
-        let mut encoder = FlightEncoder::default();
-        let encoded = encoder.encode(FlightMessage::RecordBatch(record_batch.clone()));
-        let FlightData {
-            data_header,
-            data_body,
-            ..
-        } = encoded.into_iter().next().unwrap();
-        let raw_data_bytes = (data_header, data_body);
-        encode_timer.observe_duration();
-
         for (peer, masks) in mask_per_datanode {
             for (region_id, mask) in masks {
                 if mask.select_none() {
@@ -169,7 +155,10 @@ impl Inserter {
                 let node_manager = self.node_manager.clone();
                 let peer = peer.clone();
                 let raw_header_and_data = if mask.select_all() {
-                    Some(raw_data_bytes.clone())
+                    Some((
+                        raw_flight_data.data_header.clone(),
+                        raw_flight_data.data_body.clone(),
+                    ))
                 } else {
                     None
                 };

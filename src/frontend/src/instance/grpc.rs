@@ -319,11 +319,9 @@ impl GrpcQueryHandler for Instance {
                     None,
                 )
                 .await
-                .context(CatalogSnafu)
-                .and_then(|opt| {
-                    opt.with_context(|| TableNotFoundSnafu {
-                        table_name: table_name.to_string(),
-                    })
+                .context(CatalogSnafu)?
+                .with_context(|| TableNotFoundSnafu {
+                    table_name: table_name.to_string(),
                 })?;
 
             // Check permissions once for the stream
@@ -333,7 +331,7 @@ impl GrpcQueryHandler for Instance {
 
             // Process each request in the stream
             while let Some(request_result) = stream.next().await {
-                let request = request_result.map_err(|e|{
+                let request = request_result.map_err(|e| {
                     let error_msg = format!("Stream error: {:?}", e);
                     IncompleteGrpcRequestSnafu { err_msg: error_msg }.build()
                 })?;
