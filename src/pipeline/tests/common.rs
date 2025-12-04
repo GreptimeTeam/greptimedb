@@ -40,7 +40,9 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
                     .expect("failed to exec pipeline")
                     .into_transformed()
                     .expect("expect transformed result ");
-                rows.push(row.0);
+                for r in row.0 {
+                    rows.push(r);
+                }
             }
         }
         VrlValue::Object(_) => {
@@ -49,7 +51,9 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
                 .expect("failed to exec pipeline")
                 .into_transformed()
                 .expect("expect transformed result ");
-            rows.push(row.0);
+            for r in row.0 {
+                rows.push(r);
+            }
         }
         _ => {
             panic!("invalid input value");

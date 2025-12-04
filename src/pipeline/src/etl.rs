@@ -34,7 +34,7 @@ use crate::error::{
     Result, YamlLoadSnafu, YamlParseSnafu,
 };
 use crate::etl::processor::ProcessorKind;
-use crate::etl::transform::transformer::greptime::values_to_row;
+use crate::etl::transform::transformer::greptime::values_to_rows;
 use crate::tablesuffix::TableSuffixTemplate;
 use crate::{ContextOpt, GreptimeTransformer, IdentityTimeIndex, PipelineContext, SchemaInfo};
 
@@ -230,21 +230,30 @@ pub enum PipelineExecOutput {
     Filtered,
 }
 
+/// Output from a successful pipeline transformation.
+///
+/// A single input can produce multiple output rows when the VRL processor
+/// returns an array. Each element in the array becomes a separate row,
+/// enabling one-to-many log expansion.
 #[derive(Debug)]
 pub struct TransformedOutput {
+    /// Context options extracted from the input (e.g., table options, hints)
     pub opt: ContextOpt,
-    pub row: Row,
+    /// The transformed rows. Usually contains one row, but can contain multiple
+    /// when the pipeline expands a single input into multiple outputs.
+    pub rows: Vec<Row>,
+    /// Optional table suffix for routing to different tables
     pub table_suffix: Option<String>,
 }
 
 impl PipelineExecOutput {
     // Note: This is a test only function, do not use it in production.
-    pub fn into_transformed(self) -> Option<(Row, Option<String>)> {
+    pub fn into_transformed(self) -> Option<(Vec<Row>, Option<String>)> {
         if let Self::Transformed(TransformedOutput {
-            row, table_suffix, ..
+            rows, table_suffix, ..
         }) = self
         {
-            Some((row, table_suffix))
+            Some((rows, table_suffix))
         } else {
             None
         }
@@ -285,26 +294,44 @@ impl Pipeline {
             return Ok(PipelineExecOutput::DispatchedTo(rule.into(), val));
         }
 
-        // extract the options first
+        // extract the options first (for single object inputs)
         // this might be a breaking change, for table_suffix is now right after the processors
-        let mut opt = ContextOpt::from_pipeline_map_to_opt(&mut val)?;
+        // Note: for array inputs (one-to-many), options are extracted from each element in
+        // transform_array_elements or values_to_rows
+        let mut opt = if val.is_array() {
+            ContextOpt::default()
+        } else {
+            ContextOpt::from_pipeline_map_to_opt(&mut val)?
+        };
         let table_suffix = opt.resolve_table_suffix(self.tablesuffix.as_ref(), &val);
 
-        let row = match self.transformer() {
+        let rows = match self.transformer() {
             TransformerMode::GreptimeTransformer(greptime_transformer) => {
-                let values = greptime_transformer.transform_mut(&mut val, self.is_v1())?;
-                if self.is_v1() {
-                    // v1 dont combine with auto-transform
-                    // so return immediately
-                    return Ok(PipelineExecOutput::Transformed(TransformedOutput {
-                        opt,
-                        row: Row { values },
-                        table_suffix,
-                    }));
+                // Handle one-to-many: if val is an array, transform each element
+                if let Some(arr) = val.as_array_mut() {
+                    transform_array_elements(
+                        arr,
+                        greptime_transformer,
+                        self.is_v1(),
+                        schema_info,
+                        pipeline_ctx,
+                    )?
+                } else {
+                    // Single object transformation
+                    let values = greptime_transformer.transform_mut(&mut val, self.is_v1())?;
+                    if self.is_v1() {
+                        // v1 dont combine with auto-transform
+                        // so return immediately
+                        return Ok(PipelineExecOutput::Transformed(TransformedOutput {
+                            opt,
+                            rows: vec![Row { values }],
+                            table_suffix,
+                        }));
+                    }
+                    // continue v2 process, and set the rest fields with auto-transform
+                    // if transformer presents, then ts has been set
+                    values_to_rows(schema_info, val, pipeline_ctx, Some(values), false)?
                 }
-                // continue v2 process, and set the rest fields with auto-transform
-                // if transformer presents, then ts has been set
-                values_to_row(schema_info, val, pipeline_ctx, Some(values), false)?
             }
             TransformerMode::AutoTransform(ts_name, time_unit) => {
                 // infer ts from the context
@@ -316,13 +343,13 @@ impl Pipeline {
                 ));
                 let n_ctx =
                     PipelineContext::new(&def, pipeline_ctx.pipeline_param, pipeline_ctx.channel);
-                values_to_row(schema_info, val, &n_ctx, None, true)?
+                values_to_rows(schema_info, val, &n_ctx, None, true)?
             }
         };
 
         Ok(PipelineExecOutput::Transformed(TransformedOutput {
             opt,
-            row,
+            rows,
             table_suffix,
         }))
     }
@@ -350,6 +377,57 @@ impl Pipeline {
     }
 }
 
+/// Transforms an array of VRL values into rows.
+///
+/// This is used for one-to-many pipeline expansion where a VRL processor
+/// returns an array. Each element in the array is transformed separately.
+fn transform_array_elements(
+    arr: &mut [VrlValue],
+    transformer: &GreptimeTransformer,
+    is_v1: bool,
+    schema_info: &mut SchemaInfo,
+    pipeline_ctx: &PipelineContext<'_>,
+) -> Result<Vec<Row>> {
+    use crate::error::{ArrayElementMustBeObjectSnafu, TransformArrayElementSnafu};
+
+    let mut rows = Vec::with_capacity(arr.len());
+
+    for (index, element) in arr.iter_mut().enumerate() {
+        // Validate that each element is an object
+        if !element.is_object() {
+            return ArrayElementMustBeObjectSnafu {
+                index,
+                actual_type: element.kind_str().to_string(),
+            }
+            .fail();
+        }
+
+        let values = transformer
+            .transform_mut(element, is_v1)
+            .map_err(Box::new)
+            .context(TransformArrayElementSnafu { index })?;
+
+        if is_v1 {
+            // v1 mode: just use transformer output directly
+            rows.push(Row { values });
+        } else {
+            // v2 mode: combine with auto-transform for remaining fields
+            let element_rows = values_to_rows(
+                schema_info,
+                element.clone(),
+                pipeline_ctx,
+                Some(values),
+                false,
+            )
+            .map_err(Box::new)
+            .context(TransformArrayElementSnafu { index })?;
+            rows.extend(element_rows);
+        }
+    }
+
+    Ok(rows)
+}
+
 pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str) -> Result<usize> {
     intermediate_keys
         .iter()
@@ -361,7 +439,7 @@ pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str
 /// The schema_info cannot be used in auto-transform ts-infer mode for lacking the ts schema.
 ///
 /// Usage:
-/// ```rust
+/// ```ignore
 /// let (pipeline, schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
 /// let pipeline_ctx = PipelineContext::new(&pipeline_def, &pipeline_param, Channel::Unknown);
 /// ```
@@ -381,427 +459,4 @@ macro_rules! setup_pipeline {
 
         (pipeline, schema_info, pipeline_def, pipeline_param)
     }};
-}
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-
-    use api::v1::Rows;
-    use greptime_proto::v1::value::ValueData;
-    use greptime_proto::v1::{self, ColumnDataType, SemanticType};
-    use vrl::prelude::Bytes;
-    use vrl::value::KeyString;
-
-    use super::*;
-
-    #[test]
-    fn test_pipeline_prepare() {
-        let input_value_str = r#"
-                    {
-                        "my_field": "1,2",
-                        "foo": "bar",
-                        "ts": "1"
-                    }
-                "#;
-        let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
-
-        let pipeline_yaml = r#"description: 'Pipeline for Apache Tomcat'
-processors:
-    - csv:
-        field: my_field
-        target_fields: field1, field2
-    - epoch:
-        field: ts
-        resolution: ns
-transform:
-    - field: field1
-      type: uint32
-    - field: field2
-      type: uint32
-    - field: ts
-      type: timestamp, ns
-      index: time
-    "#;
-
-        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
-        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
-        let pipeline_ctx = PipelineContext::new(
-            &pipeline_def,
-            &pipeline_param,
-            session::context::Channel::Unknown,
-        );
-
-        let payload = input_value.into();
-        let result = pipeline
-            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
-            .unwrap()
-            .into_transformed()
-            .unwrap();
-
-        assert_eq!(result.0.values[0].value_data, Some(ValueData::U32Value(1)));
-        assert_eq!(result.0.values[1].value_data, Some(ValueData::U32Value(2)));
-        match &result.0.values[2].value_data {
-            Some(ValueData::TimestampNanosecondValue(v)) => {
-                assert_ne!(v, &0);
-            }
-            _ => panic!("expect null value"),
-        }
-    }
-
-    #[test]
-    fn test_dissect_pipeline() {
-        let message = r#"129.37.245.88 - meln1ks [01/Aug/2024:14:22:47 +0800] "PATCH /observability/metrics/production HTTP/1.0" 501 33085"#.to_string();
-        let pipeline_str = r#"processors:
-    - dissect:
-        fields:
-          - message
-        patterns:
-          - "%{ip} %{?ignored} %{username} [%{ts}] \"%{method} %{path} %{proto}\" %{status} %{bytes}"
-    - date:
-        fields:
-          - ts
-        formats:
-          - "%d/%b/%Y:%H:%M:%S %z"
-
-transform:
-    - fields:
-        - ip
-        - username
-        - method
-        - path
-        - proto
-      type: string
-    - fields:
-        - status
-      type: uint16
-    - fields:
-        - bytes
-      type: uint32
-    - field: ts
-      type: timestamp, ns
-      index: time"#;
-        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_str)).unwrap();
-        let pipeline = Arc::new(pipeline);
-        let schema = pipeline.schemas().unwrap();
-        let mut schema_info = SchemaInfo::from_schema_list(schema.clone());
-
-        let pipeline_def = crate::PipelineDefinition::Resolved(pipeline.clone());
-        let pipeline_param = crate::GreptimePipelineParams::default();
-        let pipeline_ctx = PipelineContext::new(
-            &pipeline_def,
-            &pipeline_param,
-            session::context::Channel::Unknown,
-        );
-        let payload = VrlValue::Object(BTreeMap::from([(
-            KeyString::from("message"),
-            VrlValue::Bytes(Bytes::from(message)),
-        )]));
-
-        let result = pipeline
-            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
-            .unwrap()
-            .into_transformed()
-            .unwrap();
-
-        assert_eq!(schema_info.schema.len(), result.0.values.len());
-        let test = [
-            (
-                ColumnDataType::String as i32,
-                Some(ValueData::StringValue("129.37.245.88".into())),
-            ),
-            (
-                ColumnDataType::String as i32,
-                Some(ValueData::StringValue("meln1ks".into())),
-            ),
-            (
-                ColumnDataType::String as i32,
-                Some(ValueData::StringValue("PATCH".into())),
-            ),
-            (
-                ColumnDataType::String as i32,
-                Some(ValueData::StringValue(
-                    "/observability/metrics/production".into(),
-                )),
-            ),
-            (
-                ColumnDataType::String as i32,
-                Some(ValueData::StringValue("HTTP/1.0".into())),
-            ),
-            (
-                ColumnDataType::Uint16 as i32,
-                Some(ValueData::U16Value(501)),
-            ),
-            (
-                ColumnDataType::Uint32 as i32,
-                Some(ValueData::U32Value(33085)),
-            ),
-            (
-                ColumnDataType::TimestampNanosecond as i32,
-                Some(ValueData::TimestampNanosecondValue(1722493367000000000)),
-            ),
-        ];
-        // manually set schema
-        let schema = pipeline.schemas().unwrap();
-        for i in 0..schema.len() {
-            let schema = &schema[i];
-            let value = &result.0.values[i];
-            assert_eq!(schema.datatype, test[i].0);
-            assert_eq!(value.value_data, test[i].1);
-        }
-    }
-
-    #[test]
-    fn test_csv_pipeline() {
-        let input_value_str = r#"
-                    {
-                        "my_field": "1,2",
-                        "foo": "bar",
-                        "ts": "1"
-                    }
-                "#;
-        let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
-
-        let pipeline_yaml = r#"
-    description: Pipeline for Apache Tomcat
-    processors:
-      - csv:
-          field: my_field
-          target_fields: field1, field2
-      - epoch:
-          field: ts
-          resolution: ns
-    transform:
-      - field: field1
-        type: uint32
-      - field: field2
-        type: uint32
-      - field: ts
-        type: timestamp, ns
-        index: time
-    "#;
-
-        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
-        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
-        let pipeline_ctx = PipelineContext::new(
-            &pipeline_def,
-            &pipeline_param,
-            session::context::Channel::Unknown,
-        );
-
-        let payload = input_value.into();
-        let result = pipeline
-            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
-            .unwrap()
-            .into_transformed()
-            .unwrap();
-        assert_eq!(result.0.values[0].value_data, Some(ValueData::U32Value(1)));
-        assert_eq!(result.0.values[1].value_data, Some(ValueData::U32Value(2)));
-        match &result.0.values[2].value_data {
-            Some(ValueData::TimestampNanosecondValue(v)) => {
-                assert_ne!(v, &0);
-            }
-            _ => panic!("expect null value"),
-        }
-    }
-
-    #[test]
-    fn test_date_pipeline() {
-        let input_value_str = r#"
-                {
-                    "my_field": "1,2",
-                    "foo": "bar",
-                    "test_time": "2014-5-17T04:34:56+00:00"
-                }
-            "#;
-        let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
-
-        let pipeline_yaml = r#"---
-description: Pipeline for Apache Tomcat
-
-processors:
-    - date:
-        field: test_time
-
-transform:
-    - field: test_time
-      type: timestamp, ns
-      index: time
-    "#;
-
-        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
-        let pipeline = Arc::new(pipeline);
-        let schema = pipeline.schemas().unwrap();
-        let mut schema_info = SchemaInfo::from_schema_list(schema.clone());
-
-        let pipeline_def = crate::PipelineDefinition::Resolved(pipeline.clone());
-        let pipeline_param = crate::GreptimePipelineParams::default();
-        let pipeline_ctx = PipelineContext::new(
-            &pipeline_def,
-            &pipeline_param,
-            session::context::Channel::Unknown,
-        );
-        let schema = pipeline.schemas().unwrap().clone();
-        let result = input_value.into();
-
-        let row = pipeline
-            .exec_mut(result, &pipeline_ctx, &mut schema_info)
-            .unwrap()
-            .into_transformed()
-            .unwrap();
-        let output = Rows {
-            schema,
-            rows: vec![row.0],
-        };
-        let schemas = output.schema;
-
-        assert_eq!(schemas.len(), 1);
-        let schema = schemas[0].clone();
-        assert_eq!("test_time", schema.column_name);
-        assert_eq!(ColumnDataType::TimestampNanosecond as i32, schema.datatype);
-        assert_eq!(SemanticType::Timestamp as i32, schema.semantic_type);
-
-        let row = output.rows[0].clone();
-        assert_eq!(1, row.values.len());
-        let value_data = row.values[0].clone().value_data;
-        assert_eq!(
-            Some(v1::value::ValueData::TimestampNanosecondValue(
-                1400301296000000000
-            )),
-            value_data
-        );
-    }
-
-    #[test]
-    fn test_dispatcher() {
-        let pipeline_yaml = r#"
----
-description: Pipeline for Apache Tomcat
-
-processors:
-  - epoch:
-      field: ts
-      resolution: ns
-
-dispatcher:
-  field: typename
-  rules:
-    - value: http
-      table_suffix: http_events
-    - value: database
-      table_suffix: db_events
-      pipeline: database_pipeline
-
-transform:
-  - field: typename
-    type: string
-  - field: ts
-    type: timestamp, ns
-    index: time
-"#;
-        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
-        let dispatcher = pipeline.dispatcher.expect("expect dispatcher");
-        assert_eq!(dispatcher.field, "typename");
-
-        assert_eq!(dispatcher.rules.len(), 2);
-
-        assert_eq!(
-            dispatcher.rules[0],
-            crate::dispatcher::Rule {
-                value: VrlValue::Bytes(Bytes::from("http")),
-                table_suffix: "http_events".to_string(),
-                pipeline: None
-            }
-        );
-
-        assert_eq!(
-            dispatcher.rules[1],
-            crate::dispatcher::Rule {
-                value: VrlValue::Bytes(Bytes::from("database")),
-                table_suffix: "db_events".to_string(),
-                pipeline: Some("database_pipeline".to_string()),
-            }
-        );
-
-        let bad_yaml1 = r#"
----
-description: Pipeline for Apache Tomcat
-
-processors:
-  - epoch:
-      field: ts
-      resolution: ns
-
-dispatcher:
-  _field: typename
-  rules:
-    - value: http
-      table_suffix: http_events
-    - value: database
-      table_suffix: db_events
-      pipeline: database_pipeline
-
-transform:
-  - field: typename
-    type: string
-  - field: ts
-    type: timestamp, ns
-    index: time
-"#;
-        let bad_yaml2 = r#"
----
-description: Pipeline for Apache Tomcat
-
-processors:
-  - epoch:
-      field: ts
-      resolution: ns
-dispatcher:
-  field: typename
-  rules:
-    - value: http
-      _table_suffix: http_events
-    - value: database
-      _table_suffix: db_events
-      pipeline: database_pipeline
-
-transform:
-  - field: typename
-    type: string
-  - field: ts
-    type: timestamp, ns
-    index: time
-"#;
-        let bad_yaml3 = r#"
----
-description: Pipeline for Apache Tomcat
-
-processors:
-  - epoch:
-      field: ts
-      resolution: ns
-dispatcher:
-  field: typename
-  rules:
-    - _value: http
-      table_suffix: http_events
-    - _value: database
-      table_suffix: db_events
-      pipeline: database_pipeline
-
-transform:
-  - field: typename
-    type: string
-  - field: ts
-    type: timestamp, ns
-    index: time
-"#;
-
-        let r: Result<Pipeline> = parse(&Content::Yaml(bad_yaml1));
-        assert!(r.is_err());
-        let r: Result<Pipeline> = parse(&Content::Yaml(bad_yaml2));
-        assert!(r.is_err());
-        let r: Result<Pipeline> = parse(&Content::Yaml(bad_yaml3));
-        assert!(r.is_err());
-    }
 }

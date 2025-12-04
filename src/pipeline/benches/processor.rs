@@ -33,7 +33,9 @@ fn processor_mut(
             .exec_mut(v, pipeline_ctx, schema_info)?
             .into_transformed()
             .expect("expect transformed result ");
-        result.push(r.0);
+        for r in r.0 {
+            result.push(r);
+        }
     }
 
     Ok(result)

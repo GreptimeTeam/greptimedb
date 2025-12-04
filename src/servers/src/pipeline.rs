@@ -16,9 +16,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt};
-use api::greptime_proto;
 use api::v1::helper::time_index_column_schema;
-use api::v1::{ColumnDataType, RowInsertRequest, Rows};
+use api::v1::{ColumnDataType, Row, RowInsertRequest, Rows, Value};
 use common_time::timestamp::TimeUnit;
 use pipeline::{
     ContextReq, DispatchedTo, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, Pipeline, PipelineContext,
@@ -156,11 +155,11 @@ async fn run_custom_pipeline(
         match r {
             PipelineExecOutput::Transformed(TransformedOutput {
                 opt,
-                row,
+                rows,
                 table_suffix,
             }) => {
                 let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
-                push_to_map!(transformed_map, (opt, act_table_name), row, arr_len);
+                push_to_map!(transformed_map, (opt, act_table_name), rows, arr_len);
             }
             PipelineExecOutput::DispatchedTo(dispatched_to, val) => {
                 push_to_map!(dispatched, dispatched_to, val, arr_len);
@@ -173,22 +172,30 @@ async fn run_custom_pipeline(
 
     let mut results = ContextReq::default();
 
-    let s_len = schema_info.schema.len();
+    // Process transformed outputs. Each entry in transformed_map contains
+    // Vec<Vec<Row>> where outer Vec is batches (one per input) and inner
+    // Vec<Row> contains rows from one-to-many expansion.
+    // Flatten all row batches into a single request per (opt, table_name) key.
+    let column_count = schema_info.schema.len();
+    for ((opt, table_name), row_batches) in transformed_map {
+        let mut all_rows: Vec<Row> = row_batches.into_iter().flatten().collect();
 
-    // if transformed
-    for ((opt, table_name), mut rows) in transformed_map {
-        for row in rows.iter_mut() {
-            row.values
-                .resize(s_len, greptime_proto::v1::Value::default());
+        // Pad rows to match final schema size (schema may have evolved during processing)
+        for row in &mut all_rows {
+            let diff = column_count.saturating_sub(row.values.len());
+            for _ in 0..diff {
+                row.values.push(Value { value_data: None });
+            }
         }
+
         results.add_row(
-            opt,
+            &opt,
             RowInsertRequest {
                 rows: Some(Rows {
-                    rows,
+                    rows: all_rows,
                     schema: schema_info.schema.clone(),
                 }),
-                table_name,
+                table_name: table_name.clone(),
             },
         );
     }

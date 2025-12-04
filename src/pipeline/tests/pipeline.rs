@@ -435,7 +435,7 @@ transform:
 
     let output = Rows {
         schema: pipeline.schemas().unwrap().clone(),
-        rows: vec![row.0],
+        rows: row.0,
     };
 
     assert_eq!(output.rows.len(), 1);
@@ -501,13 +501,14 @@ transform:
     );
 
     let status = input_value.into();
-    let row = pipeline
+    let mut row = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
     let r = row
         .0
+        .swap_remove(0)
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -616,7 +617,7 @@ transform:
     );
 
     let status = input_value.into();
-    let row = pipeline
+    let mut row = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
@@ -624,7 +625,9 @@ transform:
 
     let r = row
         .0
+        .swap_remove(0)
         .values
+        .clone()
         .into_iter()
         .map(|v| v.value_data.unwrap())
         .collect::<Vec<_>>();
@@ -688,13 +691,14 @@ transform:
     );
 
     let status = input_value.into();
-    let row = pipeline
+    let mut row = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
     let r = row
         .0
+        .swap_remove(0)
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -734,7 +738,7 @@ transform:
     );
 
     let status = input_value.into();
-    let row = pipeline
+    let mut row = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
@@ -742,6 +746,7 @@ transform:
 
     let r = row
         .0
+        .swap_remove(0)
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -799,7 +804,7 @@ transform:
     );
 
     let status = input_value.into();
-    let row = pipeline
+    let mut row = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
@@ -807,6 +812,7 @@ transform:
 
     let mut r = row
         .0
+        .swap_remove(0)
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -846,13 +852,13 @@ transform:
     );
 
     let status = input_value.into();
-    let row = pipeline
+    let mut row = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
 
-    row.0.values.into_iter().for_each(|v| {
+    row.0.swap_remove(0).values.into_iter().for_each(|v| {
         if let ValueData::TimestampNanosecondValue(v) = v.value_data.unwrap() {
             let now = chrono::Utc::now().timestamp_nanos_opt().unwrap();
             assert!(now - v < 5_000_000);
@@ -923,13 +929,14 @@ transform:
     assert_eq!(dispatched_to.pipeline.unwrap(), "access_log_pipeline");
 
     let status = input_value2.into();
-    let row = pipeline
+    let mut row = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
     let r = row
         .0
+        .swap_remove(0)
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -988,8 +995,8 @@ table_suffix: _${logger}
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap();
 
-    let (row, table_name) = exec_re.into_transformed().unwrap();
-    let values = row.values;
+    let (mut row, table_name) = exec_re.into_transformed().unwrap();
+    let values = row.swap_remove(0).values;
     let expected_values = vec![
         Value {
             value_data: Some(ValueData::StringValue("hello world".into())),
@@ -1000,4 +1007,223 @@ table_suffix: _${logger}
     ];
     assert_eq!(expected_values, values);
     assert_eq!(table_name, Some("_http".to_string()));
+}
+
+/// Test one-to-many pipeline expansion using VRL processor that returns an array
+#[test]
+fn test_one_to_many_pipeline() {
+    // Input: single log entry with a list of events
+    let input_value = serde_json::json!({
+        "request_id": "req-123",
+        "events": [
+            {"type": "click", "value": 100},
+            {"type": "scroll", "value": 200},
+            {"type": "submit", "value": 300}
+        ]
+    });
+
+    // VRL processor that expands events into separate rows using map
+    let pipeline_yaml = r#"
+processors:
+  - vrl:
+      source: |
+        events = del(.events)
+        request_id = del(.request_id)
+        map_values(array!(events)) -> |event| {
+            {
+                "request_id": request_id,
+                "event_type": event.type,
+                "event_value": event.value
+            }
+        }
+
+transform:
+  - field: request_id
+    type: string
+  - field: event_type
+    type: string
+  - field: event_value
+    type: uint64
+"#;
+
+    let yaml_content = Content::Yaml(pipeline_yaml);
+    let pipeline: Pipeline = parse(&yaml_content).expect("failed to parse pipeline");
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
+
+    let status = input_value.into();
+    let (rows, _table_suffix) = pipeline
+        .exec_mut(status, &pipeline_ctx, &mut schema_info)
+        .expect("failed to exec pipeline")
+        .into_transformed()
+        .expect("expect transformed result");
+
+    // Should produce 3 rows from the single input
+    assert_eq!(rows.len(), 3);
+
+    // Row 0: click event
+    assert_eq!(
+        rows[0].values[0].value_data,
+        Some(StringValue("req-123".into()))
+    );
+    assert_eq!(
+        rows[0].values[1].value_data,
+        Some(StringValue("click".into()))
+    );
+    assert_eq!(rows[0].values[2].value_data, Some(U64Value(100)));
+
+    // Row 1: scroll event
+    assert_eq!(
+        rows[1].values[0].value_data,
+        Some(StringValue("req-123".into()))
+    );
+    assert_eq!(
+        rows[1].values[1].value_data,
+        Some(StringValue("scroll".into()))
+    );
+    assert_eq!(rows[1].values[2].value_data, Some(U64Value(200)));
+
+    // Row 2: submit event
+    assert_eq!(
+        rows[2].values[0].value_data,
+        Some(StringValue("req-123".into()))
+    );
+    assert_eq!(
+        rows[2].values[1].value_data,
+        Some(StringValue("submit".into()))
+    );
+    assert_eq!(rows[2].values[2].value_data, Some(U64Value(300)));
+}
+
+/// Test that single object input still works correctly (backward compatibility)
+#[test]
+fn test_one_to_many_single_object_unchanged() {
+    let input_value = serde_json::json!({
+        "name": "Alice",
+        "age": 30
+    });
+
+    let pipeline_yaml = r#"
+processors:
+  - vrl:
+      source: |
+        .processed = true
+        .
+
+transform:
+  - field: name
+    type: string
+  - field: age
+    type: uint32
+  - field: processed
+    type: boolean
+"#;
+
+    let yaml_content = Content::Yaml(pipeline_yaml);
+    let pipeline: Pipeline = parse(&yaml_content).expect("failed to parse pipeline");
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
+
+    let status = input_value.into();
+    let (rows, _table_suffix) = pipeline
+        .exec_mut(status, &pipeline_ctx, &mut schema_info)
+        .expect("failed to exec pipeline")
+        .into_transformed()
+        .expect("expect transformed result");
+
+    // Should produce exactly 1 row
+    assert_eq!(rows.len(), 1);
+
+    let row = &rows[0];
+    assert_eq!(row.values[0].value_data, Some(StringValue("Alice".into())));
+    assert_eq!(row.values[1].value_data, Some(U32Value(30)));
+    assert_eq!(row.values[2].value_data, Some(BoolValue(true)));
+}
+
+/// Test error handling when array contains non-object elements
+#[test]
+fn test_one_to_many_array_element_validation() {
+    let input_value = serde_json::json!({
+        "items": ["string", 123, true]
+    });
+
+    // VRL that returns an array with non-object elements
+    let pipeline_yaml = r#"
+processors:
+  - vrl:
+      source: |
+        .items
+
+transform:
+  - field: value
+    type: string
+"#;
+
+    let yaml_content = Content::Yaml(pipeline_yaml);
+    let pipeline: Pipeline = parse(&yaml_content).expect("failed to parse pipeline");
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
+
+    let status = input_value.into();
+    let result = pipeline.exec_mut(status, &pipeline_ctx, &mut schema_info);
+
+    // Should fail because array elements are not objects
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("must be an object"),
+        "Expected 'must be an object' error, got: {}",
+        err_msg
+    );
+}
+
+/// Test that empty array produces zero rows
+#[test]
+fn test_one_to_many_empty_array() {
+    let input_value = serde_json::json!({
+        "events": []
+    });
+
+    let pipeline_yaml = r#"
+processors:
+  - vrl:
+      source: |
+        .events
+
+transform:
+  - field: value
+    type: string
+"#;
+
+    let yaml_content = Content::Yaml(pipeline_yaml);
+    let pipeline: Pipeline = parse(&yaml_content).expect("failed to parse pipeline");
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
+
+    let status = input_value.into();
+    let (rows, _table_suffix) = pipeline
+        .exec_mut(status, &pipeline_ctx, &mut schema_info)
+        .expect("failed to exec pipeline")
+        .into_transformed()
+        .expect("expect transformed result");
+
+    // Empty array should produce zero rows
+    assert_eq!(rows.len(), 0);
 }
