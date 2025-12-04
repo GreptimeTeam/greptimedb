@@ -19,7 +19,6 @@
 #![feature(box_patterns)]
 
 mod analyze;
-pub mod dataframe;
 pub mod datafusion;
 pub mod dist_plan;
 pub mod dummy_catalog;

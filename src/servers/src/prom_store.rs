@@ -27,11 +27,11 @@ use common_grpc::precision::Precision;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::tracing;
+use datafusion::dataframe::DataFrame;
 use datafusion::prelude::{Expr, col, lit, regexp_match};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
-use query::dataframe::DataFrame;
 use snafu::{OptionExt, ResultExt};
 use snap::raw::{Decoder, Encoder};
 
@@ -102,8 +102,6 @@ pub fn extract_schema_from_read_request(request: &ReadRequest) -> Option<String>
 /// Create a DataFrame from a remote Query
 #[tracing::instrument(skip_all)]
 pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
-    let DataFrame::DataFusion(dataframe) = dataframe;
-
     let start_timestamp_ms = q.start_timestamp_ms;
     let end_timestamp_ms = q.end_timestamp_ms;
 
@@ -654,7 +652,7 @@ mod tests {
         let table_provider = Arc::new(DfTableProviderAdapter::new(table));
 
         let dataframe = ctx.read_table(table_provider.clone()).unwrap();
-        let plan = query_to_plan(DataFrame::DataFusion(dataframe), &q).unwrap();
+        let plan = query_to_plan(dataframe, &q).unwrap();
         let display_string = format!("{}", plan.display_indent());
 
         let ts_col = greptime_timestamp();
@@ -688,7 +686,7 @@ mod tests {
         };
 
         let dataframe = ctx.read_table(table_provider).unwrap();
-        let plan = query_to_plan(DataFrame::DataFusion(dataframe), &q).unwrap();
+        let plan = query_to_plan(dataframe, &q).unwrap();
         let display_string = format!("{}", plan.display_indent());
 
         let ts_col = greptime_timestamp();

@@ -34,7 +34,6 @@ use itertools::Itertools;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
 use query::QueryEngineRef;
-use query::dataframe::DataFrame;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt, ensure};
 use table::TableRef;
@@ -413,7 +412,6 @@ impl PipelineTable {
             .query_engine
             .read_table(self.table.clone())
             .context(DataFrameSnafu)?;
-        let DataFrame::DataFusion(dataframe) = dataframe;
 
         let dataframe = dataframe
             .filter(prepare_dataframe_conditions(name, version))
@@ -474,7 +472,6 @@ impl PipelineTable {
             .query_engine
             .read_table(self.table.clone())
             .context(DataFrameSnafu)?;
-        let DataFrame::DataFusion(dataframe) = dataframe;
 
         // select all pipelines with name and version
         let dataframe = dataframe

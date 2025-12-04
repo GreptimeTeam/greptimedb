@@ -136,7 +136,7 @@ impl Instance {
                 table_name: format_full_table_name(ctx.current_catalog(), &table_schema, &metric),
             })?;
 
-        let scan_plan = dataframe.into_logical_plan();
+        let scan_plan = dataframe.into_unoptimized_plan();
         let filter_conditions =
             PromPlanner::matchers_to_expr(Matchers::new(matchers), scan_plan.schema())
                 .context(PrometheusLabelValuesQueryPlanSnafu)?;
