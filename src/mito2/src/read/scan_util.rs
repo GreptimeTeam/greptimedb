@@ -281,19 +281,29 @@ impl fmt::Debug for ScanMetricsSet {
         }
 
         // Write optional verbose metrics if they are not empty
-        if let Some(metrics) = inverted_index_apply_metrics && !metrics.is_empty() {
+        if let Some(metrics) = inverted_index_apply_metrics
+            && !metrics.is_empty()
+        {
             write!(f, ", \"inverted_index_apply_metrics\":{:?}", metrics)?;
         }
-        if let Some(metrics) = bloom_filter_apply_metrics && !metrics.is_empty() {
+        if let Some(metrics) = bloom_filter_apply_metrics
+            && !metrics.is_empty()
+        {
             write!(f, ", \"bloom_filter_apply_metrics\":{:?}", metrics)?;
         }
-        if let Some(metrics) = fulltext_index_apply_metrics && !metrics.is_empty() {
+        if let Some(metrics) = fulltext_index_apply_metrics
+            && !metrics.is_empty()
+        {
             write!(f, ", \"fulltext_index_apply_metrics\":{:?}", metrics)?;
         }
-        if let Some(metrics) = fetch_metrics && !metrics.is_empty() {
+        if let Some(metrics) = fetch_metrics
+            && !metrics.is_empty()
+        {
             write!(f, ", \"fetch_metrics\":{:?}", metrics)?;
         }
-        if let Some(metrics) = metadata_cache_metrics && !metrics.is_empty() {
+        if let Some(metrics) = metadata_cache_metrics
+            && !metrics.is_empty()
+        {
             write!(f, ", \"metadata_cache_metrics\":{:?}", metrics)?;
         }
 
