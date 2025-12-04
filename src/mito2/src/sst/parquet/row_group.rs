@@ -35,63 +35,79 @@ use crate::cache::{CacheStrategy, PageKey, PageValue};
 use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
 use crate::sst::parquet::helper::{MERGE_GAP, fetch_byte_ranges};
 
+/// Inner data for ParquetFetchMetrics.
+#[derive(Default, Debug, Clone)]
+pub struct ParquetFetchMetricsData {
+    /// Number of page cache hits.
+    pub page_cache_hit: usize,
+    /// Number of write cache hits.
+    pub write_cache_hit: usize,
+    /// Number of cache misses.
+    pub cache_miss: usize,
+    /// Number of pages to fetch from mem cache.
+    pub pages_to_fetch_mem: usize,
+    /// Total size in bytes of pages to fetch from mem cache.
+    pub page_size_to_fetch_mem: u64,
+    /// Number of pages to fetch from write cache.
+    pub pages_to_fetch_write_cache: usize,
+    /// Total size in bytes of pages to fetch from write cache.
+    pub page_size_to_fetch_write_cache: u64,
+    /// Number of pages to fetch from store.
+    pub pages_to_fetch_store: usize,
+    /// Total size in bytes of pages to fetch from store.
+    pub page_size_to_fetch_store: u64,
+    /// Total size in bytes of pages actually returned.
+    pub page_size_needed: u64,
+    /// Elapsed time in microseconds fetching from write cache.
+    pub write_cache_fetch_elapsed: u64,
+    /// Elapsed time in microseconds fetching from object store.
+    pub store_fetch_elapsed: u64,
+    /// Total elapsed time in microseconds for fetching row groups.
+    pub total_fetch_elapsed: u64,
+}
+
+impl ParquetFetchMetricsData {
+    /// Returns true if the metrics are empty (contain no meaningful data).
+    fn is_empty(&self) -> bool {
+        self.total_fetch_elapsed == 0
+    }
+}
+
 /// Metrics for tracking page/row group fetch operations.
-/// Uses atomic counters for thread-safe updates.
 #[derive(Default)]
 pub struct ParquetFetchMetrics {
-    /// Number of page cache hits.
-    page_cache_hit: std::sync::atomic::AtomicUsize,
-    /// Number of write cache hits.
-    write_cache_hit: std::sync::atomic::AtomicUsize,
-    /// Number of cache misses.
-    cache_miss: std::sync::atomic::AtomicUsize,
-    /// Number of pages to fetch from mem cache.
-    pages_to_fetch_mem: std::sync::atomic::AtomicUsize,
-    /// Total size in bytes of pages to fetch from mem cache.
-    page_size_to_fetch_mem: std::sync::atomic::AtomicU64,
-    /// Number of pages to fetch from write cache.
-    pages_to_fetch_write_cache: std::sync::atomic::AtomicUsize,
-    /// Total size in bytes of pages to fetch from write cache.
-    page_size_to_fetch_write_cache: std::sync::atomic::AtomicU64,
-    /// Number of pages to fetch from store.
-    pages_to_fetch_store: std::sync::atomic::AtomicUsize,
-    /// Total size in bytes of pages to fetch from store.
-    page_size_to_fetch_store: std::sync::atomic::AtomicU64,
-    /// Total size in bytes of pages actually returned.
-    page_size_needed: std::sync::atomic::AtomicU64,
-    /// Elapsed time in microseconds fetching from write cache.
-    write_cache_fetch_elapsed: std::sync::atomic::AtomicU64,
-    /// Elapsed time in microseconds fetching from object store.
-    store_fetch_elapsed: std::sync::atomic::AtomicU64,
-    /// Total elapsed time in microseconds for fetching row groups.
-    total_fetch_elapsed: std::sync::atomic::AtomicU64,
+    pub data: std::sync::Mutex<ParquetFetchMetricsData>,
 }
 
 impl std::fmt::Debug for ParquetFetchMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let page_cache_hit = self.page_cache_hit();
-        let write_cache_hit = self.write_cache_hit();
-        let cache_miss = self.cache_miss();
-        let pages_to_fetch_mem = self.pages_to_fetch_mem();
-        let page_size_to_fetch_mem = self.page_size_to_fetch_mem();
-        let pages_to_fetch_write_cache = self.pages_to_fetch_write_cache();
-        let page_size_to_fetch_write_cache = self.page_size_to_fetch_write_cache();
-        let pages_to_fetch_store = self.pages_to_fetch_store();
-        let page_size_to_fetch_store = self.page_size_to_fetch_store();
-        let page_size_needed = self.page_size_needed();
-        let write_cache_elapsed = self.write_cache_fetch_elapsed();
-        let store_elapsed = self.store_fetch_elapsed();
-        let total_elapsed = self.total_fetch_elapsed();
-
-        if self.is_empty() {
+        let data = self.data.lock().unwrap();
+        if data.is_empty() {
             return write!(f, "{{}}");
         }
+
+        let ParquetFetchMetricsData {
+            page_cache_hit,
+            write_cache_hit,
+            cache_miss,
+            pages_to_fetch_mem,
+            page_size_to_fetch_mem,
+            pages_to_fetch_write_cache,
+            page_size_to_fetch_write_cache,
+            pages_to_fetch_store,
+            page_size_to_fetch_store,
+            page_size_needed,
+            write_cache_fetch_elapsed,
+            store_fetch_elapsed,
+            total_fetch_elapsed,
+        } = *data;
+
         write!(f, "{{")?;
 
         write!(
             f,
             "\"total_fetch_elapsed\":\"{:?}\"",
-            std::time::Duration::from_micros(total_elapsed)
+            std::time::Duration::from_micros(total_fetch_elapsed)
         )?;
 
         if page_cache_hit > 0 {
@@ -136,18 +152,18 @@ impl std::fmt::Debug for ParquetFetchMetrics {
         if page_size_needed > 0 {
             write!(f, ", \"page_size_needed\":{}", page_size_needed)?;
         }
-        if write_cache_elapsed > 0 {
+        if write_cache_fetch_elapsed > 0 {
             write!(
                 f,
                 ", \"write_cache_fetch_elapsed\":\"{:?}\"",
-                std::time::Duration::from_micros(write_cache_elapsed)
+                std::time::Duration::from_micros(write_cache_fetch_elapsed)
             )?;
         }
-        if store_elapsed > 0 {
+        if store_fetch_elapsed > 0 {
             write!(
                 f,
                 ", \"store_fetch_elapsed\":\"{:?}\"",
-                std::time::Duration::from_micros(store_elapsed)
+                std::time::Duration::from_micros(store_fetch_elapsed)
             )?;
         }
 
@@ -158,214 +174,41 @@ impl std::fmt::Debug for ParquetFetchMetrics {
 impl ParquetFetchMetrics {
     /// Returns true if the metrics are empty (contain no meaningful data).
     pub fn is_empty(&self) -> bool {
-        self.total_fetch_elapsed() == 0
-    }
-
-    /// Increments page cache hit counter.
-    pub fn inc_page_cache_hit(&self) {
-        self.page_cache_hit
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Increments write cache hit counter.
-    pub fn inc_write_cache_hit(&self) {
-        self.write_cache_hit
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Increments cache miss counter.
-    pub fn inc_cache_miss(&self) {
-        self.cache_miss
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Adds to the pages to fetch from mem cache counter.
-    pub fn add_pages_to_fetch_mem(&self, count: usize) {
-        self.pages_to_fetch_mem
-            .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Adds to the page size to fetch from mem cache counter.
-    pub fn add_page_size_to_fetch_mem(&self, size: u64) {
-        self.page_size_to_fetch_mem
-            .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Adds to the pages to fetch from write cache counter.
-    pub fn add_pages_to_fetch_write_cache(&self, count: usize) {
-        self.pages_to_fetch_write_cache
-            .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Adds to the page size to fetch from write cache counter.
-    pub fn add_page_size_to_fetch_write_cache(&self, size: u64) {
-        self.page_size_to_fetch_write_cache
-            .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Adds to the pages to fetch from store counter.
-    pub fn add_pages_to_fetch_store(&self, count: usize) {
-        self.pages_to_fetch_store
-            .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Adds to the page size to fetch from store counter.
-    pub fn add_page_size_to_fetch_store(&self, size: u64) {
-        self.page_size_to_fetch_store
-            .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Returns the page cache hit count.
-    pub fn page_cache_hit(&self) -> usize {
-        self.page_cache_hit
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Returns the write cache hit count.
-    pub fn write_cache_hit(&self) -> usize {
-        self.write_cache_hit
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Returns the cache miss count.
-    pub fn cache_miss(&self) -> usize {
-        self.cache_miss.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Returns the pages to fetch from mem cache count.
-    pub fn pages_to_fetch_mem(&self) -> usize {
-        self.pages_to_fetch_mem
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Returns the page size to fetch from mem cache in bytes.
-    pub fn page_size_to_fetch_mem(&self) -> u64 {
-        self.page_size_to_fetch_mem
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Returns the pages to fetch from write cache count.
-    pub fn pages_to_fetch_write_cache(&self) -> usize {
-        self.pages_to_fetch_write_cache
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Returns the page size to fetch from write cache in bytes.
-    pub fn page_size_to_fetch_write_cache(&self) -> u64 {
-        self.page_size_to_fetch_write_cache
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Returns the pages to fetch from store count.
-    pub fn pages_to_fetch_store(&self) -> usize {
-        self.pages_to_fetch_store
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Returns the page size to fetch from store in bytes.
-    pub fn page_size_to_fetch_store(&self) -> u64 {
-        self.page_size_to_fetch_store
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Adds to the page size return counter.
-    pub fn add_page_size_return(&self, size: u64) {
-        self.page_size_needed
-            .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Returns the page size returned in bytes.
-    pub fn page_size_needed(&self) -> u64 {
-        self.page_size_needed
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Adds elapsed time in microseconds for write cache fetch.
-    pub fn add_write_cache_fetch_elapsed(&self, elapsed_us: u64) {
-        self.write_cache_fetch_elapsed
-            .fetch_add(elapsed_us, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Returns the elapsed time in microseconds for write cache fetch.
-    pub fn write_cache_fetch_elapsed(&self) -> u64 {
-        self.write_cache_fetch_elapsed
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Adds elapsed time in microseconds for object store fetch.
-    pub fn add_store_fetch_elapsed(&self, elapsed_us: u64) {
-        self.store_fetch_elapsed
-            .fetch_add(elapsed_us, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Returns the elapsed time in microseconds for object store fetch.
-    pub fn store_fetch_elapsed(&self) -> u64 {
-        self.store_fetch_elapsed
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Adds elapsed time in microseconds for total fetch operation.
-    pub fn add_total_fetch_elapsed(&self, elapsed_us: u64) {
-        self.total_fetch_elapsed
-            .fetch_add(elapsed_us, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Returns the total elapsed time in microseconds for fetch operations.
-    pub fn total_fetch_elapsed(&self) -> u64 {
-        self.total_fetch_elapsed
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.data.lock().unwrap().is_empty()
     }
 
     /// Merges metrics from another [ParquetFetchMetrics].
     pub fn merge_from(&self, other: &ParquetFetchMetrics) {
-        self.page_cache_hit
-            .fetch_add(other.page_cache_hit(), std::sync::atomic::Ordering::Relaxed);
-        self.write_cache_hit.fetch_add(
-            other.write_cache_hit(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.cache_miss
-            .fetch_add(other.cache_miss(), std::sync::atomic::Ordering::Relaxed);
-        self.pages_to_fetch_mem.fetch_add(
-            other.pages_to_fetch_mem(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.page_size_to_fetch_mem.fetch_add(
-            other.page_size_to_fetch_mem(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.pages_to_fetch_write_cache.fetch_add(
-            other.pages_to_fetch_write_cache(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.page_size_to_fetch_write_cache.fetch_add(
-            other.page_size_to_fetch_write_cache(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.pages_to_fetch_store.fetch_add(
-            other.pages_to_fetch_store(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.page_size_to_fetch_store.fetch_add(
-            other.page_size_to_fetch_store(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.page_size_needed.fetch_add(
-            other.page_size_needed(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.write_cache_fetch_elapsed.fetch_add(
-            other.write_cache_fetch_elapsed(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.store_fetch_elapsed.fetch_add(
-            other.store_fetch_elapsed(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.total_fetch_elapsed.fetch_add(
-            other.total_fetch_elapsed(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        let ParquetFetchMetricsData {
+            page_cache_hit,
+            write_cache_hit,
+            cache_miss,
+            pages_to_fetch_mem,
+            page_size_to_fetch_mem,
+            pages_to_fetch_write_cache,
+            page_size_to_fetch_write_cache,
+            pages_to_fetch_store,
+            page_size_to_fetch_store,
+            page_size_needed,
+            write_cache_fetch_elapsed,
+            store_fetch_elapsed,
+            total_fetch_elapsed,
+        } = *other.data.lock().unwrap();
+
+        let mut data = self.data.lock().unwrap();
+        data.page_cache_hit += page_cache_hit;
+        data.write_cache_hit += write_cache_hit;
+        data.cache_miss += cache_miss;
+        data.pages_to_fetch_mem += pages_to_fetch_mem;
+        data.page_size_to_fetch_mem += page_size_to_fetch_mem;
+        data.pages_to_fetch_write_cache += pages_to_fetch_write_cache;
+        data.page_size_to_fetch_write_cache += page_size_to_fetch_write_cache;
+        data.pages_to_fetch_store += pages_to_fetch_store;
+        data.page_size_to_fetch_store += page_size_to_fetch_store;
+        data.page_size_needed += page_size_needed;
+        data.write_cache_fetch_elapsed += write_cache_fetch_elapsed;
+        data.store_fetch_elapsed += store_fetch_elapsed;
+        data.total_fetch_elapsed += total_fetch_elapsed;
     }
 }
 
@@ -625,11 +468,12 @@ impl<'a> InMemoryRowGroup<'a> {
         let page_key = PageKey::new(self.file_id, self.row_group_idx, ranges.to_vec());
         if let Some(pages) = self.cache_strategy.get_pages(&page_key) {
             if let Some(metrics) = metrics {
-                metrics.inc_page_cache_hit();
-                metrics.add_pages_to_fetch_mem(ranges.len());
                 let total_size: u64 = ranges.iter().map(|r| r.end - r.start).sum();
-                metrics.add_page_size_to_fetch_mem(total_size);
-                metrics.add_page_size_return(total_size);
+                let mut metrics_data = metrics.data.lock().unwrap();
+                metrics_data.page_cache_hit += 1;
+                metrics_data.pages_to_fetch_mem += ranges.len();
+                metrics_data.page_size_to_fetch_mem += total_size;
+                metrics_data.page_size_needed += total_size;
             }
             return Ok(pages.compressed.clone());
         }
@@ -646,12 +490,13 @@ impl<'a> InMemoryRowGroup<'a> {
                     let elapsed = fetch_write_cache_start
                         .map(|start| start.elapsed().as_micros() as u64)
                         .unwrap_or_default();
-                    metrics.add_write_cache_fetch_elapsed(elapsed);
-                    metrics.inc_write_cache_hit();
-                    metrics.add_pages_to_fetch_write_cache(ranges.len());
-                    metrics.add_page_size_to_fetch_write_cache(unaligned_size);
                     let range_size_needed: u64 = ranges.iter().map(|r| r.end - r.start).sum();
-                    metrics.add_page_size_return(range_size_needed);
+                    let mut metrics_data = metrics.data.lock().unwrap();
+                    metrics_data.write_cache_fetch_elapsed += elapsed;
+                    metrics_data.write_cache_hit += 1;
+                    metrics_data.pages_to_fetch_write_cache += ranges.len();
+                    metrics_data.page_size_to_fetch_write_cache += unaligned_size;
+                    metrics_data.page_size_needed += range_size_needed;
                 }
                 data
             }
@@ -669,12 +514,13 @@ impl<'a> InMemoryRowGroup<'a> {
                     let elapsed = start
                         .map(|start| start.elapsed().as_micros() as u64)
                         .unwrap_or_default();
-                    metrics.add_store_fetch_elapsed(elapsed);
-                    metrics.inc_cache_miss();
-                    metrics.add_pages_to_fetch_store(ranges.len());
-                    metrics.add_page_size_to_fetch_store(unaligned_size);
                     let range_size_needed: u64 = ranges.iter().map(|r| r.end - r.start).sum();
-                    metrics.add_page_size_return(range_size_needed);
+                    let mut metrics_data = metrics.data.lock().unwrap();
+                    metrics_data.store_fetch_elapsed += elapsed;
+                    metrics_data.cache_miss += 1;
+                    metrics_data.pages_to_fetch_store += ranges.len();
+                    metrics_data.page_size_to_fetch_store += unaligned_size;
+                    metrics_data.page_size_needed += range_size_needed;
                 }
                 data
             }
