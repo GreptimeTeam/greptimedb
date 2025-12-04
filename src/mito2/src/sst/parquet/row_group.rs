@@ -69,9 +69,6 @@ pub struct ParquetFetchMetrics {
 
 impl std::fmt::Debug for ParquetFetchMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{{")?;
-        let mut first = true;
-
         let page_cache_hit = self.page_cache_hit();
         let write_cache_hit = self.write_cache_hit();
         let cache_miss = self.cache_miss();
@@ -86,107 +83,73 @@ impl std::fmt::Debug for ParquetFetchMetrics {
         let store_elapsed = self.store_fetch_elapsed();
         let total_elapsed = self.total_fetch_elapsed();
 
+        // If total_elapsed is 0, we didn't fetch anything.
+        if total_elapsed == 0 {
+            return write!(f, "{{}}");
+        }
+        write!(f, "{{")?;
+
+        write!(
+            f,
+            "\"total_fetch_elapsed\":\"{:?}\"",
+            std::time::Duration::from_micros(total_elapsed)
+        )?;
+
         if page_cache_hit > 0 {
-            write!(f, "\"page_cache_hit\":{}", page_cache_hit)?;
-            first = false;
+            write!(f, ", \"page_cache_hit\":{}", page_cache_hit)?;
         }
         if write_cache_hit > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"write_cache_hit\":{}", write_cache_hit)?;
-            first = false;
+            write!(f, ", \"write_cache_hit\":{}", write_cache_hit)?;
         }
         if cache_miss > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"cache_miss\":{}", cache_miss)?;
-            first = false;
+            write!(f, ", \"cache_miss\":{}", cache_miss)?;
         }
         if pages_to_fetch_mem > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"pages_to_fetch_mem\":{}", pages_to_fetch_mem)?;
-            first = false;
+            write!(f, ", \"pages_to_fetch_mem\":{}", pages_to_fetch_mem)?;
         }
         if page_size_to_fetch_mem > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"page_size_to_fetch_mem\":{}", page_size_to_fetch_mem)?;
-            first = false;
+            write!(f, ", \"page_size_to_fetch_mem\":{}", page_size_to_fetch_mem)?;
         }
         if pages_to_fetch_write_cache > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
             write!(
                 f,
-                "\"pages_to_fetch_write_cache\":{}",
+                ", \"pages_to_fetch_write_cache\":{}",
                 pages_to_fetch_write_cache
             )?;
-            first = false;
         }
         if page_size_to_fetch_write_cache > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
             write!(
                 f,
-                "\"page_size_to_fetch_write_cache\":{}",
+                ", \"page_size_to_fetch_write_cache\":{}",
                 page_size_to_fetch_write_cache
             )?;
-            first = false;
         }
         if pages_to_fetch_store > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"pages_to_fetch_store\":{}", pages_to_fetch_store)?;
-            first = false;
+            write!(f, ", \"pages_to_fetch_store\":{}", pages_to_fetch_store)?;
         }
         if page_size_to_fetch_store > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
             write!(
                 f,
-                "\"page_size_to_fetch_store\":{}",
+                ", \"page_size_to_fetch_store\":{}",
                 page_size_to_fetch_store
             )?;
-            first = false;
         }
         if page_size_needed > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "\"page_size_needed\":{}", page_size_needed)?;
-            first = false;
+            write!(f, ", \"page_size_needed\":{}", page_size_needed)?;
         }
         if write_cache_elapsed > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            let duration = std::time::Duration::from_micros(write_cache_elapsed);
-            write!(f, "\"write_cache_fetch_elapsed\":\"{:?}\"", duration)?;
-            first = false;
+            write!(
+                f,
+                ", \"write_cache_fetch_elapsed\":\"{:?}\"",
+                std::time::Duration::from_micros(write_cache_elapsed)
+            )?;
         }
         if store_elapsed > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            let duration = std::time::Duration::from_micros(store_elapsed);
-            write!(f, "\"store_fetch_elapsed\":\"{:?}\"", duration)?;
-            first = false;
-        }
-        if total_elapsed > 0 {
-            if !first {
-                write!(f, ", ")?;
-            }
-            let duration = std::time::Duration::from_micros(total_elapsed);
-            write!(f, "\"total_fetch_elapsed\":\"{:?}\"", duration)?;
+            write!(
+                f,
+                ", \"store_fetch_elapsed\":\"{:?}\"",
+                std::time::Duration::from_micros(store_elapsed)
+            )?;
         }
 
         write!(f, "}}")
