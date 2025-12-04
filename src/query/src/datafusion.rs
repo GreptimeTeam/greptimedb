@@ -32,6 +32,7 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
+use datafusion::dataframe::DataFrame;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -49,7 +50,6 @@ use table::TableRef;
 use table::requests::{DeleteRequest, InsertRequest};
 
 use crate::analyze::DistAnalyzeExec;
-use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::{DistPlannerOptions, MergeScanLogicalPlan};
 use crate::error::{
@@ -515,13 +515,11 @@ impl QueryEngine for DatafusionQueryEngine {
     }
 
     fn read_table(&self, table: TableRef) -> Result<DataFrame> {
-        Ok(DataFrame::DataFusion(
-            self.state
-                .read_table(table)
-                .context(error::DatafusionSnafu)
-                .map_err(BoxedError::new)
-                .context(QueryExecutionSnafu)?,
-        ))
+        self.state
+            .read_table(table)
+            .context(error::DatafusionSnafu)
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)
     }
 
     fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext {
@@ -799,7 +797,7 @@ mod tests {
             .await
             .unwrap();
 
-        let DataFrame::DataFusion(df) = engine.read_table(table).unwrap();
+        let df = engine.read_table(table).unwrap();
         let df = df
             .select_columns(&["number"])
             .unwrap()

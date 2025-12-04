@@ -29,6 +29,7 @@ use common_function::handlers::{
 };
 use common_query::Output;
 use datafusion::catalog::TableFunction;
+use datafusion::dataframe::DataFrame;
 use datafusion_expr::{AggregateUDF, LogicalPlan};
 use datatypes::schema::Schema;
 pub use default_serializer::{DefaultPlanDecoder, DefaultSerializer};
@@ -36,7 +37,6 @@ use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use table::TableRef;
 
-use crate::dataframe::DataFrame;
 use crate::datafusion::DatafusionQueryEngine;
 use crate::error::Result;
 use crate::options::QueryOptions;

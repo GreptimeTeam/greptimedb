@@ -68,7 +68,6 @@ use table::TableRef;
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 
 use crate::QueryEngineRef;
-use crate::dataframe::DataFrame;
 use crate::error::{self, Result, UnsupportedVariableSnafu};
 use crate::planner::DfLogicalPlanner;
 
@@ -270,7 +269,7 @@ async fn query_from_information_schema_table(
             ),
         })?;
 
-    let DataFrame::DataFusion(dataframe) = query_engine.read_table(table)?;
+    let dataframe = query_engine.read_table(table)?;
 
     // Apply filters
     let dataframe = filters.into_iter().try_fold(dataframe, |df, expr| {
