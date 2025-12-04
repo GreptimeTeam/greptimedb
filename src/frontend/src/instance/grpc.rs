@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 use api::helper::from_pb_time_ranges;
 use api::v1::ddl_request::{Expr as DdlExpr, Expr};
@@ -22,16 +24,18 @@ use api::v1::{
     DeleteRequests, DropFlowExpr, InsertIntoPlan, InsertRequests, RowDeleteRequests,
     RowInsertRequests,
 };
+use async_stream::try_stream;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_base::AffectedRows;
 use common_error::ext::BoxedError;
-use common_grpc::FlightData;
-use common_grpc::flight::FlightDecoder;
+use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
 use common_query::logical_plan::add_insert_to_logical_plan;
 use common_telemetry::tracing::{self};
 use datafusion::datasource::DefaultTableSource;
+use futures::Stream;
+use futures::stream::StreamExt;
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -240,10 +244,8 @@ impl GrpcQueryHandler for Instance {
 
     async fn put_record_batch(
         &self,
-        table_name: &TableName,
+        request: servers::grpc::flight::PutRecordBatchRequest,
         table_ref: &mut Option<TableRef>,
-        decoder: &mut FlightDecoder,
-        data: FlightData,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
         let table = if let Some(table) = table_ref {
@@ -252,15 +254,15 @@ impl GrpcQueryHandler for Instance {
             let table = self
                 .catalog_manager()
                 .table(
-                    &table_name.catalog_name,
-                    &table_name.schema_name,
-                    &table_name.table_name,
+                    &request.table_name.catalog_name,
+                    &request.table_name.schema_name,
+                    &request.table_name.table_name,
                     None,
                 )
                 .await
                 .context(CatalogSnafu)?
                 .with_context(|| TableNotFoundSnafu {
-                    table_name: table_name.to_string(),
+                    table_name: request.table_name.to_string(),
                 })?;
             *table_ref = Some(table.clone());
             table
@@ -279,9 +281,76 @@ impl GrpcQueryHandler for Instance {
         // do we check limit for bulk insert?
 
         self.inserter
-            .handle_bulk_insert(table, decoder, data)
+            .handle_bulk_insert(
+                table,
+                request.flight_data,
+                request.record_batch,
+                request.schema_bytes,
+            )
             .await
             .context(TableOperationSnafu)
+    }
+
+    fn handle_put_record_batch_stream(
+        &self,
+        mut stream: servers::grpc::flight::PutRecordBatchRequestStream,
+        ctx: QueryContextRef,
+    ) -> Pin<Box<dyn Stream<Item = Result<DoPutResponse>> + Send>> {
+        // Resolve table once for the stream
+        // Clone all necessary data to make it 'static
+        let catalog_manager = self.catalog_manager().clone();
+        let plugins = self.plugins.clone();
+        let inserter = self.inserter.clone();
+        let table_name = stream.table_name().clone();
+        let ctx = ctx.clone();
+
+        Box::pin(try_stream! {
+            plugins
+                .get::<PermissionCheckerRef>()
+                .as_ref()
+                .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
+                .context(PermissionSnafu)?;
+            // Cache for resolved table reference - resolve once and reuse
+            let table_ref = catalog_manager
+                .table(
+                    &table_name.catalog_name,
+                    &table_name.schema_name,
+                    &table_name.table_name,
+                    None,
+                )
+                .await
+                .context(CatalogSnafu)?
+                .with_context(|| TableNotFoundSnafu {
+                    table_name: table_name.to_string(),
+                })?;
+
+            // Check permissions once for the stream
+            let interceptor_ref = plugins.get::<GrpcQueryInterceptorRef<Error>>();
+            let interceptor = interceptor_ref.as_ref();
+            interceptor.pre_bulk_insert(table_ref.clone(), ctx.clone())?;
+
+            // Process each request in the stream
+            while let Some(request_result) = stream.next().await {
+                let request = request_result.map_err(|e| {
+                    let error_msg = format!("Stream error: {:?}", e);
+                    IncompleteGrpcRequestSnafu { err_msg: error_msg }.build()
+                })?;
+
+                let request_id = request.request_id;
+                let start = Instant::now();
+                let rows = inserter
+                    .handle_bulk_insert(
+                        table_ref.clone(),
+                        request.flight_data,
+                        request.record_batch,
+                        request.schema_bytes,
+                    )
+                    .await
+                    .context(TableOperationSnafu)?;
+                let elapsed_secs = start.elapsed().as_secs_f64();
+                yield DoPutResponse::new(request_id, rows, elapsed_secs);
+            }
+        })
     }
 }
 

@@ -46,13 +46,16 @@ pub struct DoPutResponse {
     request_id: i64,
     /// The successfully ingested rows number.
     affected_rows: AffectedRows,
+    /// The elapsed time in seconds for handling the bulk insert.
+    elapsed_secs: f64,
 }
 
 impl DoPutResponse {
-    pub fn new(request_id: i64, affected_rows: AffectedRows) -> Self {
+    pub fn new(request_id: i64, affected_rows: AffectedRows, elapsed_secs: f64) -> Self {
         Self {
             request_id,
             affected_rows,
+            elapsed_secs,
         }
     }
 
@@ -62,6 +65,10 @@ impl DoPutResponse {
 
     pub fn affected_rows(&self) -> AffectedRows {
         self.affected_rows
+    }
+
+    pub fn elapsed_secs(&self) -> f64 {
+        self.elapsed_secs
     }
 }
 
@@ -86,8 +93,11 @@ mod tests {
 
     #[test]
     fn test_serde_do_put_response() {
-        let x = DoPutResponse::new(42, 88);
+        let x = DoPutResponse::new(42, 88, 0.123);
         let serialized = serde_json::to_string(&x).unwrap();
-        assert_eq!(serialized, r#"{"request_id":42,"affected_rows":88}"#);
+        assert_eq!(
+            serialized,
+            r#"{"request_id":42,"affected_rows":88,"elapsed_secs":0.123}"#
+        );
     }
 }

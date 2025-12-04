@@ -16,12 +16,11 @@ use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
-use arrow_flight::FlightData;
 use async_trait::async_trait;
 use catalog::memory::MemoryCatalogManager;
 use common_base::AffectedRows;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_grpc::flight::FlightDecoder;
+use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use query::options::QueryOptions;
@@ -35,7 +34,6 @@ use session::context::QueryContextRef;
 use snafu::ensure;
 use sql::statements::statement::Statement;
 use table::TableRef;
-use table::table_name::TableName;
 
 mod http;
 mod interceptor;
@@ -165,12 +163,20 @@ impl GrpcQueryHandler for DummyInstance {
 
     async fn put_record_batch(
         &self,
-        _table_name: &TableName,
+        _request: servers::grpc::flight::PutRecordBatchRequest,
         _table_ref: &mut Option<TableRef>,
-        _decoder: &mut FlightDecoder,
-        _data: FlightData,
         _ctx: QueryContextRef,
     ) -> std::result::Result<AffectedRows, Self::Error> {
+        unimplemented!()
+    }
+
+    fn handle_put_record_batch_stream(
+        &self,
+        _stream: servers::grpc::flight::PutRecordBatchRequestStream,
+        _ctx: QueryContextRef,
+    ) -> std::pin::Pin<
+        Box<dyn futures::Stream<Item = std::result::Result<DoPutResponse, Self::Error>> + Send>,
+    > {
         unimplemented!()
     }
 }
