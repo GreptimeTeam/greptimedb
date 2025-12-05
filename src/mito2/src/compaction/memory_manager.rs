@@ -14,7 +14,6 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, Semaphore, TryAcquireError};
@@ -47,8 +46,7 @@ pub struct CompactionMemoryManager {
 
 struct Inner {
     semaphore: Semaphore,
-    limit_bytes: u64,
-    used_bytes: AtomicU64,
+    limit_permits: u32,
     notify: Notify,
 }
 
@@ -61,14 +59,14 @@ impl CompactionMemoryManager {
             return Self { inner: None };
         }
 
-        let permits = bytes_to_permits(limit_bytes) as usize;
-        COMPACTION_MEMORY_LIMIT.set(limit_bytes as i64);
+        let permits = bytes_to_permits(limit_bytes);
+        let limit_aligned_bytes = permits_to_bytes(permits);
+        COMPACTION_MEMORY_LIMIT.set(limit_aligned_bytes as i64);
 
         Self {
             inner: Some(Arc::new(Inner {
-                semaphore: Semaphore::new(permits),
-                limit_bytes,
-                used_bytes: AtomicU64::new(0),
+                semaphore: Semaphore::new(permits as usize),
+                limit_permits: permits,
                 notify: Notify::new(),
             })),
         }
@@ -78,7 +76,7 @@ impl CompactionMemoryManager {
     pub fn limit_bytes(&self) -> u64 {
         self.inner
             .as_ref()
-            .map(|inner| inner.limit_bytes)
+            .map(|inner| permits_to_bytes(inner.limit_permits))
             .unwrap_or(0)
     }
 
@@ -86,13 +84,16 @@ impl CompactionMemoryManager {
     pub fn used_bytes(&self) -> u64 {
         self.inner
             .as_ref()
-            .map(|inner| inner.used_bytes.load(Ordering::Relaxed))
+            .map(|inner| permits_to_bytes(inner.used_permits()))
             .unwrap_or(0)
     }
 
     /// Returns available bytes.
     pub fn available_bytes(&self) -> u64 {
-        self.limit_bytes().saturating_sub(self.used_bytes())
+        self.inner
+            .as_ref()
+            .map(|inner| permits_to_bytes(inner.available_permits_clamped()))
+            .unwrap_or(0)
     }
 
     /// Tries to acquire memory. Returns Some(guard) on success, None if insufficient.
@@ -108,7 +109,7 @@ impl CompactionMemoryManager {
                 match inner.semaphore.try_acquire_many(permits) {
                     Ok(permit) => {
                         permit.forget();
-                        inner.on_acquire(permits);
+                        inner.on_acquire();
                         Some(CompactionMemoryGuard::limited(inner.clone(), permits))
                     }
                     Err(TryAcquireError::NoPermits) | Err(TryAcquireError::Closed) => {
@@ -129,16 +130,20 @@ impl CompactionMemoryManager {
     /// there is no guarantee the memory will still be available at that point,
     /// as another task may acquire it concurrently.
     pub async fn wait_for_available(&self, bytes: u64) {
-        if self.inner.is_none() || bytes == 0 {
+        if bytes == 0 {
             return;
         }
 
-        let inner = self.inner.as_ref().unwrap().clone();
+        let Some(inner) = self.inner.as_ref() else {
+            return;
+        };
+        let inner = inner.clone();
+        let needed_permits = bytes_to_permits(bytes);
         loop {
             // Take a notified handle first to avoid missing notifications between
             // the availability check and awaiting.
             let notified = inner.notify.notified();
-            if inner.available_bytes() >= bytes {
+            if inner.available_permits_clamped() >= needed_permits {
                 return;
             }
             notified.await;
@@ -147,26 +152,35 @@ impl CompactionMemoryManager {
 }
 
 impl Inner {
-    fn on_acquire(&self, permits: u32) {
-        let bytes = permits_to_bytes(permits);
-        let used = self.used_bytes.fetch_add(bytes, Ordering::AcqRel) + bytes;
-        COMPACTION_MEMORY_IN_USE.set(used as i64);
+    fn on_acquire(&self) {
+        self.update_in_use_metric();
     }
 
     fn release(&self, permits: u32) {
         if permits == 0 {
             return;
         }
-        let bytes = permits_to_bytes(permits);
-        let used = self.used_bytes.fetch_sub(bytes, Ordering::AcqRel) - bytes;
-        COMPACTION_MEMORY_IN_USE.set(used as i64);
         self.semaphore.add_permits(permits as usize);
+        self.update_in_use_metric();
         self.notify.notify_waiters();
     }
 
-    fn available_bytes(&self) -> u64 {
-        self.limit_bytes
-            .saturating_sub(self.used_bytes.load(Ordering::Relaxed))
+    fn used_permits(&self) -> u32 {
+        self.limit_permits
+            .saturating_sub(self.available_permits_clamped())
+    }
+
+    fn available_permits_clamped(&self) -> u32 {
+        // Clamp to limit_permits to ensure we never report more available permits
+        // than our configured limit, even if semaphore state becomes inconsistent.
+        self.semaphore
+            .available_permits()
+            .min(self.limit_permits as usize) as u32
+    }
+
+    fn update_in_use_metric(&self) {
+        let bytes = permits_to_bytes(self.used_permits());
+        COMPACTION_MEMORY_IN_USE.set(bytes as i64);
     }
 }
 
@@ -225,11 +239,12 @@ fn bytes_to_permits(bytes: u64) -> u32 {
     bytes
         .saturating_add(PERMIT_GRANULARITY_BYTES - 1)
         .saturating_div(PERMIT_GRANULARITY_BYTES)
+        .min(Semaphore::MAX_PERMITS as u64)
         .min(u32::MAX as u64) as u32
 }
 
 fn permits_to_bytes(permits: u32) -> u64 {
-    permits as u64 * PERMIT_GRANULARITY_BYTES
+    (permits as u64).saturating_mul(PERMIT_GRANULARITY_BYTES)
 }
 
 #[cfg(test)]
