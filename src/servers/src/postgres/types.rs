@@ -1262,7 +1262,6 @@ pub(super) fn parameters_to_scalar_values(
             }
             &Type::TIMESTAMP_ARRAY => {
                 let data = portal.parameter::<Vec<NaiveDateTime>>(idx, &client_type)?;
-                dbg!(&server_type);
                 if let Some(data) = data {
                     if let Some(ConcreteDataType::List(list_type)) = &server_type {
                         match list_type.item_type() {
