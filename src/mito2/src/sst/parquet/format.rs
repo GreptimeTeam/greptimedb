@@ -28,7 +28,7 @@
 
 use std::borrow::Borrow;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_time::Timestamp;
@@ -422,10 +422,8 @@ pub struct PrimaryKeyReadFormat {
     field_id_to_projected_index: HashMap<ColumnId, usize>,
     /// Sequence number to override the sequence read from the SST.
     override_sequence: Option<SequenceNumber>,
-    /// Lazily initialized codec used to decode primary key values.
-    primary_key_codec: OnceLock<Arc<dyn PrimaryKeyCodec>>,
-    /// Whether to decode primary key values and store them in [Batch].
-    decode_primary_key_values: bool,
+    /// Codec used to decode primary key values if eager decoding is enabled.
+    primary_key_codec: Option<Arc<dyn PrimaryKeyCodec>>,
 }
 
 impl PrimaryKeyReadFormat {
@@ -454,8 +452,7 @@ impl PrimaryKeyReadFormat {
             projection_indices: format_projection.projection_indices,
             field_id_to_projected_index: format_projection.column_id_to_projected_index,
             override_sequence: None,
-            primary_key_codec: OnceLock::new(),
-            decode_primary_key_values: false,
+            primary_key_codec: None,
         }
     }
 
@@ -466,7 +463,11 @@ impl PrimaryKeyReadFormat {
 
     /// Enables or disables eager decoding of primary key values into batches.
     pub(crate) fn set_decode_primary_key_values(&mut self, decode: bool) {
-        self.decode_primary_key_values = decode;
+        self.primary_key_codec = if decode {
+            Some(build_primary_key_codec(&self.metadata))
+        } else {
+            None
+        };
     }
 
     /// Gets the arrow schema of the SST file.
@@ -584,10 +585,7 @@ impl PrimaryKeyReadFormat {
             }
 
             let mut batch = builder.build()?;
-            if self.decode_primary_key_values {
-                let codec = self
-                    .primary_key_codec
-                    .get_or_init(|| build_primary_key_codec(&self.metadata));
+            if let Some(codec) = &self.primary_key_codec {
                 let pk_values: CompositeValues =
                     codec.decode(batch.primary_key()).context(DecodeSnafu)?;
                 batch.set_pk_values(pk_values);
