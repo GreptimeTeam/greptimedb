@@ -561,6 +561,8 @@ impl HistogramFoldStream {
         Ok(builders)
     }
 
+    /// Determines bucket count using buffered batches, concatenating them to
+    /// detect the first complete bucket that may span batch boundaries.
     fn calculate_bucket_num_from_buffer(&mut self) -> DataFusionResult<Option<usize>> {
         if let Some(size) = self.bucket_size {
             return Ok(Some(size));
@@ -705,7 +707,6 @@ impl HistogramFoldStream {
         tag_values: &mut Vec<ValueRef<'a>>,
     ) {
         tag_values.clear();
-        tag_values.reserve(self.normal_indices.len());
         for idx in self.normal_indices.iter() {
             tag_values.push(vectors[*idx].get_ref(row));
         }
@@ -735,6 +736,7 @@ impl HistogramFoldStream {
         true
     }
 
+    /// Checks whether a row belongs to the current group (same series).
     fn is_same_group(
         &self,
         vectors: &[VectorRef],
@@ -961,7 +963,7 @@ impl HistogramFoldStream {
                 lower_bound = bucket[fit_bucket_pos - 1];
                 lower_count = counter[fit_bucket_pos - 1];
             }
-            if (upper_count - lower_count).abs() < f64::EPSILON {
+            if (upper_count - lower_count).abs() < 1e-10 {
                 return Ok(f64::NAN);
             }
             Ok(lower_bound
