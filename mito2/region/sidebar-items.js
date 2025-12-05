@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ESTIMATED_WAL_FACTOR"],"enum":["RegionLeaderState","RegionRoleState"],"mod":["catchup","opener","options","version"],"struct":["CatchupRegions","ManifestContext","ManifestStats","MitoRegion","OpeningRegions","RegionMap","RegionUsage"],"type":["CatchupRegionsRef","ManifestContextRef","MitoRegionRef","OpeningRegionsRef","RegionMapRef"]};

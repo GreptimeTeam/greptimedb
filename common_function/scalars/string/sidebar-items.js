@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["register_string_functions"],"mod":["regexp_extract"]};

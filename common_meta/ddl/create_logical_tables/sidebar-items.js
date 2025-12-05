@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CreateTablesState"],"fn":["create_region_request_builder"],"mod":["check","metadata","region_request","update_metadata"],"struct":["CreateLogicalTablesProcedure","CreateTablesData"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["aliased_columns_for","aliased_columns_for_inner","get_alias_layer_from_exprs","get_alias_layer_from_node","get_alias_original_column","original_column_for","original_column_for_inner","rewrite_column","rewrite_merge_sort_exprs"],"struct":["AliasLayer"],"type":["AliasMapping"]};

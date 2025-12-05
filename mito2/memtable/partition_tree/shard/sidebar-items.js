@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ShardSource"],"struct":["Shard","ShardMerger","ShardNode","ShardReader","ShardReaderBuilder"],"trait":["DataBatchSource"],"type":["BoxedDataBatchSource"]};
