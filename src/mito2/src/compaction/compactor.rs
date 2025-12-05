@@ -162,7 +162,7 @@ pub async fn open_compaction_region(
     let manifest_manager = {
         let region_dir = region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type);
         let region_manifest_options =
-            RegionManifestOptions::new(mito_config, &region_dir, &object_store);
+            RegionManifestOptions::new(mito_config, &region_dir, object_store);
 
         RegionManifestManager::open(region_manifest_options, &Default::default())
             .await?
