@@ -305,7 +305,7 @@ impl CommentOnProcedure {
         new_flow_info.comment = self.data.comment.clone().unwrap_or_default();
         new_flow_info.updated_time = Utc::now();
 
-        let raw_value = serde_json::to_vec(&new_flow_info).context(crate::error::SerdeJsonSnafu)?;
+        let raw_value = new_flow_info.try_as_raw_value()?;
 
         self.context
             .table_metadata_manager
