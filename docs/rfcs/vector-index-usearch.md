@@ -38,148 +38,15 @@ To support these use cases at scale, GreptimeDB needs an efficient vector index 
 
 ## Why USearch
 
-We evaluated several vector index libraries before selecting [USearch](https://github.com/unum-cloud/usearch). This section explains our rationale.
+We choose [USearch](https://github.com/unum-cloud/usearch) for the following reasons:
 
-### Evaluation Criteria
+1. **Official Rust bindings**: USearch provides first-class Rust support via the `usearch` crate
+2. **Production-proven**: Used by [DuckDB](https://duckdb.org/docs/extensions/vss.html) and [ClickHouse](https://clickhouse.com/docs/en/engines/table-engines/mergetree-family/annindexes) for vector search
+3. **High performance**: HNSW algorithm with SIMD optimization (AVX-512, NEON)
+4. **Flexible persistence**: `save_to_buffer`/`load_from_buffer` API fits our Puffin blob storage
+5. **Apache 2.0 license**: Compatible with GreptimeDB
 
-| Criterion | Weight | Description |
-|-----------|--------|-------------|
-| Rust Support | High | Native Rust API or high-quality bindings |
-| Performance | High | Competitive indexing and search speed |
-| Memory Efficiency | High | Reasonable memory footprint for large indexes |
-| Persistence | High | Ability to serialize/deserialize indexes |
-| Maintenance | Medium | Active development and community |
-| Build Complexity | Medium | Ease of integration into our build system |
-| License | High | Permissive license compatible with Apache 2.0 |
-
-### Libraries Evaluated
-
-#### 1. USearch ✓ (Selected)
-
-[USearch](https://github.com/unum-cloud/usearch) is a single-file vector search engine developed by Unum.
-
-**Strengths:**
-- **First-class Rust support**: Official `usearch` crate with safe Rust API via cxx bindings
-- **Performance**: Consistently ranks among the fastest in [ANN benchmarks](http://ann-benchmarks.com/)
-- **Compact implementation**: Single-header C++ core, minimal dependencies
-- **Flexible serialization**: `save_to_buffer`/`load_from_buffer` for in-memory serialization, ideal for Puffin blob storage
-- **Memory-mapped support**: `view_from_file` for zero-copy index loading
-- **SIMD optimization**: Leverages SimSIMD for hardware-accelerated distance calculations (AVX-512, NEON)
-- **Multiple metrics**: Cosine, L2, Inner Product, Hamming, Jaccard, and custom metrics
-- **Quantization options**: f32, f64, f16, i8 for memory/accuracy tradeoffs
-- **Active maintenance**: Regular releases, responsive maintainers
-- **Apache 2.0 license**: Fully compatible with GreptimeDB
-
-**Weaknesses:**
-- C++ dependency (via cxx), though build is straightforward
-- Less index variety compared to FAISS (HNSW only)
-
-**Benchmark Performance** (from USearch documentation):
-| Operation | Performance |
-|-----------|-------------|
-| Index construction | ~1M vectors/sec (f32, 128-dim) |
-| Search throughput | ~100K QPS (single-threaded) |
-| Memory overhead | ~1.1x raw vector size |
-
-#### 2. FAISS (Meta)
-
-[FAISS](https://github.com/facebookresearch/faiss) is Meta's comprehensive similarity search library.
-
-**Strengths:**
-- Extensive index types: IVF, PQ, HNSW, LSH, and combinations
-- GPU acceleration (CUDA)
-- Production-proven at massive scale
-
-**Weaknesses:**
-- **No official Rust bindings**: Third-party bindings exist but are incomplete or unmaintained
-- **Complex C++ build**: Requires careful CMake configuration, optional GPU dependencies
-- **Heavy dependency**: Brings in OpenMP, BLAS/LAPACK, potentially MKL
-- **Overkill for our needs**: Most advanced features (GPU, IVF+PQ) are not immediately needed
-
-**Verdict**: Too heavyweight and poor Rust integration.
-
-#### 3. Hnswlib
-
-[Hnswlib](https://github.com/nmslib/hnswlib) is the reference HNSW implementation.
-
-**Strengths:**
-- Reference implementation of HNSW algorithm
-- Simple API
-
-**Weaknesses:**
-- **No official Rust bindings**: Community bindings are outdated
-- **Maintenance concerns**: Less active development in recent years
-- **Limited features**: No built-in quantization, fewer distance metrics
-
-**Verdict**: USearch provides better Rust support and is more actively maintained.
-
-#### 4. Annoy (Spotify)
-
-[Annoy](https://github.com/spotify/annoy) uses random projection trees.
-
-**Strengths:**
-- Memory-mapped by design, excellent for read-heavy workloads
-- Simple API
-
-**Weaknesses:**
-- **Immutable indexes**: Cannot add vectors after build (requires full rebuild)
-- **Slower search**: Random projection trees are generally slower than HNSW
-- **Limited metrics**: Only Euclidean, Manhattan, Angular, Hamming
-
-**Verdict**: Immutability is acceptable for SST use case, but performance is inferior to HNSW.
-
-#### 5. Milvus Knowhere
-
-[Knowhere](https://github.com/milvus-io/knowhere) is Milvus's vector search engine.
-
-**Strengths:**
-- Multiple algorithm support
-- Designed for production use
-
-**Weaknesses:**
-- **No standalone Rust crate**: Tightly coupled with Milvus
-- **Complex build**: Many dependencies
-- **Less suitable for embedding**: Designed as a service component
-
-**Verdict**: Not designed for library usage.
-
-#### 6. Custom Implementation
-
-Building our own HNSW implementation in pure Rust.
-
-**Strengths:**
-- Full control over implementation
-- No external dependencies
-- Can be tailored to our exact needs
-
-**Weaknesses:**
-- **Significant engineering effort**: HNSW is complex, especially with good SIMD optimization
-- **Performance risk**: Unlikely to match years of optimization in USearch/FAISS
-- **Maintenance burden**: Bug fixes, performance tuning, new features
-
-**Verdict**: Not justified given high-quality existing libraries.
-
-### Decision Matrix
-
-| Library | Rust Support | Performance | Build | Maintenance | License | Score |
-|---------|--------------|-------------|-------|-------------|---------|-------|
-| **USearch** | ★★★★★ | ★★★★★ | ★★★★☆ | ★★★★★ | Apache 2.0 | **24/25** |
-| FAISS | ★★☆☆☆ | ★★★★★ | ★★☆☆☆ | ★★★★★ | MIT | 18/25 |
-| Hnswlib | ★★☆☆☆ | ★★★★☆ | ★★★☆☆ | ★★★☆☆ | Apache 2.0 | 15/25 |
-| Annoy | ★★★☆☆ | ★★★☆☆ | ★★★★☆ | ★★★☆☆ | Apache 2.0 | 16/25 |
-| Custom | ★★★★★ | ★★★☆☆ | ★★★★★ | ★★☆☆☆ | N/A | 17/25 |
-
-### Conclusion
-
-USearch provides the best combination of:
-1. **Native Rust support** with a well-maintained crate
-2. **Top-tier performance** in ANN benchmarks
-3. **Simple integration** with minimal build complexity
-4. **Flexible persistence** that fits our Puffin blob storage model
-5. **Active development** with responsive maintainers
-6. **Permissive licensing** compatible with Apache 2.0
-
-The only trade-off is the C++ dependency via cxx, which is acceptable given GreptimeDB already uses cxx for other components.
+Alternatives like FAISS lack official Rust bindings, and Hnswlib has maintenance concerns.
 
 ## Design Overview
 
@@ -299,7 +166,15 @@ ALTER TABLE embeddings DROP VECTOR INDEX idx_vec;
 
 ### 3. Index Building (Write Path)
 
-The `VectorIndexer` integrates with the existing indexer lifecycle in mito2:
+The `VectorIndexer` integrates with the existing indexer lifecycle in mito2.
+
+#### Key Design Decisions
+
+1. **Row ID Mapping**: HNSW keys are sequential (0, 1, 2, ...) within an SST. We maintain a mapping to handle NULL values and deletions.
+
+2. **NULL Handling**: NULL vectors are tracked in a bitmap and skipped during indexing. The HNSW key sequence remains contiguous.
+
+3. **Memory Limits**: Index building checks memory usage and fails gracefully if limits are exceeded.
 
 ```rust
 pub struct VectorIndexer {
@@ -313,19 +188,70 @@ pub struct VectorIndexer {
     /// In-memory index being built
     index: Index,
 
-    /// Row key counter (used as HNSW key)
-    row_count: u64,
+    /// Sequential HNSW key (0, 1, 2, ...)
+    /// Different from row_id due to NULL skipping
+    next_hnsw_key: u64,
+
+    /// Total rows processed (including NULLs)
+    total_rows: u64,
+
+    /// Bitmap tracking NULL positions (row_id -> is_null)
+    /// Used during query to map HNSW results back to row offsets
+    null_bitmap: RoaringBitmap,
 
     /// Memory tracking
     memory_usage: Arc<AtomicUsize>,
+
+    /// Memory limit for index building
+    memory_limit: usize,
+}
+
+impl VectorIndexer {
+    pub fn new(
+        column_id: ColumnId,
+        dimensions: u32,
+        config: VectorIndexConfig,
+        memory_limit: usize,
+    ) -> Result<Self> {
+        let options = IndexOptions {
+            dimensions: dimensions as usize,
+            metric: config.metric.into(),
+            quantization: ScalarKind::F32,
+            connectivity: config.connectivity,
+            expansion_add: config.expansion_add,
+            expansion_search: config.expansion_search,
+            multi: false,
+        };
+        let index = Index::new(&options)?;
+
+        Ok(Self {
+            column_id,
+            dimensions,
+            config,
+            index,
+            next_hnsw_key: 0,
+            total_rows: 0,
+            null_bitmap: RoaringBitmap::new(),
+            memory_usage: Arc::new(AtomicUsize::new(0)),
+            memory_limit,
+        })
+    }
 }
 
 impl Indexer for VectorIndexer {
     /// Called for each row during SST write
-    fn update(&mut self, row_id: u64, value: &Value) -> Result<()> {
+    fn update(&mut self, value: &Value) -> Result<()> {
+        let current_row = self.total_rows;
+        self.total_rows += 1;
+
+        // Handle NULL values
         let vector = match value {
             Value::Binary(bytes) => bytes_to_f32_vec(bytes)?,
-            Value::Null => return Ok(()), // Skip null values
+            Value::Null => {
+                // Track NULL position, don't add to HNSW
+                self.null_bitmap.insert(current_row as u32);
+                return Ok(());
+            }
             _ => return Err(Error::InvalidVectorData),
         };
 
@@ -337,29 +263,51 @@ impl Indexer for VectorIndexer {
             });
         }
 
-        // Add to HNSW index with row_id as key
-        self.index.add(row_id, &vector)?;
-        self.row_count += 1;
-        self.update_memory_usage();
+        // Check memory limit before adding
+        let current_memory = self.index.memory_usage();
+        if current_memory > self.memory_limit {
+            return Err(Error::MemoryLimitExceeded {
+                limit: self.memory_limit,
+                current: current_memory,
+            });
+        }
 
+        // Add to HNSW with sequential key
+        // Store mapping: hnsw_key -> row_offset implicitly
+        // hnsw_key 0 = first non-null row, etc.
+        self.index.add(self.next_hnsw_key, &vector)?;
+        self.next_hnsw_key += 1;
+
+        self.memory_usage.store(current_memory, Ordering::Relaxed);
         Ok(())
     }
 
     /// Serialize index to Puffin blob
     fn finish(&mut self) -> Result<Vec<u8>> {
-        if self.row_count == 0 {
-            return Ok(Vec::new());
+        if self.next_hnsw_key == 0 {
+            return Ok(Vec::new());  // No vectors indexed
         }
 
         let mut buffer = Vec::new();
 
-        // Header: version + config
+        // Header
         buffer.extend_from_slice(&VECTOR_INDEX_VERSION.to_le_bytes());
+
+        // Config
         let config_bytes = bincode::serialize(&self.config)?;
         buffer.extend_from_slice(&(config_bytes.len() as u32).to_le_bytes());
         buffer.extend_from_slice(&config_bytes);
 
-        // Index data
+        // Metadata: total_rows, indexed_count
+        buffer.extend_from_slice(&self.total_rows.to_le_bytes());
+        buffer.extend_from_slice(&self.next_hnsw_key.to_le_bytes());
+
+        // NULL bitmap (serialized)
+        let bitmap_bytes = self.null_bitmap.serialize::<roaring::Portable>();
+        buffer.extend_from_slice(&(bitmap_bytes.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(&bitmap_bytes);
+
+        // HNSW index data
         self.index.save_to_buffer(&mut buffer)?;
 
         Ok(buffer)
@@ -375,6 +323,42 @@ impl Indexer for VectorIndexer {
 }
 ```
 
+#### Row ID Mapping Strategy
+
+Since HNSW uses contiguous keys (0, 1, 2, ...) but SST rows may have NULLs, we need to map HNSW keys back to actual row offsets:
+
+```rust
+impl VectorIndexApplier {
+    /// Convert HNSW key to SST row offset
+    ///
+    /// HNSW keys are contiguous (skip NULLs), row offsets include NULLs.
+    /// Example: rows [V, NULL, V, V, NULL, V] -> HNSW keys [0, 1, 2, 3]
+    ///          HNSW key 2 -> row offset 3
+    fn hnsw_key_to_row_offset(&self, hnsw_key: u64) -> u64 {
+        if self.null_bitmap.is_empty() {
+            return hnsw_key;  // Fast path: no NULLs
+        }
+
+        // Count how many NULLs appear before this position
+        // Binary search to find the row offset
+        let mut row_offset = hnsw_key;
+        let mut nulls_before = self.null_bitmap.rank(row_offset as u32);
+
+        // Iterate until we find the correct position
+        while nulls_before > 0 {
+            row_offset += nulls_before as u64;
+            let new_nulls = self.null_bitmap.rank(row_offset as u32);
+            if new_nulls == nulls_before as u64 {
+                break;
+            }
+            nulls_before = new_nulls as u32;
+        }
+
+        row_offset
+    }
+}
+```
+
 #### Puffin Blob Format
 
 ```
@@ -384,6 +368,10 @@ impl Indexer for VectorIndexer {
 │  version: u32 (1)                       │
 │  config_len: u32                        │
 │  config: VectorIndexConfig (bincode)    │
+│  total_rows: u64                        │
+│  indexed_count: u64                     │
+│  null_bitmap_len: u32                   │
+│  null_bitmap: [u8] (Roaring bitmap)     │
 │  index_data: [u8] (USearch binary)      │
 └─────────────────────────────────────────┘
 ```
@@ -470,11 +458,20 @@ fn extract_vector_distance_expr(
 
 ```rust
 pub struct VectorIndexApplier {
+    /// Vector dimensions for validation
+    dimensions: u32,
+
     /// Index configuration
     config: VectorIndexConfig,
 
     /// Loaded index (lazily initialized)
     index: Option<Index>,
+
+    /// NULL bitmap for row offset mapping
+    null_bitmap: RoaringBitmap,
+
+    /// Total rows in SST (including NULLs)
+    total_rows: u64,
 
     /// Index data reference
     blob_reader: Arc<dyn BlobReader>,
@@ -484,7 +481,7 @@ pub struct VectorIndexApplier {
 }
 
 impl VectorIndexApplier {
-    /// Load index from Puffin blob
+    /// Load index from Puffin blob (updated format with NULL bitmap)
     pub fn load(&mut self) -> Result<()> {
         if self.index.is_some() {
             return Ok(());
@@ -493,66 +490,97 @@ impl VectorIndexApplier {
         // Check cache first
         let cache_key = self.blob_reader.blob_id();
         if let Some(cached) = self.cache.get(&cache_key) {
-            self.index = Some(cached);
+            self.index = Some(cached.index);
+            self.null_bitmap = cached.null_bitmap.clone();
             return Ok(());
         }
 
-        // Read blob data
+        // Read and parse blob data (format includes null_bitmap)
         let data = self.blob_reader.read_all()?;
-        if data.is_empty() {
-            return Ok(()); // No index (empty SST)
-        }
-
-        // Parse header
-        let version = u32::from_le_bytes(data[0..4].try_into()?);
-        if version != VECTOR_INDEX_VERSION {
-            return Err(Error::UnsupportedIndexVersion(version));
-        }
-
-        let config_len = u32::from_le_bytes(data[4..8].try_into()?) as usize;
-        let config: VectorIndexConfig = bincode::deserialize(&data[8..8+config_len])?;
-
-        // Load USearch index
-        let index_data = &data[8+config_len..];
-        let options = IndexOptions {
-            dimensions: self.dimensions as usize,
-            metric: config.metric.into(),
-            quantization: ScalarKind::F32,
-            connectivity: config.connectivity,
-            expansion_add: config.expansion_add,
-            expansion_search: config.expansion_search,
-            multi: false,
-        };
-
-        let index = Index::new(&options)?;
-        index.load_from_buffer(index_data)?;
-
-        // Cache the loaded index
-        self.cache.insert(cache_key, index.clone());
-        self.index = Some(index);
+        // ... parse version, config, total_rows, indexed_count, null_bitmap, index_data
+        // (see Puffin Blob Format section)
 
         Ok(())
     }
 
-    /// Perform ANN search, returns row IDs sorted by distance
+    /// Perform ANN search, returns (row_offset, distance) sorted by distance
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(u64, f32)>> {
-        let index = self.index.as_ref()
-            .ok_or(Error::IndexNotLoaded)?;
+        // Validate query dimension
+        if query.len() != self.dimensions as usize {
+            return Err(Error::DimensionMismatch {
+                expected: self.dimensions as usize,
+                query: query.len(),
+            });
+        }
 
+        let index = self.index.as_ref().ok_or(Error::IndexNotLoaded)?;
         let matches = index.search(query, k)?;
 
+        // Convert HNSW keys to SST row offsets using null_bitmap
         Ok(matches.keys.into_iter()
             .zip(matches.distances.into_iter())
+            .map(|(hnsw_key, distance)| {
+                let row_offset = self.hnsw_key_to_row_offset(hnsw_key);
+                (row_offset, distance)
+            })
             .collect())
     }
 }
 ```
 
-#### 4.3 Multi-SST Query Execution
+#### 4.3 Handling Deletions and Updates
 
-When a query spans multiple SST files, each SST's index is searched independently and results are merged:
+GreptimeDB uses logical deletion (rows marked with `__op_type = DELETE`). Since HNSW indexes are immutable after SST creation, we handle deletions at query time by over-fetching and filtering:
 
 ```rust
+impl VectorAnnScanExec {
+    /// Search with deletion filtering
+    fn search_with_deletion_filter(
+        &self,
+        applier: &VectorIndexApplier,
+        query: &[f32],
+        k: usize,
+        sst_reader: &SstReader,
+    ) -> Result<Vec<VectorMatch>> {
+        // Over-fetch to account for potential deletions
+        let overfetch_k = k * 2;
+        let candidates = applier.search(query, overfetch_k)?;
+
+        let mut valid_results = Vec::with_capacity(k);
+        for (row_offset, distance) in candidates {
+            // Check if row is deleted via __op_type column
+            if sst_reader.is_row_deleted(row_offset)? {
+                continue;
+            }
+            valid_results.push(VectorMatch {
+                row_offset,
+                distance,
+                sst_id: sst_reader.sst_id(),
+            });
+            if valid_results.len() >= k {
+                break;
+            }
+        }
+        Ok(valid_results)
+    }
+}
+```
+
+#### 4.4 Multi-SST Query Execution
+
+Each SST has its own row offset space. Results must track `(sst_id, row_offset)` pairs:
+
+```rust
+/// Represents a match from vector search
+pub struct VectorMatch {
+    /// Row offset within the SST (NOT global row ID)
+    row_offset: u64,
+    /// Distance from query vector
+    distance: f32,
+    /// SST identifier (required: row_offsets are per-SST)
+    sst_id: SstId,
+}
+
 pub struct VectorAnnScanExec {
     column: Column,
     query_vector: Vec<f32>,
@@ -564,36 +592,30 @@ impl ExecutionPlan for VectorAnnScanExec {
     fn execute(&self, partition: usize, context: Arc<TaskContext>)
         -> Result<SendableRecordBatchStream>
     {
-        let mut all_candidates: Vec<(u64, f32, SstId)> = Vec::new();
+        let mut all_candidates: Vec<VectorMatch> = Vec::new();
 
-        // Search each SST's index
+        // Search each SST's index independently
         for reader in &self.sst_readers {
-            let applier = reader.vector_index_applier(&self.column)?;
-
-            if let Some(mut applier) = applier {
+            if let Some(mut applier) = reader.vector_index_applier(&self.column)? {
                 applier.load()?;
-
-                // Request more candidates from each SST for better recall
-                let candidates = applier.search(
+                let candidates = self.search_with_deletion_filter(
+                    &applier,
                     &self.query_vector,
-                    self.k * 2  // Over-fetch for merge accuracy
+                    self.k * 2,  // Over-fetch for merge accuracy
+                    reader,
                 )?;
-
-                for (row_id, distance) in candidates {
-                    all_candidates.push((row_id, distance, reader.sst_id()));
-                }
-            } else {
-                // No index: fall back to brute-force for this SST
-                let candidates = self.brute_force_search(reader)?;
                 all_candidates.extend(candidates);
+            } else {
+                // Fallback to brute-force for SSTs without index
+                all_candidates.extend(self.brute_force_search(reader)?);
             }
         }
 
-        // Sort by distance and take top-k
-        all_candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        // Global sort by distance and take top-k
+        all_candidates.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
         all_candidates.truncate(self.k);
 
-        // Fetch actual rows by row_id
+        // Fetch rows using (sst_id, row_offset) pairs
         self.fetch_rows(all_candidates, context)
     }
 }
