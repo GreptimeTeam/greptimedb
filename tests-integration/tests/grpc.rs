@@ -514,23 +514,24 @@ async fn insert_with_hints_and_assert(db: &Database) {
 
     let pretty = record_batches.pretty_print().unwrap();
     let expected = "\
-+-------+-------------------------------------+
-| Table | Create Table                        |
-+-------+-------------------------------------+
-| demo  | CREATE TABLE IF NOT EXISTS \"demo\" ( |
-|       |   \"host\" STRING NULL,               |
-|       |   \"cpu\" DOUBLE NULL,                |
-|       |   \"memory\" DOUBLE NULL,             |
-|       |   \"ts\" TIMESTAMP(3) NOT NULL,       |
-|       |   TIME INDEX (\"ts\"),                |
-|       |   PRIMARY KEY (\"host\")              |
-|       | )                                   |
-|       |                                     |
-|       | ENGINE=mito                         |
-|       | WITH(                               |
-|       |   append_mode = 'true'              |
-|       | )                                   |
-+-------+-------------------------------------+\
++-------+---------------------------------------+
+| Table | Create Table                          |
++-------+---------------------------------------+
+| demo  | CREATE TABLE IF NOT EXISTS \"demo\" (   |
+|       |   \"host\" STRING NULL,                 |
+|       |   \"cpu\" DOUBLE NULL,                  |
+|       |   \"memory\" DOUBLE NULL,               |
+|       |   \"ts\" TIMESTAMP(3) NOT NULL,         |
+|       |   TIME INDEX (\"ts\"),                  |
+|       |   PRIMARY KEY (\"host\")                |
+|       | )                                     |
+|       |                                       |
+|       | ENGINE=mito                           |
+|       | WITH(                                 |
+|       |   'comment' = 'Created on insertion', |
+|       |   append_mode = 'true'                |
+|       | )                                     |
++-------+---------------------------------------+\
 ";
     assert_eq!(pretty, expected);
 

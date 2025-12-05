@@ -34,7 +34,9 @@ use sql::statements::create::{Column, ColumnExtensions, CreateTable, TableConstr
 use sql::statements::{self, OptionMap};
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::metadata::{TableInfoRef, TableMeta};
-use table::requests::{FILE_TABLE_META_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY};
+use table::requests::{
+    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY,
+};
 
 use crate::error::{
     ConvertSqlTypeSnafu, ConvertSqlValueSnafu, GetFulltextOptionsSnafu,
@@ -249,6 +251,13 @@ pub fn create_table_stmt(
 
     let constraints = create_table_constraints(&table_meta.engine, schema, table_meta, quote_style);
 
+    let mut options = create_sql_options(table_meta, schema_options);
+    if let Some(comment) = &table_info.desc
+        && options.get(TABLE_COMMENT_KEY).is_none()
+    {
+        options.insert(format!("'{TABLE_COMMENT_KEY}'"), comment.clone());
+    }
+
     Ok(CreateTable {
         if_not_exists: true,
         table_id: table_info.ident.table_id,
@@ -256,7 +265,7 @@ pub fn create_table_stmt(
         columns,
         engine: table_meta.engine.clone(),
         constraints,
-        options: create_sql_options(table_meta, schema_options),
+        options,
         partitions: None,
     })
 }
