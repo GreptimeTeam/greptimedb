@@ -173,11 +173,11 @@ jobs:
 
   build-linux-amd64-artifacts:
     name: Build linux-amd64 artifacts
-    if: ${{ inputs.build_linux_amd64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ inputs.build_linux_amd64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish_github_release && (inputs.build_linux_amd64_artifacts || inputs.build_linux_arm64_artifacts || inputs.build_macos_artifacts || inputs.build_windows_artifacts)) }}
     needs: [
       allocate-runners,
     ]
-    runs-on: ${{ needs.allocate-runners.outputs.linux-amd64-runner }}
+    runs-on: ${{ needs.allocate-runners.outputs.linux-amd64-runner || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -185,6 +185,7 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/build-linux-artifacts
+        if: ${{ inputs.build_linux_amd64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
         with:
           arch: amd64
           cargo-profile: ${{ env.CARGO_PROFILE }}
@@ -195,11 +196,11 @@ jobs:
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
-    if: ${{ inputs.build_linux_arm64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ inputs.build_linux_arm64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish_github_release && (inputs.build_linux_amd64_artifacts || inputs.build_linux_arm64_artifacts || inputs.build_macos_artifacts || inputs.build_windows_artifacts)) }}
     needs: [
       allocate-runners,
     ]
-    runs-on: ${{ needs.allocate-runners.outputs.linux-arm64-runner }}
+    runs-on: ${{ needs.allocate-runners.outputs.linux-arm64-runner || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -207,6 +208,7 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/build-linux-artifacts
+        if: ${{ inputs.build_linux_arm64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
         with:
           arch: arm64
           cargo-profile: ${{ env.CARGO_PROFILE }}
@@ -217,7 +219,7 @@ jobs:
 
   run-multi-lang-tests:
     name: Run Multi-language SDK Tests
-    if: ${{ inputs.build_linux_amd64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ inputs.build_linux_amd64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish_github_release && (inputs.build_linux_amd64_artifacts || inputs.build_linux_arm64_artifacts || inputs.build_macos_artifacts || inputs.build_windows_artifacts)) }}
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -226,6 +228,7 @@ jobs:
     with:
       artifact-name: greptime-linux-amd64-${{ needs.allocate-runners.outputs.version }}
       artifact-is-tarball: true
+      skip: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_github_release && !inputs.build_linux_amd64_artifacts }}
 
   build-macos-artifacts:
     name: Build macOS artifacts
@@ -247,7 +250,7 @@ jobs:
     needs: [
       allocate-runners,
     ]
-    if: ${{ inputs.build_macos_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ inputs.build_macos_artifacts || github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish_github_release && (inputs.build_linux_amd64_artifacts || inputs.build_linux_arm64_artifacts || inputs.build_macos_artifacts || inputs.build_windows_artifacts)) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -255,6 +258,7 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/build-macos-artifacts
+        if: ${{ inputs.build_macos_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
         with:
           arch: ${{ matrix.arch }}
           cargo-profile: ${{ env.CARGO_PROFILE }}
@@ -285,7 +289,7 @@ jobs:
     needs: [
       allocate-runners,
     ]
-    if: ${{ inputs.build_windows_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ inputs.build_windows_artifacts || github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish_github_release && (inputs.build_linux_amd64_artifacts || inputs.build_linux_arm64_artifacts || inputs.build_macos_artifacts || inputs.build_windows_artifacts)) }}
     steps:
       - run: git config --global core.autocrlf false
 
@@ -295,6 +299,7 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/build-windows-artifacts
+        if: ${{ inputs.build_windows_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
         with:
           arch: ${{ matrix.arch }}
           cargo-profile: ${{ env.CARGO_PROFILE }}
@@ -310,7 +315,7 @@ jobs:
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
-    if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish_github_release && (inputs.build_linux_amd64_artifacts || inputs.build_linux_arm64_artifacts || inputs.build_macos_artifacts || inputs.build_windows_artifacts)) }}
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -327,6 +332,7 @@ jobs:
           persist-credentials: false
 
       - name: Build and push images to dockerhub
+        if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
         uses: ./.github/actions/build-images
         with:
           image-registry: docker.io
@@ -386,7 +392,7 @@ jobs:
 
   publish-github-release:
     name: Create GitHub release and upload artifacts
-    if: ${{ inputs.publish_github_release || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish_github_release && (inputs.build_linux_amd64_artifacts || inputs.build_linux_arm64_artifacts || inputs.build_macos_artifacts || inputs.build_windows_artifacts)) }}
     needs: [ # The job have to wait for all the artifacts are built.
       allocate-runners,
       build-linux-amd64-artifacts,

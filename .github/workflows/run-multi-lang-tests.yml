@@ -51,6 +51,11 @@ on:
         type: boolean
         default: false
         description: 'Whether the artifact is a tarball (tar.gz) that needs to be extracted'
+      skip:
+        required: false
+        type: boolean
+        default: false
+        description: 'Skip running multi-language tests (used when the required artifact is not built)'
 
 jobs:
   run-tests:
@@ -59,18 +64,21 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     steps:
       - name: Checkout greptimedb-tests repository
+        if: ${{ !inputs.skip }}
         uses: actions/checkout@v4
         with:
           repository: GreptimeTeam/greptimedb-tests
           persist-credentials: false
 
       - name: Download pre-built greptime binary
+        if: ${{ !inputs.skip }}
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.artifact-name }}
           path: artifact
 
       - name: Setup greptime binary
+        if: ${{ !inputs.skip }}
         run: |
           mkdir -p bin
           if [ "${{ inputs.artifact-is-tarball }}" = "true" ]; then
@@ -90,6 +98,7 @@ jobs:
           ./bin/greptime --version
 
       - name: Setup Java 17
+        if: ${{ !inputs.skip }}
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -97,11 +106,13 @@ jobs:
           cache: 'maven'
 
       - name: Setup Python 3.8
+        if: ${{ !inputs.skip }}
         uses: actions/setup-python@v5
         with:
           python-version: '3.8'
 
       - name: Setup Go 1.24
+        if: ${{ !inputs.skip }}
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
@@ -109,17 +120,20 @@ jobs:
           cache-dependency-path: go-tests/go.sum
 
       - name: Set up Node.js
+        if: ${{ !inputs.skip }}
         uses: actions/setup-node@v4
         with:
           node-version: '18'
 
       - name: Install Python dependencies
+        if: ${{ !inputs.skip }}
         run: |
           pip install mysql-connector-python psycopg2-binary
           python3 -c "import mysql.connector; print(f'mysql-connector-python {mysql.connector.__version__}')"
           python3 -c "import psycopg2; print(f'psycopg2 {psycopg2.__version__}')"
 
       - name: Install Go dependencies
+        if: ${{ !inputs.skip }}
         working-directory: go-tests
         run: |
           go mod download
@@ -127,11 +141,13 @@ jobs:
           go version
 
       - name: Kill existing GreptimeDB processes
+        if: ${{ !inputs.skip }}
         run: |
           pkill -f greptime || true
           sleep 2
 
       - name: Start GreptimeDB standalone
+        if: ${{ !inputs.skip }}
         run: |
           ./bin/greptime standalone start \
             --http-addr 0.0.0.0:${{ inputs.http-port }} \
@@ -155,6 +171,7 @@ jobs:
           exit 1
 
       - name: Run multi-language tests
+        if: ${{ !inputs.skip }}
         env:
           DB_NAME: ${{ inputs.db-name }}
           MYSQL_HOST: 127.0.0.1
@@ -170,13 +187,13 @@ jobs:
           ./run_tests.sh
 
       - name: Collect logs on failure
-        if: failure()
+        if: ${{ failure() && !inputs.skip }}
         run: |
           echo "=== GreptimeDB Logs ==="
           cat /tmp/greptimedb.log || true
 
       - name: Upload test logs on failure
-        if: failure()
+        if: ${{ failure() && !inputs.skip }}
         uses: actions/upload-artifact@v4
         with:
           name: test-logs
