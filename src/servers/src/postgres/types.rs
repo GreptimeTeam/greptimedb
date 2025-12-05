@@ -1260,6 +1260,204 @@ pub(super) fn parameters_to_scalar_values(
                     ScalarValue::Null
                 }
             }
+            &Type::TIMESTAMP_ARRAY => {
+                let data = portal.parameter::<Vec<NaiveDateTime>>(idx, &client_type)?;
+                if let Some(data) = data {
+                    if let Some(ConcreteDataType::List(list_type)) = &server_type {
+                        match list_type.item_type() {
+                            ConcreteDataType::Timestamp(unit) => match *unit {
+                                TimestampType::Second(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .map(|ts| {
+                                            ScalarValue::TimestampSecond(
+                                                Some(ts.and_utc().timestamp()),
+                                                None,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Second, None),
+                                        true,
+                                    ))
+                                }
+                                TimestampType::Millisecond(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .map(|ts| {
+                                            ScalarValue::TimestampMillisecond(
+                                                Some(ts.and_utc().timestamp_millis()),
+                                                None,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                                        true,
+                                    ))
+                                }
+                                TimestampType::Microsecond(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .map(|ts| {
+                                            ScalarValue::TimestampMicrosecond(
+                                                Some(ts.and_utc().timestamp_micros()),
+                                                None,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
+                                        true,
+                                    ))
+                                }
+                                TimestampType::Nanosecond(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .filter_map(|ts| {
+                                            ts.and_utc().timestamp_nanos_opt().map(|nanos| {
+                                                ScalarValue::TimestampNanosecond(Some(nanos), None)
+                                            })
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
+                                        true,
+                                    ))
+                                }
+                            },
+                            _ => {
+                                return Err(invalid_parameter_error(
+                                    "invalid_parameter_type",
+                                    Some(format!(
+                                        "Expected: {}, found: {}",
+                                        list_type.item_type(),
+                                        client_type
+                                    )),
+                                ));
+                            }
+                        }
+                    } else {
+                        // Default to millisecond when no server type is specified
+                        let values = data
+                            .into_iter()
+                            .map(|ts| {
+                                ScalarValue::TimestampMillisecond(
+                                    Some(ts.and_utc().timestamp_millis()),
+                                    None,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        ScalarValue::List(ScalarValue::new_list(
+                            &values,
+                            &ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                            true,
+                        ))
+                    }
+                } else {
+                    ScalarValue::Null
+                }
+            }
+            &Type::TIMESTAMPTZ_ARRAY => {
+                let data = portal.parameter::<Vec<DateTime<FixedOffset>>>(idx, &client_type)?;
+                if let Some(data) = data {
+                    if let Some(ConcreteDataType::List(list_type)) = &server_type {
+                        match list_type.item_type() {
+                            ConcreteDataType::Timestamp(unit) => match *unit {
+                                TimestampType::Second(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .map(|ts| {
+                                            ScalarValue::TimestampSecond(Some(ts.timestamp()), None)
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Second, None),
+                                        true,
+                                    ))
+                                }
+                                TimestampType::Millisecond(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .map(|ts| {
+                                            ScalarValue::TimestampMillisecond(
+                                                Some(ts.timestamp_millis()),
+                                                None,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                                        true,
+                                    ))
+                                }
+                                TimestampType::Microsecond(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .map(|ts| {
+                                            ScalarValue::TimestampMicrosecond(
+                                                Some(ts.timestamp_micros()),
+                                                None,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
+                                        true,
+                                    ))
+                                }
+                                TimestampType::Nanosecond(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .filter_map(|ts| {
+                                            ts.timestamp_nanos_opt().map(|nanos| {
+                                                ScalarValue::TimestampNanosecond(Some(nanos), None)
+                                            })
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
+                                        true,
+                                    ))
+                                }
+                            },
+                            _ => {
+                                return Err(invalid_parameter_error(
+                                    "invalid_parameter_type",
+                                    Some(format!(
+                                        "Expected: {}, found: {}",
+                                        list_type.item_type(),
+                                        client_type
+                                    )),
+                                ));
+                            }
+                        }
+                    } else {
+                        // Default to millisecond when no server type is specified
+                        let values = data
+                            .into_iter()
+                            .map(|ts| {
+                                ScalarValue::TimestampMillisecond(Some(ts.timestamp_millis()), None)
+                            })
+                            .collect::<Vec<_>>();
+                        ScalarValue::List(ScalarValue::new_list(
+                            &values,
+                            &ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                            true,
+                        ))
+                    }
+                } else {
+                    ScalarValue::Null
+                }
+            }
             _ => Err(invalid_parameter_error(
                 "unsupported_parameter_value",
                 Some(format!("Found type: {}", client_type)),

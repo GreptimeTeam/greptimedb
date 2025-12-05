@@ -461,8 +461,18 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
             // we will not support other show statements for extended query protocol at least for now.
             // because the return columns is not predictable at this stage
             _ => {
-                // fallback to NoData
-                Ok(DescribePortalResponse::new(vec![]))
+                // test if query caught by fixture
+                if let Some(mut resp) =
+                    fixtures::process(&sql_plan.query, self.session.new_query_context())
+                    && let Response::Query(query_response) = resp.remove(0)
+                {
+                    Ok(DescribePortalResponse::new(
+                        (*query_response.row_schema()).clone(),
+                    ))
+                } else {
+                    // fallback to NoData
+                    Ok(DescribePortalResponse::new(vec![]))
+                }
             }
         }
     }
