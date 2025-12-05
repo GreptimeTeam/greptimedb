@@ -204,3 +204,36 @@ tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, le) (rate(g
 tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, fbf) (rate(greptime_servers_postgres_query_elapsed_no_le{instance=~"xxx"}[1m])));
 
 drop table greptime_servers_postgres_query_elapsed_no_le;
+
+-- test case with some missing buckets
+create table histogram5_bucket (
+    ts timestamp time index,
+    le string,
+    s string,
+    val double,
+    primary key (s, le),
+);
+
+insert into histogram5_bucket values
+    (3000000, "0.1", "a", 0),
+    -- (3000000, "1", "a", 0),
+    -- (3000000, "5", "a", 0),
+    -- (3000000, "+Inf", "a", 0),
+    (3005000, "0.1", "a", 50),
+    (3005000, "1", "a", 70),
+    (3005000, "5", "a", 110),
+    (3005000, "+Inf", "a", 120),
+    (3010000, "0.1", "a", 10),
+    -- (3010000, "1", "a", 20),
+    -- (3010000, "5", "a", 20),
+    (3010000, "+Inf", "a", 30),
+    (3015000, "0.1", "a", 10),
+    (3015000, "1", "a", 10),
+    (3015000, "3", "a", 20), --
+    (3015000, "5", "a", 30),
+    (3015000, "+Inf", "a", 50);
+
+
+tql eval (3000, 3015, '3s') histogram_quantile(0.5, histogram5_bucket);
+
+drop table histogram5_bucket;
