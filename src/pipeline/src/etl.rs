@@ -34,7 +34,7 @@ use crate::error::{
     Result, YamlLoadSnafu, YamlParseSnafu,
 };
 use crate::etl::processor::ProcessorKind;
-use crate::etl::transform::transformer::greptime::values_to_row;
+use crate::etl::transform::transformer::greptime::values_to_rows;
 use crate::tablesuffix::TableSuffixTemplate;
 use crate::{ContextOpt, GreptimeTransformer, IdentityTimeIndex, PipelineContext, SchemaInfo};
 
@@ -230,21 +230,22 @@ pub enum PipelineExecOutput {
     Filtered,
 }
 
+/// Output from a successful pipeline transformation.
+///
+/// Each row can have its own table_suffix for routing to different tables
+/// when using one-to-many expansion with per-row table suffix hints.
 #[derive(Debug)]
 pub struct TransformedOutput {
     pub opt: ContextOpt,
-    pub row: Row,
-    pub table_suffix: Option<String>,
+    /// Each row paired with its optional table suffix
+    pub rows: Vec<(Row, Option<String>)>,
 }
 
 impl PipelineExecOutput {
     // Note: This is a test only function, do not use it in production.
-    pub fn into_transformed(self) -> Option<(Row, Option<String>)> {
-        if let Self::Transformed(TransformedOutput {
-            row, table_suffix, ..
-        }) = self
-        {
-            Some((row, table_suffix))
+    pub fn into_transformed(self) -> Option<Vec<(Row, Option<String>)>> {
+        if let Self::Transformed(TransformedOutput { rows, .. }) = self {
+            Some(rows)
         } else {
             None
         }
@@ -285,45 +286,91 @@ impl Pipeline {
             return Ok(PipelineExecOutput::DispatchedTo(rule.into(), val));
         }
 
-        // extract the options first
-        // this might be a breaking change, for table_suffix is now right after the processors
-        let mut opt = ContextOpt::from_pipeline_map_to_opt(&mut val)?;
-        let table_suffix = opt.resolve_table_suffix(self.tablesuffix.as_ref(), &val);
-
-        let row = match self.transformer() {
-            TransformerMode::GreptimeTransformer(greptime_transformer) => {
-                let values = greptime_transformer.transform_mut(&mut val, self.is_v1())?;
-                if self.is_v1() {
-                    // v1 dont combine with auto-transform
-                    // so return immediately
-                    return Ok(PipelineExecOutput::Transformed(TransformedOutput {
-                        opt,
-                        row: Row { values },
-                        table_suffix,
-                    }));
+        // For array inputs (one-to-many), extract options from each element
+        // For single object inputs, extract once
+        let (opt, rows) = if val.is_array() {
+            // Array input: extract per-row options in transform_array_elements
+            let rows = match self.transformer() {
+                TransformerMode::GreptimeTransformer(greptime_transformer) => {
+                    transform_array_elements(
+                        val.as_array_mut().unwrap(),
+                        greptime_transformer,
+                        self.is_v1(),
+                        schema_info,
+                        pipeline_ctx,
+                        self.tablesuffix.as_ref(),
+                    )?
                 }
-                // continue v2 process, and set the rest fields with auto-transform
-                // if transformer presents, then ts has been set
-                values_to_row(schema_info, val, pipeline_ctx, Some(values), false)?
-            }
-            TransformerMode::AutoTransform(ts_name, time_unit) => {
-                // infer ts from the context
-                // we've check that only one timestamp should exist
+                TransformerMode::AutoTransform(ts_name, time_unit) => {
+                    let def = crate::PipelineDefinition::GreptimeIdentityPipeline(Some(
+                        IdentityTimeIndex::Epoch(ts_name.clone(), *time_unit, false),
+                    ));
+                    let n_ctx = PipelineContext::new(
+                        &def,
+                        pipeline_ctx.pipeline_param,
+                        pipeline_ctx.channel,
+                    );
+                    values_to_rows(
+                        schema_info,
+                        val,
+                        &n_ctx,
+                        None,
+                        true,
+                        self.tablesuffix.as_ref(),
+                    )?
+                }
+            };
+            (ContextOpt::default(), rows)
+        } else {
+            // Single object input
+            let mut opt = ContextOpt::from_pipeline_map_to_opt(&mut val)?;
+            let table_suffix = opt.resolve_table_suffix(self.tablesuffix.as_ref(), &val);
 
-                // Create pipeline context with the found timestamp
-                let def = crate::PipelineDefinition::GreptimeIdentityPipeline(Some(
-                    IdentityTimeIndex::Epoch(ts_name.clone(), *time_unit, false),
-                ));
-                let n_ctx =
-                    PipelineContext::new(&def, pipeline_ctx.pipeline_param, pipeline_ctx.channel);
-                values_to_row(schema_info, val, &n_ctx, None, true)?
-            }
+            let rows = match self.transformer() {
+                TransformerMode::GreptimeTransformer(greptime_transformer) => {
+                    let values = greptime_transformer.transform_mut(&mut val, self.is_v1())?;
+                    if self.is_v1() {
+                        // v1 dont combine with auto-transform
+                        return Ok(PipelineExecOutput::Transformed(TransformedOutput {
+                            opt,
+                            rows: vec![(Row { values }, table_suffix)],
+                        }));
+                    }
+                    // continue v2 process, and set the rest fields with auto-transform
+                    values_to_rows(
+                        schema_info,
+                        val,
+                        pipeline_ctx,
+                        Some(values),
+                        false,
+                        self.tablesuffix.as_ref(),
+                    )?
+                }
+                TransformerMode::AutoTransform(ts_name, time_unit) => {
+                    let def = crate::PipelineDefinition::GreptimeIdentityPipeline(Some(
+                        IdentityTimeIndex::Epoch(ts_name.clone(), *time_unit, false),
+                    ));
+                    let n_ctx = PipelineContext::new(
+                        &def,
+                        pipeline_ctx.pipeline_param,
+                        pipeline_ctx.channel,
+                    );
+                    values_to_rows(
+                        schema_info,
+                        val,
+                        &n_ctx,
+                        None,
+                        true,
+                        self.tablesuffix.as_ref(),
+                    )?
+                }
+            };
+            (opt, rows)
         };
 
         Ok(PipelineExecOutput::Transformed(TransformedOutput {
             opt,
-            row,
-            table_suffix,
+            rows,
         }))
     }
 
@@ -350,6 +397,67 @@ impl Pipeline {
     }
 }
 
+/// Transforms an array of VRL values into rows with per-row table suffixes.
+fn transform_array_elements(
+    arr: &mut [VrlValue],
+    transformer: &GreptimeTransformer,
+    is_v1: bool,
+    schema_info: &mut SchemaInfo,
+    pipeline_ctx: &PipelineContext<'_>,
+    tablesuffix_template: Option<&TableSuffixTemplate>,
+) -> Result<Vec<(Row, Option<String>)>> {
+    use crate::error::{ArrayElementMustBeObjectSnafu, TransformArrayElementSnafu};
+
+    let mut rows = Vec::with_capacity(arr.len());
+
+    for (index, element) in arr.iter_mut().enumerate() {
+        if !element.is_object() {
+            return ArrayElementMustBeObjectSnafu {
+                index,
+                actual_type: element.kind_str().to_string(),
+            }
+            .fail();
+        }
+
+        // Extract ContextOpt and table_suffix for this element
+        let mut opt = ContextOpt::from_pipeline_map_to_opt(element)
+            .map_err(Box::new)
+            .context(TransformArrayElementSnafu { index })?;
+        let table_suffix = opt.resolve_table_suffix(tablesuffix_template, element);
+
+        let values = transformer
+            .transform_mut(element, is_v1)
+            .map_err(Box::new)
+            .context(TransformArrayElementSnafu { index })?;
+
+        if is_v1 {
+            // v1 mode: just use transformer output directly
+            rows.push((Row { values }, table_suffix));
+        } else {
+            // v2 mode: combine with auto-transform for remaining fields
+            // Note: table_suffix already extracted, pass None to avoid double extraction
+            let element_rows = values_to_rows(
+                schema_info,
+                element.clone(),
+                pipeline_ctx,
+                Some(values),
+                false,
+                None, // table_suffix already extracted above
+            )
+            .map_err(Box::new)
+            .context(TransformArrayElementSnafu { index })?;
+            // Apply the already-extracted table_suffix to all rows from this element
+            rows.extend(
+                element_rows
+                    .into_iter()
+                    .map(|(row, _)| (row, table_suffix.clone())),
+            );
+        }
+    }
+
+    Ok(rows)
+}
+
 pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str) -> Result<usize> {
     intermediate_keys
         .iter()
@@ -361,7 +469,7 @@ pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str
 /// The schema_info cannot be used in auto-transform ts-infer mode for lacking the ts schema.
 ///
 /// Usage:
-/// ```rust
+/// ```ignore
 /// let (pipeline, schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
 /// let pipeline_ctx = PipelineContext::new(&pipeline_def, &pipeline_param, Channel::Unknown);
 /// ```
@@ -382,6 +490,7 @@ macro_rules! setup_pipeline {
         (pipeline, schema_info, pipeline_def, pipeline_param)
     }};
 }
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -433,15 +542,16 @@ transform:
         );
 
         let payload = input_value.into();
-        let result = pipeline
+        let mut result = pipeline
             .exec_mut(payload, &pipeline_ctx, &mut schema_info)
             .unwrap()
             .into_transformed()
             .unwrap();
 
-        assert_eq!(result.0.values[0].value_data, Some(ValueData::U32Value(1)));
-        assert_eq!(result.0.values[1].value_data, Some(ValueData::U32Value(2)));
-        match &result.0.values[2].value_data {
+        let (row, _table_suffix) = result.swap_remove(0);
+        assert_eq!(row.values[0].value_data, Some(ValueData::U32Value(1)));
+        assert_eq!(row.values[1].value_data, Some(ValueData::U32Value(2)));
+        match &row.values[2].value_data {
             Some(ValueData::TimestampNanosecondValue(v)) => {
                 assert_ne!(v, &0);
             }
@@ -504,7 +614,7 @@ transform:
             .into_transformed()
             .unwrap();
 
-        assert_eq!(schema_info.schema.len(), result.0.values.len());
+        assert_eq!(schema_info.schema.len(), result[0].0.values.len());
         let test = [
             (
                 ColumnDataType::String as i32,
@@ -545,7 +655,7 @@ transform:
         let schema = pipeline.schemas().unwrap();
         for i in 0..schema.len() {
             let schema = &schema[i];
-            let value = &result.0.values[i];
+            let value = &result[0].0.values[i];
             assert_eq!(schema.datatype, test[i].0);
             assert_eq!(value.value_data, test[i].1);
         }
@@ -595,9 +705,15 @@ transform:
             .unwrap()
             .into_transformed()
             .unwrap();
-        assert_eq!(result.0.values[0].value_data, Some(ValueData::U32Value(1)));
-        assert_eq!(result.0.values[1].value_data, Some(ValueData::U32Value(2)));
-        match &result.0.values[2].value_data {
+        assert_eq!(
+            result[0].0.values[0].value_data,
+            Some(ValueData::U32Value(1))
+        );
+        assert_eq!(
+            result[0].0.values[1].value_data,
+            Some(ValueData::U32Value(2))
+        );
+        match &result[0].0.values[2].value_data {
             Some(ValueData::TimestampNanosecondValue(v)) => {
                 assert_ne!(v, &0);
             }
@@ -644,14 +760,14 @@ transform:
         let schema = pipeline.schemas().unwrap().clone();
         let result = input_value.into();
 
-        let row = pipeline
+        let rows_with_suffix = pipeline
             .exec_mut(result, &pipeline_ctx, &mut schema_info)
             .unwrap()
             .into_transformed()
             .unwrap();
         let output = Rows {
             schema,
-            rows: vec![row.0],
+            rows: rows_with_suffix.into_iter().map(|(r, _)| r).collect(),
         };
         let schemas = output.schema;
 
@@ -803,5 +919,373 @@ transform:
         assert!(r.is_err());
         let r: Result<Pipeline> = parse(&Content::Yaml(bad_yaml3));
         assert!(r.is_err());
+    }
+
+    /// Test one-to-many VRL pipeline expansion.
+    /// A VRL processor can return an array, which results in multiple output rows.
+    #[test]
+    fn test_one_to_many_vrl_expansion() {
+        let pipeline_yaml = r#"
+processors:
+  - epoch:
+      field: timestamp
+      resolution: ms
+  - vrl:
+      source: |
+        events = del(.events)
+        base_host = del(.host)
+        base_ts = del(.timestamp)
+        map_values(array!(events)) -> |event| {
+            {
+                "host": base_host,
+                "event_type": event.type,
+                "event_value": event.value,
+                "timestamp": base_ts
+            }
+        }
+
+transform:
+  - field: host
+    type: string
+  - field: event_type
+    type: string
+  - field: event_value
+    type: int32
+  - field: timestamp
+    type: timestamp, ms
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
+        // Input with 3 events
+        let input_value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "host": "server1",
+                "timestamp": 1716668197217,
+                "events": [
+                    {"type": "cpu", "value": 80},
+                    {"type": "memory", "value": 60},
+                    {"type": "disk", "value": 45}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let payload = input_value.into();
+        let result = pipeline
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
+            .unwrap()
+            .into_transformed()
+            .unwrap();
+
+        // Should produce 3 rows from 1 input
+        assert_eq!(result.len(), 3);
+
+        // Verify each row has correct structure
+        for (row, _table_suffix) in &result {
+            assert_eq!(row.values.len(), 4); // host, event_type, event_value, timestamp
+            // First value should be "server1"
+            assert_eq!(
+                row.values[0].value_data,
+                Some(ValueData::StringValue("server1".to_string()))
+            );
+            // Last value should be the timestamp
+            assert_eq!(
+                row.values[3].value_data,
+                Some(ValueData::TimestampMillisecondValue(1716668197217))
+            );
+        }
+
+        // Verify event types
+        let event_types: Vec<_> = result
+            .iter()
+            .map(|(r, _)| match &r.values[1].value_data {
+                Some(ValueData::StringValue(s)) => s.clone(),
+                _ => panic!("expected string"),
+            })
+            .collect();
+        assert!(event_types.contains(&"cpu".to_string()));
+        assert!(event_types.contains(&"memory".to_string()));
+        assert!(event_types.contains(&"disk".to_string()));
+    }
+
+    /// Test that single object output still works (backward compatibility)
+    #[test]
+    fn test_single_object_output_unchanged() {
+        let pipeline_yaml = r#"
+processors:
+  - epoch:
+      field: ts
+      resolution: ms
+  - vrl:
+      source: |
+        .processed = true
+        .
+
+transform:
+  - field: name
+    type: string
+  - field: processed
+    type: boolean
+  - field: ts
+    type: timestamp, ms
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
+        let input_value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "name": "test",
+                "ts": 1716668197217
+            }"#,
+        )
+        .unwrap();
+
+        let payload = input_value.into();
+        let result = pipeline
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
+            .unwrap()
+            .into_transformed()
+            .unwrap();
+
+        // Should produce exactly 1 row
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].0.values[0].value_data,
+            Some(ValueData::StringValue("test".to_string()))
+        );
+        assert_eq!(
+            result[0].0.values[1].value_data,
+            Some(ValueData::BoolValue(true))
+        );
+    }
+
+    /// Test that empty array produces zero rows
+    #[test]
+    fn test_empty_array_produces_zero_rows() {
+        let pipeline_yaml = r#"
+processors:
+  - vrl:
+      source: |
+        .events
+
+transform:
+  - field: value
+    type: int32
+  - field: greptime_timestamp
+    type: timestamp, ns
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
+        let input_value: serde_json::Value = serde_json::from_str(r#"{"events": []}"#).unwrap();
+
+        let payload = input_value.into();
+        let result = pipeline
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
+            .unwrap()
+            .into_transformed()
+            .unwrap();
+
+        // Empty array should produce zero rows
+        assert_eq!(result.len(), 0);
+    }
+
+    /// Test that array elements must be objects
+    #[test]
+    fn test_array_element_must_be_object() {
+        let pipeline_yaml = r#"
+processors:
+  - vrl:
+      source: |
+        .items
+
+transform:
+  - field: value
+    type: int32
+  - field: greptime_timestamp
+    type: timestamp, ns
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
+        // Array with non-object elements should fail
+        let input_value: serde_json::Value =
+            serde_json::from_str(r#"{"items": [1, 2, 3]}"#).unwrap();
+
+        let payload = input_value.into();
+        let result = pipeline.exec_mut(payload, &pipeline_ctx, &mut schema_info);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("must be an object"),
+            "Expected error about non-object element, got: {}",
+            err_msg
+        );
+    }
+
+    /// Test one-to-many with table suffix from VRL hint
+    #[test]
+    fn test_one_to_many_with_table_suffix_hint() {
+        let pipeline_yaml = r#"
+processors:
+  - epoch:
+      field: ts
+      resolution: ms
+  - vrl:
+      source: |
+        .greptime_table_suffix = "_" + string!(.category)
+        .
+
+transform:
+  - field: name
+    type: string
+  - field: category
+    type: string
+  - field: ts
+    type: timestamp, ms
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
+        let input_value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "name": "test",
+                "category": "metrics",
+                "ts": 1716668197217
+            }"#,
+        )
+        .unwrap();
+
+        let payload = input_value.into();
+        let result = pipeline
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
+            .unwrap()
+            .into_transformed()
+            .unwrap();
+
+        // Should have table suffix extracted per row
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].1, Some("_metrics".to_string()));
+    }
+
+    /// Test one-to-many with per-row table suffix
+    #[test]
+    fn test_one_to_many_per_row_table_suffix() {
+        let pipeline_yaml = r#"
+processors:
+  - epoch:
+      field: timestamp
+      resolution: ms
+  - vrl:
+      source: |
+        events = del(.events)
+        base_ts = del(.timestamp)
+        
+        map_values(array!(events)) -> |event| {
+            suffix = "_" + string!(event.category)
+            {
+                "name": event.name,
+                "value": event.value,
+                "timestamp": base_ts,
+                "greptime_table_suffix": suffix
+            }
+        }
+
+transform:
+  - field: name
+    type: string
+  - field: value
+    type: int32
+  - field: timestamp
+    type: timestamp, ms
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
+        // Input with events that should go to different tables
+        let input_value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "timestamp": 1716668197217,
+                "events": [
+                    {"name": "cpu_usage", "value": 80, "category": "cpu"},
+                    {"name": "mem_usage", "value": 60, "category": "memory"},
+                    {"name": "cpu_temp", "value": 45, "category": "cpu"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let payload = input_value.into();
+        let result = pipeline
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
+            .unwrap()
+            .into_transformed()
+            .unwrap();
+
+        // Should produce 3 rows
+        assert_eq!(result.len(), 3);
+
+        // Collect table suffixes
+        let table_suffixes: Vec<_> = result.iter().map(|(_, suffix)| suffix.clone()).collect();
+
+        // Should have different table suffixes per row
+        assert!(table_suffixes.contains(&Some("_cpu".to_string())));
+        assert!(table_suffixes.contains(&Some("_memory".to_string())));
+
+        // Count rows per table suffix
+        let cpu_count = table_suffixes
+            .iter()
+            .filter(|s| *s == &Some("_cpu".to_string()))
+            .count();
+        let memory_count = table_suffixes
+            .iter()
+            .filter(|s| *s == &Some("_memory".to_string()))
+            .count();
+        assert_eq!(cpu_count, 2);
+        assert_eq!(memory_count, 1);
     }
 }
