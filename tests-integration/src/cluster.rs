@@ -48,7 +48,7 @@ use common_stat::ResourceStatImpl;
 use common_test_util::temp_dir::create_temp_dir;
 use common_time::util::DefaultSystemTimer;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
-use datanode::config::DatanodeOptions;
+use datanode::config::{DatanodeOptions, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::heartbeat::HeartbeatTask;
@@ -64,6 +64,7 @@ use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
 use mito2::gc::GcConfig;
 use object_store::config::ObjectStoreConfig;
+use object_store::factory::new_raw_object_store;
 use rand::Rng;
 use servers::grpc::GrpcOptions;
 use servers::grpc::flight::FlightCraftWrapper;
@@ -109,6 +110,7 @@ pub struct GreptimeDbClusterBuilder {
     metasrv_gc_config: GcSchedulerOptions,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
+    object_store_manager: Option<object_store::manager::ObjectStoreManagerRef>,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -142,6 +144,7 @@ impl GreptimeDbClusterBuilder {
             metasrv_gc_config: GcSchedulerOptions::default(),
             shared_home_dir: None,
             meta_selector: None,
+            object_store_manager: None,
         }
     }
 
@@ -195,6 +198,15 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_meta_selector(mut self, selector: SelectorRef) -> Self {
         self.meta_selector = Some(selector);
+        self
+    }
+
+    #[must_use]
+    pub fn with_object_store_manager(
+        mut self,
+        object_store_manager: object_store::manager::ObjectStoreManagerRef,
+    ) -> Self {
+        self.object_store_manager = Some(object_store_manager);
         self
     }
 
@@ -377,7 +389,15 @@ impl GreptimeDbClusterBuilder {
         builder
             .with_cache_registry(layered_cache_registry)
             .with_meta_client(meta_client);
-        let mut datanode = builder.build().await.unwrap();
+
+        let mut datanode = if let Some(object_store_manager) = &self.object_store_manager {
+            builder
+                .build_with_object_store_manager(object_store_manager.clone())
+                .await
+                .unwrap()
+        } else {
+            builder.build().await.unwrap()
+        };
 
         datanode.start_heartbeat().await.unwrap();
 

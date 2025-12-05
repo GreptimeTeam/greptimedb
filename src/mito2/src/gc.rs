@@ -541,6 +541,11 @@ impl LocalGcWorker {
                         // if the file's expel time is unknown(because not appear in delta manifest), we keep it for a while
                         // using it's last modified time
                         // notice unknown files use a different lingering time
+                        // FIXME(discord9): might need to reaquire all files ref in manifest to determine whether new file is in use now?
+                        debug!(
+                            "File {:?} has unknown expel time, might have been created but not yet updated in manifest, checking last modified time for lingering",
+                            file_id
+                        );
                         entry
                             .metadata()
                             .last_modified()
@@ -647,7 +652,12 @@ impl LocalGcWorker {
         // Step 2: Concurrently list all files in the region directory
         let all_entries = self.list_region_files_concurrent(listers).await?;
 
-        let cnt = all_entries.len();
+        debug!("All entries: {:?}", all_entries);
+
+        let cnt = all_entries
+            .iter()
+            .filter(|e| e.metadata().is_file())
+            .count();
 
         // Step 3: Filter files to determine which ones can be deleted
         let (all_unused_files_ready_for_delete, all_in_exist_linger_files) = self
