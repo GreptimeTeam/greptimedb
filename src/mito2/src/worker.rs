@@ -37,7 +37,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_base::Plugins;
-use common_base::readable_size::ReadableSize;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_runtime::JoinHandle;
@@ -456,8 +455,7 @@ pub async fn write_cache_from_config(
         Some(config.index_cache_percent),
         puffin_manager_factory,
         intermediate_manager,
-        // TODO(yingwen): Enable manifest cache after removing read cache.
-        ReadableSize(0),
+        config.manifest_cache_size,
     )
     .await?;
     Ok(Some(Arc::new(cache)))
