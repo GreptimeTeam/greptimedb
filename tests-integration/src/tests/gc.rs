@@ -32,6 +32,7 @@ use crate::tests::test_util::{MockInstanceBuilder, TestContext, execute_sql, wai
 
 mod basic;
 mod delay_layer;
+mod delay_query;
 mod race;
 
 /// Helper function to get table route information for GC procedure
