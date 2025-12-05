@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_function::aggrs::aggr_wrapper::{StateMergeHelper, is_all_aggr_exprs_steppable};
 use common_telemetry::debug;
 use datafusion::error::Result as DfResult;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
@@ -93,6 +94,12 @@ impl Categorizer {
         plan: &LogicalPlan,
         partition_cols: Option<AliasMapping>,
     ) -> DfResult<Commutativity> {
+        // Subquery is treated separately in `inspect_plan_with_subquery`. To avoid rewrite the
+        // "maybe rewritten" plan, stop the check here.
+        if has_subquery(plan)? {
+            return Ok(Commutativity::Unimplemented);
+        }
+
         let partition_cols = partition_cols.unwrap_or_default();
 
         let comm = match plan {
@@ -180,7 +187,7 @@ impl Categorizer {
                 if partition_cols.is_empty() {
                     Commutativity::Commutative
                 } else {
-                    Commutativity::Unimplemented
+                    Commutativity::PartialCommutative
                 }
             }
             LogicalPlan::Unnest(_) => Commutativity::Commutative,
@@ -329,6 +336,24 @@ pub struct TransformerAction {
 
 pub fn partial_commutative_transformer(plan: &LogicalPlan) -> Option<LogicalPlan> {
     Some(plan.clone())
+}
+
+fn has_subquery(plan: &LogicalPlan) -> DfResult<bool> {
+    let mut found = false;
+    plan.apply_expressions(|e| {
+        e.apply(|x| {
+            if matches!(
+                x,
+                Expr::Exists(_) | Expr::InSubquery(_) | Expr::ScalarSubquery(_)
+            ) {
+                found = true;
+                Ok(TreeNodeRecursion::Stop)
+            } else {
+                Ok(TreeNodeRecursion::Continue)
+            }
+        })
+    })?;
+    Ok(found)
 }
 
 #[cfg(test)]

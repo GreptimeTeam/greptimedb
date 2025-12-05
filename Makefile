@@ -8,7 +8,7 @@ CARGO_BUILD_OPTS := --locked
 IMAGE_REGISTRY ?= docker.io
 IMAGE_NAMESPACE ?= greptime
 IMAGE_TAG ?= latest
-DEV_BUILDER_IMAGE_TAG ?= 2025-05-19-f55023f3-20250829091211
+DEV_BUILDER_IMAGE_TAG ?= 2025-10-01-8fe17d43-20251011080129
 BUILDX_MULTI_PLATFORM_BUILD ?= false
 BUILDX_BUILDER_NAME ?= gtbuilder
 BASE_IMAGE ?= ubuntu
@@ -17,6 +17,8 @@ CARGO_REGISTRY_CACHE ?= ${HOME}/.cargo/registry
 ARCH := $(shell uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
 OUTPUT_DIR := $(shell if [ "$(RELEASE)" = "true" ]; then echo "release"; elif [ ! -z "$(CARGO_PROFILE)" ]; then echo "$(CARGO_PROFILE)" ; else echo "debug"; fi)
 SQLNESS_OPTS ?=
+EXTRA_BUILD_ENVS ?=
+ASSEMBLED_EXTRA_BUILD_ENV := $(foreach var,$(EXTRA_BUILD_ENVS),-e $(var))
 
 # The arguments for running integration tests.
 ETCD_VERSION ?= v3.5.9
@@ -83,6 +85,7 @@ build: ## Build debug version greptime.
 .PHONY: build-by-dev-builder
 build-by-dev-builder: ## Build greptime by dev-builder.
 	docker run --network=host \
+	${ASSEMBLED_EXTRA_BUILD_ENV} \
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${DEV_BUILDER_IMAGE_TAG} \
 	make build \

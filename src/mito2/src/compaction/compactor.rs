@@ -30,24 +30,25 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 
-use crate::access_layer::{AccessLayer, AccessLayerRef, OperationType, SstWriteRequest, WriteType};
+use crate::access_layer::{
+    AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
+};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::{PickerOutput, new_picker};
-use crate::compaction::{CompactionSstReaderBuilder, find_ttl};
+use crate::compaction::{CompactionOutput, CompactionSstReaderBuilder, find_ttl};
 use crate::config::MitoConfig;
 use crate::error::{
     EmptyRegionDirSnafu, InvalidPartitionExprSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
-use crate::manifest::storage::manifest_compress_type;
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::metrics;
 use crate::read::{FlatSource, Source};
-use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
+use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -159,31 +160,16 @@ pub async fn open_compaction_region(
     };
 
     let manifest_manager = {
-        let region_manifest_options = RegionManifestOptions {
-            manifest_dir: new_manifest_dir(&region_dir_from_table_dir(
-                &req.table_dir,
-                req.region_id,
-                req.path_type,
-            )),
-            object_store: object_store.clone(),
-            compress_type: manifest_compress_type(mito_config.compress_manifest),
-            checkpoint_distance: mito_config.manifest_checkpoint_distance,
-            remove_file_options: RemoveFileOptions {
-                keep_count: mito_config.experimental_manifest_keep_removed_file_count,
-                keep_ttl: mito_config.experimental_manifest_keep_removed_file_ttl,
-            },
-        };
+        let region_dir = region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type);
+        let region_manifest_options =
+            RegionManifestOptions::new(mito_config, &region_dir, object_store);
 
-        RegionManifestManager::open(
-            region_manifest_options,
-            Default::default(),
-            Default::default(),
-        )
-        .await?
-        .context(EmptyRegionDirSnafu {
-            region_id: req.region_id,
-            region_dir: &region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type),
-        })?
+        RegionManifestManager::open(region_manifest_options, &Default::default())
+            .await?
+            .with_context(|| EmptyRegionDirSnafu {
+                region_id: req.region_id,
+                region_dir: region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type),
+            })?
     };
 
     let manifest = manifest_manager.manifest();
@@ -310,6 +296,127 @@ pub trait Compactor: Send + Sync + 'static {
 /// DefaultCompactor is the default implementation of Compactor.
 pub struct DefaultCompactor;
 
+impl DefaultCompactor {
+    /// Merge a single compaction output into SST files.
+    async fn merge_single_output(
+        compaction_region: CompactionRegion,
+        output: CompactionOutput,
+        write_opts: WriteOptions,
+    ) -> Result<Vec<FileMeta>> {
+        let region_id = compaction_region.region_id;
+        let storage = compaction_region.region_options.storage.clone();
+        let index_options = compaction_region
+            .current_version
+            .options
+            .index_options
+            .clone();
+        let append_mode = compaction_region.current_version.options.append_mode;
+        let merge_mode = compaction_region.current_version.options.merge_mode();
+        let flat_format = compaction_region
+            .region_options
+            .sst_format
+            .map(|format| format == FormatType::Flat)
+            .unwrap_or(
+                compaction_region
+                    .engine_config
+                    .default_experimental_flat_format,
+            );
+
+        let index_config = compaction_region.engine_config.index.clone();
+        let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
+        let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
+        let bloom_filter_index_config = compaction_region.engine_config.bloom_filter_index.clone();
+
+        let input_file_names = output
+            .inputs
+            .iter()
+            .map(|f| f.file_id().to_string())
+            .join(",");
+        let max_sequence = output
+            .inputs
+            .iter()
+            .map(|f| f.meta_ref().sequence)
+            .max()
+            .flatten();
+        let builder = CompactionSstReaderBuilder {
+            metadata: compaction_region.region_metadata.clone(),
+            sst_layer: compaction_region.access_layer.clone(),
+            cache: compaction_region.cache_manager.clone(),
+            inputs: &output.inputs,
+            append_mode,
+            filter_deleted: output.filter_deleted,
+            time_range: output.output_time_range,
+            merge_mode,
+        };
+        let source = if flat_format {
+            let reader = builder.build_flat_sst_reader().await?;
+            Either::Right(FlatSource::Stream(reader))
+        } else {
+            let reader = builder.build_sst_reader().await?;
+            Either::Left(Source::Reader(reader))
+        };
+        let mut metrics = Metrics::new(WriteType::Compaction);
+        let region_metadata = compaction_region.region_metadata.clone();
+        let sst_infos = compaction_region
+            .access_layer
+            .write_sst(
+                SstWriteRequest {
+                    op_type: OperationType::Compact,
+                    metadata: region_metadata.clone(),
+                    source,
+                    cache_manager: compaction_region.cache_manager.clone(),
+                    storage,
+                    max_sequence: max_sequence.map(NonZero::get),
+                    index_options,
+                    index_config,
+                    inverted_index_config,
+                    fulltext_index_config,
+                    bloom_filter_index_config,
+                },
+                &write_opts,
+                &mut metrics,
+            )
+            .await?;
+        // Convert partition expression once outside the map
+        let partition_expr = match &region_metadata.partition_expr {
+            None => None,
+            Some(json_str) if json_str.is_empty() => None,
+            Some(json_str) => PartitionExpr::from_json_str(json_str).with_context(|_| {
+                InvalidPartitionExprSnafu {
+                    expr: json_str.clone(),
+                }
+            })?,
+        };
+
+        let output_files = sst_infos
+            .into_iter()
+            .map(|sst_info| FileMeta {
+                region_id,
+                file_id: sst_info.file_id,
+                time_range: sst_info.time_range,
+                level: output.output_level,
+                file_size: sst_info.file_size,
+                available_indexes: sst_info.index_metadata.build_available_indexes(),
+                indexes: sst_info.index_metadata.build_indexes(),
+                index_file_size: sst_info.index_metadata.file_size,
+                index_file_id: None,
+                num_rows: sst_info.num_rows as u64,
+                num_row_groups: sst_info.num_row_groups,
+                sequence: max_sequence,
+                partition_expr: partition_expr.clone(),
+                num_series: sst_info.num_series,
+            })
+            .collect::<Vec<_>>();
+        let output_file_names = output_files.iter().map(|f| f.file_id.to_string()).join(",");
+        info!(
+            "Region {} compaction inputs: [{}], outputs: [{}], flat_format: {}, metrics: {:?}",
+            region_id, input_file_names, output_file_names, flat_format, metrics
+        );
+        metrics.observe();
+        Ok(output_files)
+    }
+}
+
 #[async_trait::async_trait]
 impl Compactor for DefaultCompactor {
     async fn merge_ssts(
@@ -321,122 +428,22 @@ impl Compactor for DefaultCompactor {
         let mut compacted_inputs =
             Vec::with_capacity(picker_output.outputs.iter().map(|o| o.inputs.len()).sum());
         let internal_parallelism = compaction_region.max_parallelism.max(1);
+        let compaction_time_window = picker_output.time_window_size;
 
         for output in picker_output.outputs.drain(..) {
-            compacted_inputs.extend(output.inputs.iter().map(|f| f.meta_ref().clone()));
+            let inputs_to_remove: Vec<_> =
+                output.inputs.iter().map(|f| f.meta_ref().clone()).collect();
+            compacted_inputs.extend(inputs_to_remove.iter().cloned());
             let write_opts = WriteOptions {
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
                 max_file_size: picker_output.max_file_size,
                 ..Default::default()
             };
-
-            let region_metadata = compaction_region.region_metadata.clone();
-            let sst_layer = compaction_region.access_layer.clone();
-            let region_id = compaction_region.region_id;
-            let cache_manager = compaction_region.cache_manager.clone();
-            let storage = compaction_region.region_options.storage.clone();
-            let index_options = compaction_region
-                .current_version
-                .options
-                .index_options
-                .clone();
-            let append_mode = compaction_region.current_version.options.append_mode;
-            let merge_mode = compaction_region.current_version.options.merge_mode();
-            let flat_format = compaction_region
-                .engine_config
-                .enable_experimental_flat_format;
-            let index_config = compaction_region.engine_config.index.clone();
-            let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
-            let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
-            let bloom_filter_index_config =
-                compaction_region.engine_config.bloom_filter_index.clone();
-            let max_sequence = output
-                .inputs
-                .iter()
-                .map(|f| f.meta_ref().sequence)
-                .max()
-                .flatten();
-            let region_metadata_for_filemeta = region_metadata.clone();
-            futs.push(async move {
-                let input_file_names = output
-                    .inputs
-                    .iter()
-                    .map(|f| f.file_id().to_string())
-                    .join(",");
-                let builder = CompactionSstReaderBuilder {
-                    metadata: region_metadata.clone(),
-                    sst_layer: sst_layer.clone(),
-                    cache: cache_manager.clone(),
-                    inputs: &output.inputs,
-                    append_mode,
-                    filter_deleted: output.filter_deleted,
-                    time_range: output.output_time_range,
-                    merge_mode,
-                };
-                let source = if flat_format {
-                    let reader = builder.build_flat_sst_reader().await?;
-                    either::Right(FlatSource::Stream(reader))
-                } else {
-                    let reader = builder.build_sst_reader().await?;
-                    either::Left(Source::Reader(reader))
-                };
-                let (sst_infos, metrics) = sst_layer
-                    .write_sst(
-                        SstWriteRequest {
-                            op_type: OperationType::Compact,
-                            metadata: region_metadata,
-                            source,
-                            cache_manager,
-                            storage,
-                            max_sequence: max_sequence.map(NonZero::get),
-                            index_options,
-                            index_config,
-                            inverted_index_config,
-                            fulltext_index_config,
-                            bloom_filter_index_config,
-                        },
-                        &write_opts,
-                        WriteType::Compaction,
-                    )
-                    .await?;
-                // Convert partition expression once outside the map
-                let partition_expr = match &region_metadata_for_filemeta.partition_expr {
-                    None => None,
-                    Some(json_str) if json_str.is_empty() => None,
-                    Some(json_str) => {
-                        PartitionExpr::from_json_str(json_str).with_context(|_| {
-                            InvalidPartitionExprSnafu {
-                                expr: json_str.clone(),
-                            }
-                        })?
-                    }
-                };
-
-                let output_files = sst_infos
-                    .into_iter()
-                    .map(|sst_info| FileMeta {
-                        region_id,
-                        file_id: sst_info.file_id,
-                        time_range: sst_info.time_range,
-                        level: output.output_level,
-                        file_size: sst_info.file_size,
-                        available_indexes: sst_info.index_metadata.build_available_indexes(),
-                        index_file_size: sst_info.index_metadata.file_size,
-                        num_rows: sst_info.num_rows as u64,
-                        num_row_groups: sst_info.num_row_groups,
-                        sequence: max_sequence,
-                        partition_expr: partition_expr.clone(),
-                    })
-                    .collect::<Vec<_>>();
-                let output_file_names =
-                    output_files.iter().map(|f| f.file_id.to_string()).join(",");
-                info!(
-                    "Region {} compaction inputs: [{}], outputs: [{}], metrics: {:?}",
-                    region_id, input_file_names, output_file_names, metrics
-                );
-                metrics.observe();
-                Ok(output_files)
-            });
+            futs.push(Self::merge_single_output(
+                compaction_region.clone(),
+                output,
+                write_opts,
+            ));
         }
         let mut output_files = Vec::with_capacity(futs.len());
         while !futs.is_empty() {
@@ -454,6 +461,8 @@ impl Compactor for DefaultCompactor {
             output_files.extend(metas.into_iter().flatten());
         }
 
+        // In case of remote compaction, we still allow the region edit after merge to
+        // clean expired ssts.
         let mut inputs: Vec<_> = compacted_inputs.into_iter().collect();
         inputs.extend(
             picker_output
@@ -465,7 +474,7 @@ impl Compactor for DefaultCompactor {
         Ok(MergeOutput {
             files_to_add: output_files,
             files_to_remove: inputs,
-            compaction_time_window: Some(picker_output.time_window_size),
+            compaction_time_window: Some(compaction_time_window),
         })
     }
 
@@ -492,7 +501,7 @@ impl Compactor for DefaultCompactor {
         // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
         compaction_region
             .manifest_ctx
-            .update_manifest(RegionLeaderState::Writable, action_list)
+            .update_manifest(RegionLeaderState::Writable, action_list, false)
             .await?;
 
         Ok(edit)
@@ -510,6 +519,7 @@ impl Compactor for DefaultCompactor {
                 &compact_request_options,
                 &compaction_region.region_options.compaction,
                 compaction_region.region_options.append_mode,
+                None,
             )
             .pick(compaction_region);
 

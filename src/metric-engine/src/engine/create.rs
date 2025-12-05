@@ -528,7 +528,7 @@ impl MetricEngineInner {
         // set data region options
         set_data_region_options(
             &mut data_region_request.options,
-            self.config.experimental_sparse_primary_key_encoding,
+            self.config.sparse_primary_key_encoding,
         );
 
         data_region_request
@@ -619,6 +619,7 @@ pub(crate) fn region_options_for_metadata_region(
 mod test {
     use common_meta::ddl::test_util::assert_column_name_and_id;
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
+    use common_query::prelude::{greptime_timestamp, greptime_value};
     use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
     use store_api::region_request::BatchRegionDdlRequest;
 
@@ -827,9 +828,9 @@ mod test {
         let physical_region_id2 = RegionId::new(1024, 1);
         let logical_region_id1 = RegionId::new(1025, 0);
         let logical_region_id2 = RegionId::new(1025, 1);
-        env.create_physical_region(physical_region_id1, "/test_dir1")
+        env.create_physical_region(physical_region_id1, "/test_dir1", vec![])
             .await;
-        env.create_physical_region(physical_region_id2, "/test_dir2")
+        env.create_physical_region(physical_region_id2, "/test_dir2", vec![])
             .await;
 
         let region_create_request1 =
@@ -856,8 +857,8 @@ mod test {
         assert_column_name_and_id(
             &column_metadatas,
             &[
-                ("greptime_timestamp", 0),
-                ("greptime_value", 1),
+                (greptime_timestamp(), 0),
+                (greptime_value(), 1),
                 ("__table_id", ReservedColumnId::table_id()),
                 ("__tsid", ReservedColumnId::tsid()),
                 ("job", 2),

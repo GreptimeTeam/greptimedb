@@ -9,6 +9,7 @@ workspace = true
 
 [features]
 services-memory = ["opendal/services-memory"]
+testing = ["derive_builder"]
 
 [dependencies]
 bytes.workspace = true
@@ -16,6 +17,7 @@ common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-telemetry.workspace = true
+derive_builder = { workspace = true, optional = true }
 futures.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true

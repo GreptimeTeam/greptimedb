@@ -103,7 +103,7 @@ impl KeyDictBuilder {
         self.key_bytes_in_index += full_primary_key.len() + sparse_key_len;
 
         // Adds key size of index to the metrics.
-        MEMTABLE_DICT_BYTES.add(self.key_bytes_in_index as i64);
+        MEMTABLE_DICT_BYTES.add((full_primary_key.len() + sparse_key_len) as i64);
 
         pk_index
     }

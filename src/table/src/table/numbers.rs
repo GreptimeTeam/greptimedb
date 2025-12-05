@@ -80,6 +80,7 @@ impl NumbersTable {
             next_column_id: 1,
             options: Default::default(),
             created_on: Default::default(),
+            updated_on: Default::default(),
             partition_key_indices: vec![],
             column_ids: vec![],
         };
@@ -165,9 +166,9 @@ impl Stream for NumbersStream {
             batch = batch.project(projection).unwrap();
         }
 
-        Poll::Ready(Some(RecordBatch::try_from_df_record_batch(
+        Poll::Ready(Some(Ok(RecordBatch::from_df_record_batch(
             self.projected_schema.clone(),
             batch,
-        )))
+        ))))
     }
 }

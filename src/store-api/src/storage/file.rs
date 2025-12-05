@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Debug;
 use std::str::FromStr;
@@ -19,6 +20,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use uuid::Uuid;
+
+use crate::ManifestVersion;
+use crate::storage::RegionId;
 
 #[derive(Debug, Snafu, PartialEq)]
 pub struct ParseIdError {
@@ -66,6 +70,63 @@ impl FromStr for FileId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FileRef {
+    pub region_id: RegionId,
+    pub file_id: FileId,
+}
+
+impl FileRef {
+    pub fn new(region_id: RegionId, file_id: FileId) -> Self {
+        Self { region_id, file_id }
+    }
+}
+
+/// The tmp file manifest which record a table's file references.
+/// Also record the manifest version when these tmp files are read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRefsManifest {
+    pub file_refs: HashMap<RegionId, HashSet<FileId>>,
+    /// Manifest version when this manifest is read for it's files
+    pub manifest_version: HashMap<RegionId, ManifestVersion>,
+}
+
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcReport {
+    /// deleted files per region
+    pub deleted_files: HashMap<RegionId, Vec<FileId>>,
+    /// Regions that need retry in next gc round, usually because their tmp ref files are outdated
+    pub need_retry_regions: HashSet<RegionId>,
+}
+
+impl GcReport {
+    pub fn new(
+        deleted_files: HashMap<RegionId, Vec<FileId>>,
+        need_retry_regions: HashSet<RegionId>,
+    ) -> Self {
+        Self {
+            deleted_files,
+            need_retry_regions,
+        }
+    }
+
+    pub fn merge(&mut self, other: GcReport) {
+        for (region, files) in other.deleted_files {
+            let self_files = self.deleted_files.entry(region).or_default();
+            let dedup: HashSet<FileId> = HashSet::from_iter(
+                std::mem::take(self_files)
+                    .into_iter()
+                    .chain(files.iter().cloned()),
+            );
+            *self_files = dedup.into_iter().collect();
+        }
+        self.need_retry_regions.extend(other.need_retry_regions);
+        // Remove regions that have succeeded from need_retry_regions
+        self.need_retry_regions
+            .retain(|region| !self.deleted_files.contains_key(region));
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -91,5 +152,20 @@ mod tests {
 
         let parsed = serde_json::from_str(&json).unwrap();
         assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn test_file_refs_manifest_serialization() {
+        let mut manifest = FileRefsManifest::default();
+        let r0 = RegionId::new(1024, 1);
+        let r1 = RegionId::new(1024, 2);
+        manifest.file_refs.insert(r0, [FileId::random()].into());
+        manifest.file_refs.insert(r1, [FileId::random()].into());
+        manifest.manifest_version.insert(r0, 10);
+        manifest.manifest_version.insert(r1, 20);
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        let parsed: FileRefsManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(manifest, parsed);
     }
 }

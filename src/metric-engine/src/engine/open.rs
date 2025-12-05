@@ -47,6 +47,7 @@ impl MetricEngineInner {
 
         for (region_id, request) in requests {
             if !request.is_physical_table() {
+                warn!("Skipping non-physical table open request: {region_id}");
                 continue;
             }
             let physical_region_options = PhysicalRegionOptions::try_from(&request.options)?;
@@ -72,17 +73,19 @@ impl MetricEngineInner {
             let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
             let data_region_id = utils::to_data_region_id(physical_region_id);
             let metadata_region_result = results.remove(&metadata_region_id);
-            let data_region_result = results.remove(&data_region_id);
+            let data_region_result: Option<std::result::Result<RegionResponse, BoxedError>> =
+                results.remove(&data_region_id);
             // Pass the optional `metadata_region_result` and `data_region_result` to
-            // `open_physical_region_with_results`. This function handles errors for each
+            // `recover_physical_region_with_results`. This function handles errors for each
             // open physical region request, allowing the process to continue with the
             // remaining regions even if some requests fail.
             let response = self
-                .open_physical_region_with_results(
+                .recover_physical_region_with_results(
                     metadata_region_result,
                     data_region_result,
                     physical_region_id,
                     physical_region_options,
+                    true,
                 )
                 .await
                 .map_err(BoxedError::new);
@@ -107,12 +110,13 @@ impl MetricEngineInner {
         }
     }
 
-    async fn open_physical_region_with_results(
+    pub(crate) async fn recover_physical_region_with_results(
         &self,
         metadata_region_result: Option<std::result::Result<RegionResponse, BoxedError>>,
         data_region_result: Option<std::result::Result<RegionResponse, BoxedError>>,
         physical_region_id: RegionId,
         physical_region_options: PhysicalRegionOptions,
+        close_region_on_failure: bool,
     ) -> Result<RegionResponse> {
         let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
         let data_region_id = utils::to_data_region_id(physical_region_id);
@@ -136,8 +140,10 @@ impl MetricEngineInner {
             .recover_states(physical_region_id, physical_region_options)
             .await
         {
-            self.close_physical_region_on_recovery_failure(physical_region_id)
-                .await;
+            if close_region_on_failure {
+                self.close_physical_region_on_recovery_failure(physical_region_id)
+                    .await;
+            }
             return Err(err);
         }
         Ok(data_region_response)
@@ -221,7 +227,7 @@ impl MetricEngineInner {
         let mut data_region_options = request.options;
         set_data_region_options(
             &mut data_region_options,
-            self.config.experimental_sparse_primary_key_encoding,
+            self.config.sparse_primary_key_encoding,
         );
         let open_data_region_request = RegionOpenRequest {
             table_dir: request.table_dir.clone(),

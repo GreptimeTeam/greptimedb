@@ -115,7 +115,7 @@ Error: 3001(EngineExecuteQuery), Invalid query: TQL query only supports one f64 
 SHOW TABLES;
 
 +------------------------+
-| Tables                 |
+| Tables_in_public       |
 +------------------------+
 | http_requests_two_vals |
 | numbers                |

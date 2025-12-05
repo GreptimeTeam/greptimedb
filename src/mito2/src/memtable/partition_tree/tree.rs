@@ -30,7 +30,7 @@ use mito_codec::row_converter::{PrimaryKeyCodec, SortField};
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{
@@ -151,7 +151,12 @@ impl PartitionTree {
         for kv in kvs.iter() {
             self.verify_primary_key_length(&kv)?;
             // Safety: timestamp of kv must be both present and a valid timestamp value.
-            let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+            let ts = kv
+                .timestamp()
+                .try_into_timestamp()
+                .unwrap()
+                .unwrap()
+                .value();
             metrics.min_ts = metrics.min_ts.min(ts);
             metrics.max_ts = metrics.max_ts.max(ts);
             metrics.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();
@@ -196,7 +201,12 @@ impl PartitionTree {
 
         self.verify_primary_key_length(&kv)?;
         // Safety: timestamp of kv must be both present and a valid timestamp value.
-        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        let ts = kv
+            .timestamp()
+            .try_into_timestamp()
+            .unwrap()
+            .unwrap()
+            .value();
         metrics.min_ts = metrics.min_ts.min(ts);
         metrics.max_ts = metrics.max_ts.max(ts);
         metrics.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();
@@ -229,7 +239,7 @@ impl PartitionTree {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<crate::memtable::MemScanMetrics>,
     ) -> Result<BoxedBatchIterator> {
         let start = Instant::now();
@@ -465,7 +475,7 @@ struct TreeIterMetrics {
 
 struct TreeIter {
     /// Optional Sequence number of the current reader which limit results batch to lower than this sequence number.
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
     partitions: VecDeque<PartitionRef>,
     current_reader: Option<PartitionReader>,
     metrics: TreeIterMetrics,

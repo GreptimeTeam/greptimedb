@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_meta::key::{CANDIDATES_ROOT, ELECTION_KEY};
-use common_telemetry::{error, warn};
+use common_telemetry::{error, info, warn};
 use common_time::Timestamp;
 use deadpool_postgres::{Manager, Pool};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -477,6 +477,13 @@ impl Election for PgElection {
     }
 
     async fn reset_campaign(&self) {
+        info!("Resetting campaign");
+        if self.is_leader.load(Ordering::Relaxed) {
+            if let Err(err) = self.step_down_without_lock().await {
+                error!(err; "Failed to step down without lock");
+            }
+            info!("Step down without lock successfully, due to reset campaign");
+        }
         if let Err(err) = self.pg_client.write().await.reset_client().await {
             error!(err; "Failed to reset client");
         }
@@ -774,16 +781,12 @@ impl PgElection {
             key: key.clone(),
             ..Default::default()
         };
-        if self
-            .is_leader
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-            && let Err(e) = self
-                .leader_watcher
-                .send(LeaderChangeMessage::StepDown(Arc::new(leader_key)))
-        {
-            error!(e; "Failed to send leader change message");
-        }
+        send_leader_change_and_set_flags(
+            &self.is_leader,
+            &self.leader_infancy,
+            &self.leader_watcher,
+            LeaderChangeMessage::StepDown(Arc::new(leader_key)),
+        );
         Ok(())
     }
 
@@ -1000,8 +1003,11 @@ mod tests {
             version: "test_version".to_string(),
             git_commit: "test_git_commit".to_string(),
             start_time_ms: 0,
-            cpus: 0,
-            memory_bytes: 0,
+            total_cpu_millicores: 0,
+            total_memory_bytes: 0,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
+            hostname: "test_hostname".to_string(),
         };
         pg_election.register_candidate(&node_info).await.unwrap();
     }
@@ -1574,6 +1580,44 @@ mod tests {
             .unwrap();
 
         drop_table(&follower_pg_election, table_name).await;
+    }
+
+    #[tokio::test]
+    async fn test_reset_campaign() {
+        maybe_skip_postgres_integration_test!();
+        let leader_value = "test_leader".to_string();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let table_name = "test_reset_campaign_greptime_metakv";
+        let candidate_lease_ttl = Duration::from_secs(5);
+        let execution_timeout = Duration::from_secs(10);
+        let statement_timeout = Duration::from_secs(10);
+        let meta_lease_ttl = Duration::from_secs(2);
+        let idle_session_timeout = Duration::from_secs(0);
+        let client = create_postgres_client(
+            Some(table_name),
+            execution_timeout,
+            idle_session_timeout,
+            statement_timeout,
+        )
+        .await
+        .unwrap();
+
+        let (tx, _) = broadcast::channel(100);
+        let leader_pg_election = PgElection {
+            leader_value,
+            pg_client: RwLock::new(client),
+            is_leader: AtomicBool::new(false),
+            leader_infancy: AtomicBool::new(true),
+            leader_watcher: tx,
+            store_key_prefix: uuid,
+            candidate_lease_ttl,
+            meta_lease_ttl,
+            sql_set: ElectionSqlFactory::new(28321, None, table_name).build(),
+        };
+        leader_pg_election.is_leader.store(true, Ordering::Relaxed);
+        leader_pg_election.reset_campaign().await;
+        assert!(!leader_pg_election.is_leader());
+        drop_table(&leader_pg_election, table_name).await;
     }
 
     #[tokio::test]

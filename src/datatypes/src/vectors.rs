@@ -35,6 +35,7 @@ mod duration;
 mod eq;
 mod helper;
 mod interval;
+pub(crate) mod json;
 mod list;
 mod null;
 pub(crate) mod operations;
@@ -424,12 +425,12 @@ pub mod tests {
     #[test]
     #[should_panic(expected = "Must use ListVectorBuilder::with_type_capacity()")]
     fn test_mutable_vector_list_data_type() {
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
         // List type
-        let builder =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 1024);
+        let builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 1024);
         assert_eq!(
             builder.data_type(),
-            ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype())
+            ConcreteDataType::list_datatype(item_type)
         );
 
         // Panic with_capacity

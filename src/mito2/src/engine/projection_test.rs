@@ -53,8 +53,18 @@ fn build_rows_multi_tags_fields(
 
 #[tokio::test]
 async fn test_scan_projection() {
+    test_scan_projection_with_format(false).await;
+    test_scan_projection_with_format(true).await;
+}
+
+async fn test_scan_projection_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     // [tag_0, tag_1, field_0, field_1, ts]

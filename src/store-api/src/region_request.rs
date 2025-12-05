@@ -22,9 +22,10 @@ use api::v1::column_def::{
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    AlterRequest, AlterRequests, BulkInsertRequest, CloseRequest, CompactRequest, CreateRequest,
-    CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
-    OpenRequest, TruncateRequest, alter_request, compact_request, region_request, truncate_request,
+    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CloseRequest,
+    CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
+    FlushRequest, InsertRequests, OpenRequest, TruncateRequest, alter_request, compact_request,
+    region_request, truncate_request,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -51,7 +52,7 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
+    SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -146,9 +147,11 @@ pub enum RegionRequest {
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
+    BuildIndex(RegionBuildIndexRequest),
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
     BulkInserts(RegionBulkInsertsRequest),
+    EnterStaging(EnterStagingRequest),
 }
 
 impl RegionRequest {
@@ -165,6 +168,7 @@ impl RegionRequest {
             region_request::Body::Alter(alter) => make_region_alter(alter),
             region_request::Body::Flush(flush) => make_region_flush(flush),
             region_request::Body::Compact(compact) => make_region_compact(compact),
+            region_request::Body::BuildIndex(index) => make_region_build_index(index),
             region_request::Body::Truncate(truncate) => make_region_truncate(truncate),
             region_request::Body::Creates(creates) => make_region_creates(creates),
             region_request::Body::Drops(drops) => make_region_drops(drops),
@@ -213,7 +217,7 @@ fn make_region_deletes(deletes: DeleteRequests) -> Result<Vec<(RegionId, RegionR
             r.rows.map(|rows| {
                 (
                     region_id,
-                    RegionRequest::Delete(RegionDeleteRequest { rows }),
+                    RegionRequest::Delete(RegionDeleteRequest { rows, hint: None }),
                 )
             })
         })
@@ -338,9 +342,26 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
     let options = compact
         .options
         .unwrap_or(compact_request::Options::Regular(Default::default()));
+    // Convert parallelism: a value of 0 indicates no specific parallelism requested (None)
+    let parallelism = if compact.parallelism == 0 {
+        None
+    } else {
+        Some(compact.parallelism)
+    };
     Ok(vec![(
         region_id,
-        RegionRequest::Compact(RegionCompactRequest { options }),
+        RegionRequest::Compact(RegionCompactRequest {
+            options,
+            parallelism,
+        }),
+    )])
+}
+
+fn make_region_build_index(index: BuildIndexRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let region_id = index.region_id.into();
+    Ok(vec![(
+        region_id,
+        RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
     )])
 }
 
@@ -413,6 +434,8 @@ pub struct RegionDeleteRequest {
     ///
     /// Each row only contains primary key columns and a time index column.
     pub rows: Rows,
+    /// Write hint.
+    pub hint: Option<WriteHint>,
 }
 
 #[derive(Debug, Clone)]
@@ -869,11 +892,7 @@ impl AlterKind {
             AlterKind::ModifyColumnTypes { columns } => columns
                 .iter()
                 .any(|col_to_change| col_to_change.need_alter(metadata)),
-            AlterKind::SetRegionOptions { .. } => {
-                // we need to update region options for `ChangeTableOptions`.
-                // todo: we need to check if ttl has ever changed.
-                true
-            }
+            AlterKind::SetRegionOptions { .. } => true,
             AlterKind::UnsetRegionOptions { .. } => true,
             AlterKind::SetIndexes { options, .. } => options
                 .iter()
@@ -1246,6 +1265,8 @@ pub enum SetRegionOption {
     Ttl(Option<TimeToLive>),
     // Modifying TwscOptions with values as (option name, new value).
     Twsc(String, String),
+    // Modifying the SST format.
+    Format(String),
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1263,6 +1284,7 @@ impl TryFrom<&PbOption> for SetRegionOption {
             TWCS_TRIGGER_FILE_NUM | TWCS_MAX_OUTPUT_FILE_SIZE | TWCS_TIME_WINDOW => {
                 Ok(Self::Twsc(key.clone(), value.clone()))
             }
+            SST_FORMAT_KEY => Ok(Self::Format(value.clone())),
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
     }
@@ -1332,6 +1354,7 @@ pub struct RegionFlushRequest {
 #[derive(Debug)]
 pub struct RegionCompactRequest {
     pub options: compact_request::Options,
+    pub parallelism: Option<u32>,
 }
 
 impl Default for RegionCompactRequest {
@@ -1339,9 +1362,13 @@ impl Default for RegionCompactRequest {
         Self {
             // Default to regular compaction.
             options: compact_request::Options::Regular(Default::default()),
+            parallelism: None,
         }
     }
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct RegionBuildIndexRequest {}
 
 /// Truncate region request.
 #[derive(Debug)]
@@ -1390,6 +1417,17 @@ impl RegionBulkInsertsRequest {
     }
 }
 
+/// Request to stage a region with a new region rule(partition expression).
+///
+/// This request transitions a region into the staging mode.
+/// It first flushes the memtable for the old region rule if it is not empty,
+/// then enters the staging mode with the new region rule.
+#[derive(Debug, Clone)]
+pub struct EnterStagingRequest {
+    /// The partition expression of the staging region.
+    pub partition_expr: String,
+}
+
 impl fmt::Display for RegionRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1402,9 +1440,11 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Alter(_) => write!(f, "Alter"),
             RegionRequest::Flush(_) => write!(f, "Flush"),
             RegionRequest::Compact(_) => write!(f, "Compact"),
+            RegionRequest::BuildIndex(_) => write!(f, "BuildIndex"),
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
             RegionRequest::BulkInserts(_) => write!(f, "BulkInserts"),
+            RegionRequest::EnterStaging(_) => write!(f, "EnterStaging"),
         }
     }
 }

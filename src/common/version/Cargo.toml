@@ -11,7 +11,7 @@ workspace = true
 codec = ["dep:serde"]
 
 [dependencies]
-const_format = "0.2"
+const_format.workspace = true
 serde = { workspace = true, optional = true }
 shadow-rs = { version = "1.2.1", default-features = false }
 

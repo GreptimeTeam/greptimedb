@@ -51,7 +51,7 @@ impl ParserContext<'_> {
         let query_stmt = self.parse_query()?;
         match query_stmt {
             Statement::Query(query) => Ok(Statement::DeclareCursor(DeclareCursor {
-                cursor_name: ParserContext::canonicalize_object_name(cursor_name),
+                cursor_name: ParserContext::canonicalize_object_name(cursor_name)?,
                 query,
             })),
             _ => error::InvalidSqlSnafu {
@@ -78,7 +78,7 @@ impl ParserContext<'_> {
             .context(error::SyntaxSnafu)?;
 
         Ok(Statement::FetchCursor(FetchCursor {
-            cursor_name: ParserContext::canonicalize_object_name(cursor_name),
+            cursor_name: ParserContext::canonicalize_object_name(cursor_name)?,
             fetch_size,
         }))
     }
@@ -91,7 +91,7 @@ impl ParserContext<'_> {
             .context(error::SyntaxSnafu)?;
 
         Ok(Statement::CloseCursor(CloseCursor {
-            cursor_name: ParserContext::canonicalize_object_name(cursor_name),
+            cursor_name: ParserContext::canonicalize_object_name(cursor_name)?,
         }))
     }
 }

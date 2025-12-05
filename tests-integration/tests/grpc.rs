@@ -14,10 +14,12 @@
 
 use api::v1::alter_table_expr::Kind;
 use api::v1::promql_request::Promql;
+use api::v1::value::ValueData;
 use api::v1::{
     AddColumn, AddColumns, AlterTableExpr, Basic, Column, ColumnDataType, ColumnDef,
     CreateTableExpr, InsertRequest, InsertRequests, PromInstantQuery, PromRangeQuery,
-    PromqlRequest, RequestHeader, SemanticType, column,
+    PromqlRequest, RequestHeader, Row, RowInsertRequest, RowInsertRequests, SemanticType, Value,
+    column,
 };
 use auth::user_provider_from_option;
 use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputData};
@@ -89,6 +91,7 @@ macro_rules! grpc_tests {
                 test_prom_gateway_query,
                 test_grpc_timezone,
                 test_grpc_tls_config,
+                test_grpc_memory_limit,
             );
         )*
     };
@@ -951,10 +954,12 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         Some(TlsMode::Require),
         Some(server_cert_path),
         Some(server_key_path),
+        false,
     );
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
+        max_total_message_memory: 1024 * 1024 * 1024,
         tls,
         max_connection_age: None,
     };
@@ -967,6 +972,7 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         server_ca_cert_path: Some(ca_path),
         client_cert_path: Some(client_cert_path),
         client_key_path: Some(client_key_path),
+        watch: false,
     };
     {
         let grpc_client =
@@ -997,6 +1003,7 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         let config = GrpcServerConfig {
             max_recv_message_size: 1024,
             max_send_message_size: 1024,
+            max_total_message_memory: 1024 * 1024 * 1024,
             tls,
             max_connection_age: None,
         };
@@ -1005,6 +1012,160 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
             GrpcServerBuilder::new(config.clone(), runtime).with_tls_config(config.tls);
         assert!(grpc_builder.is_err());
     }
+
+    let _ = fe_grpc_server.shutdown().await;
+}
+
+pub async fn test_grpc_memory_limit(store_type: StorageType) {
+    let config = GrpcServerConfig {
+        max_recv_message_size: 1024 * 1024,
+        max_send_message_size: 1024 * 1024,
+        max_total_message_memory: 200,
+        tls: Default::default(),
+        max_connection_age: None,
+    };
+    let (_db, fe_grpc_server) =
+        setup_grpc_server_with(store_type, "test_grpc_memory_limit", None, Some(config)).await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+
+    let grpc_client = Client::with_urls([&addr]);
+    let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
+
+    let table_name = "demo";
+
+    let column_schemas = vec![
+        ColumnDef {
+            name: "host".to_string(),
+            data_type: ColumnDataType::String as i32,
+            is_nullable: false,
+            default_constraint: vec![],
+            semantic_type: SemanticType::Tag as i32,
+            comment: String::new(),
+            datatype_extension: None,
+            options: None,
+        },
+        ColumnDef {
+            name: "ts".to_string(),
+            data_type: ColumnDataType::TimestampMillisecond as i32,
+            is_nullable: false,
+            default_constraint: vec![],
+            semantic_type: SemanticType::Timestamp as i32,
+            comment: String::new(),
+            datatype_extension: None,
+            options: None,
+        },
+        ColumnDef {
+            name: "cpu".to_string(),
+            data_type: ColumnDataType::Float64 as i32,
+            is_nullable: true,
+            default_constraint: vec![],
+            semantic_type: SemanticType::Field as i32,
+            comment: String::new(),
+            datatype_extension: None,
+            options: None,
+        },
+    ];
+
+    let expr = CreateTableExpr {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: table_name.to_string(),
+        desc: String::new(),
+        column_defs: column_schemas.clone(),
+        time_index: "ts".to_string(),
+        primary_keys: vec!["host".to_string()],
+        create_if_not_exists: true,
+        table_options: Default::default(),
+        table_id: None,
+        engine: MITO_ENGINE.to_string(),
+    };
+
+    db.create(expr).await.unwrap();
+
+    // Test that small request succeeds
+    let small_row_insert = RowInsertRequest {
+        table_name: table_name.to_owned(),
+        rows: Some(api::v1::Rows {
+            schema: column_schemas
+                .iter()
+                .map(|c| api::v1::ColumnSchema {
+                    column_name: c.name.clone(),
+                    datatype: c.data_type,
+                    semantic_type: c.semantic_type,
+                    datatype_extension: None,
+                    options: None,
+                })
+                .collect(),
+            rows: vec![Row {
+                values: vec![
+                    Value {
+                        value_data: Some(ValueData::StringValue("host1".to_string())),
+                    },
+                    Value {
+                        value_data: Some(ValueData::TimestampMillisecondValue(1000)),
+                    },
+                    Value {
+                        value_data: Some(ValueData::F64Value(1.2)),
+                    },
+                ],
+            }],
+        }),
+    };
+
+    let result = db
+        .row_inserts(RowInsertRequests {
+            inserts: vec![small_row_insert],
+        })
+        .await;
+    assert!(result.is_ok());
+
+    // Test that large request exceeds limit
+    let large_rows: Vec<Row> = (0..100)
+        .map(|i| Row {
+            values: vec![
+                Value {
+                    value_data: Some(ValueData::StringValue(format!("host{}", i))),
+                },
+                Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(1000 + i)),
+                },
+                Value {
+                    value_data: Some(ValueData::F64Value(i as f64 * 1.2)),
+                },
+            ],
+        })
+        .collect();
+
+    let large_row_insert = RowInsertRequest {
+        table_name: table_name.to_owned(),
+        rows: Some(api::v1::Rows {
+            schema: column_schemas
+                .iter()
+                .map(|c| api::v1::ColumnSchema {
+                    column_name: c.name.clone(),
+                    datatype: c.data_type,
+                    semantic_type: c.semantic_type,
+                    datatype_extension: None,
+                    options: None,
+                })
+                .collect(),
+            rows: large_rows,
+        }),
+    };
+
+    let result = db
+        .row_inserts(RowInsertRequests {
+            inserts: vec![large_row_insert],
+        })
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("Too many concurrent"),
+        "Expected memory limit error, got: {}",
+        err_msg
+    );
 
     let _ = fe_grpc_server.shutdown().await;
 }

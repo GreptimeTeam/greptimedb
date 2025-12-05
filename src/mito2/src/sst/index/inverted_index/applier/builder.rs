@@ -27,6 +27,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use index::inverted_index::search::index_apply::PredicatesIndexApplier;
 use index::inverted_index::search::predicate::Predicate;
+use index::target::IndexTarget;
 use mito_codec::index::IndexValueCodec;
 use mito_codec::row_converter::SortField;
 use object_store::ObjectStore;
@@ -139,8 +140,13 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         let predicates = self
             .output
             .iter()
-            .map(|(column_id, predicates)| (column_id.to_string(), predicates.clone()))
-            .collect();
+            .map(|(column_id, predicates)| {
+                (
+                    format!("{}", IndexTarget::ColumnId(*column_id)),
+                    predicates.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
         let applier = PredicatesIndexApplier::try_from(predicates);
 
         Ok(Some(
@@ -344,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_collect_and_basic() {
-        let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_collect_and_basic_");
+        let (_d, factory) = PuffinManagerFactory::new_for_test_block("test_collect_and_basic_");
 
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
@@ -353,7 +359,7 @@ mod tests {
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         let expr = Expr::BinaryExpr(BinaryExpr {

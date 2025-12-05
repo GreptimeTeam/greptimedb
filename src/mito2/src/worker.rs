@@ -21,10 +21,12 @@ mod handle_close;
 mod handle_compaction;
 mod handle_create;
 mod handle_drop;
+mod handle_enter_staging;
 mod handle_flush;
 mod handle_manifest;
 mod handle_open;
 mod handle_rebuild_index;
+mod handle_remap;
 mod handle_truncate;
 mod handle_write;
 
@@ -35,6 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_base::Plugins;
+use common_base::readable_size::ReadableSize;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_runtime::JoinHandle;
@@ -58,15 +61,20 @@ use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
+use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
-use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
+use crate::region::{
+    CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap,
+    RegionMapRef,
+};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderBulkRequest, SenderDdlRequest, SenderWriteRequest,
     WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
+use crate::sst::file::RegionFileId;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::IndexBuildScheduler;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -137,6 +145,8 @@ pub(crate) struct WorkerGroup {
     cache_manager: CacheManagerRef,
     /// File reference manager.
     file_ref_manager: FileReferenceManagerRef,
+    /// Gc limiter to limit concurrent gc jobs.
+    gc_limiter: GcLimiterRef,
 }
 
 impl WorkerGroup {
@@ -195,6 +205,7 @@ impl WorkerGroup {
                 .build(),
         );
         let time_provider = Arc::new(StdTimeProvider);
+        let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -233,6 +244,7 @@ impl WorkerGroup {
             purge_scheduler,
             cache_manager,
             file_ref_manager,
+            gc_limiter,
         })
     }
 
@@ -274,6 +286,11 @@ impl WorkerGroup {
         self.worker(region_id).is_region_opening(region_id)
     }
 
+    /// Returns true if the specific region is catching up.
+    pub(crate) fn is_region_catching_up(&self, region_id: RegionId) -> bool {
+        self.worker(region_id).is_region_catching_up(region_id)
+    }
+
     /// Returns region of specific `region_id`.
     ///
     /// This method should not be public.
@@ -288,6 +305,10 @@ impl WorkerGroup {
 
     pub(crate) fn file_ref_manager(&self) -> FileReferenceManagerRef {
         self.file_ref_manager.clone()
+    }
+
+    pub(crate) fn gc_limiter(&self) -> GcLimiterRef {
+        self.gc_limiter.clone()
     }
 
     /// Get worker for specific `region_id`.
@@ -360,6 +381,7 @@ impl WorkerGroup {
                 .write_cache(write_cache)
                 .build(),
         );
+        let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -397,6 +419,7 @@ impl WorkerGroup {
             purge_scheduler,
             cache_manager,
             file_ref_manager,
+            gc_limiter,
         })
     }
 
@@ -411,7 +434,7 @@ fn region_id_to_index(id: RegionId, num_workers: usize) -> usize {
         % num_workers
 }
 
-async fn write_cache_from_config(
+pub async fn write_cache_from_config(
     config: &MitoConfig,
     puffin_manager_factory: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
@@ -430,8 +453,11 @@ async fn write_cache_from_config(
         &config.write_cache_path,
         config.write_cache_size,
         config.write_cache_ttl,
+        Some(config.index_cache_percent),
         puffin_manager_factory,
         intermediate_manager,
+        // TODO(yingwen): Enable manifest cache after removing read cache.
+        ReadableSize(0),
     )
     .await?;
     Ok(Some(Arc::new(cache)))
@@ -475,6 +501,7 @@ impl<S: LogStore> WorkerStarter<S> {
     fn start(self) -> Result<RegionWorker> {
         let regions = Arc::new(RegionMap::default());
         let opening_regions = Arc::new(OpeningRegions::default());
+        let catchup_regions = Arc::new(CatchupRegions::default());
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
@@ -484,6 +511,7 @@ impl<S: LogStore> WorkerStarter<S> {
             id: self.id,
             config: self.config.clone(),
             regions: regions.clone(),
+            catchup_regions: catchup_regions.clone(),
             dropping_regions: Arc::new(RegionMap::default()),
             opening_regions: opening_regions.clone(),
             sender: sender.clone(),
@@ -497,7 +525,10 @@ impl<S: LogStore> WorkerStarter<S> {
             ),
             purge_scheduler: self.purge_scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
-            index_build_scheduler: IndexBuildScheduler::new(self.index_build_job_pool),
+            index_build_scheduler: IndexBuildScheduler::new(
+                self.index_build_job_pool,
+                self.config.max_background_index_builds,
+            ),
             flush_scheduler: FlushScheduler::new(self.flush_job_pool),
             compaction_scheduler: CompactionScheduler::new(
                 self.compact_job_pool,
@@ -533,6 +564,7 @@ impl<S: LogStore> WorkerStarter<S> {
             id: self.id,
             regions,
             opening_regions,
+            catchup_regions,
             sender,
             handle: Mutex::new(Some(handle)),
             running,
@@ -548,6 +580,8 @@ pub(crate) struct RegionWorker {
     regions: RegionMapRef,
     /// The opening regions.
     opening_regions: OpeningRegionsRef,
+    /// The catching up regions.
+    catchup_regions: CatchupRegionsRef,
     /// Request sender.
     sender: Sender<WorkerRequestWithTime>,
     /// Handle to the worker thread.
@@ -618,6 +652,11 @@ impl RegionWorker {
         self.opening_regions.is_region_exists(region_id)
     }
 
+    /// Returns true if the region is catching up.
+    fn is_region_catching_up(&self, region_id: RegionId) -> bool {
+        self.catchup_regions.is_region_exists(region_id)
+    }
+
     /// Returns region of specific `region_id`.
     fn get_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         self.regions.get_region(region_id)
@@ -627,6 +666,12 @@ impl RegionWorker {
     /// Returns the [OpeningRegionsRef].
     pub(crate) fn opening_regions(&self) -> &OpeningRegionsRef {
         &self.opening_regions
+    }
+
+    #[cfg(test)]
+    /// Returns the [CatchupRegionsRef].
+    pub(crate) fn catchup_regions(&self) -> &CatchupRegionsRef {
+        &self.catchup_regions
     }
 }
 
@@ -725,6 +770,8 @@ struct RegionWorkerLoop<S> {
     dropping_regions: RegionMapRef,
     /// Regions that are opening.
     opening_regions: OpeningRegionsRef,
+    /// Regions that are catching up.
+    catchup_regions: CatchupRegionsRef,
     /// Request sender.
     sender: Sender<WorkerRequestWithTime>,
     /// Request receiver.
@@ -931,9 +978,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::EditRegion(request) => {
                     self.handle_region_edit(request).await;
                 }
-                WorkerRequest::BuildIndexRegion(request) => {
-                    self.handle_rebuild_index(request).await;
-                }
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
@@ -962,6 +1006,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                             .fail(),
                         );
                     }
+                }
+                WorkerRequest::RemapManifests(req) => {
+                    self.handle_remap_manifests_request(req);
                 }
             }
         }
@@ -996,12 +1043,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     continue;
                 }
                 DdlRequest::Flush(req) => {
-                    self.handle_flush_request(ddl.region_id, req, ddl.sender)
-                        .await;
+                    self.handle_flush_request(ddl.region_id, req, ddl.sender);
                     continue;
                 }
                 DdlRequest::Compact(req) => {
                     self.handle_compaction_request(ddl.region_id, req, ddl.sender)
+                        .await;
+                    continue;
+                }
+                DdlRequest::BuildIndex(req) => {
+                    self.handle_build_index_request(ddl.region_id, req, ddl.sender)
                         .await;
                     continue;
                 }
@@ -1010,7 +1061,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await;
                     continue;
                 }
-                DdlRequest::Catchup(req) => self.handle_catchup_request(ddl.region_id, req).await,
+                DdlRequest::Catchup((req, wal_entry_receiver)) => {
+                    self.handle_catchup_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
+                        .await;
+                    continue;
+                }
+                DdlRequest::EnterStaging(req) => {
+                    self.handle_enter_staging_request(
+                        ddl.region_id,
+                        req.partition_expr,
+                        ddl.sender,
+                    )
+                    .await;
+                    continue;
+                }
             };
 
             ddl.sender.send(res);
@@ -1045,6 +1109,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::IndexBuildFinished(req) => {
                 self.handle_index_build_finished(region_id, req).await
             }
+            BackgroundNotify::IndexBuildStopped(req) => {
+                self.handle_index_build_stopped(region_id, req).await
+            }
             BackgroundNotify::IndexBuildFailed(req) => {
                 self.handle_index_build_failed(region_id, req).await
             }
@@ -1056,6 +1123,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::RegionChange(req) => {
                 self.handle_manifest_region_change_result(req).await
             }
+            BackgroundNotify::EnterStaging(req) => self.handle_enter_staging_result(req).await,
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
         }
     }
@@ -1214,6 +1282,34 @@ impl WorkerListener {
             listener
                 .on_notify_region_change_result_begin(_region_id)
                 .await;
+        }
+    }
+
+    pub(crate) async fn on_enter_staging_result_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_enter_staging_result_begin(_region_id).await;
+        }
+    }
+
+    pub(crate) async fn on_index_build_finish(&self, _region_file_id: RegionFileId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_index_build_finish(_region_file_id).await;
+        }
+    }
+
+    pub(crate) async fn on_index_build_begin(&self, _region_file_id: RegionFileId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_index_build_begin(_region_file_id).await;
+        }
+    }
+
+    pub(crate) async fn on_index_build_abort(&self, _region_file_id: RegionFileId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_index_build_abort(_region_file_id).await;
         }
     }
 }

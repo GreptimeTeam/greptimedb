@@ -39,6 +39,7 @@ common-meta.workspace = true
 common-options.workspace = true
 common-procedure.workspace = true
 common-runtime.workspace = true
+common-stat.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-version.workspace = true
@@ -53,6 +54,7 @@ either.workspace = true
 etcd-client.workspace = true
 futures.workspace = true
 h2 = "0.3"
+hostname.workspace = true
 http-body-util = "0.1"
 humantime.workspace = true
 humantime-serde.workspace = true
@@ -60,7 +62,9 @@ hyper-util = { workspace = true, features = ["tokio"] }
 itertools.workspace = true
 lazy_static.workspace = true
 once_cell.workspace = true
+ordered-float.workspace = true
 parking_lot.workspace = true
+partition.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 rand.workspace = true
@@ -70,7 +74,10 @@ serde.workspace = true
 serde_json.workspace = true
 servers.workspace = true
 snafu.workspace = true
-sqlx = { workspace = true, optional = true }
+sqlx = { workspace = true, features = [
+    "mysql",
+    "chrono",
+], optional = true }
 store-api.workspace = true
 strum.workspace = true
 table.workspace = true

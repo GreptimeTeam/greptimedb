@@ -45,7 +45,7 @@ impl MetricEngineInner {
             .metadata_flushed_entry_id()
             .unwrap_or_default();
         let metadata_region_manifest =
-            RegionManifestInfo::mito(metadata_manifest_version, metadata_flushed_entry_id);
+            RegionManifestInfo::mito(metadata_manifest_version, metadata_flushed_entry_id, 0);
         let metadata_synced = self
             .mito
             .sync_region(metadata_region_id, metadata_region_manifest)
@@ -57,7 +57,7 @@ impl MetricEngineInner {
         let data_manifest_version = manifest_info.data_manifest_version();
         let data_flushed_entry_id = manifest_info.data_flushed_entry_id();
         let data_region_manifest =
-            RegionManifestInfo::mito(data_manifest_version, data_flushed_entry_id);
+            RegionManifestInfo::mito(data_manifest_version, data_flushed_entry_id, 0);
 
         let data_synced = self
             .mito
@@ -110,6 +110,7 @@ mod tests {
     use std::collections::HashMap;
 
     use api::v1::SemanticType;
+    use common_query::prelude::greptime_timestamp;
     use common_telemetry::info;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
@@ -243,7 +244,7 @@ mod tests {
             .unwrap();
         assert_eq!(semantic_type, SemanticType::Tag);
         let timestamp_index = metadata_region
-            .column_semantic_type(physical_region_id, logical_region_id, "greptime_timestamp")
+            .column_semantic_type(physical_region_id, logical_region_id, greptime_timestamp())
             .await
             .unwrap()
             .unwrap();

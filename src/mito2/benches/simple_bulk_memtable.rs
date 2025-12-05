@@ -20,12 +20,11 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use mito2::memtable::simple_bulk_memtable::SimpleBulkMemtable;
-use mito2::memtable::{KeyValues, Memtable, MemtableRanges};
+use mito2::memtable::{KeyValues, Memtable, MemtableRanges, RangesOptions};
 use mito2::read;
 use mito2::read::Source;
 use mito2::read::dedup::DedupReader;
 use mito2::read::merge::MergeReaderBuilder;
-use mito2::read::scan_region::PredicateGroup;
 use mito2::region::options::MergeMode;
 use mito2::test_util::column_metadata_to_column_schema;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -126,9 +125,7 @@ fn create_memtable_with_rows(num_batches: usize) -> SimpleBulkMemtable {
 }
 
 async fn flush(mem: &SimpleBulkMemtable) {
-    let MemtableRanges { ranges, .. } = mem
-        .ranges(None, PredicateGroup::default(), None, true)
-        .unwrap();
+    let MemtableRanges { ranges, .. } = mem.ranges(None, RangesOptions::for_flush()).unwrap();
 
     let mut source = if ranges.len() == 1 {
         let only_range = ranges.into_values().next().unwrap();

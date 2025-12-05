@@ -105,6 +105,8 @@ struct ConfigContext {
     mysql_addr: String,
     // for standalone
     postgres_addr: String,
+    // enable flat format for storage engine
+    enable_flat_format: bool,
 }
 
 impl ServerMode {
@@ -328,6 +330,7 @@ impl ServerMode {
             grpc_addr,
             mysql_addr,
             postgres_addr,
+            enable_flat_format: db_ctx.store_config().enable_flat_format,
         };
 
         let rendered = tt.render(self.name(), &ctx).unwrap();

@@ -19,7 +19,7 @@ use greptime_proto::v1::index::InvertedIndexMetas;
 
 use crate::bitmap::Bitmap;
 use crate::inverted_index::error::{IndexNotFoundSnafu, Result};
-use crate::inverted_index::format::reader::InvertedIndexReader;
+use crate::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
 use crate::inverted_index::search::fst_apply::{
     FstApplier, IntersectionFstApplier, KeysFstApplier,
 };
@@ -43,12 +43,14 @@ pub struct PredicatesIndexApplier {
 impl IndexApplier for PredicatesIndexApplier {
     /// Applies all `FstApplier`s to the data in the inverted index reader, intersecting the individual
     /// bitmaps obtained for each index to result in a final set of indices.
-    async fn apply<'a>(
+    async fn apply<'a, 'b>(
         &self,
         context: SearchContext,
         reader: &mut (dyn InvertedIndexReader + 'a),
+        metrics: Option<&'b mut InvertedIndexReadMetrics>,
     ) -> Result<ApplyOutput> {
-        let metadata = reader.metadata().await?;
+        let mut metrics = metrics;
+        let metadata = reader.metadata(metrics.as_deref_mut()).await?;
         let mut output = ApplyOutput {
             matched_segment_ids: Bitmap::new_bitvec(),
             total_row_count: metadata.total_row_count as _,
@@ -84,7 +86,7 @@ impl IndexApplier for PredicatesIndexApplier {
             return Ok(output);
         }
 
-        let fsts = reader.fst_vec(&fst_ranges).await?;
+        let fsts = reader.fst_vec(&fst_ranges, metrics.as_deref_mut()).await?;
         let value_and_meta_vec = fsts
             .into_iter()
             .zip(appliers)
@@ -92,7 +94,7 @@ impl IndexApplier for PredicatesIndexApplier {
             .collect::<Vec<_>>();
 
         let mut mapper = ParallelFstValuesMapper::new(reader);
-        let mut bm_vec = mapper.map_values_vec(&value_and_meta_vec).await?;
+        let mut bm_vec = mapper.map_values_vec(&value_and_meta_vec, metrics).await?;
 
         let mut bitmap = bm_vec.pop().unwrap(); // SAFETY: `fst_ranges` is not empty
         for bm in bm_vec {
@@ -221,26 +223,28 @@ mod tests {
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas([("tag-0", 0)])));
-        mock_reader.expect_fst_vec().returning(|_ranges| {
+            .returning(|_| Ok(mock_metas([("tag-0", 0)])));
+        mock_reader.expect_fst_vec().returning(|_ranges, _metrics| {
             Ok(vec![
                 FstMap::from_iter([(b"tag-0_value-0", fst_value(2, 1))]).unwrap(),
             ])
         });
 
-        mock_reader.expect_bitmap_deque().returning(|arg| {
-            assert_eq!(arg.len(), 1);
-            let range = &arg[0].0;
-            let bitmap_type = arg[0].1;
-            assert_eq!(*range, 2..3);
-            assert_eq!(bitmap_type, BitmapType::Roaring);
-            Ok(VecDeque::from([Bitmap::from_lsb0_bytes(
-                &[0b10101010],
-                bitmap_type,
-            )]))
-        });
+        mock_reader
+            .expect_bitmap_deque()
+            .returning(|arg, _metrics| {
+                assert_eq!(arg.len(), 1);
+                let range = &arg[0].0;
+                let bitmap_type = arg[0].1;
+                assert_eq!(*range, 2..3);
+                assert_eq!(bitmap_type, BitmapType::Roaring);
+                Ok(VecDeque::from([Bitmap::from_lsb0_bytes(
+                    &[0b10101010],
+                    bitmap_type,
+                )]))
+            });
         let output = applier
-            .apply(SearchContext::default(), &mut mock_reader)
+            .apply(SearchContext::default(), &mut mock_reader, None)
             .await
             .unwrap();
         assert_eq!(
@@ -252,14 +256,14 @@ mod tests {
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas([("tag-0", 0)])));
-        mock_reader.expect_fst_vec().returning(|_range| {
+            .returning(|_| Ok(mock_metas([("tag-0", 0)])));
+        mock_reader.expect_fst_vec().returning(|_range, _metrics| {
             Ok(vec![
                 FstMap::from_iter([(b"tag-0_value-1", fst_value(2, 1))]).unwrap(),
             ])
         });
         let output = applier
-            .apply(SearchContext::default(), &mut mock_reader)
+            .apply(SearchContext::default(), &mut mock_reader, None)
             .await
             .unwrap();
         assert_eq!(output.matched_segment_ids.count_ones(), 0);
@@ -279,8 +283,8 @@ mod tests {
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas([("tag-0", 0), ("tag-1", 1)])));
-        mock_reader.expect_fst_vec().returning(|ranges| {
+            .returning(|_| Ok(mock_metas([("tag-0", 0), ("tag-1", 1)])));
+        mock_reader.expect_fst_vec().returning(|ranges, _metrics| {
             let mut output = vec![];
             for range in ranges {
                 match range.start {
@@ -293,27 +297,29 @@ mod tests {
             }
             Ok(output)
         });
-        mock_reader.expect_bitmap_deque().returning(|ranges| {
-            let mut output = VecDeque::new();
-            for (range, bitmap_type) in ranges {
-                let offset = range.start;
-                let size = range.end - range.start;
-                match (offset, size, bitmap_type) {
-                    (1, 1, BitmapType::Roaring) => {
-                        output.push_back(Bitmap::from_lsb0_bytes(&[0b10101010], *bitmap_type))
+        mock_reader
+            .expect_bitmap_deque()
+            .returning(|ranges, _metrics| {
+                let mut output = VecDeque::new();
+                for (range, bitmap_type) in ranges {
+                    let offset = range.start;
+                    let size = range.end - range.start;
+                    match (offset, size, bitmap_type) {
+                        (1, 1, BitmapType::Roaring) => {
+                            output.push_back(Bitmap::from_lsb0_bytes(&[0b10101010], *bitmap_type))
+                        }
+                        (2, 1, BitmapType::Roaring) => {
+                            output.push_back(Bitmap::from_lsb0_bytes(&[0b11011011], *bitmap_type))
+                        }
+                        _ => unreachable!(),
                     }
-                    (2, 1, BitmapType::Roaring) => {
-                        output.push_back(Bitmap::from_lsb0_bytes(&[0b11011011], *bitmap_type))
-                    }
-                    _ => unreachable!(),
                 }
-            }
 
-            Ok(output)
-        });
+                Ok(output)
+            });
 
         let output = applier
-            .apply(SearchContext::default(), &mut mock_reader)
+            .apply(SearchContext::default(), &mut mock_reader, None)
             .await
             .unwrap();
         assert_eq!(
@@ -331,10 +337,10 @@ mod tests {
         let mut mock_reader: MockInvertedIndexReader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas([("tag-0", 0)])));
+            .returning(|_| Ok(mock_metas([("tag-0", 0)])));
 
         let output = applier
-            .apply(SearchContext::default(), &mut mock_reader)
+            .apply(SearchContext::default(), &mut mock_reader, None)
             .await
             .unwrap();
         assert_eq!(output.matched_segment_ids, Bitmap::full_bitvec(8)); // full range to scan
@@ -343,7 +349,7 @@ mod tests {
     #[tokio::test]
     async fn test_index_applier_with_empty_index() {
         let mut mock_reader = MockInvertedIndexReader::new();
-        mock_reader.expect_metadata().returning(move || {
+        mock_reader.expect_metadata().returning(move |_| {
             Ok(Arc::new(InvertedIndexMetas {
                 total_row_count: 0, // No rows
                 segment_row_count: 1,
@@ -359,7 +365,7 @@ mod tests {
         };
 
         let output = applier
-            .apply(SearchContext::default(), &mut mock_reader)
+            .apply(SearchContext::default(), &mut mock_reader, None)
             .await
             .unwrap();
         assert!(output.matched_segment_ids.is_empty());
@@ -370,7 +376,7 @@ mod tests {
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas(vec![])));
+            .returning(|_| Ok(mock_metas(vec![])));
 
         let mut mock_fst_applier = MockFstApplier::new();
         mock_fst_applier.expect_apply().never();
@@ -385,6 +391,7 @@ mod tests {
                     index_not_found_strategy: IndexNotFoundStrategy::ThrowError,
                 },
                 &mut mock_reader,
+                None,
             )
             .await;
         assert!(matches!(result, Err(Error::IndexNotFound { .. })));
@@ -395,6 +402,7 @@ mod tests {
                     index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
                 },
                 &mut mock_reader,
+                None,
             )
             .await
             .unwrap();
@@ -406,6 +414,7 @@ mod tests {
                     index_not_found_strategy: IndexNotFoundStrategy::Ignore,
                 },
                 &mut mock_reader,
+                None,
             )
             .await
             .unwrap();

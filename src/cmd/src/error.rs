@@ -99,13 +99,6 @@ pub enum Error {
         source: flow::Error,
     },
 
-    #[snafu(display("Servers error"))]
-    Servers {
-        #[snafu(implicit)]
-        location: Location,
-        source: servers::error::Error,
-    },
-
     #[snafu(display("Failed to start frontend"))]
     StartFrontend {
         #[snafu(implicit)]
@@ -316,6 +309,13 @@ pub enum Error {
         location: Location,
         source: standalone::error::Error,
     },
+
+    #[snafu(display("Invalid WAL provider"))]
+    InvalidWalProvider {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_wal::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -329,7 +329,6 @@ impl ErrorExt for Error {
             Error::ShutdownFrontend { source, .. } => source.status_code(),
             Error::StartMetaServer { source, .. } => source.status_code(),
             Error::ShutdownMetaServer { source, .. } => source.status_code(),
-            Error::Servers { source, .. } => source.status_code(),
             Error::BuildMetaServer { source, .. } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
             Error::BuildCli { source, .. } => source.status_code(),
@@ -373,6 +372,7 @@ impl ErrorExt for Error {
             }
             Error::MetaClientInit { source, .. } => source.status_code(),
             Error::SchemaNotFound { .. } => StatusCode::DatabaseNotFound,
+            Error::InvalidWalProvider { .. } => StatusCode::InvalidArguments,
         }
     }
 

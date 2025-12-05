@@ -23,7 +23,7 @@ use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole
 use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{EmptyRecordBatchStream, MemoryPermit, SendableRecordBatchStream};
 use common_time::Timestamp;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType};
@@ -34,7 +34,9 @@ use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
-use crate::region_request::{BatchRegionDdlRequest, RegionOpenRequest, RegionRequest};
+use crate::region_request::{
+    BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+};
 use crate::storage::{RegionId, ScanRequest, SequenceNumber};
 
 /// The settable region role state.
@@ -202,7 +204,7 @@ impl From<PbGrantedRegion> for GrantedRegion {
 
 /// The role of the region.
 /// TODO(weny): rename it to `RegionRoleState`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RegionRole {
     // Readonly region(mito2)
     Follower,
@@ -419,6 +421,8 @@ pub struct QueryScanContext {
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
 /// You can use this trait to implement an [`ExecutionPlan`](datafusion_physical_plan::ExecutionPlan).
 pub trait RegionScanner: Debug + DisplayAs + Send {
+    fn name(&self) -> &str;
+
     /// Returns the properties of the scanner.
     fn properties(&self) -> &ScannerProperties;
 
@@ -444,8 +448,8 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
 
-    /// Check if there is any predicate that may be executed in this scanner.
-    fn has_predicate(&self) -> bool;
+    /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
+    fn has_predicate_without_region(&self) -> bool;
 
     /// Sets whether the scanner is reading a logical region.
     fn set_logical_region(&mut self, logical_region: bool);
@@ -495,6 +499,8 @@ pub enum RegionManifestInfo {
     Mito {
         manifest_version: u64,
         flushed_entry_id: u64,
+        /// Number of files removed in the manifest's `removed_files` field.
+        file_removed_cnt: u64,
     },
     Metric {
         data_manifest_version: u64,
@@ -506,10 +512,11 @@ pub enum RegionManifestInfo {
 
 impl RegionManifestInfo {
     /// Creates a new [RegionManifestInfo] for mito2 engine.
-    pub fn mito(manifest_version: u64, flushed_entry_id: u64) -> Self {
+    pub fn mito(manifest_version: u64, flushed_entry_id: u64, file_removal_rate: u64) -> Self {
         Self::Mito {
             manifest_version,
             flushed_entry_id,
+            file_removed_cnt: file_removal_rate,
         }
     }
 
@@ -602,6 +609,7 @@ impl Default for RegionManifestInfo {
         Self::Mito {
             manifest_version: 0,
             flushed_entry_id: 0,
+            file_removed_cnt: 0,
         }
     }
 }
@@ -685,6 +693,26 @@ impl SyncManifestResponse {
     }
 }
 
+/// Request to remap manifests from old regions to new regions.
+#[derive(Debug, Clone)]
+pub struct RemapManifestsRequest {
+    /// The [`RegionId`] of a staging region used to obtain table directory and storage configuration for the remap operation.
+    pub region_id: RegionId,
+    /// Regions to remap manifests from.
+    pub input_regions: Vec<RegionId>,
+    /// For each old region, which new regions should receive its files
+    pub region_mapping: HashMap<RegionId, Vec<RegionId>>,
+    /// New partition expressions for the new regions.
+    pub new_partition_exprs: HashMap<RegionId, String>,
+}
+
+/// Response to remap manifests from old regions to new regions.
+#[derive(Debug, Clone)]
+pub struct RemapManifestsResponse {
+    /// The new manifests for the new regions.
+    pub new_manifests: HashMap<RegionId, String>,
+}
+
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
     /// Name of this engine
@@ -707,6 +735,30 @@ pub trait RegionEngine: Send + Sync {
                 let _permit = semaphore_moved.acquire().await.unwrap();
                 let result = self
                     .handle_request(region_id, RegionRequest::Open(request))
+                    .await;
+                (region_id, result)
+            });
+        }
+
+        Ok(join_all(tasks).await)
+    }
+
+    async fn handle_batch_catchup_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<BatchResponses, BoxedError> {
+        let semaphore = Arc::new(Semaphore::new(parallelism));
+        let mut tasks = Vec::with_capacity(requests.len());
+
+        for (region_id, request) in requests {
+            let semaphore_moved = semaphore.clone();
+
+            tasks.push(async move {
+                // Safety: semaphore must exist
+                let _permit = semaphore_moved.acquire().await.unwrap();
+                let result = self
+                    .handle_request(region_id, RegionRequest::Catchup(request))
                     .await;
                 (region_id, result)
             });
@@ -757,6 +809,11 @@ pub trait RegionEngine: Send + Sync {
         request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError>;
 
+    /// Registers and returns a query memory permit.
+    fn register_query_memory_permit(&self) -> Option<Arc<MemoryPermit>> {
+        None
+    }
+
     /// Retrieves region's metadata.
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError>;
 
@@ -779,6 +836,12 @@ pub trait RegionEngine: Send + Sync {
         region_id: RegionId,
         manifest_info: RegionManifestInfo,
     ) -> Result<SyncManifestResponse, BoxedError>;
+
+    /// Remaps manifests from old regions to new regions.
+    async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse, BoxedError>;
 
     /// Sets region role state gracefully.
     ///
@@ -831,6 +894,10 @@ impl Debug for SinglePartitionScanner {
 }
 
 impl RegionScanner for SinglePartitionScanner {
+    fn name(&self) -> &str {
+        "SinglePartition"
+    }
+
     fn properties(&self) -> &ScannerProperties {
         &self.properties
     }
@@ -857,7 +924,7 @@ impl RegionScanner for SinglePartitionScanner {
         Ok(result.unwrap())
     }
 
-    fn has_predicate(&self) -> bool {
+    fn has_predicate_without_region(&self) -> bool {
         false
     }
 

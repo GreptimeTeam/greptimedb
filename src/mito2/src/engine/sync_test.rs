@@ -71,9 +71,19 @@ async fn scan_check(
 
 #[tokio::test]
 async fn test_sync_after_flush_region() {
+    test_sync_after_flush_region_with_format(false).await;
+    test_sync_after_flush_region_with_format(true).await;
+}
+
+async fn test_sync_after_flush_region_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
     let region_id = RegionId::new(1, 1);
     env.get_schema_metadata_manager()
         .register_region_table_info(
@@ -100,7 +110,12 @@ async fn test_sync_after_flush_region() {
     put_rows(&engine, region_id, rows).await;
 
     // Open the region on the follower engine
-    let follower_engine = env.create_follower_engine(MitoConfig::default()).await;
+    let follower_engine = env
+        .create_follower_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
     follower_engine
         .handle_request(
             region_id,
@@ -136,7 +151,7 @@ async fn test_sync_after_flush_region() {
     scan_check(&follower_engine, region_id, expected, 0, 0).await;
 
     // Returns error since the max manifest is 1
-    let manifest_info = RegionManifestInfo::mito(2, 0);
+    let manifest_info = RegionManifestInfo::mito(2, 0, 0);
     let err = follower_engine
         .sync_region(region_id, manifest_info)
         .await
@@ -144,7 +159,7 @@ async fn test_sync_after_flush_region() {
     let err = err.as_any().downcast_ref::<Error>().unwrap();
     assert_matches!(err, Error::InstallManifestTo { .. });
 
-    let manifest_info = RegionManifestInfo::mito(1, 0);
+    let manifest_info = RegionManifestInfo::mito(1, 0, 0);
     follower_engine
         .sync_region(region_id, manifest_info)
         .await
@@ -164,10 +179,20 @@ async fn test_sync_after_flush_region() {
 
 #[tokio::test]
 async fn test_sync_after_alter_region() {
+    test_sync_after_alter_region_with_format(false).await;
+    test_sync_after_alter_region_with_format(true).await;
+}
+
+async fn test_sync_after_alter_region_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -197,7 +222,12 @@ async fn test_sync_after_alter_region() {
     put_rows(&engine, region_id, rows).await;
 
     // Open the region on the follower engine
-    let follower_engine = env.create_follower_engine(MitoConfig::default()).await;
+    let follower_engine = env
+        .create_follower_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
     follower_engine
         .handle_request(
             region_id,
@@ -234,7 +264,7 @@ async fn test_sync_after_alter_region() {
     scan_check(&follower_engine, region_id, expected, 0, 0).await;
 
     // Sync the region from the leader engine to the follower engine
-    let manifest_info = RegionManifestInfo::mito(2, 0);
+    let manifest_info = RegionManifestInfo::mito(2, 0, 0);
     follower_engine
         .sync_region(region_id, manifest_info)
         .await

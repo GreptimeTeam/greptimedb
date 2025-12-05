@@ -14,15 +14,15 @@
 
 use std::str::FromStr;
 
-use snafu::ResultExt;
-use sqlparser::ast::{Ident, ObjectNamePart, Query, Value};
+use snafu::{OptionExt, ResultExt};
+use sqlparser::ast::{Ident, Query, Value};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError, ParserOptions};
 use sqlparser::tokenizer::{Token, TokenWithSpan};
 
 use crate::ast::{Expr, ObjectName};
-use crate::error::{self, Result, SyntaxSnafu};
+use crate::error::{self, InvalidSqlSnafu, Result, SyntaxSnafu};
 use crate::parsers::tql_parser;
 use crate::statements::kill::Kill;
 use crate::statements::statement::Statement;
@@ -106,7 +106,7 @@ impl ParserContext<'_> {
                     expected: "a table name",
                     actual: self.parser.peek_token().to_string(),
                 })?;
-        Ok(Self::canonicalize_object_name(raw_table_name))
+        Self::canonicalize_object_name(raw_table_name)
     }
 
     pub fn parse_function(sql: &str, dialect: &dyn Dialect) -> Result<Expr> {
@@ -305,17 +305,20 @@ impl ParserContext<'_> {
     }
 
     /// Like [canonicalize_identifier] but for [ObjectName].
-    pub fn canonicalize_object_name(object_name: ObjectName) -> ObjectName {
+    pub(crate) fn canonicalize_object_name(object_name: ObjectName) -> Result<ObjectName> {
         object_name
             .0
             .into_iter()
             .map(|x| {
-                let ObjectNamePart::Identifier(ident) = x;
-                ident
+                x.as_ident()
+                    .cloned()
+                    .map(Self::canonicalize_identifier)
+                    .with_context(|| InvalidSqlSnafu {
+                        msg: format!("not an ident: '{x}'"),
+                    })
             })
-            .map(Self::canonicalize_identifier)
-            .collect::<Vec<_>>()
-            .into()
+            .collect::<Result<Vec<_>>>()
+            .map(Into::into)
     }
 
     /// Simply a shortcut for sqlparser's same name method `parse_object_name`,
@@ -352,7 +355,8 @@ mod tests {
                 let ts_col = columns.first().unwrap();
                 assert_eq!(
                     expected_type,
-                    sql_data_type_to_concrete_data_type(ts_col.data_type()).unwrap()
+                    sql_data_type_to_concrete_data_type(ts_col.data_type(), &Default::default())
+                        .unwrap()
                 );
             }
             _ => unreachable!(),

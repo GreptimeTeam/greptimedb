@@ -51,6 +51,7 @@ where
         // Writes dropping marker
         // We rarely drop a region so we still operate in the worker loop.
         let region_dir = region.access_layer.build_region_dir(region_id);
+        let table_dir = region.access_layer.table_dir().to_string();
         let marker_path = join_path(&region_dir, DROPPING_MARKER_FILE);
         region
             .access_layer
@@ -83,11 +84,13 @@ where
         self.flush_scheduler.on_region_dropped(region_id);
         // Notifies compaction scheduler.
         self.compaction_scheduler.on_region_dropped(region_id);
+        // notifies index build scheduler.
+        self.index_build_scheduler
+            .on_region_dropped(region_id)
+            .await;
 
         // Marks region version as dropped
-        region
-            .version_control
-            .mark_dropped(&region.memtable_builder);
+        region.version_control.mark_dropped();
         info!(
             "Region {} is dropped logically, but some files are not deleted yet",
             region_id
@@ -100,13 +103,14 @@ where
         let dropping_regions = self.dropping_regions.clone();
         let listener = self.listener.clone();
         let intm_manager = self.intermediate_manager.clone();
+        let cache_manager = self.cache_manager.clone();
         common_runtime::spawn_global(async move {
             let gc_duration = listener
                 .on_later_drop_begin(region_id)
                 .unwrap_or(Duration::from_secs(GC_TASK_INTERVAL_SEC));
             let removed = later_drop_task(
                 region_id,
-                region_dir,
+                region_dir.clone(),
                 object_store,
                 dropping_regions,
                 gc_duration,
@@ -115,6 +119,16 @@ where
             if let Err(err) = intm_manager.prune_region_dir(&region_id).await {
                 warn!(err; "Failed to prune intermediate region directory, region_id: {}", region_id);
             }
+
+            // Clean manifest cache for the region
+            if let Some(write_cache) = cache_manager.write_cache()
+                && let Some(manifest_cache) = write_cache.manifest_cache()
+            {
+                // We pass the table dir so we can remove the table dir in manifest cache
+                // when the last region in the same host is dropped.
+                manifest_cache.clean_manifests(&table_dir).await;
+            }
+
             listener.on_later_drop_end(region_id, removed);
         });
 

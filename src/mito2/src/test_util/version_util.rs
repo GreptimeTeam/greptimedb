@@ -102,9 +102,12 @@ impl VersionControlBuilder {
                 level: 0,
                 file_size: 0, // We don't care file size.
                 available_indexes: Default::default(),
+                indexes: Default::default(),
                 index_file_size: 0,
+                index_file_id: None,
                 num_rows: 0,
                 num_row_groups: 0,
+                num_series: 0,
                 sequence: NonZeroU64::new(start_ms as u64),
                 partition_expr: match &self.metadata.partition_expr {
                     Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
@@ -190,9 +193,12 @@ pub(crate) fn apply_edit(
                 level: 0,
                 file_size: 0, // We don't care file size.
                 available_indexes: Default::default(),
+                indexes: Default::default(),
                 index_file_size: 0,
+                index_file_id: None,
                 num_rows: 0,
                 num_row_groups: 0,
+                num_series: 0,
                 sequence: NonZeroU64::new(*start_ms as u64),
                 partition_expr: match &version_control.current().version.metadata.partition_expr {
                     Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)

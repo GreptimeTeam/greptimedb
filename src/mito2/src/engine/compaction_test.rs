@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use api::v1::{ColumnSchema, Rows};
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
-use datatypes::prelude::ScalarVector;
-use datatypes::vectors::TimestampMillisecondVector;
+use datatypes::arrow::array::AsArray;
+use datatypes::arrow::datatypes::TimestampMillisecondType;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::AlterKind::SetRegionOptions;
 use store_api::region_request::{
@@ -37,7 +37,7 @@ use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows_for_key, column_metadata_to_column_schema, put_rows,
 };
 
-async fn put_and_flush(
+pub(crate) async fn put_and_flush(
     engine: &MitoEngine,
     region_id: RegionId,
     column_schemas: &[ColumnSchema],
@@ -74,7 +74,7 @@ async fn flush(engine: &MitoEngine, region_id: RegionId) {
     assert_eq!(0, result.affected_rows);
 }
 
-async fn compact(engine: &MitoEngine, region_id: RegionId) {
+pub(crate) async fn compact(engine: &MitoEngine, region_id: RegionId) {
     let result = engine
         .handle_request(
             region_id,
@@ -85,7 +85,7 @@ async fn compact(engine: &MitoEngine, region_id: RegionId) {
     assert_eq!(result.affected_rows, 0);
 }
 
-async fn delete_and_flush(
+pub(crate) async fn delete_and_flush(
     engine: &MitoEngine,
     region_id: RegionId,
     column_schemas: &[ColumnSchema],
@@ -100,7 +100,7 @@ async fn delete_and_flush(
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Delete(RegionDeleteRequest { rows }),
+            RegionRequest::Delete(RegionDeleteRequest { rows, hint: None }),
         )
         .await
         .unwrap();
@@ -125,19 +125,27 @@ async fn collect_stream_ts(stream: SendableRecordBatchStream) -> Vec<i64> {
         let ts_col = batch
             .column_by_name("ts")
             .unwrap()
-            .as_any()
-            .downcast_ref::<TimestampMillisecondVector>()
-            .unwrap();
-        res.extend(ts_col.iter_data().map(|t| t.unwrap().0.value()));
+            .as_primitive::<TimestampMillisecondType>();
+        res.extend((0..ts_col.len()).map(|i| ts_col.value(i)));
     }
     res
 }
 
 #[tokio::test]
 async fn test_compaction_region() {
+    test_compaction_region_with_format(false).await;
+    test_compaction_region_with_format(true).await;
+}
+
+async fn test_compaction_region_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     env.get_schema_metadata_manager()
@@ -201,9 +209,19 @@ async fn test_compaction_region() {
 
 #[tokio::test]
 async fn test_infer_compaction_time_window() {
+    test_infer_compaction_time_window_with_format(false).await;
+    test_infer_compaction_time_window_with_format(true).await;
+}
+
+async fn test_infer_compaction_time_window_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     env.get_schema_metadata_manager()
@@ -342,9 +360,19 @@ async fn test_infer_compaction_time_window() {
 
 #[tokio::test]
 async fn test_compaction_overlapping_files() {
+    test_compaction_overlapping_files_with_format(false).await;
+    test_compaction_overlapping_files_with_format(true).await;
+}
+
+async fn test_compaction_overlapping_files_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     env.get_schema_metadata_manager()
@@ -403,9 +431,19 @@ async fn test_compaction_overlapping_files() {
 
 #[tokio::test]
 async fn test_compaction_region_with_overlapping() {
+    test_compaction_region_with_overlapping_with_format(false).await;
+    test_compaction_region_with_overlapping_with_format(true).await;
+}
+
+async fn test_compaction_region_with_overlapping_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
     let region_id = RegionId::new(1, 1);
 
     env.get_schema_metadata_manager()
@@ -451,9 +489,19 @@ async fn test_compaction_region_with_overlapping() {
 
 #[tokio::test]
 async fn test_compaction_region_with_overlapping_delete_all() {
+    test_compaction_region_with_overlapping_delete_all_with_format(false).await;
+    test_compaction_region_with_overlapping_delete_all_with_format(true).await;
+}
+
+async fn test_compaction_region_with_overlapping_delete_all_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
 
@@ -507,12 +555,18 @@ async fn test_compaction_region_with_overlapping_delete_all() {
 // For issue https://github.com/GreptimeTeam/greptimedb/issues/3633
 #[tokio::test]
 async fn test_readonly_during_compaction() {
+    test_readonly_during_compaction_with_format(false).await;
+    test_readonly_during_compaction_with_format(true).await;
+}
+
+async fn test_readonly_during_compaction_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let listener = Arc::new(CompactionListener::default());
     let engine = env
         .create_engine_with(
             MitoConfig {
+                default_experimental_flat_format: flat_format,
                 // Ensure there is only one background worker for purge task.
                 max_background_purges: 1,
                 ..Default::default()
@@ -592,9 +646,19 @@ async fn test_readonly_during_compaction() {
 
 #[tokio::test]
 async fn test_compaction_update_time_window() {
+    test_compaction_update_time_window_with_format(false).await;
+    test_compaction_update_time_window_with_format(true).await;
+}
+
+async fn test_compaction_update_time_window_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
 
@@ -688,9 +752,19 @@ async fn test_compaction_update_time_window() {
 
 #[tokio::test]
 async fn test_change_region_compaction_window() {
+    test_change_region_compaction_window_with_format(false).await;
+    test_change_region_compaction_window_with_format(true).await;
+}
+
+async fn test_change_region_compaction_window_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
 
@@ -785,7 +859,15 @@ async fn test_change_region_compaction_window() {
     }
 
     // Reopen region.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     engine
         .handle_request(
             region_id,
@@ -815,9 +897,19 @@ async fn test_change_region_compaction_window() {
 
 #[tokio::test]
 async fn test_open_overwrite_compaction_window() {
+    test_open_overwrite_compaction_window_with_format(false).await;
+    test_open_overwrite_compaction_window_with_format(true).await;
+}
+
+async fn test_open_overwrite_compaction_window_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
 
@@ -869,7 +961,15 @@ async fn test_open_overwrite_compaction_window() {
         ("compaction.type".to_string(), "twcs".to_string()),
         ("compaction.twcs.time_window".to_string(), "2h".to_string()),
     ]);
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     engine
         .handle_request(
             region_id,

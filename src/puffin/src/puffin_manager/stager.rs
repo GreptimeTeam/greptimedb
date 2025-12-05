@@ -23,7 +23,7 @@ use futures::AsyncWrite;
 use futures::future::BoxFuture;
 
 use crate::error::Result;
-use crate::puffin_manager::{BlobGuard, DirGuard};
+use crate::puffin_manager::{BlobGuard, DirGuard, DirMetrics};
 
 pub type BoxWriter = Box<dyn AsyncWrite + Unpin + Send>;
 
@@ -72,14 +72,15 @@ pub trait Stager: Send + Sync {
 
     /// Retrieves a directory, initializing it if necessary using the provided `init_fn`.
     ///
-    /// The returned `DirGuard` is used to access the directory in the filesystem.
+    /// The returned tuple contains the `DirGuard` and `DirMetrics`.
+    /// The `DirGuard` is used to access the directory in the filesystem.
     /// The caller is responsible for holding the `DirGuard` until they are done with the directory.
     async fn get_dir<'a>(
         &self,
         handle: &Self::FileHandle,
         key: &str,
         init_fn: Box<dyn InitDirFn + Send + Sync + 'a>,
-    ) -> Result<Self::Dir>;
+    ) -> Result<(Self::Dir, DirMetrics)>;
 
     /// Stores a directory in the staging area.
     async fn put_dir(

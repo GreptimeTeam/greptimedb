@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use common_telemetry::debug;
 use datafusion::arrow::array::{Array, ArrayRef, Int64Array, TimestampMillisecondArray};
 use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::{Field, SchemaRef};
@@ -43,7 +44,9 @@ use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::{METRIC_NUM_SERIES, Millisecond};
+use crate::extension_plan::{
+    METRIC_NUM_SERIES, Millisecond, resolve_column_name, serialize_column_index,
+};
 use crate::metrics::PROMQL_SERIES_COUNT;
 use crate::range_array::RangeArray;
 
@@ -62,11 +65,17 @@ pub struct RangeManipulate {
     end: Millisecond,
     interval: Millisecond,
     range: Millisecond,
-
     time_index: String,
     field_columns: Vec<String>,
     input: LogicalPlan,
     output_schema: DFSchemaRef,
+    unfix: Option<UnfixIndices>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct UnfixIndices {
+    pub time_index_idx: u64,
+    pub tag_column_indices: Vec<u64>,
 }
 
 impl RangeManipulate {
@@ -90,6 +99,7 @@ impl RangeManipulate {
             field_columns,
             input,
             output_schema,
+            unfix: None,
         })
     }
 
@@ -157,7 +167,7 @@ impl RangeManipulate {
     }
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-        let output_schema: SchemaRef = SchemaRef::new(self.output_schema.as_ref().into());
+        let output_schema: SchemaRef = self.output_schema.inner().clone();
         let properties = exec_input.properties();
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
@@ -181,13 +191,22 @@ impl RangeManipulate {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
+        let time_index_idx = serialize_column_index(self.input.schema(), &self.time_index);
+
+        let tag_column_indices = self
+            .field_columns
+            .iter()
+            .map(|name| serialize_column_index(self.input.schema(), name))
+            .collect::<Vec<u64>>();
+
         pb::RangeManipulate {
             start: self.start,
             end: self.end,
             interval: self.interval,
             range: self.range,
-            time_index: self.time_index.clone(),
-            tag_columns: self.field_columns.clone(),
+            time_index_idx,
+            tag_column_indices,
+            ..Default::default()
         }
         .encode_to_vec()
     }
@@ -200,6 +219,12 @@ impl RangeManipulate {
             schema: empty_schema.clone(),
         });
 
+        let unfix = UnfixIndices {
+            time_index_idx: pb_range_manipulate.time_index_idx,
+            tag_column_indices: pb_range_manipulate.tag_column_indices.clone(),
+        };
+        debug!("RangeManipulate deserialize unfix: {:?}", unfix);
+
         // Unlike `Self::new()`, this method doesn't check the input schema as it will fail
         // because the input schema is empty.
         // But this is Ok since datafusion guarantees to call `with_exprs_and_inputs` for the
@@ -209,10 +234,11 @@ impl RangeManipulate {
             end: pb_range_manipulate.end,
             interval: pb_range_manipulate.interval,
             range: pb_range_manipulate.range,
-            time_index: pb_range_manipulate.time_index,
-            field_columns: pb_range_manipulate.tag_columns,
+            time_index: String::new(),
+            field_columns: Vec::new(),
             input: placeholder_plan,
             output_schema: empty_schema,
+            unfix: Some(unfix),
         })
     }
 }
@@ -286,19 +312,52 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
 
         let input: LogicalPlan = inputs.pop().unwrap();
         let input_schema = input.schema();
-        let output_schema =
-            Self::calculate_output_schema(input_schema, &self.time_index, &self.field_columns)?;
 
-        Ok(Self {
-            start: self.start,
-            end: self.end,
-            interval: self.interval,
-            range: self.range,
-            time_index: self.time_index.clone(),
-            field_columns: self.field_columns.clone(),
-            input,
-            output_schema,
-        })
+        if let Some(unfix) = &self.unfix {
+            // transform indices to names
+            let time_index = resolve_column_name(
+                unfix.time_index_idx,
+                input_schema,
+                "RangeManipulate",
+                "time index",
+            )?;
+
+            let field_columns = unfix
+                .tag_column_indices
+                .iter()
+                .map(|idx| resolve_column_name(*idx, input_schema, "RangeManipulate", "tag"))
+                .collect::<DataFusionResult<Vec<String>>>()?;
+
+            let output_schema =
+                Self::calculate_output_schema(input_schema, &time_index, &field_columns)?;
+
+            Ok(Self {
+                start: self.start,
+                end: self.end,
+                interval: self.interval,
+                range: self.range,
+                time_index,
+                field_columns,
+                input,
+                output_schema,
+                unfix: None,
+            })
+        } else {
+            let output_schema =
+                Self::calculate_output_schema(input_schema, &self.time_index, &self.field_columns)?;
+
+            Ok(Self {
+                start: self.start,
+                end: self.end,
+                interval: self.interval,
+                range: self.range,
+                time_index: self.time_index.clone(),
+                field_columns: self.field_columns.clone(),
+                input,
+                output_schema,
+                unfix: None,
+            })
+        }
     }
 }
 
@@ -732,8 +791,8 @@ mod test {
                 &field_columns,
             )
             .unwrap()
-            .as_ref()
-            .into(),
+            .as_arrow()
+            .clone(),
         );
         let properties = PlanProperties::new(
             EquivalenceProperties::new(manipulate_output_schema.clone()),

@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
+use common_recordbatch::recordbatch::align_json_array;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryBuilder, DictionaryArray, UInt32Array,
 };
@@ -27,7 +28,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::value::Value;
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{Helper, VectorRef};
 use mito_codec::row_converter::{
     CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
     build_primary_key_codec_with_fields,
@@ -38,8 +39,9 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::{
-    CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
-    NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
+    CastVectorSnafu, CompatReaderSnafu, ComputeArrowSnafu, ConvertVectorSnafu, CreateDefaultSnafu,
+    DecodeSnafu, EncodeSnafu, NewRecordBatchSnafu, RecordBatchSnafu, Result, UnexpectedSnafu,
+    UnsupportedOperationSnafu,
 };
 use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
 use crate::read::projection::{PrimaryKeyProjectionMapper, ProjectionMapper};
@@ -150,7 +152,7 @@ impl PrimaryKeyCompatBatch {
             batch = compat_pk.compat(batch)?;
         }
         if let Some(compat_fields) = &self.compat_fields {
-            batch = compat_fields.compat(batch);
+            batch = compat_fields.compat(batch)?;
         }
 
         Ok(batch)
@@ -351,11 +353,13 @@ impl FlatCompatBatch {
                     let old_column = batch.column(*pos);
 
                     if let Some(ty) = cast_type {
-                        // Safety: We ensure type can be converted and the new batch should be valid.
-                        // Tips: `safe` must be true in `CastOptions`, which will replace the specific value with null when it cannot be converted.
-                        let casted =
+                        let casted = if let Some(json_type) = ty.as_json() {
+                            align_json_array(old_column, &json_type.as_arrow_type())
+                                .context(RecordBatchSnafu)?
+                        } else {
                             datatypes::arrow::compute::cast(old_column, &ty.as_arrow_type())
-                                .context(ComputeArrowSnafu)?;
+                                .context(ComputeArrowSnafu)?
+                        };
                         Ok(casted)
                     } else {
                         Ok(old_column.clone())
@@ -386,7 +390,8 @@ impl FlatCompatBatch {
 /// Repeats the vector value `to_len` times.
 fn repeat_vector(vector: &VectorRef, to_len: usize, is_tag: bool) -> Result<ArrayRef> {
     assert_eq!(1, vector.len());
-    if is_tag {
+    let data_type = vector.data_type();
+    if is_tag && data_type.is_string() {
         let values = vector.to_arrow_array();
         if values.is_null(0) {
             // Creates a dictionary array with `to_len` null keys.
@@ -451,8 +456,7 @@ struct CompatFields {
 
 impl CompatFields {
     /// Make fields of the `batch` compatible.
-    #[must_use]
-    fn compat(&self, batch: Batch) -> Batch {
+    fn compat(&self, batch: Batch) -> Result<Batch> {
         debug_assert_eq!(self.actual_fields.len(), batch.fields().len());
         debug_assert!(
             self.actual_fields
@@ -462,24 +466,32 @@ impl CompatFields {
         );
 
         let len = batch.num_rows();
-        let fields = self
-            .index_or_defaults
+        self.index_or_defaults
             .iter()
             .map(|index_or_default| match index_or_default {
                 IndexOrDefault::Index { pos, cast_type } => {
                     let old_column = &batch.fields()[*pos];
 
                     let data = if let Some(ty) = cast_type {
-                        // Safety: We ensure type can be converted and the new batch should be valid.
-                        // Tips: `safe` must be true in `CastOptions`, which will replace the specific value with null when it cannot be converted.
-                        old_column.data.cast(ty).unwrap()
+                        if let Some(json_type) = ty.as_json() {
+                            let json_array = old_column.data.to_arrow_array();
+                            let json_array =
+                                align_json_array(&json_array, &json_type.as_arrow_type())
+                                    .context(RecordBatchSnafu)?;
+                            Helper::try_into_vector(&json_array).context(ConvertVectorSnafu)?
+                        } else {
+                            old_column.data.cast(ty).with_context(|_| CastVectorSnafu {
+                                from: old_column.data.data_type(),
+                                to: ty.clone(),
+                            })?
+                        }
                     } else {
                         old_column.data.clone()
                     };
-                    BatchColumn {
+                    Ok(BatchColumn {
                         column_id: old_column.column_id,
                         data,
-                    }
+                    })
                 }
                 IndexOrDefault::DefaultValue {
                     column_id,
@@ -487,16 +499,14 @@ impl CompatFields {
                     semantic_type: _,
                 } => {
                     let data = default_vector.replicate(&[len]);
-                    BatchColumn {
+                    Ok(BatchColumn {
                         column_id: *column_id,
                         data,
-                    }
+                    })
                 }
             })
-            .collect();
-
-        // Safety: We ensure all columns have the same length and the new batch should be valid.
-        batch.with_fields(fields).unwrap()
+            .collect::<Result<Vec<_>>>()
+            .and_then(|fields| batch.with_fields(fields))
     }
 }
 

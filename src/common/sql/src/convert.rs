@@ -16,9 +16,10 @@ use std::str::FromStr;
 
 use common_time::Timestamp;
 use common_time::timezone::Timezone;
+use datatypes::json::JsonStructureSettings;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnDefaultConstraint;
-use datatypes::types::{parse_string_to_json_type_value, parse_string_to_vector_type_value};
+use datatypes::types::{JsonFormat, parse_string_to_jsonb, parse_string_to_vector_type_value};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use snafu::{OptionExt, ResultExt, ensure};
 pub use sqlparser::ast::{
@@ -220,19 +221,25 @@ pub fn sql_value_to_value(
                 _ => return InvalidUnaryOpSnafu { unary_op, value }.fail(),
             },
 
-            Value::String(_) | Value::Binary(_) | Value::List(_) | Value::Struct(_) => {
+            Value::String(_)
+            | Value::Binary(_)
+            | Value::List(_)
+            | Value::Struct(_)
+            | Value::Json(_) => {
                 return InvalidUnaryOpSnafu { unary_op, value }.fail();
             }
         }
     }
 
-    if value.data_type() != *data_type {
+    let value_datatype = value.data_type();
+    // The datatype of json value is determined by its actual data, so we can't simply "cast" it here.
+    if value_datatype.is_json() || value_datatype == *data_type {
+        Ok(value)
+    } else {
         datatypes::types::cast(value, data_type).with_context(|_| InvalidCastSnafu {
             sql_value: sql_val.clone(),
             datatype: data_type,
         })
-    } else {
-        Ok(value)
     }
 }
 
@@ -297,8 +304,21 @@ pub(crate) fn parse_string_to_value(
         }
         ConcreteDataType::Binary(_) => Ok(Value::Binary(s.as_bytes().into())),
         ConcreteDataType::Json(j) => {
-            let v = parse_string_to_json_type_value(&s, &j.format).context(DatatypeSnafu)?;
-            Ok(Value::Binary(v.into()))
+            match &j.format {
+                JsonFormat::Jsonb => {
+                    let v = parse_string_to_jsonb(&s).context(DatatypeSnafu)?;
+                    Ok(Value::Binary(v.into()))
+                }
+                JsonFormat::Native(_inner) => {
+                    // Always use the structured version at this level.
+                    let serde_json_value =
+                        serde_json::from_str(&s).context(DeserializeSnafu { json: s })?;
+                    let json_structure_settings = JsonStructureSettings::Structured(None);
+                    json_structure_settings
+                        .encode(serde_json_value)
+                        .context(DatatypeSnafu)
+                }
+            }
         }
         ConcreteDataType::Vector(d) => {
             let v = parse_string_to_vector_type_value(&s, Some(d.dim)).context(DatatypeSnafu)?;

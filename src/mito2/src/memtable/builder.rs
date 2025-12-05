@@ -47,7 +47,7 @@ impl FieldBuilder {
     pub(crate) fn push(&mut self, value: ValueRef) -> datatypes::error::Result<()> {
         match self {
             FieldBuilder::String(b) => {
-                if let Some(s) = value.as_string()? {
+                if let Some(s) = value.try_into_string()? {
                     b.append(s);
                 } else {
                     b.append_null();

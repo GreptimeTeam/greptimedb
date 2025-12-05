@@ -20,10 +20,8 @@ use common_macro::stack_trace_debug;
 use datafusion_common::DataFusionError;
 use datatypes::prelude::{ConcreteDataType, Value};
 use snafu::{Location, Snafu};
-use sqlparser::ast::Ident;
 use sqlparser::parser::ParserError;
 
-use crate::ast::Expr;
 use crate::parsers::error::TQLError;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -210,10 +208,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Unrecognized table option key: {}, value: {}", key, value))]
-    InvalidTableOptionValue {
-        key: Ident,
-        value: Expr,
+    #[snafu(display("Invalid expr as option value, error: {error}"))]
+    InvalidExprAsOptionValue {
+        error: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -335,6 +332,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to set JSON structure settings: {value}"))]
+    SetJsonStructureSettings {
+        value: String,
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -361,7 +366,7 @@ impl ErrorExt for Error {
             }
 
             InvalidColumnOption { .. }
-            | InvalidTableOptionValue { .. }
+            | InvalidExprAsOptionValue { .. }
             | InvalidDatabaseName { .. }
             | InvalidDatabaseOption { .. }
             | ColumnTypeMismatch { .. }
@@ -380,7 +385,9 @@ impl ErrorExt for Error {
             #[cfg(feature = "enterprise")]
             InvalidTriggerWebhookOption { .. } => StatusCode::InvalidArguments,
 
-            SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
+            SerializeColumnDefaultConstraint { source, .. }
+            | SetJsonStructureSettings { source, .. } => source.status_code(),
+
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             SqlCommon { source, .. } => source.status_code(),
             ConvertToDfStatement { .. } => StatusCode::Internal,

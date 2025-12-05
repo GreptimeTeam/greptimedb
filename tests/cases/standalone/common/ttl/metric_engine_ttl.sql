@@ -7,7 +7,7 @@ INSERT INTO test_ttl(ts, val, host) VALUES
        (now(), 2, 'host2'),
        (now(), 3, 'host3');
 
-SELECT val, host FROM test_ttl;
+SELECT val, host FROM test_ttl ORDER BY host;
 
 -- SQLNESS SLEEP 2s
 ADMIN flush_table('phy');
@@ -29,11 +29,11 @@ ADMIN flush_table('phy');
 ADMIN compact_table('phy');
 
 --- should not be expired --
-SELECT val, host FROM test_ttl;
+SELECT val, host FROM test_ttl ORDER BY host;
 
 -- restart the db, ensure everything is ok
 -- SQLNESS ARG restart=true
-SELECT val, host FROM test_ttl;
+SELECT val, host FROM test_ttl ORDER BY host;
 
 DROP TABLE test_ttl;
 

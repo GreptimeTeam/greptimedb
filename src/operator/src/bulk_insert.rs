@@ -22,9 +22,10 @@ use api::v1::region::{
 };
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
+use bytes::Bytes;
 use common_base::AffectedRows;
 use common_grpc::FlightData;
-use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
+use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -40,32 +41,20 @@ impl Inserter {
     pub async fn handle_bulk_insert(
         &self,
         table: TableRef,
-        decoder: &mut FlightDecoder,
-        data: FlightData,
+        raw_flight_data: FlightData,
+        record_batch: RecordBatch,
+        schema_bytes: Bytes,
     ) -> error::Result<AffectedRows> {
         let table_info = table.table_info();
         let table_id = table_info.table_id();
         let db_name = table_info.get_db_string();
-        let decode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
-            .with_label_values(&["decode_request"])
-            .start_timer();
-        let body_size = data.data_body.len();
-        // Build region server requests
-        let message = decoder
-            .try_decode(&data)
-            .context(error::DecodeFlightDataSnafu)?
-            .context(error::NotSupportedSnafu {
-                feat: "bulk insert RecordBatch with dictionary arrays",
-            })?;
-        let FlightMessage::RecordBatch(record_batch) = message else {
-            return Ok(0);
-        };
-        decode_timer.observe_duration();
 
         if record_batch.num_rows() == 0 {
             return Ok(0);
         }
 
+        let body_size = raw_flight_data.data_body.len();
+        // TODO(yingwen): Fill record batch impure default values. Note that we should override `raw_flight_data` if we have to fill defaults.
         // notify flownode to update dirty timestamps if flow is configured.
         self.maybe_update_flow_dirty_window(table_info.clone(), record_batch.clone());
 
@@ -74,8 +63,6 @@ impl Inserter {
             .with_label_values(&["raw"])
             .observe(record_batch.num_rows() as f64);
 
-        // safety: when reach here schema must be present.
-        let schema_bytes = decoder.schema_bytes().unwrap();
         let partition_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
             .with_label_values(&["partition"])
             .start_timer();
@@ -105,6 +92,7 @@ impl Inserter {
                 .find_region_leader(region_id)
                 .await
                 .context(error::FindRegionLeaderSnafu)?;
+
             let request = RegionRequest {
                 header: Some(RegionRequestHeader {
                     tracing_context: TracingContext::from_current_span().to_w3c(),
@@ -113,9 +101,9 @@ impl Inserter {
                 body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
                     region_id: region_id.as_u64(),
                     body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
-                        schema: schema_bytes,
-                        data_header: data.data_header,
-                        payload: data.data_body,
+                        schema: schema_bytes.clone(),
+                        data_header: raw_flight_data.data_header,
+                        payload: raw_flight_data.data_body,
                     })),
                 })),
             };
@@ -157,8 +145,6 @@ impl Inserter {
 
         let mut handles = Vec::with_capacity(mask_per_datanode.len());
 
-        // raw daya header and payload bytes.
-        let mut raw_data_bytes = None;
         for (peer, masks) in mask_per_datanode {
             for (region_id, mask) in masks {
                 if mask.select_none() {
@@ -169,13 +155,10 @@ impl Inserter {
                 let node_manager = self.node_manager.clone();
                 let peer = peer.clone();
                 let raw_header_and_data = if mask.select_all() {
-                    Some(
-                        raw_data_bytes
-                            .get_or_insert_with(|| {
-                                (data.data_header.clone(), data.data_body.clone())
-                            })
-                            .clone(),
-                    )
+                    Some((
+                        raw_flight_data.data_header.clone(),
+                        raw_flight_data.data_body.clone(),
+                    ))
                 } else {
                     None
                 };

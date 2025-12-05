@@ -25,10 +25,10 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use strum::Display;
 
-use crate::error::{
-    DurationOutOfRangeSnafu, RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
-};
+use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu};
 use crate::manifest::manager::RemoveFileOptions;
+use crate::region::ManifestStats;
+use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::wal::EntryId;
 
@@ -49,6 +49,9 @@ pub enum RegionMetaAction {
 pub struct RegionChange {
     /// The metadata after changed.
     pub metadata: RegionMetadataRef,
+    /// Format of the SST.
+    #[serde(default)]
+    pub sst_format: FormatType,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -128,6 +131,9 @@ pub struct RegionManifest {
     /// Inferred compaction time window.
     #[serde(with = "humantime_serde")]
     pub compaction_time_window: Option<Duration>,
+    /// Format of the SST file.
+    #[serde(default)]
+    pub sst_format: FormatType,
 }
 
 #[cfg(test)]
@@ -155,6 +161,7 @@ pub struct RegionManifestBuilder {
     truncated_entry_id: Option<EntryId>,
     compaction_time_window: Option<Duration>,
     committed_sequence: Option<SequenceNumber>,
+    sst_format: FormatType,
 }
 
 impl RegionManifestBuilder {
@@ -171,6 +178,7 @@ impl RegionManifestBuilder {
                 truncated_entry_id: s.truncated_entry_id,
                 compaction_time_window: s.compaction_time_window,
                 committed_sequence: s.committed_sequence,
+                sst_format: s.sst_format,
             }
         } else {
             Default::default()
@@ -180,6 +188,7 @@ impl RegionManifestBuilder {
     pub fn apply_change(&mut self, manifest_version: ManifestVersion, change: RegionChange) {
         self.metadata = Some(change.metadata);
         self.manifest_version = manifest_version;
+        self.sst_format = change.sst_format;
     }
 
     pub fn apply_edit(&mut self, manifest_version: ManifestVersion, edit: RegionEdit) {
@@ -226,13 +235,13 @@ impl RegionManifestBuilder {
                 self.flushed_entry_id = truncated_entry_id;
                 self.flushed_sequence = truncated_sequence;
                 self.truncated_entry_id = Some(truncated_entry_id);
-                self.files.clear();
                 self.removed_files.add_removed_files(
                     self.files.values().map(|meta| meta.file_id).collect(),
                     truncate
                         .timestamp_ms
                         .unwrap_or_else(|| Utc::now().timestamp_millis()),
                 );
+                self.files.clear();
             }
             TruncateKind::Partial { files_to_remove } => {
                 self.removed_files.add_removed_files(
@@ -269,6 +278,7 @@ impl RegionManifestBuilder {
             manifest_version: self.manifest_version,
             truncated_entry_id: self.truncated_entry_id,
             compaction_time_window: self.compaction_time_window,
+            sst_format: self.sst_format,
         })
     }
 }
@@ -283,6 +293,29 @@ pub struct RemovedFilesRecord {
     pub removed_files: Vec<RemovedFiles>,
 }
 
+impl RemovedFilesRecord {
+    /// Clear the actually deleted files from the list of removed files
+    pub fn clear_deleted_files(&mut self, deleted_files: Vec<FileId>) {
+        let deleted_file_set: HashSet<_> = HashSet::from_iter(deleted_files);
+        for files in self.removed_files.iter_mut() {
+            files.file_ids.retain(|fid| !deleted_file_set.contains(fid));
+        }
+
+        self.removed_files.retain(|fs| !fs.file_ids.is_empty());
+    }
+
+    pub fn update_file_removed_cnt_to_stats(&self, stats: &ManifestStats) {
+        let cnt = self
+            .removed_files
+            .iter()
+            .map(|r| r.file_ids.len() as u64)
+            .sum();
+        stats
+            .file_removed_cnt
+            .store(cnt, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct RemovedFiles {
     /// The timestamp is the time when
@@ -295,6 +328,9 @@ pub struct RemovedFiles {
 impl RemovedFilesRecord {
     /// Add a record of removed files with the current timestamp.
     pub fn add_removed_files(&mut self, file_ids: HashSet<FileId>, at: i64) {
+        if file_ids.is_empty() {
+            return;
+        }
         self.removed_files.push(RemovedFiles {
             removed_at: at,
             file_ids,
@@ -302,35 +338,13 @@ impl RemovedFilesRecord {
     }
 
     pub fn evict_old_removed_files(&mut self, opt: &RemoveFileOptions) -> Result<()> {
-        let total_removed_files: usize = self.removed_files.iter().map(|s| s.file_ids.len()).sum();
-        if opt.keep_count > 0 && total_removed_files <= opt.keep_count {
+        if !opt.enable_gc {
+            // If GC is not enabled, always keep removed files empty.
+            self.removed_files.clear();
             return Ok(());
         }
 
-        let mut cur_file_cnt = total_removed_files;
-
-        let can_evict_until = chrono::Utc::now()
-            - chrono::Duration::from_std(opt.keep_ttl).context(DurationOutOfRangeSnafu {
-                input: opt.keep_ttl,
-            })?;
-
-        self.removed_files.sort_unstable_by_key(|f| f.removed_at);
-        let updated = std::mem::take(&mut self.removed_files)
-            .into_iter()
-            .filter_map(|f| {
-                if f.removed_at < can_evict_until.timestamp_millis()
-                    && (opt.keep_count == 0 || cur_file_cnt >= opt.keep_count)
-                {
-                    // can evict all files
-                    // TODO(discord9): maybe only evict to below keep_count? Maybe not, or the update might be too frequent.
-                    cur_file_cnt -= f.file_ids.len();
-                    None
-                } else {
-                    Some(f)
-                }
-            })
-            .collect();
-        self.removed_files = updated;
+        // if GC is enabled, rely on gc worker to delete files, and evict removed files based on options.
 
         Ok(())
     }
@@ -472,6 +486,7 @@ mod tests {
         }"#;
         let _ = serde_json::from_str::<RegionEdit>(region_edit).unwrap();
 
+        // Note: For backward compatibility, the test accepts a RegionChange without sst_format
         let region_change = r#" {
             "metadata":{
                 "column_metadatas":[
@@ -729,6 +744,7 @@ mod tests {
                     .unwrap()]),
                 }],
             },
+            sst_format: FormatType::PrimaryKey,
         };
 
         let json = serde_json::to_string(&manifest).unwrap();
@@ -830,6 +846,7 @@ mod tests {
                 manifest_version: 0,
                 truncated_entry_id: None,
                 compaction_time_window: None,
+                sst_format: FormatType::PrimaryKey,
             }
         );
 
@@ -843,6 +860,7 @@ mod tests {
             manifest_version: 0,
             truncated_entry_id: None,
             compaction_time_window: None,
+            sst_format: FormatType::PrimaryKey,
         };
         let json = serde_json::to_string(&new_manifest).unwrap();
         let old_from_new: RegionManifestV1 = serde_json::from_str(&json).unwrap();
@@ -915,5 +933,37 @@ mod tests {
             },
             old_from_new
         );
+    }
+
+    #[test]
+    fn test_region_change_backward_compatibility() {
+        // Test that we can deserialize a RegionChange without sst_format
+        let region_change_json = r#"{
+            "metadata": {
+                "column_metadatas": [
+                    {"column_schema":{"name":"a","data_type":{"Int64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Tag","column_id":1},
+                    {"column_schema":{"name":"b","data_type":{"Int64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Field","column_id":2},
+                    {"column_schema":{"name":"c","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Timestamp","column_id":3}
+                ],
+                "primary_key": [
+                    1
+                ],
+                "region_id": 42,
+                "schema_version": 0
+            }
+        }"#;
+
+        let region_change: RegionChange = serde_json::from_str(region_change_json).unwrap();
+        assert_eq!(region_change.sst_format, FormatType::PrimaryKey);
+
+        // Test serialization and deserialization with sst_format
+        let region_change = RegionChange {
+            metadata: region_change.metadata.clone(),
+            sst_format: FormatType::Flat,
+        };
+
+        let serialized = serde_json::to_string(&region_change).unwrap();
+        let deserialized: RegionChange = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.sst_format, FormatType::Flat);
     }
 }

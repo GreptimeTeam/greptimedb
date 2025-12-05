@@ -33,12 +33,25 @@ use crate::worker::DROPPING_MARKER_FILE;
 
 #[tokio::test]
 async fn test_engine_drop_region() {
+    test_engine_drop_region_with_format(false).await;
+    test_engine_drop_region_with_format(true).await;
+}
+
+async fn test_engine_drop_region_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::with_prefix("drop").await;
     let listener = Arc::new(DropListener::new(Duration::from_millis(100)));
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .create_engine_with(
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
         .await;
 
     let region_id = RegionId::new(1, 1);
@@ -107,6 +120,11 @@ async fn test_engine_drop_region() {
 
 #[tokio::test]
 async fn test_engine_drop_region_for_custom_store() {
+    test_engine_drop_region_for_custom_store_with_format(false).await;
+    test_engine_drop_region_for_custom_store_with_format(true).await;
+}
+
+async fn test_engine_drop_region_for_custom_store_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     async fn setup(
         engine: &MitoEngine,
@@ -148,7 +166,10 @@ async fn test_engine_drop_region_for_custom_store() {
     let listener = Arc::new(DropListener::new(Duration::from_millis(100)));
     let engine = env
         .create_engine_with_multiple_object_stores(
-            MitoConfig::default(),
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
             None,
             Some(listener.clone()),
             &["Gcs"],

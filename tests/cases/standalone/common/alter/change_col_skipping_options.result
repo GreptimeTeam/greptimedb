@@ -323,7 +323,7 @@ Error: 1002(Unexpected), Invalid skipping index option: Invalid false positive r
 
 ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM', false_positive_rate = -0.01);
 
-Error: 1004(InvalidArguments), Unrecognized table option key: false_positive_rate, value: -0.01
+Error: 1004(InvalidArguments), Invalid expr as option value, error: -0.01 not accepted
 
 ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM', false_positive_rate = 2);
 

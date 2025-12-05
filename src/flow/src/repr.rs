@@ -17,7 +17,7 @@
 
 mod relation;
 
-use api::helper::{pb_value_to_value_ref, value_to_grpc_value};
+use api::helper::{pb_value_to_value_ref, to_grpc_value};
 use api::v1::Row as ProtoRow;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::cast;
@@ -201,11 +201,7 @@ impl From<ProtoRow> for Row {
 
 impl From<Row> for ProtoRow {
     fn from(row: Row) -> Self {
-        let values = row
-            .unpack()
-            .into_iter()
-            .map(value_to_grpc_value)
-            .collect_vec();
+        let values = row.unpack().into_iter().map(to_grpc_value).collect_vec();
         ProtoRow { values }
     }
 }

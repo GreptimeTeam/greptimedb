@@ -129,7 +129,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // Applies the truncate action to the region.
                 region
                     .version_control
-                    .truncate(truncate_result.kind.clone(), &region.memtable_builder);
+                    .truncate(truncate_result.kind.clone());
             }
             Err(e) => {
                 // Unable to truncate the region.
@@ -142,6 +142,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.flush_scheduler.on_region_truncated(region_id);
         // Notifies compaction scheduler.
         self.compaction_scheduler.on_region_truncated(region_id);
+        // Notifies index build scheduler.
+        self.index_build_scheduler
+            .on_region_truncated(region_id)
+            .await;
 
         if let TruncateKind::All {
             truncated_entry_id,

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -22,14 +23,15 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{
     Certificate, Channel as InnerChannel, ClientTlsConfig, Endpoint, Identity, Uri,
 };
 use tower::Service;
 
-use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, InvalidTlsConfigSnafu, Result};
+use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, Result};
+use crate::reloadable_tls::{ReloadableTlsConfig, TlsConfigLoader, maybe_watch_tls_config};
 
 const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_GRPC_REQUEST_TIMEOUT_SECS: u64 = 10;
@@ -50,7 +52,7 @@ pub struct ChannelManager {
 struct Inner {
     id: u64,
     config: ChannelConfig,
-    client_tls_config: Option<ClientTlsConfig>,
+    reloadable_client_tls_config: Option<Arc<ReloadableClientTlsConfig>>,
     pool: Arc<Pool>,
     channel_recycle_started: AtomicBool,
     cancel: CancellationToken,
@@ -78,7 +80,7 @@ impl Inner {
         Self {
             id,
             config,
-            client_tls_config: None,
+            reloadable_client_tls_config: None,
             pool,
             channel_recycle_started: AtomicBool::new(false),
             cancel,
@@ -91,55 +93,20 @@ impl ChannelManager {
         Default::default()
     }
 
-    pub fn with_config(config: ChannelConfig) -> Self {
-        let inner = Inner::with_config(config);
+    /// Create a ChannelManager with configuration and optional TLS config
+    ///
+    /// Use [`load_client_tls_config`] to create TLS configuration from `ClientTlsOption`.
+    /// The TLS config supports both static (watch disabled) and dynamic reloading (watch enabled).
+    /// If you want to use dynamic reloading, please **manually** invoke [`maybe_watch_client_tls_config`] after this method.
+    pub fn with_config(
+        config: ChannelConfig,
+        reloadable_tls_config: Option<Arc<ReloadableClientTlsConfig>>,
+    ) -> Self {
+        let mut inner = Inner::with_config(config.clone());
+        inner.reloadable_client_tls_config = reloadable_tls_config;
         Self {
             inner: Arc::new(inner),
         }
-    }
-
-    /// Read tls cert and key files and create a ChannelManager with TLS config.
-    pub fn with_tls_config(config: ChannelConfig) -> Result<Self> {
-        let mut inner = Inner::with_config(config.clone());
-
-        // setup tls
-        let path_config = config.client_tls.context(InvalidTlsConfigSnafu {
-            msg: "no config input",
-        })?;
-
-        if !path_config.enabled {
-            // if TLS not enabled, just ignore other tls config
-            // and not set `client_tls_config` hence not use TLS
-            return Ok(Self {
-                inner: Arc::new(inner),
-            });
-        }
-
-        let mut tls_config = ClientTlsConfig::new();
-
-        if let Some(server_ca) = path_config.server_ca_cert_path {
-            let server_root_ca_cert =
-                std::fs::read_to_string(server_ca).context(InvalidConfigFilePathSnafu)?;
-            let server_root_ca_cert = Certificate::from_pem(server_root_ca_cert);
-            tls_config = tls_config.ca_certificate(server_root_ca_cert);
-        }
-
-        if let (Some(client_cert_path), Some(client_key_path)) =
-            (&path_config.client_cert_path, &path_config.client_key_path)
-        {
-            let client_cert =
-                std::fs::read_to_string(client_cert_path).context(InvalidConfigFilePathSnafu)?;
-            let client_key =
-                std::fs::read_to_string(client_key_path).context(InvalidConfigFilePathSnafu)?;
-            let client_identity = Identity::from_pem(client_cert, client_key);
-            tls_config = tls_config.identity(client_identity);
-        }
-
-        inner.client_tls_config = Some(tls_config);
-
-        Ok(Self {
-            inner: Arc::new(inner),
-        })
     }
 
     pub fn config(&self) -> &ChannelConfig {
@@ -211,8 +178,21 @@ impl ChannelManager {
         self.pool().retain_channel(f);
     }
 
+    /// Clear all channels to force reconnection.
+    /// This should be called when TLS configuration changes to ensure new connections use updated certificates.
+    pub fn clear_all_channels(&self) {
+        self.pool().retain_channel(|_, _| false);
+    }
+
     fn build_endpoint(&self, addr: &str) -> Result<Endpoint> {
-        let http_prefix = if self.inner.client_tls_config.is_some() {
+        // Get the latest TLS config from reloadable config (which handles both static and dynamic cases)
+        let tls_config = self
+            .inner
+            .reloadable_client_tls_config
+            .as_ref()
+            .and_then(|c| c.get_config());
+
+        let http_prefix = if tls_config.is_some() {
             "https"
         } else {
             "http"
@@ -251,9 +231,9 @@ impl ChannelManager {
         if let Some(enabled) = self.config().http2_adaptive_window {
             endpoint = endpoint.http2_adaptive_window(enabled);
         }
-        if let Some(tls_config) = &self.inner.client_tls_config {
+        if let Some(tls_config) = tls_config {
             endpoint = endpoint
-                .tls_config(tls_config.clone())
+                .tls_config(tls_config)
                 .context(CreateChannelSnafu { addr })?;
         }
 
@@ -287,13 +267,97 @@ impl ChannelManager {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+fn load_tls_config(tls_option: Option<&ClientTlsOption>) -> Result<Option<ClientTlsConfig>> {
+    let path_config = match tls_option {
+        Some(path_config) if path_config.enabled => path_config,
+        _ => return Ok(None),
+    };
+
+    let mut tls_config = ClientTlsConfig::new();
+
+    if let Some(server_ca) = &path_config.server_ca_cert_path {
+        let server_root_ca_cert =
+            std::fs::read_to_string(server_ca).context(InvalidConfigFilePathSnafu)?;
+        let server_root_ca_cert = Certificate::from_pem(server_root_ca_cert);
+        tls_config = tls_config.ca_certificate(server_root_ca_cert);
+    }
+
+    if let (Some(client_cert_path), Some(client_key_path)) =
+        (&path_config.client_cert_path, &path_config.client_key_path)
+    {
+        let client_cert =
+            std::fs::read_to_string(client_cert_path).context(InvalidConfigFilePathSnafu)?;
+        let client_key =
+            std::fs::read_to_string(client_key_path).context(InvalidConfigFilePathSnafu)?;
+        let client_identity = Identity::from_pem(client_cert, client_key);
+        tls_config = tls_config.identity(client_identity);
+    }
+    Ok(Some(tls_config))
+}
+
+impl TlsConfigLoader<ClientTlsConfig> for ClientTlsOption {
+    type Error = crate::error::Error;
+
+    fn load(&self) -> Result<Option<ClientTlsConfig>> {
+        load_tls_config(Some(self))
+    }
+
+    fn watch_paths(&self) -> Vec<&Path> {
+        let mut paths = Vec::new();
+        if let Some(cert_path) = &self.client_cert_path {
+            paths.push(Path::new(cert_path.as_str()));
+        }
+        if let Some(key_path) = &self.client_key_path {
+            paths.push(Path::new(key_path.as_str()));
+        }
+        if let Some(ca_path) = &self.server_ca_cert_path {
+            paths.push(Path::new(ca_path.as_str()));
+        }
+        paths
+    }
+
+    fn watch_enabled(&self) -> bool {
+        self.enabled && self.watch
+    }
+}
+
+/// Type alias for client-side reloadable TLS config
+pub type ReloadableClientTlsConfig = ReloadableTlsConfig<ClientTlsConfig, ClientTlsOption>;
+
+/// Load client TLS configuration from `ClientTlsOption` and return a `ReloadableClientTlsConfig`.
+/// This is the primary way to create TLS configuration for the ChannelManager.
+pub fn load_client_tls_config(
+    tls_option: Option<ClientTlsOption>,
+) -> Result<Option<Arc<ReloadableClientTlsConfig>>> {
+    match tls_option {
+        Some(option) if option.enabled => {
+            let reloadable = ReloadableClientTlsConfig::try_new(option)?;
+            Ok(Some(Arc::new(reloadable)))
+        }
+        _ => Ok(None),
+    }
+}
+
+pub fn maybe_watch_client_tls_config(
+    client_tls_config: Arc<ReloadableClientTlsConfig>,
+    channel_manager: ChannelManager,
+) -> Result<()> {
+    maybe_watch_tls_config(client_tls_config, move || {
+        // Clear all existing channels to force reconnection with new certificates
+        channel_manager.clear_all_channels();
+        info!("Cleared all existing channels to use new TLS certificates.");
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ClientTlsOption {
     /// Whether to enable TLS for client.
     pub enabled: bool,
     pub server_ca_cert_path: Option<String>,
     pub client_cert_path: Option<String>,
     pub client_key_path: Option<String>,
+    #[serde(default)]
+    pub watch: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -613,6 +677,7 @@ mod tests {
                 server_ca_cert_path: Some("some_server_path".to_string()),
                 client_cert_path: Some("some_cert_path".to_string()),
                 client_key_path: Some("some_key_path".to_string()),
+                watch: false,
             });
 
         assert_eq!(
@@ -634,6 +699,7 @@ mod tests {
                     server_ca_cert_path: Some("some_server_path".to_string()),
                     client_cert_path: Some("some_cert_path".to_string()),
                     client_key_path: Some("some_key_path".to_string()),
+                    watch: false,
                 }),
                 max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
                 max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
@@ -659,7 +725,7 @@ mod tests {
             .http2_adaptive_window(true)
             .tcp_keepalive(Duration::from_secs(2))
             .tcp_nodelay(true);
-        let mgr = ChannelManager::with_config(config);
+        let mgr = ChannelManager::with_config(config, None);
 
         let res = mgr.build_endpoint("test_addr");
 

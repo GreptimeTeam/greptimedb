@@ -14,13 +14,17 @@
 
 //! Utilities for scanners.
 
+use std::collections::VecDeque;
 use std::fmt;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, Time};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::Stream;
 use prometheus::IntGauge;
 use smallvec::SmallVec;
@@ -33,12 +37,18 @@ use crate::metrics::{
     IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROW_GROUPS_TOTAL,
     READ_ROWS_IN_ROW_GROUP_TOTAL, READ_ROWS_RETURN, READ_STAGE_ELAPSED,
 };
-use crate::read::range::{RangeBuilderList, RowGroupIndex};
+use crate::read::range::{RangeBuilderList, RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::{Batch, BoxedBatchStream, BoxedRecordBatchStream, ScannerMetrics, Source};
 use crate::sst::file::FileTimeRange;
+use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplyMetrics;
+use crate::sst::index::fulltext_index::applier::FulltextIndexApplyMetrics;
+use crate::sst::index::inverted_index::applier::InvertedIndexApplyMetrics;
+use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::file_range::FileRange;
-use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
+use crate::sst::parquet::flat_format::time_index_column_index;
+use crate::sst::parquet::reader::{MetadataCacheMetrics, ReaderFilterMetrics, ReaderMetrics};
+use crate::sst::parquet::row_group::ParquetFetchMetrics;
 
 /// Verbose scan metrics for a partition.
 #[derive(Default)]
@@ -75,6 +85,8 @@ pub(crate) struct ScanMetricsSet {
     // SST related metrics:
     /// Duration to build file ranges.
     build_parts_cost: Duration,
+    /// Duration to scan SST files.
+    sst_scan_cost: Duration,
     /// Number of row groups before filtering.
     rg_total: usize,
     /// Number of row groups filtered by fulltext index.
@@ -120,6 +132,18 @@ pub(crate) struct ScanMetricsSet {
 
     /// The stream reached EOF
     stream_eof: bool,
+
+    // Optional verbose metrics:
+    /// Inverted index apply metrics.
+    inverted_index_apply_metrics: Option<InvertedIndexApplyMetrics>,
+    /// Bloom filter index apply metrics.
+    bloom_filter_apply_metrics: Option<BloomFilterIndexApplyMetrics>,
+    /// Fulltext index apply metrics.
+    fulltext_index_apply_metrics: Option<FulltextIndexApplyMetrics>,
+    /// Parquet fetch metrics.
+    fetch_metrics: Option<ParquetFetchMetrics>,
+    /// Metadata cache metrics.
+    metadata_cache_metrics: Option<MetadataCacheMetrics>,
 }
 
 impl fmt::Debug for ScanMetricsSet {
@@ -135,6 +159,7 @@ impl fmt::Debug for ScanMetricsSet {
             num_mem_ranges,
             num_file_ranges,
             build_parts_cost,
+            sst_scan_cost,
             rg_total,
             rg_fulltext_filtered,
             rg_inverted_filtered,
@@ -160,6 +185,11 @@ impl fmt::Debug for ScanMetricsSet {
             mem_rows,
             mem_batches,
             mem_series,
+            inverted_index_apply_metrics,
+            bloom_filter_apply_metrics,
+            fulltext_index_apply_metrics,
+            fetch_metrics,
+            metadata_cache_metrics,
         } = self;
 
         // Write core metrics
@@ -175,6 +205,7 @@ impl fmt::Debug for ScanMetricsSet {
             \"num_mem_ranges\":{num_mem_ranges}, \
             \"num_file_ranges\":{num_file_ranges}, \
             \"build_parts_cost\":\"{build_parts_cost:?}\", \
+            \"sst_scan_cost\":\"{sst_scan_cost:?}\", \
             \"rg_total\":{rg_total}, \
             \"rows_before_filter\":{rows_before_filter}, \
             \"num_sst_record_batches\":{num_sst_record_batches}, \
@@ -249,6 +280,33 @@ impl fmt::Debug for ScanMetricsSet {
             write!(f, ", \"mem_scan_cost\":\"{mem_scan_cost:?}\"")?;
         }
 
+        // Write optional verbose metrics if they are not empty
+        if let Some(metrics) = inverted_index_apply_metrics
+            && !metrics.is_empty()
+        {
+            write!(f, ", \"inverted_index_apply_metrics\":{:?}", metrics)?;
+        }
+        if let Some(metrics) = bloom_filter_apply_metrics
+            && !metrics.is_empty()
+        {
+            write!(f, ", \"bloom_filter_apply_metrics\":{:?}", metrics)?;
+        }
+        if let Some(metrics) = fulltext_index_apply_metrics
+            && !metrics.is_empty()
+        {
+            write!(f, ", \"fulltext_index_apply_metrics\":{:?}", metrics)?;
+        }
+        if let Some(metrics) = fetch_metrics
+            && !metrics.is_empty()
+        {
+            write!(f, ", \"fetch_metrics\":{:?}", metrics)?;
+        }
+        if let Some(metrics) = metadata_cache_metrics
+            && !metrics.is_empty()
+        {
+            write!(f, ", \"metadata_cache_metrics\":{:?}", metrics)?;
+        }
+
         write!(f, ", \"stream_eof\":{stream_eof}}}")
     }
 }
@@ -298,14 +356,20 @@ impl ScanMetricsSet {
                     rows_inverted_filtered,
                     rows_bloom_filtered,
                     rows_precise_filtered,
+                    inverted_index_apply_metrics,
+                    bloom_filter_apply_metrics,
+                    fulltext_index_apply_metrics,
                 },
             num_record_batches,
             num_batches,
             num_rows,
-            scan_cost: _,
+            scan_cost,
+            metadata_cache_metrics,
+            fetch_metrics,
         } = other;
 
         self.build_parts_cost += *build_cost;
+        self.sst_scan_cost += *scan_cost;
 
         self.rg_total += *rg_total;
         self.rg_fulltext_filtered += *rg_fulltext_filtered;
@@ -322,6 +386,31 @@ impl ScanMetricsSet {
         self.num_sst_record_batches += *num_record_batches;
         self.num_sst_batches += *num_batches;
         self.num_sst_rows += *num_rows;
+
+        // Merge optional verbose metrics
+        if let Some(metrics) = inverted_index_apply_metrics {
+            self.inverted_index_apply_metrics
+                .get_or_insert_with(InvertedIndexApplyMetrics::default)
+                .merge_from(metrics);
+        }
+        if let Some(metrics) = bloom_filter_apply_metrics {
+            self.bloom_filter_apply_metrics
+                .get_or_insert_with(BloomFilterIndexApplyMetrics::default)
+                .merge_from(metrics);
+        }
+        if let Some(metrics) = fulltext_index_apply_metrics {
+            self.fulltext_index_apply_metrics
+                .get_or_insert_with(FulltextIndexApplyMetrics::default)
+                .merge_from(metrics);
+        }
+        if let Some(metrics) = fetch_metrics {
+            self.fetch_metrics
+                .get_or_insert_with(ParquetFetchMetrics::default)
+                .merge_from(metrics);
+        }
+        self.metadata_cache_metrics
+            .get_or_insert_with(MetadataCacheMetrics::default)
+            .merge_from(metadata_cache_metrics);
     }
 
     /// Sets distributor metrics.
@@ -426,6 +515,8 @@ struct PartitionMetricsInner {
     yield_cost: Time,
     /// Duration to convert [`Batch`]es.
     convert_cost: Time,
+    /// Aggregated compute time reported to DataFusion.
+    elapsed_compute: Time,
 }
 
 impl PartitionMetricsInner {
@@ -526,6 +617,7 @@ impl PartitionMetrics {
             scan_cost: MetricBuilder::new(metrics_set).subset_time("scan_cost", partition),
             yield_cost: MetricBuilder::new(metrics_set).subset_time("yield_cost", partition),
             convert_cost: MetricBuilder::new(metrics_set).subset_time("convert_cost", partition),
+            elapsed_compute: MetricBuilder::new(metrics_set).elapsed_compute(partition),
         };
         Self(Arc::new(inner))
     }
@@ -545,6 +637,13 @@ impl PartitionMetrics {
         metrics.num_file_ranges += num;
     }
 
+    fn record_elapsed_compute(&self, duration: Duration) {
+        if duration.is_zero() {
+            return;
+        }
+        self.0.elapsed_compute.add_duration(duration);
+    }
+
     /// Merges `build_reader_cost`.
     pub(crate) fn inc_build_reader_cost(&self, cost: Duration) {
         self.0.build_reader_cost.add_duration(cost);
@@ -555,6 +654,7 @@ impl PartitionMetrics {
 
     pub(crate) fn inc_convert_batch_cost(&self, cost: Duration) {
         self.0.convert_cost.add_duration(cost);
+        self.record_elapsed_compute(cost);
     }
 
     /// Reports memtable scan metrics.
@@ -572,7 +672,9 @@ impl PartitionMetrics {
             .build_reader_cost
             .add_duration(metrics.build_reader_cost);
         self.0.scan_cost.add_duration(metrics.scan_cost);
+        self.record_elapsed_compute(metrics.scan_cost);
         self.0.yield_cost.add_duration(metrics.yield_cost);
+        self.record_elapsed_compute(metrics.yield_cost);
 
         let mut metrics_set = self.0.metrics.lock().unwrap();
         metrics_set.merge_scanner_metrics(metrics);
@@ -595,6 +697,11 @@ impl PartitionMetrics {
     pub(crate) fn set_distributor_metrics(&self, metrics: &SeriesDistributorMetrics) {
         let mut metrics_set = self.0.metrics.lock().unwrap();
         metrics_set.set_distributor_metrics(metrics);
+    }
+
+    /// Returns whether verbose explain is enabled.
+    pub(crate) fn explain_verbose(&self) -> bool {
+        self.0.explain_verbose
     }
 }
 
@@ -657,7 +764,6 @@ pub(crate) fn scan_mem_ranges(
 }
 
 /// Scans memtable ranges at `index` using flat format that returns RecordBatch.
-#[allow(dead_code)]
 pub(crate) fn scan_flat_mem_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
@@ -685,6 +791,86 @@ pub(crate) fn scan_flat_mem_ranges(
     }
 }
 
+/// Files with row count greater than this threshold can contribute to the estimation.
+const SPLIT_ROW_THRESHOLD: u64 = DEFAULT_ROW_GROUP_SIZE as u64;
+/// Number of series threshold for splitting batches.
+const NUM_SERIES_THRESHOLD: u64 = 10240;
+/// Minimum batch size after splitting. The batch size is less than 60 because a series may only have
+/// 60 samples per hour.
+const BATCH_SIZE_THRESHOLD: u64 = 50;
+
+/// Returns true if splitting flat record batches may improve merge performance.
+pub(crate) fn should_split_flat_batches_for_merge(
+    stream_ctx: &Arc<StreamContext>,
+    range_meta: &RangeMeta,
+) -> bool {
+    // Number of files to split and scan.
+    let mut num_files_to_split = 0;
+    let mut num_mem_rows = 0;
+    let mut num_mem_series = 0;
+    // Checks each file range, returns early if any range is not splittable.
+    // For mem ranges, we collect the total number of rows and series because the number of rows in a
+    // mem range may be too small.
+    for index in &range_meta.row_group_indices {
+        if stream_ctx.is_mem_range_index(*index) {
+            let memtable = &stream_ctx.input.memtables[index.index];
+            // Is mem range
+            let stats = memtable.stats();
+            num_mem_rows += stats.num_rows();
+            num_mem_series += stats.series_count();
+        } else if stream_ctx.is_file_range_index(*index) {
+            // This is a file range.
+            let file_index = index.index - stream_ctx.input.num_memtables();
+            let file = &stream_ctx.input.files[file_index];
+            if file.meta_ref().num_rows < SPLIT_ROW_THRESHOLD || file.meta_ref().num_series == 0 {
+                // If the file doesn't have enough rows, or the number of series is unavailable, skips it.
+                continue;
+            }
+            debug_assert!(file.meta_ref().num_rows > 0);
+            if !can_split_series(file.meta_ref().num_rows, file.meta_ref().num_series) {
+                // We can't split batches in a file.
+                return false;
+            } else {
+                num_files_to_split += 1;
+            }
+        }
+        // Skips non-file and non-mem ranges.
+    }
+
+    if num_files_to_split > 0 {
+        // We mainly consider file ranges because they have enough data for sampling.
+        true
+    } else if num_mem_series > 0 && num_mem_rows > 0 {
+        // If we don't have files to scan, we check whether to split by the memtable.
+        can_split_series(num_mem_rows as u64, num_mem_series as u64)
+    } else {
+        false
+    }
+}
+
+fn can_split_series(num_rows: u64, num_series: u64) -> bool {
+    assert!(num_series > 0);
+    assert!(num_rows > 0);
+
+    // It doesn't have too many series or it will have enough rows for each batch.
+    num_series < NUM_SERIES_THRESHOLD || num_rows / num_series >= BATCH_SIZE_THRESHOLD
+}
+
+/// Creates a new [ReaderFilterMetrics] with optional apply metrics initialized
+/// based on the `explain_verbose` flag.
+fn new_filter_metrics(explain_verbose: bool) -> ReaderFilterMetrics {
+    if explain_verbose {
+        ReaderFilterMetrics {
+            inverted_index_apply_metrics: Some(InvertedIndexApplyMetrics::default()),
+            bloom_filter_apply_metrics: Some(BloomFilterIndexApplyMetrics::default()),
+            fulltext_index_apply_metrics: Some(FulltextIndexApplyMetrics::default()),
+            ..Default::default()
+        }
+    } else {
+        ReaderFilterMetrics::default()
+    }
+}
+
 /// Scans file ranges at `index`.
 pub(crate) async fn scan_file_ranges(
     stream_ctx: Arc<StreamContext>,
@@ -693,7 +879,10 @@ pub(crate) async fn scan_file_ranges(
     read_type: &'static str,
     range_builder: Arc<RangeBuilderList>,
 ) -> Result<impl Stream<Item = Result<Batch>>> {
-    let mut reader_metrics = ReaderMetrics::default();
+    let mut reader_metrics = ReaderMetrics {
+        filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
+        ..Default::default()
+    };
     let ranges = range_builder
         .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
         .await?;
@@ -709,7 +898,6 @@ pub(crate) async fn scan_file_ranges(
 }
 
 /// Scans file ranges at `index` using flat reader that returns RecordBatch.
-#[allow(dead_code)]
 pub(crate) async fn scan_flat_file_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
@@ -717,7 +905,10 @@ pub(crate) async fn scan_flat_file_ranges(
     read_type: &'static str,
     range_builder: Arc<RangeBuilderList>,
 ) -> Result<impl Stream<Item = Result<RecordBatch>>> {
-    let mut reader_metrics = ReaderMetrics::default();
+    let mut reader_metrics = ReaderMetrics {
+        filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
+        ..Default::default()
+    };
     let ranges = range_builder
         .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
         .await?;
@@ -740,10 +931,18 @@ pub fn build_file_range_scan_stream(
     ranges: SmallVec<[FileRange; 2]>,
 ) -> impl Stream<Item = Result<Batch>> {
     try_stream! {
-        let reader_metrics = &mut ReaderMetrics::default();
+        let fetch_metrics = if part_metrics.explain_verbose() {
+            Some(Arc::new(ParquetFetchMetrics::default()))
+        } else {
+            None
+        };
+        let reader_metrics = &mut ReaderMetrics {
+            fetch_metrics: fetch_metrics.clone(),
+            ..Default::default()
+        };
         for range in ranges {
             let build_reader_start = Instant::now();
-            let reader = range.reader(stream_ctx.input.series_row_selector).await?;
+            let reader = range.reader(stream_ctx.input.series_row_selector, fetch_metrics.as_deref()).await?;
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
             let compat_batch = range.compat_batch();
@@ -775,10 +974,18 @@ pub fn build_flat_file_range_scan_stream(
     ranges: SmallVec<[FileRange; 2]>,
 ) -> impl Stream<Item = Result<RecordBatch>> {
     try_stream! {
-        let reader_metrics = &mut ReaderMetrics::default();
+        let fetch_metrics = if part_metrics.explain_verbose() {
+            Some(Arc::new(ParquetFetchMetrics::default()))
+        } else {
+            None
+        };
+        let reader_metrics = &mut ReaderMetrics {
+            fetch_metrics: fetch_metrics.clone(),
+            ..Default::default()
+        };
         for range in ranges {
             let build_reader_start = Instant::now();
-            let mut reader = range.flat_reader().await?;
+            let mut reader = range.flat_reader(fetch_metrics.as_deref()).await?;
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
 
@@ -851,7 +1058,6 @@ pub(crate) async fn maybe_scan_other_ranges(
     }
 }
 
-#[allow(dead_code)]
 pub(crate) async fn maybe_scan_flat_other_ranges(
     context: &Arc<StreamContext>,
     index: RowGroupIndex,
@@ -865,4 +1071,84 @@ pub(crate) async fn maybe_scan_flat_other_ranges(
         reason: "no other ranges scannable in flat format",
     }
     .fail()
+}
+
+/// A stream wrapper that splits record batches from an inner stream.
+pub(crate) struct SplitRecordBatchStream<S> {
+    /// The inner stream that yields record batches.
+    inner: S,
+    /// Buffer for split batches.
+    batches: VecDeque<RecordBatch>,
+}
+
+impl<S> SplitRecordBatchStream<S> {
+    /// Creates a new splitting stream wrapper.
+    pub(crate) fn new(inner: S) -> Self {
+        Self {
+            inner,
+            batches: VecDeque::new(),
+        }
+    }
+}
+
+impl<S> Stream for SplitRecordBatchStream<S>
+where
+    S: Stream<Item = Result<RecordBatch>> + Unpin,
+{
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            // First, check if we have buffered split batches
+            if let Some(batch) = self.batches.pop_front() {
+                return Poll::Ready(Some(Ok(batch)));
+            }
+
+            // Poll the inner stream for the next batch
+            let record_batch = match futures::ready!(Pin::new(&mut self.inner).poll_next(cx)) {
+                Some(Ok(batch)) => batch,
+                Some(Err(e)) => return Poll::Ready(Some(Err(e))),
+                None => return Poll::Ready(None),
+            };
+
+            // Split the batch and buffer the results
+            split_record_batch(record_batch, &mut self.batches);
+            // Continue the loop to return the first split batch
+        }
+    }
+}
+
+/// Splits the batch by timestamps.
+///
+/// # Panics
+/// Panics if the timestamp array is invalid.
+pub(crate) fn split_record_batch(record_batch: RecordBatch, batches: &mut VecDeque<RecordBatch>) {
+    let batch_rows = record_batch.num_rows();
+    if batch_rows == 0 {
+        return;
+    }
+    if batch_rows < 2 {
+        batches.push_back(record_batch);
+        return;
+    }
+
+    let time_index_pos = time_index_column_index(record_batch.num_columns());
+    let timestamps = record_batch.column(time_index_pos);
+    let (ts_values, _unit) = timestamp_array_to_primitive(timestamps).unwrap();
+    let mut offsets = Vec::with_capacity(16);
+    offsets.push(0);
+    let values = ts_values.values();
+    for (i, &value) in values.iter().take(batch_rows - 1).enumerate() {
+        if value > values[i + 1] {
+            offsets.push(i + 1);
+        }
+    }
+    offsets.push(values.len());
+
+    // Splits the batch by offsets.
+    for (i, &start) in offsets[..offsets.len() - 1].iter().enumerate() {
+        let end = offsets[i + 1];
+        let rows_in_batch = end - start;
+        batches.push_back(record_batch.slice(start, rows_in_batch));
+    }
 }

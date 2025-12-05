@@ -18,7 +18,7 @@ use common_function::scalars::vector::impl_conv::veclit_to_binlit;
 use common_recordbatch::RecordBatch;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::vectors::BinaryVector;
+use datatypes::vectors::{BinaryVector, Helper};
 use rand::Rng;
 use table::test_util::MemTable;
 
@@ -64,5 +64,6 @@ pub fn get_value_from_batches(column_name: &str, batches: Vec<RecordBatch>) -> V
     assert_eq!(batch.column(0).len(), 1);
     let v = batch.column(0);
     assert_eq!(1, v.len());
+    let v = Helper::try_into_vector(v).unwrap();
     v.get(0)
 }

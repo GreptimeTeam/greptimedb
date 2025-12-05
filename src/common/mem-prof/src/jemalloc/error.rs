@@ -71,6 +71,18 @@ pub enum Error {
         #[snafu(source)]
         error: tikv_jemalloc_ctl::Error,
     },
+
+    #[snafu(display("Failed to read jemalloc gdump flag"))]
+    ReadGdump {
+        #[snafu(source)]
+        error: tikv_jemalloc_ctl::Error,
+    },
+
+    #[snafu(display("Failed to update jemalloc gdump flag"))]
+    UpdateGdump {
+        #[snafu(source)]
+        error: tikv_jemalloc_ctl::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -84,6 +96,8 @@ impl ErrorExt for Error {
             Error::ActivateProf { .. } => StatusCode::Internal,
             Error::DeactivateProf { .. } => StatusCode::Internal,
             Error::ReadProfActive { .. } => StatusCode::Internal,
+            Error::ReadGdump { .. } => StatusCode::Internal,
+            Error::UpdateGdump { .. } => StatusCode::Internal,
         }
     }
 

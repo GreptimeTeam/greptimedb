@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use greptime_proto::v1::ColumnDataTypeExtension;
 use greptime_proto::v1::column_data_type_extension::TypeExt;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 use syn::spanned::Spanned;
 use syn::{DeriveInput, Result};
@@ -69,50 +70,7 @@ fn impl_schema_method(fields: &[ParsedField<'_>]) -> Result<TokenStream2> {
             let semantic_type_val = convert_semantic_type_to_proto_semantic_type(column_attribute.semantic_type) as i32;
             let semantic_type = syn::LitInt::new(&semantic_type_val.to_string(), ident.span());
             let extension = match extension {
-                Some(ext) => {
-                    match ext.type_ext {
-                        Some(TypeExt::DecimalType(ext)) => {
-                            let precision = syn::LitInt::new(&ext.precision.to_string(), ident.span());
-                            let scale = syn::LitInt::new(&ext.scale.to_string(), ident.span());
-                            quote! {
-                                Some(ColumnDataTypeExtension { type_ext: Some(TypeExt::DecimalType(DecimalTypeExtension { precision: #precision, scale: #scale })) })
-                            }
-                        }
-                        Some(TypeExt::JsonType(ext)) => {
-                            let json_type = syn::LitInt::new(&ext.to_string(), ident.span());
-                            quote! {
-                                Some(ColumnDataTypeExtension { type_ext: Some(TypeExt::JsonType(#json_type)) })
-                            }
-                        }
-                        Some(TypeExt::VectorType(ext)) => {
-                            let dim = syn::LitInt::new(&ext.dim.to_string(), ident.span());
-                            quote! {
-                                Some(ColumnDataTypeExtension { type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim: #dim })) })
-                            }
-                        }
-                        Some(TypeExt::ListType(ext)) => {
-                            let item_type = syn::Ident::new(&ext.datatype.to_string(), ident.span());
-                            quote! {
-                                Some(ColumnDataTypeExtension { type_ext: Some(TypeExt::ListType(ListTypeExtension { item_type: #item_type })) })
-                            }
-                        }
-                        Some(TypeExt::StructType(ext)) => {
-                            let fields = ext.fields.iter().map(|field| {
-                                let field_name = syn::Ident::new(&field.name.clone(), ident.span());
-                                let field_type = syn::Ident::new(&field.datatype.to_string(), ident.span());
-                                quote! {
-                                    StructField { name: #field_name, type_: #field_type }
-                                }
-                            }).collect::<Vec<_>>();
-                            quote! {
-                                Some(ColumnDataTypeExtension { type_ext: Some(TypeExt::StructType(StructTypeExtension { fields: [#(#fields),*] })) })
-                            }
-                        }
-                        None => {
-                            quote! { None }
-                        }
-                    }
-                }
+                Some(ext) => column_data_type_extension_to_tokens(&ext, ident.span()),
                 None => quote! { None },
             };
 
@@ -133,4 +91,126 @@ fn impl_schema_method(fields: &[ParsedField<'_>]) -> Result<TokenStream2> {
             vec![ #(#schemas),* ]
         }
     })
+}
+
+fn column_data_type_extension_to_tokens(
+    extension: &ColumnDataTypeExtension,
+    span: Span,
+) -> TokenStream2 {
+    match extension.type_ext.as_ref() {
+        Some(TypeExt::DecimalType(ext)) => {
+            let precision = syn::LitInt::new(&ext.precision.to_string(), span);
+            let scale = syn::LitInt::new(&ext.scale.to_string(), span);
+            quote! {
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::DecimalType(DecimalTypeExtension {
+                        precision: #precision,
+                        scale: #scale,
+                    })),
+                })
+            }
+        }
+        Some(TypeExt::JsonType(ext)) => {
+            let json_type = syn::LitInt::new(&ext.to_string(), span);
+            quote! {
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::JsonType(#json_type)),
+                })
+            }
+        }
+        Some(TypeExt::VectorType(ext)) => {
+            let dim = syn::LitInt::new(&ext.dim.to_string(), span);
+            quote! {
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim: #dim })),
+                })
+            }
+        }
+        Some(TypeExt::ListType(ext)) => {
+            let datatype = syn::LitInt::new(&ext.datatype.to_string(), span);
+            let datatype_extension = ext
+                .datatype_extension
+                .as_deref()
+                .map(|ext| column_data_type_extension_to_tokens(ext, span))
+                .unwrap_or_else(|| quote! { None });
+            quote! {
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::ListType(Box::new(ListTypeExtension {
+                        datatype: #datatype,
+                        datatype_extension: #datatype_extension,
+                    }))),
+                })
+            }
+        }
+        Some(TypeExt::StructType(ext)) => {
+            let fields = ext.fields.iter().map(|field| {
+                let field_name = &field.name;
+                let datatype = syn::LitInt::new(&field.datatype.to_string(), span);
+                let datatype_extension = field
+                    .datatype_extension
+                    .as_ref()
+                    .map(|ext| column_data_type_extension_to_tokens(ext, span))
+                    .unwrap_or_else(|| quote! { None });
+                quote! {
+                    greptime_proto::v1::StructField {
+                        name: #field_name.to_string(),
+                        datatype: #datatype,
+                        datatype_extension: #datatype_extension,
+                    }
+                }
+            });
+            quote! {
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::StructType(StructTypeExtension {
+                        fields: vec![#(#fields),*],
+                    })),
+                })
+            }
+        }
+        Some(TypeExt::JsonNativeType(ext)) => {
+            let inner = syn::LitInt::new(&ext.datatype.to_string(), span);
+            let datatype_extension = ext
+                .datatype_extension
+                .as_deref()
+                .map(|ext| column_data_type_extension_to_tokens(ext, span))
+                .unwrap_or_else(|| quote! { None });
+            quote! {
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::JsonNativeType(Box::new(
+                        JsonNativeTypeExtension {
+                            datatype: #inner,
+                            datatype_extension: #datatype_extension,
+                        },
+                    ))),
+                })
+            }
+        }
+        Some(TypeExt::DictionaryType(ext)) => {
+            let key_datatype = syn::LitInt::new(&ext.key_datatype.to_string(), span);
+            let value_datatype = syn::LitInt::new(&ext.value_datatype.to_string(), span);
+            let key_datatype_extension = ext
+                .key_datatype_extension
+                .as_deref()
+                .map(|ext| column_data_type_extension_to_tokens(ext, span))
+                .unwrap_or_else(|| quote! { None });
+            let value_datatype_extension = ext
+                .value_datatype_extension
+                .as_deref()
+                .map(|ext| column_data_type_extension_to_tokens(ext, span))
+                .unwrap_or_else(|| quote! { None });
+            quote! {
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::DictionaryType(Box::new(
+                        DictionaryTypeExtension {
+                            key_datatype: #key_datatype,
+                            key_datatype_extension: #key_datatype_extension,
+                            value_datatype: #value_datatype,
+                            value_datatype_extension: #value_datatype_extension,
+                        },
+                    ))),
+                })
+            }
+        }
+        None => quote! { None },
+    }
 }

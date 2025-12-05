@@ -18,6 +18,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
+use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
@@ -396,8 +397,8 @@ impl RefillTask {
         // we don't need information from query context in this query so a default query context is enough
         let query_ctx = Arc::new(
             QueryContextBuilder::default()
-                .current_catalog("greptime".to_string())
-                .current_schema("public".to_string())
+                .current_catalog(DEFAULT_CATALOG_NAME.to_string())
+                .current_schema(DEFAULT_SCHEMA_NAME.to_string())
                 .build(),
         );
 

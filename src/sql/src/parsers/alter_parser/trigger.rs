@@ -544,7 +544,7 @@ mod tests {
     use crate::parsers::alter_parser::trigger::{apply_label_change, apply_label_replacement};
     use crate::statements::OptionMap;
     use crate::statements::alter::trigger::{LabelChange, LabelOperations};
-    use crate::statements::create::trigger::TriggerOn;
+    use crate::statements::create::trigger::{DurationExpr, TriggerOn};
     use crate::statements::statement::Statement;
 
     #[test]
@@ -569,12 +569,12 @@ mod tests {
         };
         let TriggerOn {
             query,
-            interval,
-            raw_interval_expr,
+            query_interval,
         } = alter.operation.trigger_on.unwrap();
+        let DurationExpr { duration, raw_expr } = query_interval;
         assert_eq!(query.to_string(), "(SELECT * FROM test_table)");
-        assert_eq!(raw_interval_expr, "'5 minute'::INTERVAL");
-        assert_eq!(interval, Duration::from_secs(300));
+        assert_eq!(raw_expr, "'5 minute'::INTERVAL");
+        assert_eq!(duration, Duration::from_secs(300));
         assert!(alter.operation.rename.is_none());
         assert!(alter.operation.label_operations.is_none());
         assert!(alter.operation.annotation_operations.is_none());
@@ -625,8 +625,8 @@ mod tests {
         };
 
         assert_eq!(labels.len(), 2);
-        assert_eq!(labels.get("key1"), Some(&"value1".to_string()));
-        assert_eq!(labels.get("key2"), Some(&"VALUE2".to_string()));
+        assert_eq!(labels.get("key1"), Some("value1"));
+        assert_eq!(labels.get("key2"), Some("VALUE2"));
 
         // Passed case: multiple ADD/DROP/MODIFY LABELS.
         let sql = r#"test_trigger ADD LABELS (key1='value1') MODIFY LABELS (key2='value2') DROP LABELS ('key3')"#;
@@ -640,18 +640,26 @@ mod tests {
             panic!("Expected PartialChanges label operations");
         };
         assert_eq!(changes.len(), 3);
-        let expected_changes = vec![
-            LabelChange::Add(OptionMap::from([(
-                "key1".to_string(),
-                "value1".to_string(),
-            )])),
-            LabelChange::Modify(OptionMap::from([(
-                "key2".to_string(),
-                "value2".to_string(),
-            )])),
-            LabelChange::Drop(vec!["key3".to_string()]),
-        ];
-        assert_eq!(changes, expected_changes);
+        let change0 = changes.first().unwrap();
+        let LabelChange::Add(labels) = change0 else {
+            panic!("Expected Add label change");
+        };
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels.get("key1"), Some("value1"));
+
+        let change1 = changes.get(1).unwrap();
+        let LabelChange::Modify(labels) = change1 else {
+            panic!("Expected Modify label change");
+        };
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels.get("key2"), Some("value2"));
+
+        let change2 = changes.get(2).unwrap();
+        let LabelChange::Drop(names) = change2 else {
+            panic!("Expected Drop label change");
+        };
+        assert_eq!(names.len(), 1);
+        assert_eq!(names.first().unwrap(), "key3");
 
         // Failed case: Duplicate SET LABELS.
         let sql =

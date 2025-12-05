@@ -32,6 +32,15 @@ use crate::blob_metadata::{BlobMetadata, CompressionCodec};
 use crate::error::Result;
 use crate::file_metadata::FileMetadata;
 
+/// Metrics returned by `PuffinReader::dir` operations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DirMetrics {
+    /// Whether this was a cache hit (true) or cache miss (false).
+    pub cache_hit: bool,
+    /// Size of the directory in bytes.
+    pub dir_size: u64,
+}
+
 /// The `PuffinManager` trait provides a unified interface for creating `PuffinReader` and `PuffinWriter`.
 #[async_trait]
 pub trait PuffinManager {
@@ -106,9 +115,10 @@ pub trait PuffinReader {
 
     /// Reads a directory from the Puffin file.
     ///
-    /// The returned `GuardWithMetadata` is used to access the directory data and its metadata.
+    /// The returned tuple contains `GuardWithMetadata` and `DirMetrics`.
+    /// The `GuardWithMetadata` is used to access the directory data and its metadata.
     /// Users should hold the `GuardWithMetadata` until they are done with the directory data.
-    async fn dir(&self, key: &str) -> Result<GuardWithMetadata<Self::Dir>>;
+    async fn dir(&self, key: &str) -> Result<(GuardWithMetadata<Self::Dir>, DirMetrics)>;
 }
 
 /// `BlobGuard` is provided by the `PuffinReader` to access the blob data.

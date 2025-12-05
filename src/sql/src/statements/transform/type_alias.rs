@@ -33,12 +33,21 @@ use crate::statements::{TimezoneInfo, sql_data_type_to_concrete_data_type};
 ///  - `TimestampMillisecond`, `Timestamp_ms` for `Timestamp(3)`.
 ///  - `TimestampMicrosecond`, `Timestamp_us` for `Timestamp(6)`.
 ///  - `TimestampNanosecond`, `Timestamp_ns` for `Timestamp(9)`.
-///  - `INT8` for `tinyint`
+///  -  TinyText, MediumText, LongText for `Text`.
+///
+/// SQL dialect integer type aliases (MySQL & PostgreSQL):
+///  - `INT2` for `smallint`
+///  - `INT4` for `int`
+///  - `INT8` for `bigint`
+///  - `FLOAT4` for `float`
+///  - `FLOAT8` for `double`
+///
+/// Extended type aliases for Arrow types:
 ///  - `INT16` for `smallint`
 ///  - `INT32` for `int`
 ///  - `INT64` for `bigint`
 ///  -  And `UINT8`, `UINT16` etc. for `TinyIntUnsigned` etc.
-///  -  TinyText, MediumText, LongText for `Text`.
+///
 pub(crate) struct TypeAliasTransformRule;
 
 impl TransformRule for TypeAliasTransformRule {
@@ -108,7 +117,9 @@ impl TransformRule for TypeAliasTransformRule {
             } if get_type_by_alias(data_type).is_some() => {
                 // Safety: checked in the match arm.
                 let new_type = get_type_by_alias(data_type).unwrap();
-                if let Ok(new_type) = sql_data_type_to_concrete_data_type(&new_type) {
+                if let Ok(new_type) =
+                    sql_data_type_to_concrete_data_type(&new_type, &Default::default())
+                {
                     *expr = Expr::Function(cast_expr_to_arrow_cast_func(
                         (**cast_expr).clone(),
                         new_type.as_arrow_type().to_string(),
@@ -123,9 +134,10 @@ impl TransformRule for TypeAliasTransformRule {
                 expr: cast_expr,
                 ..
             } => {
-                if let Ok(concrete_type) =
-                    sql_data_type_to_concrete_data_type(&DataType::Timestamp(*precision, *zone))
-                {
+                if let Ok(concrete_type) = sql_data_type_to_concrete_data_type(
+                    &DataType::Timestamp(*precision, *zone),
+                    &Default::default(),
+                ) {
                     let new_type = concrete_type.as_arrow_type();
                     *expr = Expr::Function(cast_expr_to_arrow_cast_func(
                         (**cast_expr).clone(),
@@ -153,13 +165,12 @@ fn replace_type_alias(data_type: &mut DataType) {
 // Remember to update `get_data_type_by_alias_name()` if you modify this method.
 pub(crate) fn get_type_by_alias(data_type: &DataType) -> Option<DataType> {
     match data_type {
-        // The sqlparser latest version contains the Int8 alias for Postgres Bigint.
-        // Which means 8 bytes in postgres (not 8 bits).
-        // See https://docs.rs/sqlparser/latest/sqlparser/ast/enum.DataType.html#variant.Int8
         DataType::Custom(name, tokens) if name.0.len() == 1 && tokens.is_empty() => {
             get_data_type_by_alias_name(name.0[0].to_string_unquoted().as_str())
         }
-        DataType::Int8(None) => Some(DataType::TinyInt(None)),
+        DataType::Int2(None) => Some(DataType::SmallInt(None)),
+        DataType::Int4(None) => Some(DataType::Int(None)),
+        DataType::Int8(None) => Some(DataType::BigInt(None)),
         DataType::Int16 => Some(DataType::SmallInt(None)),
         DataType::Int32 => Some(DataType::Int(None)),
         DataType::Int64 => Some(DataType::BigInt(None)),
@@ -167,6 +178,8 @@ pub(crate) fn get_type_by_alias(data_type: &DataType) -> Option<DataType> {
         DataType::UInt16 => Some(DataType::SmallIntUnsigned(None)),
         DataType::UInt32 => Some(DataType::IntUnsigned(None)),
         DataType::UInt64 => Some(DataType::BigIntUnsigned(None)),
+        DataType::Float4 => Some(DataType::Float(None)),
+        DataType::Float8 => Some(DataType::Double(ExactNumberInfo::None)),
         DataType::Float32 => Some(DataType::Float(None)),
         DataType::Float64 => Some(DataType::Double(ExactNumberInfo::None)),
         DataType::Bool => Some(DataType::Boolean),
@@ -199,8 +212,9 @@ pub(crate) fn get_data_type_by_alias_name(name: &str) -> Option<DataType> {
             Some(DataType::Timestamp(Some(9), TimezoneInfo::None))
         }
         // Number type alias
-        // We keep them for backward compatibility.
-        "INT8" => Some(DataType::TinyInt(None)),
+        "INT2" => Some(DataType::SmallInt(None)),
+        "INT4" => Some(DataType::Int(None)),
+        "INT8" => Some(DataType::BigInt(None)),
         "INT16" => Some(DataType::SmallInt(None)),
         "INT32" => Some(DataType::Int(None)),
         "INT64" => Some(DataType::BigInt(None)),
@@ -208,6 +222,8 @@ pub(crate) fn get_data_type_by_alias_name(name: &str) -> Option<DataType> {
         "UINT16" => Some(DataType::SmallIntUnsigned(None)),
         "UINT32" => Some(DataType::IntUnsigned(None)),
         "UINT64" => Some(DataType::BigIntUnsigned(None)),
+        "FLOAT4" => Some(DataType::Float(None)),
+        "FLOAT8" => Some(DataType::Double(ExactNumberInfo::None)),
         "FLOAT32" => Some(DataType::Float(None)),
         "FLOAT64" => Some(DataType::Double(ExactNumberInfo::None)),
         // String type alias
@@ -238,14 +254,29 @@ mod tests {
             get_data_type_by_alias_name("FLOAT64"),
             Some(DataType::Double(ExactNumberInfo::None))
         );
-
         assert_eq!(
             get_data_type_by_alias_name("float32"),
             Some(DataType::Float(None))
         );
         assert_eq!(
+            get_data_type_by_alias_name("float8"),
+            Some(DataType::Double(ExactNumberInfo::None))
+        );
+        assert_eq!(
+            get_data_type_by_alias_name("float4"),
+            Some(DataType::Float(None))
+        );
+        assert_eq!(
             get_data_type_by_alias_name("int8"),
-            Some(DataType::TinyInt(None))
+            Some(DataType::BigInt(None))
+        );
+        assert_eq!(
+            get_data_type_by_alias_name("int4"),
+            Some(DataType::Int(None))
+        );
+        assert_eq!(
+            get_data_type_by_alias_name("int2"),
+            Some(DataType::SmallInt(None))
         );
         assert_eq!(
             get_data_type_by_alias_name("INT16"),
@@ -394,11 +425,15 @@ CREATE TABLE data_types (
   tt tinytext,
   mt mediumtext,
   lt longtext,
-  tint int8,
+  i2 int2,
+  i4 int4,
+  i8 int8,
   sint int16,
   i int32,
   bint int64,
   v varchar,
+  f4 float4,
+  f8 float8,
   f float32,
   d float64,
   b boolean,
@@ -423,11 +458,15 @@ CREATE TABLE data_types (
   tt TINYTEXT,
   mt MEDIUMTEXT,
   lt LONGTEXT,
-  tint TINYINT,
+  i2 SMALLINT,
+  i4 INT,
+  i8 BIGINT,
   sint SMALLINT,
   i INT,
   bint BIGINT,
   v VARCHAR,
+  f4 FLOAT,
+  f8 DOUBLE,
   f FLOAT,
   d DOUBLE,
   b BOOLEAN,

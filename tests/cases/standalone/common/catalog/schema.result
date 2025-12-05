@@ -45,19 +45,19 @@ Affected Rows: 0
 
 SHOW TABLES FROM test_public_schema;
 
-+--------+
-| Tables |
-+--------+
-| hello  |
-+--------+
++------------------------------+
+| Tables_in_test_public_schema |
++------------------------------+
+| hello                        |
++------------------------------+
 
 SHOW TABLES FROM public;
 
-+---------+
-| Tables  |
-+---------+
-| numbers |
-+---------+
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
++------------------+
 
 INSERT INTO hello VALUES (2), (3), (4);
 
@@ -75,19 +75,19 @@ SELECT * FROM hello;
 
 SHOW TABLES;
 
-+--------+
-| Tables |
-+--------+
-| hello  |
-+--------+
++------------------------------+
+| Tables_in_test_public_schema |
++------------------------------+
+| hello                        |
++------------------------------+
 
 SHOW FULL TABLES WHERE Table_type != 'VIEW';
 
-+--------+------------+
-| Tables | Table_type |
-+--------+------------+
-| hello  | BASE TABLE |
-+--------+------------+
++------------------------------+------------+
+| Tables_in_test_public_schema | Table_type |
++------------------------------+------------+
+| hello                        | BASE TABLE |
++------------------------------+------------+
 
 DROP TABLE hello;
 
@@ -104,19 +104,19 @@ SHOW TABLES FROM test_public_schema;
 
 SHOW TABLES FROM public;
 
-+---------+
-| Tables  |
-+---------+
-| numbers |
-+---------+
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
++------------------+
 
 SHOW TABLES FROM public WHERE Tables = 'numbers';
 
-+---------+
-| Tables  |
-+---------+
-| numbers |
-+---------+
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
++------------------+
 
 DROP SCHEMA test_public_schema;
 

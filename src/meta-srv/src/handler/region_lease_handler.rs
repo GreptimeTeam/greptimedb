@@ -19,6 +19,7 @@ use api::v1::meta::{HeartbeatRequest, RegionLease, Role};
 use async_trait::async_trait;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
+use common_telemetry::error;
 use store_api::region_engine::GrantedRegion;
 use store_api::storage::RegionId;
 
@@ -83,36 +84,44 @@ impl HeartbeatHandler for RegionLeaseHandler {
         let regions = stat.regions();
         let datanode_id = stat.id;
 
-        let RenewRegionLeasesResponse {
-            non_exists,
-            renewed,
-        } = self
+        match self
             .region_lease_keeper
             .renew_region_leases(datanode_id, &regions)
-            .await?;
+            .await
+        {
+            Ok(RenewRegionLeasesResponse {
+                non_exists,
+                renewed,
+            }) => {
+                let renewed = if let Some(renewer) = &self.customized_region_lease_renewer {
+                    renewer
+                        .renew(ctx, renewed)
+                        .into_iter()
+                        .map(|region| region.into())
+                        .collect()
+                } else {
+                    renewed
+                        .into_iter()
+                        .map(|(region_id, region_lease_info)| {
+                            GrantedRegion::new(region_id, region_lease_info.role).into()
+                        })
+                        .collect::<Vec<_>>()
+                };
 
-        let renewed = if let Some(renewer) = &self.customized_region_lease_renewer {
-            renewer
-                .renew(ctx, renewed)
-                .into_iter()
-                .map(|region| region.into())
-                .collect()
-        } else {
-            renewed
-                .into_iter()
-                .map(|(region_id, region_lease_info)| {
-                    GrantedRegion::new(region_id, region_lease_info.role).into()
-                })
-                .collect::<Vec<_>>()
-        };
-
-        acc.region_lease = Some(RegionLease {
-            regions: renewed,
-            duration_since_epoch: req.duration_since_epoch,
-            lease_seconds: self.region_lease_seconds,
-            closeable_region_ids: non_exists.iter().map(|region| region.as_u64()).collect(),
-        });
-        acc.inactive_region_ids = non_exists;
+                acc.region_lease = Some(RegionLease {
+                    regions: renewed,
+                    duration_since_epoch: req.duration_since_epoch,
+                    lease_seconds: self.region_lease_seconds,
+                    closeable_region_ids: non_exists.iter().map(|region| region.as_u64()).collect(),
+                });
+                acc.inactive_region_ids = non_exists;
+            }
+            Err(e) => {
+                error!(e; "Failed to renew region leases for datanode: {datanode_id:?}, regions: {:?}", regions);
+                // If we throw error here, the datanode will be marked as failure by region failure handler.
+                // So we only log the error and continue.
+            }
+        }
 
         Ok(HandleControl::Continue)
     }
@@ -120,6 +129,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
 
 #[cfg(test)]
 mod test {
+
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
@@ -129,6 +139,7 @@ mod test {
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::test_util::MockKvBackendBuilder;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
@@ -164,6 +175,7 @@ mod test {
             region_manifest: RegionManifestInfo::Mito {
                 manifest_version: 0,
                 flushed_entry_id: 0,
+                file_removed_cnt: 0,
             },
             data_topic_latest_entry_id: 0,
             metadata_topic_latest_entry_id: 0,
@@ -404,5 +416,59 @@ mod test {
             .collect::<HashMap<_, _>>();
 
         assert_eq!(granted, expected);
+    }
+
+    #[tokio::test]
+    async fn test_handle_renew_region_lease_failure() {
+        common_telemetry::init_default_ut_logging();
+        let kv = MockKvBackendBuilder::default()
+            .batch_get_fn(Arc::new(|_| {
+                common_meta::error::UnexpectedSnafu {
+                    err_msg: "mock err",
+                }
+                .fail()
+            }) as _)
+            .build()
+            .unwrap();
+        let kvbackend = Arc::new(kv);
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kvbackend));
+
+        let datanode_id = 1;
+        let region_number = 1u32;
+        let table_id = 10;
+        let region_id = RegionId::new(table_id, region_number);
+        let another_region_id = RegionId::new(table_id, region_number + 1);
+        let no_exist_region_id = RegionId::new(table_id, region_number + 2);
+        let peer = Peer::empty(datanode_id);
+
+        let builder = MetasrvBuilder::new();
+        let metasrv = builder.build().await.unwrap();
+        let ctx = &mut metasrv.new_ctx();
+
+        let req = HeartbeatRequest {
+            duration_since_epoch: 1234,
+            ..Default::default()
+        };
+
+        let acc = &mut HeartbeatAccumulator::default();
+        acc.stat = Some(Stat {
+            id: peer.id,
+            region_stats: vec![
+                new_empty_region_stat(region_id, RegionRole::Leader),
+                new_empty_region_stat(another_region_id, RegionRole::Leader),
+                new_empty_region_stat(no_exist_region_id, RegionRole::Leader),
+            ],
+            ..Default::default()
+        });
+        let handler = RegionLeaseHandler::new(
+            distributed_time_constants::REGION_LEASE_SECS,
+            table_metadata_manager.clone(),
+            Default::default(),
+            None,
+        );
+        handler.handle(&req, ctx, acc).await.unwrap();
+
+        assert!(acc.region_lease.is_none());
+        assert!(acc.inactive_region_ids.is_empty());
     }
 }

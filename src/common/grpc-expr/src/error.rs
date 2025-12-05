@@ -25,13 +25,6 @@ use store_api::metadata::MetadataError;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Illegal delete request, reason: {reason}"))]
-    IllegalDeleteRequest {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Column datatype error"))]
     ColumnDataType {
         #[snafu(implicit)]
@@ -65,13 +58,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to create vector"))]
-    CreateVector {
-        #[snafu(implicit)]
-        location: Location,
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
     MissingField {
         field: String,
@@ -85,13 +71,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: api::error::Error,
-    },
-
-    #[snafu(display("Unexpected values length, reason: {}", reason))]
-    UnexpectedValuesLength {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
     },
 
     #[snafu(display("Unknown location type: {}", location_type))]
@@ -189,18 +168,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::IllegalDeleteRequest { .. } => StatusCode::InvalidArguments,
-
             Error::ColumnDataType { .. } => StatusCode::Internal,
             Error::DuplicatedTimestampColumn { .. }
             | Error::DuplicatedColumnName { .. }
             | Error::MissingTimestampColumn { .. } => StatusCode::InvalidArguments,
-            Error::CreateVector { .. } => StatusCode::InvalidArguments,
             Error::MissingField { .. } => StatusCode::InvalidArguments,
             Error::InvalidColumnDef { source, .. } => source.status_code(),
-            Error::UnexpectedValuesLength { .. } | Error::UnknownLocationType { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::UnknownLocationType { .. } => StatusCode::InvalidArguments,
 
             Error::UnknownColumnDataType { .. } | Error::InvalidStringIndexColumnType { .. } => {
                 StatusCode::InvalidArguments

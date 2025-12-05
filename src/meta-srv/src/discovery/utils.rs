@@ -19,7 +19,7 @@ use common_meta::DatanodeId;
 use common_meta::cluster::NodeInfo;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
-use common_time::util::{DefaultSystemTimer, SystemTimer};
+use common_time::util::SystemTimer;
 use common_workload::DatanodeWorkloadType;
 use snafu::ResultExt;
 
@@ -49,16 +49,9 @@ pub trait LastActiveTs {
 /// Builds a filter closure that checks whether a [`LastActiveTs`] item
 /// is still within the specified active duration, relative to the
 /// current time provided by the given [`SystemTimer`].
-///
-/// The returned closure uses the timestamp at the time of building,
-/// so the "now" reference point is fixed when this function is called.
-pub fn build_active_filter<T: LastActiveTs>(
-    timer: impl SystemTimer,
-    active_duration: Duration,
-) -> impl Fn(&T) -> bool {
-    let now = timer.current_time_millis();
-    let active_duration = active_duration.as_millis() as u64;
-    move |item: &T| {
+pub fn build_active_filter<T: LastActiveTs>(active_duration: Duration) -> impl Fn(i64, &T) -> bool {
+    move |now: i64, item: &T| {
+        let active_duration = active_duration.as_millis() as u64;
         let elapsed = now.saturating_sub(item.last_active_ts()) as u64;
         elapsed < active_duration
     }
@@ -66,18 +59,19 @@ pub fn build_active_filter<T: LastActiveTs>(
 
 /// Returns the alive datanodes.
 pub async fn alive_datanodes(
+    timer: &impl SystemTimer,
     accessor: &impl LeaseValueAccessor,
     active_duration: Duration,
     condition: Option<fn(&NodeWorkloads) -> bool>,
 ) -> Result<Vec<Peer>> {
-    let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
+    let active_filter = build_active_filter(active_duration);
     let condition = condition.unwrap_or(|_| true);
-    Ok(accessor
-        .lease_values(LeaseValueType::Datanode)
-        .await?
+    let lease_values = accessor.lease_values(LeaseValueType::Datanode).await?;
+    let now = timer.current_time_millis();
+    Ok(lease_values
         .into_iter()
         .filter_map(|(peer_id, lease_value)| {
-            if active_filter(&lease_value) && condition(&lease_value.workloads) {
+            if active_filter(now, &lease_value) && condition(&lease_value.workloads) {
                 Some(Peer::new(peer_id, lease_value.node_addr))
             } else {
                 None
@@ -88,18 +82,19 @@ pub async fn alive_datanodes(
 
 /// Returns the alive flownodes.
 pub async fn alive_flownodes(
+    timer: &impl SystemTimer,
     accessor: &impl LeaseValueAccessor,
     active_duration: Duration,
     condition: Option<fn(&NodeWorkloads) -> bool>,
 ) -> Result<Vec<Peer>> {
-    let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
+    let active_filter = build_active_filter(active_duration);
     let condition = condition.unwrap_or(|_| true);
-    Ok(accessor
-        .lease_values(LeaseValueType::Flownode)
-        .await?
+    let lease_values = accessor.lease_values(LeaseValueType::Flownode).await?;
+    let now = timer.current_time_millis();
+    Ok(lease_values
         .into_iter()
         .filter_map(|(peer_id, lease_value)| {
-            if active_filter(&lease_value) && condition(&lease_value.workloads) {
+            if active_filter(now, &lease_value) && condition(&lease_value.workloads) {
                 Some(Peer::new(peer_id, lease_value.node_addr))
             } else {
                 None
@@ -110,16 +105,17 @@ pub async fn alive_flownodes(
 
 /// Returns the alive frontends.
 pub async fn alive_frontends(
+    timer: &impl SystemTimer,
     lister: &impl NodeInfoAccessor,
     active_duration: Duration,
 ) -> Result<Vec<Peer>> {
-    let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
-    Ok(lister
-        .node_infos(NodeInfoType::Frontend)
-        .await?
+    let active_filter = build_active_filter(active_duration);
+    let node_infos = lister.node_infos(NodeInfoType::Frontend).await?;
+    let now = timer.current_time_millis();
+    Ok(node_infos
         .into_iter()
         .filter_map(|(_, node_info)| {
-            if active_filter(&node_info) {
+            if active_filter(now, &node_info) {
                 Some(node_info.peer)
             } else {
                 None
@@ -130,15 +126,18 @@ pub async fn alive_frontends(
 
 /// Returns the alive datanode peer.
 pub async fn alive_datanode(
+    timer: &impl SystemTimer,
     lister: &impl LeaseValueAccessor,
     peer_id: u64,
     active_duration: Duration,
 ) -> Result<Option<Peer>> {
-    let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
-    let v = lister
+    let active_filter = build_active_filter(active_duration);
+    let lease_value = lister
         .lease_value(LeaseValueType::Datanode, peer_id)
-        .await?
-        .filter(|(_, lease)| active_filter(lease))
+        .await?;
+    let now = timer.current_time_millis();
+    let v = lease_value
+        .filter(|(_, lease)| active_filter(now, lease))
         .map(|(peer_id, lease)| Peer::new(peer_id, lease.node_addr));
 
     Ok(v)

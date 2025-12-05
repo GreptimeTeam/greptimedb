@@ -27,6 +27,8 @@ use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
+use common_query::prelude::set_default_prefix;
+use common_stat::ResourceStatImpl;
 use common_telemetry::{error, info, warn};
 use common_wal::config::DatanodeWalConfig;
 use common_wal::config::kafka::DatanodeKafkaConfig;
@@ -34,6 +36,7 @@ use common_wal::config::raft_engine::RaftEngineConfig;
 use file_engine::engine::FileRegionEngine;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::kafka::{GlobalIndexCollector, default_index_file};
+use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::MetaClientRef;
 use metric_engine::engine::MetricEngine;
@@ -45,7 +48,6 @@ use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
 use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
-use servers::export_metrics::ExportMetricsTask;
 use servers::server::ServerHandlers;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::path_utils::WAL_DIR;
@@ -57,9 +59,9 @@ use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
-    self, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu,
-    MissingCacheSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
-    ShutdownServerSnafu, StartServerSnafu,
+    self, BuildDatanodeSnafu, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu,
+    GetMetadataSnafu, MissingCacheSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result,
+    ShutdownInstanceSnafu, ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
     NoopRegionServerEventListener, RegionServerEventListenerRef, RegionServerEventReceiver,
@@ -81,7 +83,6 @@ pub struct Datanode {
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leases_notifier: Option<Arc<Notify>>,
     plugins: Plugins,
-    export_metrics_task: Option<ExportMetricsTask>,
 }
 
 impl Datanode {
@@ -92,10 +93,6 @@ impl Datanode {
         self.wait_coordinated().await;
 
         self.start_telemetry();
-
-        if let Some(t) = self.export_metrics_task.as_ref() {
-            t.start(None).context(StartServerSnafu)?
-        }
 
         self.services.start_all().await.context(StartServerSnafu)
     }
@@ -218,6 +215,9 @@ impl DatanodeBuilder {
 
     pub async fn build(mut self) -> Result<Datanode> {
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
+        set_default_prefix(self.opts.default_column_prefix.as_deref())
+            .map_err(BoxedError::new)
+            .context(BuildDatanodeSnafu)?;
 
         let meta_client = self.meta_client.take();
 
@@ -281,6 +281,9 @@ impl DatanodeBuilder {
             open_all_regions.await?;
         }
 
+        let mut resource_stat = ResourceStatImpl::default();
+        resource_stat.start_collect_cpu_usage();
+
         let heartbeat_task = if let Some(meta_client) = meta_client {
             Some(
                 HeartbeatTask::try_new(
@@ -289,6 +292,7 @@ impl DatanodeBuilder {
                     meta_client,
                     cache_registry,
                     self.plugins.clone(),
+                    Arc::new(resource_stat),
                 )
                 .await?,
             )
@@ -309,10 +313,6 @@ impl DatanodeBuilder {
             None
         };
 
-        let export_metrics_task =
-            ExportMetricsTask::try_new(&self.opts.export_metrics, Some(&self.plugins))
-                .context(StartServerSnafu)?;
-
         Ok(Datanode {
             services: ServerHandlers::default(),
             heartbeat_task,
@@ -321,7 +321,6 @@ impl DatanodeBuilder {
             region_event_receiver,
             leases_notifier,
             plugins: self.plugins.clone(),
-            export_metrics_task,
         })
     }
 
@@ -512,6 +511,7 @@ impl DatanodeBuilder {
                     file_ref_manager,
                     partition_expr_fetcher.clone(),
                     plugins,
+                    opts.max_concurrent_queries,
                 );
 
                 #[cfg(feature = "enterprise")]
@@ -554,6 +554,29 @@ impl DatanodeBuilder {
                     file_ref_manager,
                     partition_expr_fetcher,
                     plugins,
+                    opts.max_concurrent_queries,
+                );
+
+                #[cfg(feature = "enterprise")]
+                let builder = builder.with_extension_range_provider_factory(
+                    self.extension_range_provider_factory.take(),
+                );
+
+                builder.try_build().await.context(BuildMitoEngineSnafu)?
+            }
+            DatanodeWalConfig::Noop => {
+                let log_store = Arc::new(NoopLogStore);
+
+                let builder = MitoEngineBuilder::new(
+                    &opts.storage.data_home,
+                    config,
+                    log_store,
+                    object_store_manager,
+                    schema_metadata_manager,
+                    file_ref_manager,
+                    partition_expr_fetcher.clone(),
+                    plugins,
+                    opts.max_concurrent_queries,
                 );
 
                 #[cfg(feature = "enterprise")]

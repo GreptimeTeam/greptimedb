@@ -395,12 +395,20 @@ pub struct FlushTableRequest {
     pub table_name: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct BuildIndexTableRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
     pub compact_options: compact_request::Options,
+    pub parallelism: u32,
 }
 
 impl Default for CompactTableRequest {
@@ -410,6 +418,7 @@ impl Default for CompactTableRequest {
             schema_name: Default::default(),
             table_name: Default::default(),
             compact_options: compact_request::Options::Regular(Default::default()),
+            parallelism: 1,
         }
     }
 }

@@ -48,8 +48,18 @@ use crate::test_util::{
 
 #[tokio::test]
 async fn test_engine_new_stop() {
+    test_engine_new_stop_with_format(false).await;
+    test_engine_new_stop_with_format(true).await;
+}
+
+async fn test_engine_new_stop_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("engine-stop").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -75,8 +85,18 @@ async fn test_engine_new_stop() {
 
 #[tokio::test]
 async fn test_write_to_region() {
+    test_write_to_region_with_format(false).await;
+    test_write_to_region_with_format(true).await;
+}
+
+async fn test_write_to_region_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("write-to-region").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -97,8 +117,12 @@ async fn test_write_to_region() {
 }
 
 #[apply(multiple_log_store_factories)]
-
 async fn test_region_replay(factory: Option<LogStoreFactory>) {
+    test_region_replay_with_format(factory.clone(), false).await;
+    test_region_replay_with_format(factory, true).await;
+}
+
+async fn test_region_replay_with_format(factory: Option<LogStoreFactory>, flat_format: bool) {
     use common_wal::options::{KafkaWalOptions, WalOptions};
 
     common_telemetry::init_default_ut_logging();
@@ -108,7 +132,12 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
     let mut env = TestEnv::with_prefix("region-replay")
         .await
         .with_log_store_factory(factory.clone());
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let topic = prepare_test_for_kafka_log_store(&factory).await;
@@ -136,7 +165,15 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
     };
     put_rows(&engine, region_id, rows).await;
 
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
 
     let mut options = HashMap::new();
     if let Some(topic) = &topic {
@@ -189,8 +226,18 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
 
 #[tokio::test]
 async fn test_write_query_region() {
+    test_write_query_region_with_format(false).await;
+    test_write_query_region_with_format(true).await;
+}
+
+async fn test_write_query_region_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -223,8 +270,18 @@ async fn test_write_query_region() {
 
 #[tokio::test]
 async fn test_different_order() {
+    test_different_order_with_format(false).await;
+    test_different_order_with_format(true).await;
+}
+
+async fn test_different_order_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().tag_num(2).field_num(2).build();
@@ -274,8 +331,18 @@ async fn test_different_order() {
 
 #[tokio::test]
 async fn test_different_order_and_type() {
+    test_different_order_and_type_with_format(false).await;
+    test_different_order_and_type_with_format(true).await;
+}
+
+async fn test_different_order_and_type_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     // tag_0, tag_1, field_0, field_1, ts,
@@ -326,10 +393,20 @@ async fn test_different_order_and_type() {
 
 #[tokio::test]
 async fn test_put_delete() {
+    test_put_delete_with_format(false).await;
+    test_put_delete_with_format(true).await;
+}
+
+async fn test_put_delete_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -380,8 +457,18 @@ async fn test_put_delete() {
 
 #[tokio::test]
 async fn test_delete_not_null_fields() {
+    test_delete_not_null_fields_with_format(false).await;
+    test_delete_not_null_fields_with_format(true).await;
+}
+
+async fn test_delete_not_null_fields_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().all_not_null(true).build();
@@ -429,8 +516,18 @@ async fn test_delete_not_null_fields() {
 
 #[tokio::test]
 async fn test_put_overwrite() {
+    test_put_overwrite_with_format(false).await;
+    test_put_overwrite_with_format(true).await;
+}
+
+async fn test_put_overwrite_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -489,8 +586,18 @@ async fn test_put_overwrite() {
 
 #[tokio::test]
 async fn test_absent_and_invalid_columns() {
+    test_absent_and_invalid_columns_with_format(false).await;
+    test_absent_and_invalid_columns_with_format(true).await;
+}
+
+async fn test_absent_and_invalid_columns_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     // tag_0, field_0, field_1, ts,
@@ -531,8 +638,18 @@ async fn test_absent_and_invalid_columns() {
 
 #[tokio::test]
 async fn test_region_usage() {
+    test_region_usage_with_format(false).await;
+    test_region_usage_with_format(true).await;
+}
+
+async fn test_region_usage_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("region_usage").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -558,6 +675,7 @@ async fn test_region_usage() {
 
     let region_stat = region.region_statistic();
     assert!(region_stat.wal_size > 0);
+    assert_eq!(region_stat.num_rows, 10);
 
     // delete some rows
     let rows = Rows {
@@ -568,6 +686,7 @@ async fn test_region_usage() {
 
     let region_stat = region.region_statistic();
     assert!(region_stat.wal_size > 0);
+    assert_eq!(region_stat.num_rows, 13);
 
     // flush region
     flush_region(&engine, region_id, None).await;
@@ -583,11 +702,20 @@ async fn test_region_usage() {
 
 #[tokio::test]
 async fn test_engine_with_write_cache() {
+    test_engine_with_write_cache_with_format(false).await;
+    test_engine_with_write_cache_with_format(true).await;
+}
+
+async fn test_engine_with_write_cache_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
     let path = env.data_home().to_str().unwrap().to_string();
-    let mito_config = MitoConfig::default().enable_write_cache(path, ReadableSize::mb(512), None);
+    let mito_config = MitoConfig {
+        default_experimental_flat_format: flat_format,
+        ..Default::default()
+    }
+    .enable_write_cache(path, ReadableSize::mb(512), None);
     let engine = env.create_engine(mito_config).await;
 
     let region_id = RegionId::new(1, 1);
@@ -625,9 +753,15 @@ async fn test_engine_with_write_cache() {
 
 #[tokio::test]
 async fn test_cache_null_primary_key() {
+    test_cache_null_primary_key_with_format(false).await;
+    test_cache_null_primary_key_with_format(true).await;
+}
+
+async fn test_cache_null_primary_key_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
             vector_cache_size: ReadableSize::mb(32),
             ..Default::default()
         })
@@ -726,8 +860,40 @@ async fn test_cache_null_primary_key() {
 
 #[tokio::test]
 async fn test_list_ssts() {
+    test_list_ssts_with_format(false, r#"
+ManifestSstEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_id: Some("<index_file_id>"), level: 0, file_path: "test/11_0000000001/<file_id>.parquet", file_size: 2513, index_file_path: Some("test/11_0000000001/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), origin_region_id: 47244640257(11, 1), node_id: None, visible: true }
+ManifestSstEntry { table_dir: "test/", region_id: 47244640258(11, 2), table_id: 11, region_number: 2, region_group: 0, region_sequence: 2, file_id: "<file_id>", index_file_id: Some("<index_file_id>"), level: 0, file_path: "test/11_0000000002/<file_id>.parquet", file_size: 2513, index_file_path: Some("test/11_0000000002/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), origin_region_id: 47244640258(11, 2), node_id: None, visible: true }
+ManifestSstEntry { table_dir: "test/", region_id: 94489280554(22, 42), table_id: 22, region_number: 42, region_group: 0, region_sequence: 42, file_id: "<file_id>", index_file_id: Some("<index_file_id>"), level: 0, file_path: "test/22_0000000042/<file_id>.parquet", file_size: 2513, index_file_path: Some("test/22_0000000042/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), origin_region_id: 94489280554(22, 42), node_id: None, visible: true }"# ,r#"
+StorageSstEntry { file_path: "test/11_0000000001/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/11_0000000001/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/11_0000000002/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/11_0000000002/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/22_0000000042/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/22_0000000042/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }"#).await;
+    test_list_ssts_with_format(true, r#"
+ManifestSstEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_id: Some("<index_file_id>"), level: 0, file_path: "test/11_0000000001/<file_id>.parquet", file_size: 2837, index_file_path: Some("test/11_0000000001/index/<file_id>.puffin"), index_file_size: Some(292), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), origin_region_id: 47244640257(11, 1), node_id: None, visible: true }
+ManifestSstEntry { table_dir: "test/", region_id: 47244640258(11, 2), table_id: 11, region_number: 2, region_group: 0, region_sequence: 2, file_id: "<file_id>", index_file_id: Some("<index_file_id>"), level: 0, file_path: "test/11_0000000002/<file_id>.parquet", file_size: 2837, index_file_path: Some("test/11_0000000002/index/<file_id>.puffin"), index_file_size: Some(292), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), origin_region_id: 47244640258(11, 2), node_id: None, visible: true }
+ManifestSstEntry { table_dir: "test/", region_id: 94489280554(22, 42), table_id: 22, region_number: 42, region_group: 0, region_sequence: 42, file_id: "<file_id>", index_file_id: Some("<index_file_id>"), level: 0, file_path: "test/22_0000000042/<file_id>.parquet", file_size: 2837, index_file_path: Some("test/22_0000000042/index/<file_id>.puffin"), index_file_size: Some(292), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), origin_region_id: 94489280554(22, 42), node_id: None, visible: true }"#, r#"
+StorageSstEntry { file_path: "test/11_0000000001/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/11_0000000001/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/11_0000000002/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/11_0000000002/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/22_0000000042/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/22_0000000042/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }"#).await;
+}
+
+async fn test_list_ssts_with_format(
+    flat_format: bool,
+    expected_manifest_ssts: &str,
+    expected_storage_ssts: &str,
+) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     // Create 3 regions and write some rows to each of them
     let region_ids = vec![
@@ -779,18 +945,13 @@ async fn test_list_ssts() {
                 .index_file_path
                 .map(|p| p.replace(&e.file_id, "<file_id>"));
             e.file_id = "<file_id>".to_string();
+            e.index_file_id = e.index_file_id.map(|_| "<index_file_id>".to_string());
             format!("\n{:?}", e)
         })
         .sorted()
         .collect::<Vec<_>>()
         .join("");
-    assert_eq!(
-        debug_format,
-        r#"
-ManifestSstEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", level: 0, file_path: "test/11_0000000001/<file_id>.parquet", file_size: 2515, index_file_path: Some("test/11_0000000001/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), origin_region_id: 47244640257(11, 1), node_id: None, visible: true }
-ManifestSstEntry { table_dir: "test/", region_id: 47244640258(11, 2), table_id: 11, region_number: 2, region_group: 0, region_sequence: 2, file_id: "<file_id>", level: 0, file_path: "test/11_0000000002/<file_id>.parquet", file_size: 2515, index_file_path: Some("test/11_0000000002/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), origin_region_id: 47244640258(11, 2), node_id: None, visible: true }
-ManifestSstEntry { table_dir: "test/", region_id: 94489280554(22, 42), table_id: 22, region_number: 42, region_group: 0, region_sequence: 42, file_id: "<file_id>", level: 0, file_path: "test/22_0000000042/<file_id>.parquet", file_size: 2515, index_file_path: Some("test/22_0000000042/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), origin_region_id: 94489280554(22, 42), node_id: None, visible: true }"#
-    );
+    assert_eq!(debug_format, expected_manifest_ssts,);
 
     // list from storage
     let storage_entries = engine
@@ -808,14 +969,190 @@ ManifestSstEntry { table_dir: "test/", region_id: 94489280554(22, 42), table_id:
         .sorted()
         .collect::<Vec<_>>()
         .join("");
-    assert_eq!(
-        debug_format,
-        r#"
-StorageSstEntry { file_path: "test/11_0000000001/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/11_0000000001/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/11_0000000002/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/11_0000000002/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/22_0000000042/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/22_0000000042/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }"#
+    assert_eq!(debug_format, expected_storage_ssts,);
+}
+
+#[tokio::test]
+async fn test_all_index_metas_list_all_types() {
+    test_all_index_metas_list_all_types_with_format(false, r#"
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "bloom_filter", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 751, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":640,\"row_count\":20,\"rows_per_segment\":2,\"segment_count\":10}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "fulltext_bloom", target_type: "column", target_key: "4", target_json: "{\"column\":4}", blob_size: 89, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":64,\"row_count\":20,\"rows_per_segment\":4,\"segment_count\":5},\"fulltext\":{\"analyzer\":\"English\",\"case_sensitive\":false}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "fulltext_tantivy", target_type: "column", target_key: "5", target_json: "{\"column\":5}", blob_size: 1100, meta_json: Some("{\"fulltext\":{\"analyzer\":\"Chinese\",\"case_sensitive\":true}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "inverted", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 518, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":150,\"inverted_index_size\":518,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "inverted", target_type: "column", target_key: "2", target_json: "{\"column\":2}", blob_size: 515, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":147,\"inverted_index_size\":515,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }"#).await;
+    test_all_index_metas_list_all_types_with_format(true, r#"
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "bloom_filter", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 751, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":640,\"row_count\":20,\"rows_per_segment\":2,\"segment_count\":10}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "fulltext_bloom", target_type: "column", target_key: "4", target_json: "{\"column\":4}", blob_size: 89, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":64,\"row_count\":20,\"rows_per_segment\":4,\"segment_count\":5},\"fulltext\":{\"analyzer\":\"English\",\"case_sensitive\":false}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "fulltext_tantivy", target_type: "column", target_key: "5", target_json: "{\"column\":5}", blob_size: 1100, meta_json: Some("{\"fulltext\":{\"analyzer\":\"Chinese\",\"case_sensitive\":true}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "inverted", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 518, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":150,\"inverted_index_size\":518,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "inverted", target_type: "column", target_key: "2", target_json: "{\"column\":2}", blob_size: 515, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":147,\"inverted_index_size\":515,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }"#).await;
+}
+
+async fn test_all_index_metas_list_all_types_with_format(flat_format: bool, expect_format: &str) {
+    use datatypes::schema::{
+        FulltextAnalyzer, FulltextBackend, FulltextOptions, SkippingIndexOptions, SkippingIndexType,
+    };
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    // One region with both fulltext backends and inverted index enabled, plus bloom skipping index
+    let region_id = RegionId::new(11, 1);
+
+    let mut request = CreateRequestBuilder::new().tag_num(1).field_num(2).build();
+    // bloom filter skipping index on field_1
+    let skipping = SkippingIndexOptions::new_unchecked(2, 0.01, SkippingIndexType::BloomFilter);
+    request.column_metadatas[1]
+        .column_schema
+        .set_skipping_options(&skipping)
+        .unwrap();
+
+    // inverted index on field_1
+    request.column_metadatas[2]
+        .column_schema
+        .set_inverted_index(true);
+    // inverted index on tag_0
+    request.column_metadatas[1]
+        .column_schema
+        .set_inverted_index(true);
+
+    request.column_metadatas.push(ColumnMetadata {
+        column_schema: ColumnSchema::new(
+            "field_2".to_string(),
+            ConcreteDataType::string_datatype(),
+            true,
+        ),
+        semantic_type: SemanticType::Field,
+        column_id: 4,
+    });
+    // fulltext bloom on field_2
+    let ft_bloom = FulltextOptions::new_unchecked(
+        true,
+        FulltextAnalyzer::English,
+        false,
+        FulltextBackend::Bloom,
+        4,
+        0.001,
     );
+    request
+        .column_metadatas
+        .last_mut()
+        .unwrap()
+        .column_schema
+        .set_fulltext_options(&ft_bloom)
+        .unwrap();
+
+    request.column_metadatas.push(ColumnMetadata {
+        column_schema: ColumnSchema::new(
+            "field_3".to_string(),
+            ConcreteDataType::string_datatype(),
+            true,
+        ),
+        semantic_type: SemanticType::Field,
+        column_id: 5,
+    });
+    // fulltext tantivy on field_3
+    let ft_tantivy = FulltextOptions::new_unchecked(
+        true,
+        FulltextAnalyzer::Chinese,
+        true,
+        FulltextBackend::Tantivy,
+        2,
+        0.01,
+    );
+    request
+        .column_metadatas
+        .last_mut()
+        .unwrap()
+        .column_schema
+        .set_fulltext_options(&ft_tantivy)
+        .unwrap();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    // write some rows (schema: tag_0, field_0, field_1, field_2, field_3, ts)
+    let column_schemas = rows_schema(&request);
+    let rows_vec: Vec<api::v1::Row> = (0..20)
+        .map(|ts| api::v1::Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue("x".to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::F64Value(ts as f64)),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::F64Value((20 - ts) as f64)),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::TimestampMillisecondValue(
+                        ts as i64 * 1000,
+                    )),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue("y".to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue("z".to_string())),
+                },
+            ],
+        })
+        .collect();
+    let rows = api::v1::Rows {
+        schema: column_schemas.clone(),
+        rows: rows_vec,
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // flush to generate sst and indexes
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    fn bucket_size(size: u64) -> u64 {
+        if size < 512 { size } else { (size / 100) * 100 }
+    }
+
+    let mut metas = engine.all_index_metas().await;
+    for entry in &mut metas {
+        entry.index_file_path = entry.index_file_path.replace(&entry.file_id, "<file_id>");
+        entry.file_id = "<file_id>".to_string();
+        entry.index_file_size = entry.index_file_size.map(bucket_size);
+        if entry.index_type == "fulltext_tantivy" {
+            entry.blob_size = bucket_size(entry.blob_size);
+        }
+        if let Some(meta_json) = entry.meta_json.as_mut()
+            && let Ok(mut value) = serde_json::from_str::<serde_json::Value>(meta_json)
+        {
+            if let Some(inverted) = value.get_mut("inverted").and_then(|v| v.as_object_mut()) {
+                inverted.insert("base_offset".to_string(), serde_json::Value::from(0));
+            }
+            *meta_json = value.to_string();
+        }
+    }
+    metas.sort_by(|a, b| {
+        (a.index_type.as_str(), a.target_key.as_str())
+            .cmp(&(b.index_type.as_str(), b.target_key.as_str()))
+    });
+
+    let debug_format = metas
+        .iter()
+        .map(|entry| format!("\n{:?}", entry))
+        .collect::<String>();
+
+    assert_eq!(expect_format, debug_format);
 }

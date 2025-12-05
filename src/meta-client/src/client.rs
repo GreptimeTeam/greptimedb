@@ -24,7 +24,9 @@ mod util;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse, Role};
+use api::v1::meta::{
+    MetasrvNodeInfo, ProcedureDetailResponse, ReconcileRequest, ReconcileResponse, Role,
+};
 pub use ask_leader::{AskLeader, LeaderProvider, LeaderProviderRef};
 use cluster::Client as ClusterClient;
 pub use cluster::ClusterKvBackend;
@@ -187,6 +189,9 @@ impl MetaClientBuilder {
         let mgr = client.channel_manager.clone();
 
         if self.enable_heartbeat {
+            if self.heartbeat_channel_manager.is_some() {
+                info!("Enable heartbeat channel using the heartbeat channel manager.");
+            }
             let mgr = self.heartbeat_channel_manager.unwrap_or(mgr.clone());
             client.heartbeat = Some(HeartbeatClient::new(
                 self.id,
@@ -353,6 +358,8 @@ impl ProcedureExecutor for MetaClient {
     }
 }
 
+// TODO(zyy17): Allow deprecated fields for backward compatibility. Remove this when the deprecated fields are removed from the proto.
+#[allow(deprecated)]
 #[async_trait::async_trait]
 impl ClusterInfo for MetaClient {
     type Error = Error;
@@ -369,28 +376,73 @@ impl ClusterInfo for MetaClient {
         let mut nodes = if get_metasrv_nodes {
             let last_activity_ts = -1; // Metasrv does not provide this information.
 
-            let (leader, followers) = cluster_client.get_metasrv_peers().await?;
+            let (leader, followers): (Option<MetasrvNodeInfo>, Vec<MetasrvNodeInfo>) =
+                cluster_client.get_metasrv_peers().await?;
             followers
                 .into_iter()
-                .map(|node| NodeInfo {
-                    peer: node.peer.unwrap_or_default(),
-                    last_activity_ts,
-                    status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
-                    version: node.version,
-                    git_commit: node.git_commit,
-                    start_time_ms: node.start_time_ms,
-                    cpus: node.cpus,
-                    memory_bytes: node.memory_bytes,
+                .map(|node| {
+                    if let Some(node_info) = node.info {
+                        NodeInfo {
+                            peer: node.peer.unwrap_or_default(),
+                            last_activity_ts,
+                            status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
+                            version: node_info.version,
+                            git_commit: node_info.git_commit,
+                            start_time_ms: node_info.start_time_ms,
+                            total_cpu_millicores: node_info.total_cpu_millicores,
+                            total_memory_bytes: node_info.total_memory_bytes,
+                            cpu_usage_millicores: node_info.cpu_usage_millicores,
+                            memory_usage_bytes: node_info.memory_usage_bytes,
+                            hostname: node_info.hostname,
+                        }
+                    } else {
+                        // TODO(zyy17): It's for backward compatibility. Remove this when the deprecated fields are removed from the proto.
+                        NodeInfo {
+                            peer: node.peer.unwrap_or_default(),
+                            last_activity_ts,
+                            status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
+                            version: node.version,
+                            git_commit: node.git_commit,
+                            start_time_ms: node.start_time_ms,
+                            total_cpu_millicores: node.cpus as i64,
+                            total_memory_bytes: node.memory_bytes as i64,
+                            cpu_usage_millicores: 0,
+                            memory_usage_bytes: 0,
+                            hostname: "".to_string(),
+                        }
+                    }
                 })
-                .chain(leader.into_iter().map(|node| NodeInfo {
-                    peer: node.peer.unwrap_or_default(),
-                    last_activity_ts,
-                    status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
-                    version: node.version,
-                    git_commit: node.git_commit,
-                    start_time_ms: node.start_time_ms,
-                    cpus: node.cpus,
-                    memory_bytes: node.memory_bytes,
+                .chain(leader.into_iter().map(|node| {
+                    if let Some(node_info) = node.info {
+                        NodeInfo {
+                            peer: node.peer.unwrap_or_default(),
+                            last_activity_ts,
+                            status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
+                            version: node_info.version,
+                            git_commit: node_info.git_commit,
+                            start_time_ms: node_info.start_time_ms,
+                            total_cpu_millicores: node_info.total_cpu_millicores,
+                            total_memory_bytes: node_info.total_memory_bytes,
+                            cpu_usage_millicores: node_info.cpu_usage_millicores,
+                            memory_usage_bytes: node_info.memory_usage_bytes,
+                            hostname: node_info.hostname,
+                        }
+                    } else {
+                        // TODO(zyy17): It's for backward compatibility. Remove this when the deprecated fields are removed from the proto.
+                        NodeInfo {
+                            peer: node.peer.unwrap_or_default(),
+                            last_activity_ts,
+                            status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
+                            version: node.version,
+                            git_commit: node.git_commit,
+                            start_time_ms: node.start_time_ms,
+                            total_cpu_millicores: node.cpus as i64,
+                            total_memory_bytes: node.memory_bytes as i64,
+                            cpu_usage_millicores: 0,
+                            memory_usage_bytes: 0,
+                            hostname: "".to_string(),
+                        }
+                    }
                 }))
                 .collect::<Vec<_>>()
         } else {

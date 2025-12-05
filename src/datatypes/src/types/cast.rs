@@ -104,7 +104,7 @@ pub fn can_cast_type(src_value: &Value, dest_type: &ConcreteDataType) -> bool {
         (_, Boolean(_)) => src_type.is_numeric() || src_type.is_string(),
         (Boolean(_), _) => dest_type.is_numeric() || dest_type.is_string(),
 
-        // numeric types cast
+        // numeric and string types cast
         (
             UInt8(_) | UInt16(_) | UInt32(_) | UInt64(_) | Int8(_) | Int16(_) | Int32(_) | Int64(_)
             | Float32(_) | Float64(_) | String(_),

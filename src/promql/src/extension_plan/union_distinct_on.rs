@@ -92,7 +92,7 @@ impl UnionDistinctOn {
         left_exec: Arc<dyn ExecutionPlan>,
         right_exec: Arc<dyn ExecutionPlan>,
     ) -> Arc<dyn ExecutionPlan> {
-        let output_schema: SchemaRef = Arc::new(self.output_schema.as_ref().into());
+        let output_schema: SchemaRef = self.output_schema.inner().clone();
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::UnknownPartitioning(1),

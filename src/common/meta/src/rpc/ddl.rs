@@ -48,6 +48,7 @@ use serde_with::{DefaultOnNull, serde_as};
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::{RawTableInfo, TableId};
+use table::requests::validate_database_option;
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
@@ -1068,14 +1069,21 @@ impl TryFrom<PbOption> for SetDatabaseOption {
     type Error = error::Error;
 
     fn try_from(PbOption { key, value }: PbOption) -> Result<Self> {
-        match key.to_ascii_lowercase().as_str() {
+        let key_lower = key.to_ascii_lowercase();
+        match key_lower.as_str() {
             TTL_KEY => {
                 let ttl = DatabaseTimeToLive::from_humantime_or_str(&value)
                     .map_err(|_| InvalidSetDatabaseOptionSnafu { key, value }.build())?;
 
                 Ok(SetDatabaseOption::Ttl(ttl))
             }
-            _ => InvalidSetDatabaseOptionSnafu { key, value }.fail(),
+            _ => {
+                if validate_database_option(&key_lower) {
+                    Ok(SetDatabaseOption::Other(key_lower, value))
+                } else {
+                    InvalidSetDatabaseOptionSnafu { key, value }.fail()
+                }
+            }
         }
     }
 }
@@ -1083,20 +1091,29 @@ impl TryFrom<PbOption> for SetDatabaseOption {
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum SetDatabaseOption {
     Ttl(DatabaseTimeToLive),
+    Other(String, String),
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum UnsetDatabaseOption {
     Ttl,
+    Other(String),
 }
 
 impl TryFrom<&str> for UnsetDatabaseOption {
     type Error = error::Error;
 
     fn try_from(key: &str) -> Result<Self> {
-        match key.to_ascii_lowercase().as_str() {
+        let key_lower = key.to_ascii_lowercase();
+        match key_lower.as_str() {
             TTL_KEY => Ok(UnsetDatabaseOption::Ttl),
-            _ => InvalidUnsetDatabaseOptionSnafu { key }.fail(),
+            _ => {
+                if validate_database_option(&key_lower) {
+                    Ok(UnsetDatabaseOption::Other(key_lower))
+                } else {
+                    InvalidUnsetDatabaseOptionSnafu { key }.fail()
+                }
+            }
         }
     }
 }
@@ -1625,6 +1642,7 @@ mod tests {
             region_numbers: vec![0],
             options: Default::default(),
             created_on: Default::default(),
+            updated_on: Default::default(),
             partition_key_indices: Default::default(),
             column_ids: Default::default(),
         };

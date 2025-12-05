@@ -83,6 +83,11 @@ impl SparseValues {
     pub fn insert(&mut self, column_id: ColumnId, value: Value) {
         self.values.insert(column_id, value);
     }
+
+    /// Returns an iterator over all stored column id/value pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&ColumnId, &Value)> {
+        self.values.iter()
+    }
 }
 
 /// The column id of the tsid.
@@ -385,6 +390,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
+    use common_query::prelude::{greptime_timestamp, greptime_value};
     use common_time::Timestamp;
     use common_time::timestamp::TimeUnit;
     use datatypes::schema::ColumnSchema;
@@ -461,7 +467,7 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "greptime_value",
+                    greptime_value(),
                     ConcreteDataType::float64_datatype(),
                     false,
                 ),
@@ -470,7 +476,7 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "greptime_timestamp",
+                    greptime_timestamp(),
                     ConcreteDataType::timestamp_nanosecond_datatype(),
                     false,
                 ),

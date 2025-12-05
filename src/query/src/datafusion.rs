@@ -32,6 +32,7 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
+use datafusion::dataframe::DataFrame;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -49,7 +50,6 @@ use table::TableRef;
 use table::requests::{DeleteRequest, InsertRequest};
 
 use crate::analyze::DistAnalyzeExec;
-use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::{DistPlannerOptions, MergeScanLogicalPlan};
 use crate::error::{
@@ -515,13 +515,11 @@ impl QueryEngine for DatafusionQueryEngine {
     }
 
     fn read_table(&self, table: TableRef) -> Result<DataFrame> {
-        Ok(DataFrame::DataFusion(
-            self.state
-                .read_table(table)
-                .context(error::DatafusionSnafu)
-                .map_err(BoxedError::new)
-                .context(QueryExecutionSnafu)?,
-        ))
+        self.state
+            .read_table(table)
+            .context(error::DatafusionSnafu)
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)
     }
 
     fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext {
@@ -682,13 +680,14 @@ impl QueryExecutor for DatafusionQueryEngine {
 mod tests {
     use std::sync::Arc;
 
+    use arrow::array::{ArrayRef, UInt64Array};
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_recordbatch::util;
     use datafusion::prelude::{col, lit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use datatypes::vectors::{Helper, UInt32Vector, UInt64Vector, VectorRef};
+    use datatypes::vectors::{Helper, UInt32Vector, VectorRef};
     use session::context::{QueryContext, QueryContextBuilder};
     use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
 
@@ -770,10 +769,8 @@ mod tests {
                 assert_eq!(1, batch.num_columns());
                 assert_eq!(batch.column(0).len(), 1);
 
-                assert_eq!(
-                    *batch.column(0),
-                    Arc::new(UInt64Vector::from_slice([4950])) as VectorRef
-                );
+                let expected = Arc::new(UInt64Array::from_iter_values([4950])) as ArrayRef;
+                assert_eq!(batch.column(0), &expected);
             }
             _ => unreachable!(),
         }
@@ -800,7 +797,7 @@ mod tests {
             .await
             .unwrap();
 
-        let DataFrame::DataFusion(df) = engine.read_table(table).unwrap();
+        let df = engine.read_table(table).unwrap();
         let df = df
             .select_columns(&["number"])
             .unwrap()

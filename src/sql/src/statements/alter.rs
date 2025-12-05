@@ -102,6 +102,10 @@ pub enum AlterTableOperation {
     SetDefaults {
         defaults: Vec<SetDefaultsOperation>,
     },
+    /// `REPARTITION (...) INTO (...)`
+    Repartition {
+        operation: RepartitionOperation,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
@@ -112,6 +116,38 @@ pub struct DropDefaultsOperation(pub Ident);
 pub struct SetDefaultsOperation {
     pub column_name: Ident,
     pub default_constraint: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct RepartitionOperation {
+    pub from_exprs: Vec<Expr>,
+    pub into_exprs: Vec<Expr>,
+}
+
+impl RepartitionOperation {
+    pub fn new(from_exprs: Vec<Expr>, into_exprs: Vec<Expr>) -> Self {
+        Self {
+            from_exprs,
+            into_exprs,
+        }
+    }
+}
+
+impl Display for RepartitionOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let from = self
+            .from_exprs
+            .iter()
+            .map(|expr| expr.to_string())
+            .join(", ");
+        let into = self
+            .into_exprs
+            .iter()
+            .map(|expr| expr.to_string())
+            .join(", ");
+
+        write!(f, "({from}) INTO ({into})")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
@@ -195,6 +231,9 @@ impl Display for AlterTableOperation {
             AlterTableOperation::UnsetTableOptions { keys } => {
                 let keys = keys.iter().map(|k| format!("'{k}'")).join(",");
                 write!(f, "UNSET {keys}")
+            }
+            AlterTableOperation::Repartition { operation } => {
+                write!(f, "REPARTITION {operation}")
             }
             AlterTableOperation::SetIndex { options } => match options {
                 SetIndexOperation::Fulltext {

@@ -305,6 +305,7 @@ impl CompactionScheduler {
             &options,
             &request.current_version.options.compaction,
             request.current_version.options.append_mode,
+            Some(self.engine_config.max_background_compactions),
         );
         let region_id = request.region_id();
         let CompactionRequest {
@@ -720,7 +721,7 @@ fn time_range_to_predicate(
         }
     };
 
-    let predicate = PredicateGroup::new(metadata, &exprs);
+    let predicate = PredicateGroup::new(metadata, &exprs)?;
     Ok(predicate)
 }
 
@@ -777,6 +778,7 @@ mod tests {
     use super::*;
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::ManifestContext;
+    use crate::sst::FormatType;
     use crate::test_util::mock_schema_metadata_manager;
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::version_util::{VersionControlBuilder, apply_edit};
@@ -1108,9 +1110,10 @@ mod tests {
                     compress_type: CompressionType::Uncompressed,
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
+                    manifest_cache: None,
                 },
-                Default::default(),
-                Default::default(),
+                FormatType::PrimaryKey,
+                &Default::default(),
             )
             .await
             .unwrap();

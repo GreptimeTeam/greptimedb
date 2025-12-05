@@ -185,7 +185,8 @@ impl TableProvider for DummyTableProvider {
             .handle_query(self.region_id, request.clone())
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        let mut scan_exec = RegionScanExec::new(scanner, request)?;
+        let query_memory_permit = self.engine.register_query_memory_permit();
+        let mut scan_exec = RegionScanExec::new(scanner, request, query_memory_permit)?;
         if let Some(query_ctx) = &self.query_ctx {
             scan_exec.set_explain_verbose(query_ctx.explain_verbose());
         }
@@ -256,7 +257,7 @@ impl DummyTableProvider {
     }
 
     pub fn with_sequence(&self, sequence: u64) {
-        self.scan_request.lock().unwrap().sequence = Some(sequence);
+        self.scan_request.lock().unwrap().memtable_max_sequence = Some(sequence);
     }
 
     /// Gets the scan request of the provider.
@@ -287,7 +288,7 @@ impl DummyTableProviderFactory {
         let scan_request = query_ctx
             .as_ref()
             .map(|ctx| ScanRequest {
-                sequence: ctx.get_snapshot(region_id.as_u64()),
+                memtable_max_sequence: ctx.get_snapshot(region_id.as_u64()),
                 sst_min_sequence: ctx.sst_min_sequence(region_id.as_u64()),
                 ..Default::default()
             })

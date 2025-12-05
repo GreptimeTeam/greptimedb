@@ -29,10 +29,20 @@ use crate::test_util::{
 
 #[tokio::test]
 async fn test_append_mode_write_query() {
+    test_append_mode_write_query_with_format(false).await;
+    test_append_mode_write_query_with_format(true).await;
+}
+
+async fn test_append_mode_write_query_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
@@ -89,9 +99,15 @@ async fn test_append_mode_write_query() {
 
 #[tokio::test]
 async fn test_append_mode_compaction() {
+    test_append_mode_compaction_with_format(false).await;
+    test_append_mode_compaction_with_format(true).await;
+}
+
+async fn test_append_mode_compaction_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -190,6 +206,130 @@ async fn test_append_mode_compaction() {
         .reopen_engine(
             engine,
             MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
+    // Reopens the region.
+    reopen_region(&engine, region_id, table_dir, false, region_opts).await;
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected, sort_batches_and_print(&batches, &["tag_0", "ts"]));
+}
+
+#[tokio::test]
+async fn test_put_single_range() {
+    test_put_single_range_with_format(false).await;
+    test_put_single_range_with_format(true).await;
+}
+
+async fn test_put_single_range_with_format(flat_format: bool) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("append_mode", "true")
+        .build();
+    let table_dir = request.table_dir.clone();
+    let region_opts = request.options.clone();
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // a, field 1, 2
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 1, 3, 1),
+    };
+    put_rows(&engine, region_id, rows).await;
+    // a, field 0, 1
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 2, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+    // b, field 0, 1
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("b", 0, 2, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+    // a, field 2, 3
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows_for_key("a", 2, 4, 2),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 0.0     | 1970-01-01T00:00:00 |
+| a     | 1.0     | 1970-01-01T00:00:01 |
+| a     | 1.0     | 1970-01-01T00:00:01 |
+| a     | 2.0     | 1970-01-01T00:00:02 |
+| a     | 2.0     | 1970-01-01T00:00:02 |
+| a     | 3.0     | 1970-01-01T00:00:03 |
+| b     | 0.0     | 1970-01-01T00:00:00 |
+| b     | 1.0     | 1970-01-01T00:00:01 |
++-------+---------+---------------------+";
+    // Scans in parallel.
+    let mut scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(0, scanner.num_files());
+    assert_eq!(1, scanner.num_memtables());
+    scanner.set_target_partitions(2);
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected, sort_batches_and_print(&batches, &["tag_0", "ts"]));
+
+    // Flushes and scans.
+    flush_region(&engine, region_id, None).await;
+    let mut scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(1, scanner.num_files());
+    assert_eq!(0, scanner.num_memtables());
+    scanner.set_target_partitions(2);
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected, sort_batches_and_print(&batches, &["tag_0", "ts"]));
+
+    // Reopens engine.
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
                 ..Default::default()
             },
         )

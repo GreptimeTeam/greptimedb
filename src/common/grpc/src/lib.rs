@@ -16,6 +16,7 @@ pub mod channel_manager;
 pub mod error;
 pub mod flight;
 pub mod precision;
+pub mod reloadable_tls;
 pub mod select;
 
 pub use arrow_flight::FlightData;

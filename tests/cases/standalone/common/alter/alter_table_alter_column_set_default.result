@@ -116,7 +116,7 @@ SHOW CREATE TABLE test1;
 
 ALTER TABLE test1 MODIFY COLUMN o SET DEFAULT "not allow";
 
-Error: 1001(Unsupported), Unsupported expr in default constraint: "not allow" for column: o
+Error: 1001(Unsupported), Unsupported default constraint for column: 'o', reason: expr '"not allow"' not supported
 
 ALTER TABLE test1 MODIFY COLUMN o SET DEFAULT NULL;
 

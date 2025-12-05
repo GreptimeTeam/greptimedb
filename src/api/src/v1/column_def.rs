@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY};
 use datatypes::schema::{
     COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema, FULLTEXT_KEY, FulltextAnalyzer,
     FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY, SkippingIndexOptions,
@@ -67,6 +68,15 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         }
         if let Some(skipping_index) = options.options.get(SKIPPING_INDEX_GRPC_KEY) {
             metadata.insert(SKIPPING_INDEX_KEY.to_string(), skipping_index.to_owned());
+        }
+        if let Some(extension_name) = options.options.get(EXTENSION_TYPE_NAME_KEY) {
+            metadata.insert(EXTENSION_TYPE_NAME_KEY.to_string(), extension_name.clone());
+        }
+        if let Some(extension_metadata) = options.options.get(EXTENSION_TYPE_METADATA_KEY) {
+            metadata.insert(
+                EXTENSION_TYPE_METADATA_KEY.to_string(),
+                extension_metadata.clone(),
+            );
         }
     }
 
@@ -138,6 +148,17 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
         options
             .options
             .insert(SKIPPING_INDEX_GRPC_KEY.to_string(), skipping_index.clone());
+    }
+    if let Some(extension_name) = column_schema.metadata().get(EXTENSION_TYPE_NAME_KEY) {
+        options
+            .options
+            .insert(EXTENSION_TYPE_NAME_KEY.to_string(), extension_name.clone());
+    }
+    if let Some(extension_metadata) = column_schema.metadata().get(EXTENSION_TYPE_METADATA_KEY) {
+        options.options.insert(
+            EXTENSION_TYPE_METADATA_KEY.to_string(),
+            extension_metadata.clone(),
+        );
     }
 
     (!options.options.is_empty()).then_some(options)

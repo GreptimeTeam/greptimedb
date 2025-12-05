@@ -16,7 +16,7 @@ default = [
     "meta-srv/pg_kvbackend",
     "meta-srv/mysql_kvbackend",
 ]
-enterprise = ["common-meta/enterprise", "frontend/enterprise", "meta-srv/enterprise", "catalog/enterprise"]
+enterprise = ["common-meta/enterprise", "frontend/enterprise", "meta-srv/enterprise"]
 tokio-console = ["common-telemetry/tokio-console"]
 
 [lints]
@@ -29,9 +29,11 @@ base64.workspace = true
 cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
+either = "1.15"
 clap.workspace = true
 cli.workspace = true
 client.workspace = true
+colored = "2.1.0"
 common-base.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true
@@ -63,9 +65,11 @@ lazy_static.workspace = true
 meta-client.workspace = true
 meta-srv.workspace = true
 metric-engine.workspace = true
+mito2.workspace = true
 moka.workspace = true
 nu-ansi-term = "0.46"
 object-store.workspace = true
+parquet = { workspace = true, features = ["object_store"] }
 plugins.workspace = true
 prometheus.workspace = true
 prost.workspace = true
@@ -82,12 +86,16 @@ similar-asserts.workspace = true
 snafu.workspace = true
 common-stat.workspace = true
 store-api.workspace = true
-substrait.workspace = true
 table.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tonic.workspace = true
 tracing-appender.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+pprof = { version = "0.14", features = [
+    "flamegraph",
+] }
 
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemallocator = "0.6"

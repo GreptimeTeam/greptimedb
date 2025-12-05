@@ -52,9 +52,6 @@ pub enum Error {
         data_type: ArrowDatatype,
     },
 
-    #[snafu(display("Failed to downcast vector: {}", err_msg))]
-    DowncastVector { err_msg: String },
-
     #[snafu(display("Invalid input type: {}", err_msg))]
     InvalidInputType {
         #[snafu(implicit)]
@@ -199,6 +196,9 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid character in prefix config: {}", prefix))]
+    InvalidColumnPrefix { prefix: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -206,8 +206,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::DowncastVector { .. }
-            | Error::InvalidInputState { .. }
+            Error::InvalidInputState { .. }
             | Error::ToScalarValue { .. }
             | Error::GetScalarVector { .. }
             | Error::ArrowCompute { .. }
@@ -227,7 +226,8 @@ impl ErrorExt for Error {
 
             Error::UnsupportedInputDataType { .. }
             | Error::TypeCast { .. }
-            | Error::InvalidFuncArgs { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidFuncArgs { .. }
+            | Error::InvalidColumnPrefix { .. } => StatusCode::InvalidArguments,
 
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
 

@@ -16,16 +16,19 @@
 #![feature(try_blocks)]
 #![feature(exclusive_wrapper)]
 #![feature(if_let_guard)]
+#![feature(box_patterns)]
 
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;
 use sql::statements::statement::Statement;
+// Re-export for use in add_service! macro
+#[doc(hidden)]
+pub use tower;
 
 pub mod addrs;
 pub mod configurator;
 pub(crate) mod elasticsearch;
 pub mod error;
-pub mod export_metrics;
 pub mod grpc;
 pub mod heartbeat_options;
 mod hint_headers;
@@ -47,12 +50,13 @@ pub mod prometheus_handler;
 pub mod proto;
 pub mod query_handler;
 pub mod repeated_field;
+pub mod request_limiter;
 mod row_writer;
 pub mod server;
 pub mod tls;
 
 /// Cached SQL and logical plan for database interfaces
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SqlPlan {
     query: String,
     // Store the parsed statement to determine if it is a query and whether to track it.

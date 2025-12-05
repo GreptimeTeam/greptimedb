@@ -41,7 +41,7 @@ use async_trait::async_trait;
 use common_time::Timestamp;
 use datafusion_common::arrow::array::UInt8Array;
 use datatypes::arrow;
-use datatypes::arrow::array::{Array, ArrayRef, UInt64Array};
+use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::compute::SortOptions;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::arrow::row::{RowConverter, SortField};
@@ -60,7 +60,7 @@ use futures::stream::BoxStream;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadata;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
 use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, DecodeSnafu, InvalidBatchSnafu,
@@ -361,17 +361,29 @@ impl Batch {
     }
 
     /// Filters rows by the given `sequence`. Only preserves rows with sequence less than or equal to `sequence`.
-    pub fn filter_by_sequence(&mut self, sequence: Option<SequenceNumber>) -> Result<()> {
-        let seq = match (sequence, self.last_sequence()) {
-            (None, _) | (_, None) => return Ok(()),
-            (Some(sequence), Some(last_sequence)) if sequence >= last_sequence => return Ok(()),
-            (Some(sequence), Some(_)) => sequence,
+    pub fn filter_by_sequence(&mut self, sequence: Option<SequenceRange>) -> Result<()> {
+        let seq_range = match sequence {
+            None => return Ok(()),
+            Some(seq_range) => {
+                let (Some(first), Some(last)) = (self.first_sequence(), self.last_sequence())
+                else {
+                    return Ok(());
+                };
+                let is_subset = match seq_range {
+                    SequenceRange::Gt { min } => min < first,
+                    SequenceRange::LtEq { max } => max >= last,
+                    SequenceRange::GtLtEq { min, max } => min < first && max >= last,
+                };
+                if is_subset {
+                    return Ok(());
+                }
+                seq_range
+            }
         };
 
         let seqs = self.sequences.as_arrow();
-        let sequence = UInt64Array::new_scalar(seq);
-        let predicate = datafusion_common::arrow::compute::kernels::cmp::lt_eq(seqs, &sequence)
-            .context(ComputeArrowSnafu)?;
+        let predicate = seq_range.filter(seqs).context(ComputeArrowSnafu)?;
+
         let predicate = BooleanVector::from(predicate);
         self.filter(&predicate)?;
 
@@ -1292,7 +1304,9 @@ mod tests {
             &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
             &[21, 22, 23, 24],
         );
-        batch.filter_by_sequence(Some(13)).unwrap();
+        batch
+            .filter_by_sequence(Some(SequenceRange::LtEq { max: 13 }))
+            .unwrap();
         let expect = new_batch(
             &[1, 2, 3],
             &[11, 12, 13],
@@ -1309,7 +1323,9 @@ mod tests {
             &[21, 22, 23, 24],
         );
 
-        batch.filter_by_sequence(Some(10)).unwrap();
+        batch
+            .filter_by_sequence(Some(SequenceRange::LtEq { max: 10 }))
+            .unwrap();
         assert!(batch.is_empty());
 
         // None filter.
@@ -1325,12 +1341,94 @@ mod tests {
 
         // Filter a empty batch
         let mut batch = new_batch(&[], &[], &[], &[]);
-        batch.filter_by_sequence(Some(10)).unwrap();
+        batch
+            .filter_by_sequence(Some(SequenceRange::LtEq { max: 10 }))
+            .unwrap();
         assert!(batch.is_empty());
 
         // Filter a empty batch with None
         let mut batch = new_batch(&[], &[], &[], &[]);
         batch.filter_by_sequence(None).unwrap();
+        assert!(batch.is_empty());
+
+        // Test From variant - exclusive lower bound
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        batch
+            .filter_by_sequence(Some(SequenceRange::Gt { min: 12 }))
+            .unwrap();
+        let expect = new_batch(&[3, 4], &[13, 14], &[OpType::Put, OpType::Put], &[23, 24]);
+        assert_eq!(expect, batch);
+
+        // Test From variant with no matches
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Delete, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        batch
+            .filter_by_sequence(Some(SequenceRange::Gt { min: 20 }))
+            .unwrap();
+        assert!(batch.is_empty());
+
+        // Test Range variant - exclusive lower bound, inclusive upper bound
+        let mut batch = new_batch(
+            &[1, 2, 3, 4, 5],
+            &[11, 12, 13, 14, 15],
+            &[
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+            ],
+            &[21, 22, 23, 24, 25],
+        );
+        batch
+            .filter_by_sequence(Some(SequenceRange::GtLtEq { min: 12, max: 14 }))
+            .unwrap();
+        let expect = new_batch(&[3, 4], &[13, 14], &[OpType::Put, OpType::Put], &[23, 24]);
+        assert_eq!(expect, batch);
+
+        // Test Range variant with mixed operations
+        let mut batch = new_batch(
+            &[1, 2, 3, 4, 5],
+            &[11, 12, 13, 14, 15],
+            &[
+                OpType::Put,
+                OpType::Delete,
+                OpType::Put,
+                OpType::Delete,
+                OpType::Put,
+            ],
+            &[21, 22, 23, 24, 25],
+        );
+        batch
+            .filter_by_sequence(Some(SequenceRange::GtLtEq { min: 11, max: 13 }))
+            .unwrap();
+        let expect = new_batch(
+            &[2, 3],
+            &[12, 13],
+            &[OpType::Delete, OpType::Put],
+            &[22, 23],
+        );
+        assert_eq!(expect, batch);
+
+        // Test Range variant with no matches
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        batch
+            .filter_by_sequence(Some(SequenceRange::GtLtEq { min: 20, max: 25 }))
+            .unwrap();
         assert!(batch.is_empty());
     }
 

@@ -16,15 +16,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
+use api::v1::SemanticType;
 use common_telemetry::{debug, warn};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::SkippingIndexType;
 use datatypes::vectors::Helper;
 use index::bloom_filter::creator::BloomFilterCreator;
+use index::target::IndexTarget;
 use mito_codec::index::{IndexValueCodec, IndexValuesCodec};
-use mito_codec::row_converter::SortField;
+use mito_codec::row_converter::{CompositeValues, SortField};
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{ResultExt, ensure};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -34,13 +37,13 @@ use crate::error::{
     OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PushBloomFilterValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
+use crate::sst::index::{TYPE_BLOOM_FILTER_INDEX, decode_primary_keys_with_counts};
 
 /// The buffer size for the pipe used to send index data to the puffin blob.
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
@@ -288,47 +291,81 @@ impl BloomFilterIndexer {
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
+        let is_sparse = self.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse;
+        let mut decoded_pks: Option<Vec<(CompositeValues, usize)>> = None;
+
         for (col_id, creator) in &mut self.creators {
-            // Get the column name from metadata
-            if let Some(column_meta) = self.metadata.column_by_id(*col_id) {
-                let column_name = &column_meta.column_schema.name;
+            // Safety: `creators` are created from the metadata so it won't be None.
+            let column_meta = self.metadata.column_by_id(*col_id).unwrap();
+            let column_name = &column_meta.column_schema.name;
+            if let Some(column_array) = batch.column_by_name(column_name) {
+                // Convert Arrow array to VectorRef
+                let vector = Helper::try_into_vector(column_array.clone())
+                    .context(crate::error::ConvertVectorSnafu)?;
+                let sort_field = SortField::new(vector.data_type());
 
-                // Find the column in the RecordBatch by name
-                if let Some(column_array) = batch.column_by_name(column_name) {
-                    // Convert Arrow array to VectorRef
-                    let vector = Helper::try_into_vector(column_array.clone())
-                        .context(crate::error::ConvertVectorSnafu)?;
-                    let sort_field = SortField::new(vector.data_type());
+                for i in 0..n {
+                    let value = vector.get_ref(i);
+                    let elems = (!value.is_null())
+                        .then(|| {
+                            let mut buf = vec![];
+                            IndexValueCodec::encode_nonnull_value(value, &sort_field, &mut buf)
+                                .context(EncodeSnafu)?;
+                            Ok(buf)
+                        })
+                        .transpose()?;
 
-                    for i in 0..n {
-                        let value = vector.get_ref(i);
-                        let elems = (!value.is_null())
-                            .then(|| {
-                                let mut buf = vec![];
-                                IndexValueCodec::encode_nonnull_value(value, &sort_field, &mut buf)
-                                    .context(EncodeSnafu)?;
-                                Ok(buf)
-                            })
-                            .transpose()?;
+                    creator
+                        .push_row_elems(elems)
+                        .await
+                        .context(PushBloomFilterValueSnafu)?;
+                }
+            } else if is_sparse && column_meta.semantic_type == SemanticType::Tag {
+                // Column not found in batch, tries to decode from primary keys for sparse encoding.
+                if decoded_pks.is_none() {
+                    decoded_pks = Some(decode_primary_keys_with_counts(batch, &self.codec)?);
+                }
 
-                        creator
-                            .push_row_elems(elems)
-                            .await
-                            .context(PushBloomFilterValueSnafu)?;
-                    }
-                } else {
+                let pk_values_with_counts = decoded_pks.as_ref().unwrap();
+                let Some(col_info) = self.codec.pk_col_info(*col_id) else {
                     debug!(
-                        "Column {} not found in the batch during building bloom filter index",
+                        "Column {} not found in primary key during building bloom filter index",
                         column_name
                     );
-                    // Push empty elements to maintain alignment
-                    for _ in 0..n {
-                        creator
-                            .push_row_elems(None)
-                            .await
-                            .context(PushBloomFilterValueSnafu)?;
-                    }
+                    continue;
+                };
+                let pk_index = col_info.idx;
+                let field = &col_info.field;
+                for (decoded, count) in pk_values_with_counts {
+                    let value = match decoded {
+                        CompositeValues::Dense(dense) => dense.get(pk_index).map(|v| &v.1),
+                        CompositeValues::Sparse(sparse) => sparse.get(col_id),
+                    };
+
+                    let elems = value
+                        .filter(|v| !v.is_null())
+                        .map(|v| {
+                            let mut buf = vec![];
+                            IndexValueCodec::encode_nonnull_value(
+                                v.as_value_ref(),
+                                field,
+                                &mut buf,
+                            )
+                            .context(EncodeSnafu)?;
+                            Ok(buf)
+                        })
+                        .transpose()?;
+
+                    creator
+                        .push_n_row_elems(*count, elems)
+                        .await
+                        .context(PushBloomFilterValueSnafu)?;
                 }
+            } else {
+                debug!(
+                    "Column {} not found in the batch during building bloom filter index",
+                    column_name
+                );
             }
         }
 
@@ -381,7 +418,8 @@ impl BloomFilterIndexer {
     ) -> Result<ByteCount> {
         let (tx, rx) = tokio::io::duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
 
-        let blob_name = format!("{}-{}", INDEX_BLOB_TYPE, col_id);
+        let target_key = IndexTarget::ColumnId(*col_id);
+        let blob_name = format!("{INDEX_BLOB_TYPE}-{target_key}");
         let (index_finish, puffin_add_blob) = futures::join!(
             creator.finish(tx.compat_write()),
             puffin_writer.put_blob(
@@ -599,17 +637,17 @@ pub(crate) mod tests {
                 .unwrap();
             let reader = blob_guard.reader().await.unwrap();
             let bloom_filter = BloomFilterReaderImpl::new(reader);
-            let metadata = bloom_filter.metadata().await.unwrap();
+            let metadata = bloom_filter.metadata(None).await.unwrap();
 
             assert_eq!(metadata.segment_count, 10);
             for i in 0..5 {
                 let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[i] as usize];
-                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
+                let bf = bloom_filter.bloom_filter(loc, None).await.unwrap();
                 assert!(bf.contains(b"tag1"));
             }
             for i in 5..10 {
                 let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[i] as usize];
-                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
+                let bf = bloom_filter.bloom_filter(loc, None).await.unwrap();
                 assert!(bf.contains(b"tag2"));
             }
         }
@@ -624,13 +662,13 @@ pub(crate) mod tests {
                 .unwrap();
             let reader = blob_guard.reader().await.unwrap();
             let bloom_filter = BloomFilterReaderImpl::new(reader);
-            let metadata = bloom_filter.metadata().await.unwrap();
+            let metadata = bloom_filter.metadata(None).await.unwrap();
 
             assert_eq!(metadata.segment_count, 5);
             for i in 0u64..20 {
                 let idx = i as usize / 4;
                 let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[idx] as usize];
-                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
+                let bf = bloom_filter.bloom_filter(loc, None).await.unwrap();
                 let mut buf = vec![];
                 IndexValueCodec::encode_nonnull_value(ValueRef::UInt64(i), &sort_field, &mut buf)
                     .unwrap();

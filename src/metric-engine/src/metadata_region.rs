@@ -317,45 +317,20 @@ pub fn decode_batch_stream<T: Send + 'static>(
 
 /// Decode a record batch to a list of key and value.
 fn decode_record_batch_to_key_and_value(batch: RecordBatch) -> Vec<(String, String)> {
-    let key_col = batch.column(0);
-    let val_col = batch.column(1);
-
-    (0..batch.num_rows())
-        .flat_map(move |row_index| {
-            let key = key_col
-                .get_ref(row_index)
-                .as_string()
-                .unwrap()
-                .map(|s| s.to_string());
-
-            key.map(|k| {
-                (
-                    k,
-                    val_col
-                        .get_ref(row_index)
-                        .as_string()
-                        .unwrap()
-                        .map(|s| s.to_string())
-                        .unwrap_or_default(),
-                )
-            })
+    let keys = batch.iter_column_as_string(0);
+    let values = batch.iter_column_as_string(1);
+    keys.zip(values)
+        .filter_map(|(k, v)| match (k, v) {
+            (Some(k), Some(v)) => Some((k, v)),
+            (Some(k), None) => Some((k, "".to_string())),
+            (None, _) => None,
         })
-        .collect()
+        .collect::<Vec<_>>()
 }
 
 /// Decode a record batch to a list of key.
 fn decode_record_batch_to_key(batch: RecordBatch) -> Vec<String> {
-    let key_col = batch.column(0);
-
-    (0..batch.num_rows())
-        .flat_map(move |row_index| {
-            key_col
-                .get_ref(row_index)
-                .as_string()
-                .unwrap()
-                .map(|s| s.to_string())
-        })
-        .collect()
+    batch.iter_column_as_string(0).flatten().collect::<Vec<_>>()
 }
 
 // simulate to `KvBackend`
@@ -536,7 +511,7 @@ impl MetadataRegion {
             .collect();
         let rows = Rows { schema: cols, rows };
 
-        RegionDeleteRequest { rows }
+        RegionDeleteRequest { rows, hint: None }
     }
 
     /// Add logical regions to the metadata region.
@@ -590,6 +565,8 @@ impl MetadataRegion {
     /// Retrieves the value associated with the given key in the specified region.
     /// Returns `Ok(None)` if the key is not found.
     pub async fn get(&self, region_id: RegionId, key: &str) -> Result<Option<String>> {
+        use datatypes::arrow::array::{Array, AsArray};
+
         let filter_expr = datafusion::prelude::col(METADATA_SCHEMA_KEY_COLUMN_NAME)
             .eq(datafusion::prelude::lit(key));
 
@@ -611,12 +588,9 @@ impl MetadataRegion {
             return Ok(None);
         };
 
-        let val = first_batch
-            .column(0)
-            .get_ref(0)
-            .as_string()
-            .unwrap()
-            .map(|s| s.to_string());
+        let column = first_batch.column(0);
+        let column = column.as_string::<i32>();
+        let val = column.is_valid(0).then(|| column.value(0).to_string());
 
         Ok(val)
     }
@@ -699,10 +673,20 @@ mod test {
             semantic_type,
             column_id: 5,
         };
-        let expected = "{\"column_schema\":{\"name\":\"blabla\",\"data_type\":{\"String\":null},\"is_nullable\":false,\"is_time_index\":false,\"default_constraint\":null,\"metadata\":{}},\"semantic_type\":\"Tag\",\"column_id\":5}".to_string();
+        let old_fmt = "{\"column_schema\":{\"name\":\"blabla\",\"data_type\":{\"String\":null},\"is_nullable\":false,\"is_time_index\":false,\"default_constraint\":null,\"metadata\":{}},\"semantic_type\":\"Tag\",\"column_id\":5}".to_string();
+        let new_fmt = "{\"column_schema\":{\"name\":\"blabla\",\"data_type\":{\"String\":{\"size_type\":\"Utf8\"}},\"is_nullable\":false,\"is_time_index\":false,\"default_constraint\":null,\"metadata\":{}},\"semantic_type\":\"Tag\",\"column_id\":5}".to_string();
         assert_eq!(
             MetadataRegion::serialize_column_metadata(&column_metadata),
-            expected
+            new_fmt
+        );
+        // Ensure both old and new formats can be deserialized.
+        assert_eq!(
+            MetadataRegion::deserialize_column_metadata(&old_fmt).unwrap(),
+            column_metadata
+        );
+        assert_eq!(
+            MetadataRegion::deserialize_column_metadata(&new_fmt).unwrap(),
+            column_metadata
         );
 
         let semantic_type = "\"Invalid Column Metadata\"";

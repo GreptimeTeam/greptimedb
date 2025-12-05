@@ -27,6 +27,7 @@ use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion_pg_catalog::pg_catalog::catalog_info::CatalogInfo;
+use datafusion_pg_catalog::pg_catalog::context::EmptyContextProvider;
 use datafusion_pg_catalog::pg_catalog::{
     PG_CATALOG_TABLES, PgCatalogSchemaProvider, PgCatalogStaticTables, PgCatalogTable,
 };
@@ -44,7 +45,7 @@ use crate::system_schema::{
 /// [`PGCatalogProvider`] is the provider for a schema named `pg_catalog`, it is not a catalog.
 pub struct PGCatalogProvider {
     catalog_name: String,
-    inner: PgCatalogSchemaProvider<CatalogManagerWrapper>,
+    inner: PgCatalogSchemaProvider<CatalogManagerWrapper, EmptyContextProvider>,
     tables: HashMap<String, TableRef>,
     table_ids: HashMap<&'static str, u32>,
 }
@@ -69,6 +70,7 @@ impl PGCatalogProvider {
                 catalog_manager,
             },
             Arc::new(static_tables),
+            EmptyContextProvider,
         )
         .expect("Failed to initialize PgCatalogSchemaProvider");
 

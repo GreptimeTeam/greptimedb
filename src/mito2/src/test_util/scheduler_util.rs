@@ -35,6 +35,7 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::region::{ManifestContext, ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::WorkerRequestWithTime;
 use crate::schedule::scheduler::{Job, LocalScheduler, Scheduler, SchedulerRef};
+use crate::sst::FormatType;
 use crate::sst::index::IndexBuildScheduler;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -110,10 +111,10 @@ impl SchedulerEnv {
     }
 
     /// Creates a new index build scheduler.
-    pub(crate) fn mock_index_build_scheduler(&self) -> IndexBuildScheduler {
+    pub(crate) fn mock_index_build_scheduler(&self, files_limit: usize) -> IndexBuildScheduler {
         let scheduler = self.get_scheduler();
 
-        IndexBuildScheduler::new(scheduler)
+        IndexBuildScheduler::new(scheduler, files_limit)
     }
 
     /// Creates a new manifest context.
@@ -131,9 +132,10 @@ impl SchedulerEnv {
                     compress_type: CompressionType::Uncompressed,
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
+                    manifest_cache: None,
                 },
-                Default::default(),
-                Default::default(),
+                FormatType::PrimaryKey,
+                &Default::default(),
             )
             .await
             .unwrap(),

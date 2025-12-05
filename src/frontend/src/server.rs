@@ -22,6 +22,7 @@ use common_telemetry::info;
 use meta_client::MetaClientOptions;
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
+use servers::grpc::flight::FlightCraftRef;
 use servers::grpc::frontend_grpc_handler::FrontendGrpcHandler;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{GrpcOptions, GrpcServer};
@@ -36,7 +37,7 @@ use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
 use servers::server::{Server, ServerHandlers};
-use servers::tls::{ReloadableTlsServerConfig, maybe_watch_tls_config};
+use servers::tls::{ReloadableTlsServerConfig, maybe_watch_server_tls_config};
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartServerSnafu, TomlFormatSnafu};
@@ -52,6 +53,7 @@ where
     grpc_server_builder: Option<GrpcServerBuilder>,
     http_server_builder: Option<HttpServerBuilder>,
     plugins: Plugins,
+    flight_handler: Option<FlightCraftRef>,
 }
 
 impl<T> Services<T>
@@ -65,6 +67,7 @@ where
             grpc_server_builder: None,
             http_server_builder: None,
             plugins,
+            flight_handler: None,
         }
     }
 
@@ -139,6 +142,13 @@ where
         }
     }
 
+    pub fn with_flight_handler(self, flight_handler: FlightCraftRef) -> Self {
+        Self {
+            flight_handler: Some(flight_handler),
+            ..self
+        }
+    }
+
     fn build_grpc_server(
         &mut self,
         grpc: &GrpcOptions,
@@ -173,6 +183,12 @@ where
             grpc.flight_compression,
         );
 
+        // Use custom flight handler if provided, otherwise use the default GreptimeRequestHandler
+        let flight_handler = self
+            .flight_handler
+            .clone()
+            .unwrap_or_else(|| Arc::new(greptime_request_handler.clone()) as FlightCraftRef);
+
         let grpc_server = builder
             .name(name)
             .database_handler(greptime_request_handler.clone())
@@ -181,7 +197,7 @@ where
                 self.instance.clone(),
                 user_provider.clone(),
             ))
-            .flight_handler(Arc::new(greptime_request_handler));
+            .flight_handler(flight_handler);
 
         let grpc_server = if !external {
             let frontend_grpc_handler =
@@ -258,7 +274,7 @@ where
             );
 
             // will not watch if watch is disabled in tls option
-            maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
+            maybe_watch_server_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
             let mysql_server = MysqlServer::create_server(
                 common_runtime::global_runtime(),
@@ -287,7 +303,7 @@ where
                 ReloadableTlsServerConfig::try_new(opts.tls.clone()).context(StartServerSnafu)?,
             );
 
-            maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
+            maybe_watch_server_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
             let pg_server = Box::new(PostgresServer::new(
                 ServerSqlQueryHandlerAdapter::arc(instance.clone()),

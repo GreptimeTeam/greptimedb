@@ -202,7 +202,7 @@ impl GreptimeDbStandaloneBuilder {
                 .step(10)
                 .build(),
         );
-        let kafka_options = opts.wal.clone().into();
+        let kafka_options = opts.wal.clone().try_into().unwrap();
         let wal_options_allocator = build_wal_options_allocator(&kafka_options, kv_backend.clone())
             .await
             .unwrap();
@@ -287,7 +287,6 @@ impl GreptimeDbStandaloneBuilder {
             instance,
             servers: ServerHandlers::default(),
             heartbeat_task: None,
-            export_metrics_task: None,
         };
 
         frontend.start().await.unwrap();
@@ -310,6 +309,7 @@ impl GreptimeDbStandaloneBuilder {
             store_types,
             &self.instance_name,
             self.datanode_wal_config.clone(),
+            Default::default(),
         );
 
         let kv_backend_config = KvBackendConfig::default();

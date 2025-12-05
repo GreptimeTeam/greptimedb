@@ -18,6 +18,7 @@ mod cache_size;
 
 pub(crate) mod file_cache;
 pub(crate) mod index;
+pub(crate) mod manifest_cache;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod write_cache;
@@ -44,6 +45,7 @@ use crate::cache::write_cache::WriteCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
 use crate::sst::file::RegionFileId;
+use crate::sst::parquet::reader::MetadataCacheMetrics;
 
 /// Metrics type key for sst meta.
 const SST_META_TYPE: &str = "sst_meta";
@@ -53,6 +55,8 @@ const VECTOR_TYPE: &str = "vector";
 const PAGE_TYPE: &str = "page";
 /// Metrics type key for files on the local store.
 const FILE_TYPE: &str = "file";
+/// Metrics type key for index files (puffin) on the local store.
+const INDEX_TYPE: &str = "index";
 /// Metrics type key for selector result cache.
 const SELECTOR_RESULT_TYPE: &str = "selector_result";
 
@@ -72,19 +76,24 @@ pub enum CacheStrategy {
 }
 
 impl CacheStrategy {
-    /// Calls [CacheManager::get_parquet_meta_data()].
-    pub async fn get_parquet_meta_data(
+    /// Gets parquet metadata with cache metrics tracking.
+    /// Returns the metadata and updates the provided metrics.
+    pub(crate) async fn get_parquet_meta_data(
         &self,
         file_id: RegionFileId,
+        metrics: &mut MetadataCacheMetrics,
     ) -> Option<Arc<ParquetMetaData>> {
         match self {
             CacheStrategy::EnableAll(cache_manager) => {
-                cache_manager.get_parquet_meta_data(file_id).await
+                cache_manager.get_parquet_meta_data(file_id, metrics).await
             }
             CacheStrategy::Compaction(cache_manager) => {
-                cache_manager.get_parquet_meta_data(file_id).await
+                cache_manager.get_parquet_meta_data(file_id, metrics).await
             }
-            CacheStrategy::Disabled => None,
+            CacheStrategy::Disabled => {
+                metrics.cache_miss += 1;
+                None
+            }
         }
     }
 
@@ -167,6 +176,19 @@ impl CacheStrategy {
     pub fn put_pages(&self, page_key: PageKey, pages: Arc<PageValue>) {
         if let CacheStrategy::EnableAll(cache_manager) = self {
             cache_manager.put_pages(page_key, pages);
+        }
+    }
+
+    /// Calls [CacheManager::evict_puffin_cache()].
+    pub async fn evict_puffin_cache(&self, file_id: RegionFileId) {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => {
+                cache_manager.evict_puffin_cache(file_id).await
+            }
+            CacheStrategy::Compaction(cache_manager) => {
+                cache_manager.evict_puffin_cache(file_id).await
+            }
+            CacheStrategy::Disabled => {}
         }
     }
 
@@ -276,16 +298,17 @@ impl CacheManager {
         CacheManagerBuilder::default()
     }
 
-    /// Gets cached [ParquetMetaData] from in-memory cache first.
-    /// If not found, tries to get it from write cache and fill the in-memory cache.
-    pub async fn get_parquet_meta_data(
+    /// Gets cached [ParquetMetaData] with metrics tracking.
+    /// Tries in-memory cache first, then file cache, updating metrics accordingly.
+    pub(crate) async fn get_parquet_meta_data(
         &self,
         file_id: RegionFileId,
+        metrics: &mut MetadataCacheMetrics,
     ) -> Option<Arc<ParquetMetaData>> {
         // Try to get metadata from sst meta cache
-        let metadata = self.get_parquet_meta_data_from_mem_cache(file_id);
-        if metadata.is_some() {
-            return metadata;
+        if let Some(metadata) = self.get_parquet_meta_data_from_mem_cache(file_id) {
+            metrics.mem_cache_hit += 1;
+            return Some(metadata);
         }
 
         // Try to get metadata from write cache
@@ -293,11 +316,13 @@ impl CacheManager {
         if let Some(write_cache) = &self.write_cache
             && let Some(metadata) = write_cache.file_cache().get_parquet_meta_data(key).await
         {
+            metrics.file_cache_hit += 1;
             let metadata = Arc::new(metadata);
             // Put metadata into sst meta cache
             self.put_parquet_meta_data(file_id, metadata.clone());
             return Some(metadata);
         };
+        metrics.cache_miss += 1;
 
         None
     }
@@ -371,6 +396,35 @@ impl CacheManager {
                 .with_label_values(&[PAGE_TYPE])
                 .add(page_cache_weight(&page_key, &pages).into());
             cache.insert(page_key, pages);
+        }
+    }
+
+    /// Evicts every puffin-related cache entry for the given file.
+    pub async fn evict_puffin_cache(&self, file_id: RegionFileId) {
+        if let Some(cache) = &self.bloom_filter_index_cache {
+            cache.invalidate_file(file_id.file_id());
+        }
+
+        if let Some(cache) = &self.inverted_index_cache {
+            cache.invalidate_file(file_id.file_id());
+        }
+
+        if let Some(cache) = &self.index_result_cache {
+            cache.invalidate_file(file_id.file_id());
+        }
+
+        if let Some(cache) = &self.puffin_metadata_cache {
+            cache.remove(&file_id.to_string());
+        }
+
+        if let Some(write_cache) = &self.write_cache {
+            write_cache
+                .remove(IndexKey::new(
+                    file_id.region_id(),
+                    file_id.file_id(),
+                    FileType::Puffin,
+                ))
+                .await;
         }
     }
 
@@ -760,10 +814,16 @@ type SelectorResultCache = Cache<SelectorResultKey, Arc<SelectorResultValue>>;
 mod tests {
     use std::sync::Arc;
 
+    use api::v1::index::{BloomFilterMeta, InvertedIndexMetas};
     use datatypes::vectors::Int64Vector;
+    use puffin::file_metadata::FileMetadata;
+    use store_api::storage::ColumnId;
 
     use super::*;
+    use crate::cache::index::bloom_filter_index::Tag;
+    use crate::cache::index::result_cache::PredicateKey;
     use crate::cache::test_util::parquet_meta;
+    use crate::sst::parquet::row_selection::RowGroupSelection;
 
     #[tokio::test]
     async fn test_disable_cache() {
@@ -775,8 +835,14 @@ mod tests {
         let region_id = RegionId::new(1, 1);
         let file_id = RegionFileId::new(region_id, FileId::random());
         let metadata = parquet_meta();
+        let mut metrics = MetadataCacheMetrics::default();
         cache.put_parquet_meta_data(file_id, metadata);
-        assert!(cache.get_parquet_meta_data(file_id).await.is_none());
+        assert!(
+            cache
+                .get_parquet_meta_data(file_id, &mut metrics)
+                .await
+                .is_none()
+        );
 
         let value = Value::Int64(10);
         let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
@@ -798,14 +864,30 @@ mod tests {
     #[tokio::test]
     async fn test_parquet_meta_cache() {
         let cache = CacheManager::builder().sst_meta_cache_size(2000).build();
+        let mut metrics = MetadataCacheMetrics::default();
         let region_id = RegionId::new(1, 1);
         let file_id = RegionFileId::new(region_id, FileId::random());
-        assert!(cache.get_parquet_meta_data(file_id).await.is_none());
+        assert!(
+            cache
+                .get_parquet_meta_data(file_id, &mut metrics)
+                .await
+                .is_none()
+        );
         let metadata = parquet_meta();
         cache.put_parquet_meta_data(file_id, metadata);
-        assert!(cache.get_parquet_meta_data(file_id).await.is_some());
+        assert!(
+            cache
+                .get_parquet_meta_data(file_id, &mut metrics)
+                .await
+                .is_some()
+        );
         cache.remove_parquet_meta_data(file_id);
-        assert!(cache.get_parquet_meta_data(file_id).await.is_none());
+        assert!(
+            cache
+                .get_parquet_meta_data(file_id, &mut metrics)
+                .await
+                .is_none()
+        );
     }
 
     #[test]
@@ -851,5 +933,107 @@ mod tests {
         let result = Arc::new(SelectorResultValue::new(Vec::new(), Vec::new()));
         cache.put_selector_result(key, result);
         assert!(cache.get_selector_result(&key).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_evict_puffin_cache_clears_all_entries() {
+        use std::collections::{BTreeMap, HashMap};
+
+        let cache = CacheManager::builder()
+            .index_metadata_size(128)
+            .index_content_size(128)
+            .index_content_page_size(64)
+            .index_result_cache_size(128)
+            .puffin_metadata_size(128)
+            .build();
+        let cache = Arc::new(cache);
+
+        let region_id = RegionId::new(1, 1);
+        let region_file_id = RegionFileId::new(region_id, FileId::random());
+        let column_id: ColumnId = 1;
+
+        let bloom_cache = cache.bloom_filter_index_cache().unwrap().clone();
+        let inverted_cache = cache.inverted_index_cache().unwrap().clone();
+        let result_cache = cache.index_result_cache().unwrap();
+        let puffin_metadata_cache = cache.puffin_metadata_cache().unwrap().clone();
+
+        let bloom_key = (region_file_id.file_id(), column_id, Tag::Skipping);
+        bloom_cache.put_metadata(bloom_key, Arc::new(BloomFilterMeta::default()));
+        inverted_cache.put_metadata(
+            region_file_id.file_id(),
+            Arc::new(InvertedIndexMetas::default()),
+        );
+        let predicate = PredicateKey::new_bloom(Arc::new(BTreeMap::new()));
+        let selection = Arc::new(RowGroupSelection::default());
+        result_cache.put(predicate.clone(), region_file_id.file_id(), selection);
+        let file_id_str = region_file_id.to_string();
+        let metadata = Arc::new(FileMetadata {
+            blobs: Vec::new(),
+            properties: HashMap::new(),
+        });
+        puffin_metadata_cache.put_metadata(file_id_str.clone(), metadata);
+
+        assert!(bloom_cache.get_metadata(bloom_key).is_some());
+        assert!(
+            inverted_cache
+                .get_metadata(region_file_id.file_id())
+                .is_some()
+        );
+        assert!(
+            result_cache
+                .get(&predicate, region_file_id.file_id())
+                .is_some()
+        );
+        assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_some());
+
+        cache.evict_puffin_cache(region_file_id).await;
+
+        assert!(bloom_cache.get_metadata(bloom_key).is_none());
+        assert!(
+            inverted_cache
+                .get_metadata(region_file_id.file_id())
+                .is_none()
+        );
+        assert!(
+            result_cache
+                .get(&predicate, region_file_id.file_id())
+                .is_none()
+        );
+        assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
+
+        // Refill caches and evict via CacheStrategy to ensure delegation works.
+        bloom_cache.put_metadata(bloom_key, Arc::new(BloomFilterMeta::default()));
+        inverted_cache.put_metadata(
+            region_file_id.file_id(),
+            Arc::new(InvertedIndexMetas::default()),
+        );
+        result_cache.put(
+            predicate.clone(),
+            region_file_id.file_id(),
+            Arc::new(RowGroupSelection::default()),
+        );
+        puffin_metadata_cache.put_metadata(
+            file_id_str.clone(),
+            Arc::new(FileMetadata {
+                blobs: Vec::new(),
+                properties: HashMap::new(),
+            }),
+        );
+
+        let strategy = CacheStrategy::EnableAll(cache.clone());
+        strategy.evict_puffin_cache(region_file_id).await;
+
+        assert!(bloom_cache.get_metadata(bloom_key).is_none());
+        assert!(
+            inverted_cache
+                .get_metadata(region_file_id.file_id())
+                .is_none()
+        );
+        assert!(
+            result_cache
+                .get(&predicate, region_file_id.file_id())
+                .is_none()
+        );
+        assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
     }
 }

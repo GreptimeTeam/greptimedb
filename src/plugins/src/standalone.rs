@@ -33,3 +33,18 @@ pub async fn setup_standalone_plugins(
 pub async fn start_standalone_plugins(_plugins: Plugins) -> Result<()> {
     Ok(())
 }
+
+pub mod context {
+    use std::sync::Arc;
+
+    use catalog::CatalogManagerRef;
+    use common_meta::kv_backend::KvBackendRef;
+    use flow::FrontendClient;
+
+    /// The context for [`common_meta::ddl_manager::DdlManagerConfiguratorRef`] in standalone.
+    pub struct DdlManagerConfigureContext {
+        pub kv_backend: KvBackendRef,
+        pub fe_client: Arc<FrontendClient>,
+        pub catalog_manager: CatalogManagerRef,
+    }
+}

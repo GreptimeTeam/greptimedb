@@ -104,7 +104,7 @@ impl MetaClientSelector {
         let cfg = ChannelConfig::new()
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(30));
-        let channel_manager = ChannelManager::with_config(cfg);
+        let channel_manager = ChannelManager::with_config(cfg, None);
         Self {
             meta_client,
             channel_manager,

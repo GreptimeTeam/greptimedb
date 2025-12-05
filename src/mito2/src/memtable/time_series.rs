@@ -39,7 +39,7 @@ use mito_codec::key_values::KeyValue;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{
@@ -53,7 +53,7 @@ use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable,
     MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
-    MemtableStats, PredicateGroup,
+    MemtableStats, RangesOptions,
 };
 use crate::metrics::{
     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT, MEMTABLE_ACTIVE_SERIES_COUNT, READ_ROWS_TOTAL,
@@ -197,7 +197,12 @@ impl TimeSeriesMemtable {
         stats.value_bytes += value_allocated;
 
         // safety: timestamp of kv must be both present and a valid timestamp value.
-        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        let ts = kv
+            .timestamp()
+            .try_into_timestamp()
+            .unwrap()
+            .unwrap()
+            .value();
         stats.min_ts = stats.min_ts.min(ts);
         stats.max_ts = stats.max_ts.max(ts);
         Ok(())
@@ -272,7 +277,7 @@ impl Memtable for TimeSeriesMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         filters: Option<Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator> {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
@@ -298,10 +303,10 @@ impl Memtable for TimeSeriesMemtable {
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
-        _for_flush: bool,
+        options: RangesOptions,
     ) -> Result<MemtableRanges> {
+        let predicate = options.predicate;
+        let sequence = options.sequence;
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -463,7 +468,7 @@ impl SeriesSet {
         projection: HashSet<ColumnId>,
         predicate: Option<Predicate>,
         dedup: bool,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Iter> {
         let primary_key_schema = primary_key_schema(&self.region_metadata);
@@ -531,7 +536,7 @@ struct Iter {
     pk_datatypes: Vec<ConcreteDataType>,
     codec: Arc<DensePrimaryKeyCodec>,
     dedup: bool,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
     metrics: Metrics,
     mem_scan_metrics: Option<MemScanMetrics>,
 }
@@ -547,7 +552,7 @@ impl Iter {
         pk_datatypes: Vec<ConcreteDataType>,
         codec: Arc<DensePrimaryKeyCodec>,
         dedup: bool,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Self> {
         let predicate = predicate
@@ -896,7 +901,7 @@ impl ValueBuilder {
         };
 
         self.timestamp
-            .push(ts.as_timestamp().unwrap().unwrap().value());
+            .push(ts.try_into_timestamp().unwrap().unwrap().value());
         self.sequence.push(sequence);
         self.op_type.push(op_type);
         let num_rows = self.timestamp.len();
@@ -917,7 +922,9 @@ impl ValueBuilder {
                             )
                         };
                     mutable_vector.push_nulls(num_rows - 1);
-                    let _ = mutable_vector.push(field_value);
+                    mutable_vector
+                        .push(field_value)
+                        .unwrap_or_else(|e| panic!("unexpected field value: {e:?}"));
                     self.fields[idx] = Some(mutable_vector);
                     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.inc();
                 }
@@ -1239,7 +1246,7 @@ struct TimeSeriesIterBuilder {
     projection: HashSet<ColumnId>,
     predicate: Option<Predicate>,
     dedup: bool,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
     merge_mode: MergeMode,
 }
 
@@ -1650,10 +1657,13 @@ mod tests {
         memtable.write(&kvs).unwrap();
 
         let mut expected_ts: HashMap<i64, usize> = HashMap::new();
-        for ts in kvs
-            .iter()
-            .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
-        {
+        for ts in kvs.iter().map(|kv| {
+            kv.timestamp()
+                .try_into_timestamp()
+                .unwrap()
+                .unwrap()
+                .value()
+        }) {
             *expected_ts.entry(ts).or_default() += if dedup { 1 } else { 2 };
         }
 

@@ -27,7 +27,7 @@ use datafusion_expr::{LogicalPlan, TableSource};
 use futures::TryStreamExt;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use store_api::sst_entry::{ManifestSstEntry, StorageSstEntry};
+use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
 use store_api::storage::RegionId;
 
 use crate::error::{DataFusionSnafu, ListStorageSstsSnafu, Result, UnexpectedSnafu};
@@ -35,10 +35,12 @@ use crate::region_server::RegionServer;
 
 /// Reserved internal table kinds used.
 /// These are recognized by reserved table names and mapped to providers.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
 enum InternalTableKind {
     InspectSstManifest,
     InspectSstStorage,
+    InspectSstIndexMeta,
 }
 
 impl InternalTableKind {
@@ -50,6 +52,9 @@ impl InternalTableKind {
         if name.eq_ignore_ascii_case(StorageSstEntry::reserved_table_name_for_inspection()) {
             return Some(Self::InspectSstStorage);
         }
+        if name.eq_ignore_ascii_case(PuffinIndexMetaEntry::reserved_table_name_for_inspection()) {
+            return Some(Self::InspectSstIndexMeta);
+        }
         None
     }
 
@@ -58,6 +63,7 @@ impl InternalTableKind {
         match self {
             Self::InspectSstManifest => server.inspect_sst_manifest_provider().await,
             Self::InspectSstStorage => server.inspect_sst_storage_provider().await,
+            Self::InspectSstIndexMeta => server.inspect_sst_index_meta_provider().await,
         }
     }
 }
@@ -97,6 +103,25 @@ impl RegionServer {
             .context(ListStorageSstsSnafu)?;
         let schema = StorageSstEntry::schema().arrow_schema().clone();
         let batch = StorageSstEntry::to_record_batch(&entries)
+            .map_err(DataFusionError::from)
+            .context(DataFusionSnafu)?;
+
+        let table = MemTable::try_new(schema, vec![vec![batch]]).context(DataFusionSnafu)?;
+        Ok(Arc::new(table))
+    }
+
+    /// Expose index metadata across the engine as an in-memory table.
+    pub async fn inspect_sst_index_meta_provider(&self) -> Result<Arc<dyn TableProvider>> {
+        let mito = {
+            let guard = self.inner.mito_engine.read().unwrap();
+            guard.as_ref().cloned().context(UnexpectedSnafu {
+                violated: "mito engine not available",
+            })?
+        };
+
+        let entries = mito.all_index_metas().await;
+        let schema = PuffinIndexMetaEntry::schema().arrow_schema().clone();
+        let batch = PuffinIndexMetaEntry::to_record_batch(&entries)
             .map_err(DataFusionError::from)
             .context(DataFusionSnafu)?;
 

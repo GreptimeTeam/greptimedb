@@ -21,11 +21,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
+use common_base::memory_limit::MemoryLimit;
 use common_config::Configurable;
 use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
 use common_options::memory::MemoryOptions;
 use common_runtime::JoinHandle;
+use common_stat::get_total_cpu_cores;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{debug, info, trace};
 use datatypes::schema::ColumnSchema;
@@ -92,7 +94,7 @@ pub struct FlowConfig {
 impl Default for FlowConfig {
     fn default() -> Self {
         Self {
-            num_workers: (common_config::utils::get_cpus() / 2).max(1),
+            num_workers: (get_total_cpu_cores() / 2).max(1),
             batching_mode: BatchingModeOptions::default(),
         }
     }
@@ -131,6 +133,7 @@ impl Default for FlownodeOptions {
             query: QueryOptions {
                 parallelism: 1,
                 allow_query_fallback: false,
+                memory_pool_size: MemoryLimit::default(),
             },
             user_provider: None,
             memory: MemoryOptions::default(),
@@ -141,7 +144,7 @@ impl Default for FlownodeOptions {
 impl Configurable for FlownodeOptions {
     fn validate_sanitize(&mut self) -> common_config::error::Result<()> {
         if self.flow.num_workers == 0 {
-            self.flow.num_workers = (common_config::utils::get_cpus() / 2).max(1);
+            self.flow.num_workers = (get_total_cpu_cores() / 2).max(1);
         }
         Ok(())
     }

@@ -21,7 +21,8 @@ use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
 use humantime_serde::re::humantime;
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
+use store_api::logstore::LogStore;
 use store_api::metadata::{
     InvalidSetRegionOptionRequestSnafu, MetadataError, RegionMetadata, RegionMetadataBuilder,
     RegionMetadataRef,
@@ -35,12 +36,13 @@ use crate::flush::FlushReason;
 use crate::manifest::action::RegionChange;
 use crate::region::MitoRegionRef;
 use crate::region::options::CompactionOptions::Twcs;
-use crate::region::options::TwcsOptions;
+use crate::region::options::{RegionOptions, TwcsOptions};
 use crate::region::version::VersionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
+use crate::sst::FormatType;
 use crate::worker::RegionWorkerLoop;
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_alter_request(
         &mut self,
         region_id: RegionId,
@@ -57,36 +59,38 @@ impl<S> RegionWorkerLoop<S> {
 
         info!("Try to alter region: {}, request: {:?}", region_id, request);
 
-        // Get the version before alter.
-        let version = region.version();
+        // Gets the version before alter.
+        let mut version = region.version();
 
         // fast path for memory state changes like options.
-        match request.kind {
-            AlterKind::SetRegionOptions { options } => {
-                match self.handle_alter_region_options(region, version, options) {
-                    Ok(_) => sender.send(Ok(0)),
-                    Err(e) => sender.send(Err(e).context(InvalidMetadataSnafu)),
-                }
-                return;
-            }
+        let set_options = match &request.kind {
+            AlterKind::SetRegionOptions { options } => options.clone(),
             AlterKind::UnsetRegionOptions { keys } => {
                 // Converts the keys to SetRegionOption.
                 //
                 // It passes an empty string to achieve the purpose of unset
-                match self.handle_alter_region_options(
-                    region,
-                    version,
-                    keys.iter().map(Into::into).collect(),
-                ) {
-                    Ok(_) => sender.send(Ok(0)),
-                    Err(e) => sender.send(Err(e).context(InvalidMetadataSnafu)),
-                }
-                return;
+                keys.iter().map(Into::into).collect()
             }
-            _ => {}
+            _ => Vec::new(),
+        };
+        if !set_options.is_empty() {
+            match self.handle_alter_region_options_fast(&region, version, set_options) {
+                Ok(new_version) => {
+                    let Some(new_version) = new_version else {
+                        // We don't have options to alter after flush.
+                        sender.send(Ok(0));
+                        return;
+                    };
+                    version = new_version;
+                }
+                Err(e) => {
+                    sender.send(Err(e).context(InvalidMetadataSnafu));
+                    return;
+                }
+            }
         }
 
-        // Validate request.
+        // Validates request.
         if let Err(e) = request.validate(&version.metadata) {
             // Invalid request.
             sender.send(Err(e).context(InvalidRegionRequestSnafu));
@@ -110,7 +114,13 @@ impl<S> RegionWorkerLoop<S> {
             info!("Flush region: {} before alteration", region_id);
 
             // Try to submit a flush task.
-            let task = self.new_flush_task(&region, FlushReason::Alter, None, self.config.clone());
+            let task = self.new_flush_task(
+                &region,
+                FlushReason::Alter,
+                None,
+                self.config.clone(),
+                region.is_staging(),
+            );
             if let Err(e) =
                 self.flush_scheduler
                     .schedule_flush(region.region_id, &region.version_control, task)
@@ -132,20 +142,23 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         info!(
-            "Try to alter region {}, version.metadata: {:?}, request: {:?}",
-            region_id, version.metadata, request,
+            "Try to alter region {}, version.metadata: {:?}, version.options: {:?}, request: {:?}",
+            region_id, version.metadata, version.options, request,
         );
-        self.handle_alter_region_metadata(region, version, request, sender);
+        self.handle_alter_region_with_empty_memtable(region, version, request, sender);
     }
 
-    /// Handles region metadata changes.
-    fn handle_alter_region_metadata(
+    // TODO(yingwen): Optional new options and sst format.
+    /// Handles region metadata and format changes when the region memtable is empty.
+    fn handle_alter_region_with_empty_memtable(
         &mut self,
         region: MitoRegionRef,
         version: VersionRef,
         request: RegionAlterRequest,
         sender: OptionOutputTx,
     ) {
+        let need_index = need_change_index(&request.kind);
+        let new_options = new_region_options_on_empty_memtable(&version.options, &request.kind);
         let new_meta = match metadata_after_alteration(&version.metadata, request) {
             Ok(new_meta) => new_meta,
             Err(e) => {
@@ -154,18 +167,32 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
         // Persist the metadata to region's manifest.
-        let change = RegionChange { metadata: new_meta };
-        self.handle_manifest_region_change(region, change, sender)
+        let change = RegionChange {
+            metadata: new_meta,
+            sst_format: new_options
+                .as_ref()
+                .unwrap_or(&version.options)
+                .sst_format
+                .unwrap_or_default(),
+        };
+        self.handle_manifest_region_change(region, change, need_index, new_options, sender);
     }
 
     /// Handles requests that changes region options, like TTL. It only affects memory state
     /// since changes are persisted in the `DatanodeTableValue` in metasrv.
-    fn handle_alter_region_options(
+    ///
+    /// If the options require empty memtable, it only does validation.
+    ///
+    /// Returns a new version with the updated options if it needs further alteration.
+    fn handle_alter_region_options_fast(
         &mut self,
-        region: MitoRegionRef,
+        region: &MitoRegionRef,
         version: VersionRef,
         options: Vec<SetRegionOption>,
-    ) -> std::result::Result<(), MetadataError> {
+    ) -> std::result::Result<Option<VersionRef>, MetadataError> {
+        assert!(!options.is_empty());
+
+        let mut all_options_altered = true;
         let mut current_options = version.options.clone();
         for option in options {
             match option {
@@ -186,11 +213,66 @@ impl<S> RegionWorkerLoop<S> {
                         region.region_id,
                     )?;
                 }
+                SetRegionOption::Format(format_str) => {
+                    let new_format = format_str.parse::<FormatType>().map_err(|_| {
+                        store_api::metadata::InvalidRegionRequestSnafu {
+                            region_id: region.region_id,
+                            err: format!("Invalid format type: {}", format_str),
+                        }
+                        .build()
+                    })?;
+                    // If the format is unchanged, we also consider the option is altered.
+                    if new_format != current_options.sst_format.unwrap_or_default() {
+                        all_options_altered = false;
+
+                        // Validates the format type.
+                        ensure!(
+                            new_format == FormatType::Flat,
+                            store_api::metadata::InvalidRegionRequestSnafu {
+                                region_id: region.region_id,
+                                err: "Only allow changing format type to flat",
+                            }
+                        );
+                    }
+                }
             }
         }
         region.version_control.alter_options(current_options);
-        Ok(())
+        if all_options_altered {
+            Ok(None)
+        } else {
+            Ok(Some(region.version()))
+        }
     }
+}
+
+/// Returns the new region options if there are updates to the options.
+fn new_region_options_on_empty_memtable(
+    current_options: &RegionOptions,
+    kind: &AlterKind,
+) -> Option<RegionOptions> {
+    let AlterKind::SetRegionOptions { options } = kind else {
+        return None;
+    };
+
+    if options.is_empty() {
+        return None;
+    }
+
+    let mut current_options = current_options.clone();
+    for option in options {
+        match option {
+            SetRegionOption::Ttl(_) | SetRegionOption::Twsc(_, _) => (),
+            SetRegionOption::Format(format_str) => {
+                // Safety: handle_alter_region_options_fast() has validated this.
+                let new_format = format_str.parse::<FormatType>().unwrap();
+                assert_eq!(FormatType::Flat, new_format);
+
+                current_options.sst_format = Some(new_format);
+            }
+        }
+    }
+    Some(current_options)
 }
 
 /// Creates a metadata after applying the alter `request` to the old `metadata`.
@@ -276,4 +358,17 @@ fn log_option_update<T: std::fmt::Debug>(
         "Update region {}: {}, previous: {:?}, new: {:?}",
         option_name, region_id, prev_value, cur_value
     );
+}
+
+/// Used to determine whether we can build index directly after schema change.
+fn need_change_index(kind: &AlterKind) -> bool {
+    match kind {
+        // `SetIndexes` is a fast-path operation because it can build indexes for existing SSTs
+        // in the background, without needing to wait for a flush or compaction cycle.
+        AlterKind::SetIndexes { options: _ } => true,
+        // For AddColumns, DropColumns, UnsetIndexes and ModifyColumnTypes, we don't treat them as index changes.
+        // Index files still need to be rebuilt after schema changes,
+        // but this will happen automatically during flush or compaction.
+        _ => false,
+    }
 }

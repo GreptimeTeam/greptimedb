@@ -53,7 +53,10 @@ serde_yaml = "0.9"
 snafu = { workspace = true }
 sql = { workspace = true }
 sqlparser.workspace = true
-sqlx.workspace = true
+sqlx = { workspace = true, features = [
+    "mysql",
+    "chrono",
+] }
 store-api = { workspace = true }
 strum.workspace = true
 tinytemplate = "1.2"

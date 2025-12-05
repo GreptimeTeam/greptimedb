@@ -47,6 +47,8 @@ pub struct ManifestSstEntry {
     pub region_sequence: RegionSeq,
     /// Engine-specific file identifier (string form).
     pub file_id: String,
+    /// Engine-specific index file identifier (string form).
+    pub index_file_id: Option<String>,
     /// SST level.
     pub level: u8,
     /// Full path of the SST file in object store.
@@ -61,6 +63,8 @@ pub struct ManifestSstEntry {
     pub num_rows: u64,
     /// Number of row groups in the SST.
     pub num_row_groups: u64,
+    /// Number of series in the SST.
+    pub num_series: Option<u64>,
     /// Min timestamp.
     pub min_ts: Timestamp,
     /// Max timestamp.
@@ -87,6 +91,7 @@ impl ManifestSstEntry {
             ColumnSchema::new("region_group", Ty::uint8_datatype(), false),
             ColumnSchema::new("region_sequence", Ty::uint32_datatype(), false),
             ColumnSchema::new("file_id", Ty::string_datatype(), false),
+            ColumnSchema::new("index_file_id", Ty::string_datatype(), true),
             ColumnSchema::new("level", Ty::uint8_datatype(), false),
             ColumnSchema::new("file_path", Ty::string_datatype(), false),
             ColumnSchema::new("file_size", Ty::uint64_datatype(), false),
@@ -94,6 +99,7 @@ impl ManifestSstEntry {
             ColumnSchema::new("index_file_size", Ty::uint64_datatype(), true),
             ColumnSchema::new("num_rows", Ty::uint64_datatype(), false),
             ColumnSchema::new("num_row_groups", Ty::uint64_datatype(), false),
+            ColumnSchema::new("num_series", Ty::uint64_datatype(), true),
             ColumnSchema::new("min_ts", Ty::timestamp_nanosecond_datatype(), true),
             ColumnSchema::new("max_ts", Ty::timestamp_nanosecond_datatype(), true),
             ColumnSchema::new("sequence", Ty::uint64_datatype(), true),
@@ -113,6 +119,7 @@ impl ManifestSstEntry {
         let region_groups = entries.iter().map(|e| e.region_group);
         let region_sequences = entries.iter().map(|e| e.region_sequence);
         let file_ids = entries.iter().map(|e| e.file_id.as_str());
+        let index_file_ids = entries.iter().map(|e| e.index_file_id.as_ref());
         let levels = entries.iter().map(|e| e.level);
         let file_paths = entries.iter().map(|e| e.file_path.as_str());
         let file_sizes = entries.iter().map(|e| e.file_size);
@@ -120,6 +127,7 @@ impl ManifestSstEntry {
         let index_file_sizes = entries.iter().map(|e| e.index_file_size);
         let num_rows = entries.iter().map(|e| e.num_rows);
         let num_row_groups = entries.iter().map(|e| e.num_row_groups);
+        let num_series = entries.iter().map(|e| e.num_series);
         let min_ts = entries.iter().map(|e| {
             e.min_ts
                 .convert_to(TimeUnit::Nanosecond)
@@ -143,6 +151,7 @@ impl ManifestSstEntry {
             Arc::new(UInt8Array::from_iter_values(region_groups)),
             Arc::new(UInt32Array::from_iter_values(region_sequences)),
             Arc::new(StringArray::from_iter_values(file_ids)),
+            Arc::new(StringArray::from_iter(index_file_ids)),
             Arc::new(UInt8Array::from_iter_values(levels)),
             Arc::new(StringArray::from_iter_values(file_paths)),
             Arc::new(UInt64Array::from_iter_values(file_sizes)),
@@ -150,6 +159,7 @@ impl ManifestSstEntry {
             Arc::new(UInt64Array::from_iter(index_file_sizes)),
             Arc::new(UInt64Array::from_iter_values(num_rows)),
             Arc::new(UInt64Array::from_iter_values(num_row_groups)),
+            Arc::new(UInt64Array::from_iter(num_series)),
             Arc::new(TimestampNanosecondArray::from_iter(min_ts)),
             Arc::new(TimestampNanosecondArray::from_iter(max_ts)),
             Arc::new(UInt64Array::from_iter(sequences)),
@@ -249,6 +259,124 @@ impl StorageSstEntry {
     }
 }
 
+/// An entry describing puffin index metadata for inspection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PuffinIndexMetaEntry {
+    /// The table directory this index belongs to.
+    pub table_dir: String,
+    /// The full path of the index file in object store.
+    pub index_file_path: String,
+    /// The region id referencing the index file.
+    pub region_id: RegionId,
+    /// The table id referencing the index file.
+    pub table_id: TableId,
+    /// The region number referencing the index file.
+    pub region_number: RegionNumber,
+    /// The region group referencing the index file.
+    pub region_group: RegionGroup,
+    /// The region sequence referencing the index file.
+    pub region_sequence: RegionSeq,
+    /// Engine-specific file identifier (string form).
+    pub file_id: String,
+    /// Size of the index file in object store (if available).
+    pub index_file_size: Option<u64>,
+    /// Logical index type (`bloom_filter`, `fulltext_bloom`, `fulltext_tantivy`, `inverted`).
+    pub index_type: String,
+    /// Target type (`column`, ...).
+    pub target_type: String,
+    /// Encoded target key string.
+    pub target_key: String,
+    /// Structured JSON describing the target.
+    pub target_json: String,
+    /// Size of the blob storing this target.
+    pub blob_size: u64,
+    /// Structured JSON describing index-specific metadata (if available).
+    pub meta_json: Option<String>,
+    /// Node id associated with the index file (if known).
+    pub node_id: Option<u64>,
+}
+
+impl PuffinIndexMetaEntry {
+    /// Returns the schema describing puffin index metadata entries.
+    pub fn schema() -> SchemaRef {
+        use datatypes::prelude::ConcreteDataType as Ty;
+        Arc::new(Schema::new(vec![
+            ColumnSchema::new("table_dir", Ty::string_datatype(), false),
+            ColumnSchema::new("index_file_path", Ty::string_datatype(), false),
+            ColumnSchema::new("region_id", Ty::uint64_datatype(), false),
+            ColumnSchema::new("table_id", Ty::uint32_datatype(), false),
+            ColumnSchema::new("region_number", Ty::uint32_datatype(), false),
+            ColumnSchema::new("region_group", Ty::uint8_datatype(), false),
+            ColumnSchema::new("region_sequence", Ty::uint32_datatype(), false),
+            ColumnSchema::new("file_id", Ty::string_datatype(), false),
+            ColumnSchema::new("index_file_size", Ty::uint64_datatype(), true),
+            ColumnSchema::new("index_type", Ty::string_datatype(), false),
+            ColumnSchema::new("target_type", Ty::string_datatype(), false),
+            ColumnSchema::new("target_key", Ty::string_datatype(), false),
+            ColumnSchema::new("target_json", Ty::string_datatype(), false),
+            ColumnSchema::new("blob_size", Ty::uint64_datatype(), false),
+            ColumnSchema::new("meta_json", Ty::string_datatype(), true),
+            ColumnSchema::new("node_id", Ty::uint64_datatype(), true),
+        ]))
+    }
+
+    /// Converts a list of puffin index metadata entries to a record batch.
+    pub fn to_record_batch(entries: &[Self]) -> std::result::Result<DfRecordBatch, ArrowError> {
+        let schema = Self::schema();
+        let table_dirs = entries.iter().map(|e| e.table_dir.as_str());
+        let index_file_paths = entries.iter().map(|e| e.index_file_path.as_str());
+        let region_ids = entries.iter().map(|e| e.region_id.as_u64());
+        let table_ids = entries.iter().map(|e| e.table_id);
+        let region_numbers = entries.iter().map(|e| e.region_number);
+        let region_groups = entries.iter().map(|e| e.region_group);
+        let region_sequences = entries.iter().map(|e| e.region_sequence);
+        let file_ids = entries.iter().map(|e| e.file_id.as_str());
+        let index_file_sizes = entries.iter().map(|e| e.index_file_size);
+        let index_types = entries.iter().map(|e| e.index_type.as_str());
+        let target_types = entries.iter().map(|e| e.target_type.as_str());
+        let target_keys = entries.iter().map(|e| e.target_key.as_str());
+        let target_jsons = entries.iter().map(|e| e.target_json.as_str());
+        let blob_sizes = entries.iter().map(|e| e.blob_size);
+        let meta_jsons = entries.iter().map(|e| e.meta_json.as_deref());
+        let node_ids = entries.iter().map(|e| e.node_id);
+
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from_iter_values(table_dirs)),
+            Arc::new(StringArray::from_iter_values(index_file_paths)),
+            Arc::new(UInt64Array::from_iter_values(region_ids)),
+            Arc::new(UInt32Array::from_iter_values(table_ids)),
+            Arc::new(UInt32Array::from_iter_values(region_numbers)),
+            Arc::new(UInt8Array::from_iter_values(region_groups)),
+            Arc::new(UInt32Array::from_iter_values(region_sequences)),
+            Arc::new(StringArray::from_iter_values(file_ids)),
+            Arc::new(UInt64Array::from_iter(index_file_sizes)),
+            Arc::new(StringArray::from_iter_values(index_types)),
+            Arc::new(StringArray::from_iter_values(target_types)),
+            Arc::new(StringArray::from_iter_values(target_keys)),
+            Arc::new(StringArray::from_iter_values(target_jsons)),
+            Arc::new(UInt64Array::from_iter_values(blob_sizes)),
+            Arc::new(StringArray::from_iter(meta_jsons)),
+            Arc::new(UInt64Array::from_iter(node_ids)),
+        ];
+
+        DfRecordBatch::try_new(schema.arrow_schema().clone(), columns)
+    }
+
+    /// Reserved internal inspect table name for puffin index metadata.
+    pub fn reserved_table_name_for_inspection() -> &'static str {
+        "__inspect/__mito/__puffin_index_meta"
+    }
+
+    /// Builds a logical plan for scanning puffin index metadata entries.
+    pub fn build_plan(scan_request: ScanRequest) -> Result<LogicalPlan, DataFusionError> {
+        build_plan_helper(
+            scan_request,
+            Self::reserved_table_name_for_inspection(),
+            Self::schema(),
+        )
+    }
+}
+
 fn build_plan_helper(
     scan_request: ScanRequest,
     table_name: &str,
@@ -309,6 +437,7 @@ mod tests {
                 region_group: region_group1,
                 region_sequence: region_seq1,
                 file_id: "f1".to_string(),
+                index_file_id: None,
                 level: 1,
                 file_path: "/p1".to_string(),
                 file_size: 100,
@@ -316,6 +445,7 @@ mod tests {
                 index_file_size: None,
                 num_rows: 10,
                 num_row_groups: 2,
+                num_series: Some(5),
                 min_ts: Timestamp::new_millisecond(1000), // 1s -> 1_000_000_000ns
                 max_ts: Timestamp::new_second(2),         // 2s -> 2_000_000_000ns
                 sequence: None,
@@ -331,6 +461,7 @@ mod tests {
                 region_group: region_group2,
                 region_sequence: region_seq2,
                 file_id: "f2".to_string(),
+                index_file_id: Some("idx".to_string()),
                 level: 3,
                 file_path: "/p2".to_string(),
                 file_size: 200,
@@ -338,6 +469,7 @@ mod tests {
                 index_file_size: Some(11),
                 num_rows: 20,
                 num_row_groups: 4,
+                num_series: None,
                 min_ts: Timestamp::new_nanosecond(5),     // 5ns
                 max_ts: Timestamp::new_microsecond(2000), // 2ms -> 2_000_000ns
                 sequence: Some(9),
@@ -416,8 +548,16 @@ mod tests {
         assert_eq!("f1", file_ids.value(0));
         assert_eq!("f2", file_ids.value(1));
 
-        let levels = batch
+        let index_file_ids = batch
             .column(7)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(index_file_ids.is_null(0));
+        assert_eq!("idx", index_file_ids.value(1));
+
+        let levels = batch
+            .column(8)
             .as_any()
             .downcast_ref::<UInt8Array>()
             .unwrap();
@@ -425,7 +565,7 @@ mod tests {
         assert_eq!(3, levels.value(1));
 
         let file_paths = batch
-            .column(8)
+            .column(9)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -433,7 +573,7 @@ mod tests {
         assert_eq!("/p2", file_paths.value(1));
 
         let file_sizes = batch
-            .column(9)
+            .column(10)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -441,7 +581,7 @@ mod tests {
         assert_eq!(200, file_sizes.value(1));
 
         let index_file_paths = batch
-            .column(10)
+            .column(11)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -449,7 +589,7 @@ mod tests {
         assert_eq!("idx", index_file_paths.value(1));
 
         let index_file_sizes = batch
-            .column(11)
+            .column(12)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -457,7 +597,7 @@ mod tests {
         assert_eq!(11, index_file_sizes.value(1));
 
         let num_rows = batch
-            .column(12)
+            .column(13)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -465,15 +605,23 @@ mod tests {
         assert_eq!(20, num_rows.value(1));
 
         let num_row_groups = batch
-            .column(13)
+            .column(14)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
         assert_eq!(2, num_row_groups.value(0));
         assert_eq!(4, num_row_groups.value(1));
 
+        let num_series = batch
+            .column(15)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(5, num_series.value(0));
+        assert!(num_series.is_null(1));
+
         let min_ts = batch
-            .column(14)
+            .column(16)
             .as_any()
             .downcast_ref::<TimestampNanosecondArray>()
             .unwrap();
@@ -481,7 +629,7 @@ mod tests {
         assert_eq!(5, min_ts.value(1));
 
         let max_ts = batch
-            .column(15)
+            .column(17)
             .as_any()
             .downcast_ref::<TimestampNanosecondArray>()
             .unwrap();
@@ -489,7 +637,7 @@ mod tests {
         assert_eq!(2_000_000, max_ts.value(1));
 
         let sequences = batch
-            .column(16)
+            .column(18)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -497,7 +645,7 @@ mod tests {
         assert_eq!(9, sequences.value(1));
 
         let origin_region_ids = batch
-            .column(17)
+            .column(19)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -505,7 +653,7 @@ mod tests {
         assert_eq!(region_id2.as_u64(), origin_region_ids.value(1));
 
         let node_ids = batch
-            .column(18)
+            .column(20)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -513,7 +661,7 @@ mod tests {
         assert!(node_ids.is_null(1));
 
         let visible = batch
-            .column(19)
+            .column(21)
             .as_any()
             .downcast_ref::<BooleanArray>()
             .unwrap();
@@ -574,6 +722,188 @@ mod tests {
             .downcast_ref::<UInt64Array>()
             .unwrap();
         assert_eq!(1, node_ids.value(0));
+        assert!(node_ids.is_null(1));
+    }
+
+    #[test]
+    fn test_puffin_index_meta_to_record_batch() {
+        let entries = vec![
+            PuffinIndexMetaEntry {
+                table_dir: "table1".to_string(),
+                index_file_path: "index1".to_string(),
+                region_id: RegionId::with_group_and_seq(10, 0, 20),
+                table_id: 10,
+                region_number: 20,
+                region_group: 0,
+                region_sequence: 20,
+                file_id: "file1".to_string(),
+                index_file_size: Some(1024),
+                index_type: "bloom_filter".to_string(),
+                target_type: "column".to_string(),
+                target_key: "1".to_string(),
+                target_json: "{\"column\":1}".to_string(),
+                blob_size: 256,
+                meta_json: Some("{\"bloom\":{}}".to_string()),
+                node_id: Some(42),
+            },
+            PuffinIndexMetaEntry {
+                table_dir: "table2".to_string(),
+                index_file_path: "index2".to_string(),
+                region_id: RegionId::with_group_and_seq(11, 0, 21),
+                table_id: 11,
+                region_number: 21,
+                region_group: 0,
+                region_sequence: 21,
+                file_id: "file2".to_string(),
+                index_file_size: None,
+                index_type: "inverted".to_string(),
+                target_type: "unknown".to_string(),
+                target_key: "legacy".to_string(),
+                target_json: "{}".to_string(),
+                blob_size: 0,
+                meta_json: None,
+                node_id: None,
+            },
+        ];
+
+        let schema = PuffinIndexMetaEntry::schema();
+        let batch = PuffinIndexMetaEntry::to_record_batch(&entries).unwrap();
+
+        assert_eq!(schema.arrow_schema().fields().len(), batch.num_columns());
+        assert_eq!(2, batch.num_rows());
+
+        let table_dirs = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("table1", table_dirs.value(0));
+        assert_eq!("table2", table_dirs.value(1));
+
+        let index_file_paths = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("index1", index_file_paths.value(0));
+        assert_eq!("index2", index_file_paths.value(1));
+
+        let region_ids = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(
+            RegionId::with_group_and_seq(10, 0, 20).as_u64(),
+            region_ids.value(0)
+        );
+        assert_eq!(
+            RegionId::with_group_and_seq(11, 0, 21).as_u64(),
+            region_ids.value(1)
+        );
+
+        let table_ids = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(10, table_ids.value(0));
+        assert_eq!(11, table_ids.value(1));
+
+        let region_numbers = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(20, region_numbers.value(0));
+        assert_eq!(21, region_numbers.value(1));
+
+        let region_groups = batch
+            .column(5)
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .unwrap();
+        assert_eq!(0, region_groups.value(0));
+        assert_eq!(0, region_groups.value(1));
+
+        let region_sequences = batch
+            .column(6)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(20, region_sequences.value(0));
+        assert_eq!(21, region_sequences.value(1));
+
+        let file_ids = batch
+            .column(7)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("file1", file_ids.value(0));
+        assert_eq!("file2", file_ids.value(1));
+
+        let index_file_sizes = batch
+            .column(8)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(1024, index_file_sizes.value(0));
+        assert!(index_file_sizes.is_null(1));
+
+        let index_types = batch
+            .column(9)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("bloom_filter", index_types.value(0));
+        assert_eq!("inverted", index_types.value(1));
+
+        let target_types = batch
+            .column(10)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("column", target_types.value(0));
+        assert_eq!("unknown", target_types.value(1));
+
+        let target_keys = batch
+            .column(11)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("1", target_keys.value(0));
+        assert_eq!("legacy", target_keys.value(1));
+
+        let target_json = batch
+            .column(12)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("{\"column\":1}", target_json.value(0));
+        assert_eq!("{}", target_json.value(1));
+
+        let blob_sizes = batch
+            .column(13)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(256, blob_sizes.value(0));
+        assert_eq!(0, blob_sizes.value(1));
+
+        let meta_jsons = batch
+            .column(14)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("{\"bloom\":{}}", meta_jsons.value(0));
+        assert!(meta_jsons.is_null(1));
+
+        let node_ids = batch
+            .column(15)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(42, node_ids.value(0));
         assert!(node_ids.is_null(1));
     }
 

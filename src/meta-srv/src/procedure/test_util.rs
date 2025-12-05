@@ -17,7 +17,8 @@ use std::collections::HashMap;
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{HeartbeatResponse, MailboxMessage};
 use common_meta::instruction::{
-    DowngradeRegionReply, FlushRegionReply, InstructionReply, SimpleReply, UpgradeRegionReply,
+    DowngradeRegionReply, DowngradeRegionsReply, FlushRegionReply, InstructionReply, SimpleReply,
+    UpgradeRegionReply, UpgradeRegionsReply,
 };
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::TableRouteValue;
@@ -95,8 +96,11 @@ pub fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> Ma
         to: "meta".to_string(),
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
-            serde_json::to_string(&InstructionReply::OpenRegion(SimpleReply { result, error }))
-                .unwrap(),
+            serde_json::to_string(&InstructionReply::OpenRegions(SimpleReply {
+                result,
+                error,
+            }))
+            .unwrap(),
         )),
     }
 }
@@ -157,7 +161,7 @@ pub fn new_close_region_reply(id: u64) -> MailboxMessage {
         to: "meta".to_string(),
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
-            serde_json::to_string(&InstructionReply::CloseRegion(SimpleReply {
+            serde_json::to_string(&InstructionReply::CloseRegions(SimpleReply {
                 result: false,
                 error: None,
             }))
@@ -180,12 +184,15 @@ pub fn new_downgrade_region_reply(
         to: "meta".to_string(),
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
-            serde_json::to_string(&InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                last_entry_id,
-                metadata_last_entry_id: None,
-                exists: exist,
-                error,
-            }))
+            serde_json::to_string(&InstructionReply::DowngradeRegions(
+                DowngradeRegionsReply::new(vec![DowngradeRegionReply {
+                    region_id: RegionId::new(0, 0),
+                    last_entry_id,
+                    metadata_last_entry_id: None,
+                    exists: exist,
+                    error,
+                }]),
+            ))
             .unwrap(),
         )),
     }
@@ -205,11 +212,14 @@ pub fn new_upgrade_region_reply(
         to: "meta".to_string(),
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
-            serde_json::to_string(&InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                ready,
-                exists,
-                error,
-            }))
+            serde_json::to_string(&InstructionReply::UpgradeRegions(
+                UpgradeRegionsReply::single(UpgradeRegionReply {
+                    region_id: RegionId::new(0, 0),
+                    ready,
+                    exists,
+                    error,
+                }),
+            ))
             .unwrap(),
         )),
     }

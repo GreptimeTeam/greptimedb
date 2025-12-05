@@ -30,7 +30,7 @@ use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortFi
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
-use store_api::storage::{ColumnId, RegionId, SequenceNumber};
+use store_api::storage::{ColumnId, RegionId, SequenceNumber, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::Result;
@@ -38,9 +38,8 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::partition_tree::data::{DataBatch, DataBuffer, timestamp_array_to_i64_slice};
 use crate::memtable::{
     BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRanges,
-    MemtableRef, MemtableStats,
+    MemtableRef, MemtableStats, RangesOptions,
 };
-use crate::read::scan_region::PredicateGroup;
 
 /// Empty memtable for test.
 #[derive(Debug, Default)]
@@ -89,7 +88,7 @@ impl Memtable for EmptyMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _filters: Option<Predicate>,
-        _sequence: Option<SequenceNumber>,
+        _sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator> {
         Ok(Box::new(std::iter::empty()))
     }
@@ -97,9 +96,7 @@ impl Memtable for EmptyMemtable {
     fn ranges(
         &self,
         _projection: Option<&[ColumnId]>,
-        _predicate: PredicateGroup,
-        _sequence: Option<SequenceNumber>,
-        _for_flush: bool,
+        _options: RangesOptions,
     ) -> Result<MemtableRanges> {
         Ok(MemtableRanges::default())
     }

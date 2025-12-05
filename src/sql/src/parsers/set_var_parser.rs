@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use snafu::ResultExt;
-use sqlparser::ast::Statement as SpStatement;
+use sqlparser::ast::{Set, Statement as SpStatement};
 
 use crate::ast::{Ident, ObjectName};
 use crate::error::{self, Result};
@@ -27,21 +27,27 @@ impl ParserContext<'_> {
         let _ = self.parser.next_token();
         let spstatement = self.parser.parse_set().context(error::SyntaxSnafu)?;
         match spstatement {
-            SpStatement::SetVariable {
-                variables,
-                value,
-                hivevar,
-                ..
-            } if !hivevar => Ok(Statement::SetVariables(SetVariables {
-                variable: (*variables)[0].clone(),
-                value,
-            })),
+            SpStatement::Set(set) => match set {
+                Set::SingleAssignment {
+                    scope: _,
+                    hivevar,
+                    variable,
+                    values,
+                } if !hivevar => Ok(Statement::SetVariables(SetVariables {
+                    variable,
+                    value: values,
+                })),
 
-            SpStatement::SetTimeZone { value, .. } => Ok(Statement::SetVariables(SetVariables {
-                variable: ObjectName::from(vec![Ident::new("TIMEZONE")]),
-                value: vec![value],
-            })),
+                Set::SetTimeZone { local: _, value } => Ok(Statement::SetVariables(SetVariables {
+                    variable: ObjectName::from(vec![Ident::new("TIMEZONE")]),
+                    value: vec![value],
+                })),
 
+                set => error::UnsupportedSnafu {
+                    keyword: set.to_string(),
+                }
+                .fail(),
+            },
             unexp => error::UnsupportedSnafu {
                 keyword: unexp.to_string(),
             }

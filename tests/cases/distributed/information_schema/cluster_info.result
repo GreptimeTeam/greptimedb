@@ -4,24 +4,27 @@ Affected Rows: 0
 
 DESC TABLE CLUSTER_INFO;
 
-+--------------+----------------------+-----+------+---------+---------------+
-| Column       | Type                 | Key | Null | Default | Semantic Type |
-+--------------+----------------------+-----+------+---------+---------------+
-| peer_id      | Int64                |     | NO   |         | FIELD         |
-| peer_type    | String               |     | NO   |         | FIELD         |
-| peer_addr    | String               |     | YES  |         | FIELD         |
-| cpus         | UInt32               |     | NO   |         | FIELD         |
-| memory_bytes | UInt64               |     | NO   |         | FIELD         |
-| version      | String               |     | NO   |         | FIELD         |
-| git_commit   | String               |     | NO   |         | FIELD         |
-| start_time   | TimestampMillisecond |     | YES  |         | FIELD         |
-| uptime       | String               |     | YES  |         | FIELD         |
-| active_time  | String               |     | YES  |         | FIELD         |
-| node_status  | String               |     | YES  |         | FIELD         |
-+--------------+----------------------+-----+------+---------+---------------+
++----------------------+----------------------+-----+------+---------+---------------+
+| Column               | Type                 | Key | Null | Default | Semantic Type |
++----------------------+----------------------+-----+------+---------+---------------+
+| peer_id              | Int64                |     | NO   |         | FIELD         |
+| peer_type            | String               |     | NO   |         | FIELD         |
+| peer_addr            | String               |     | YES  |         | FIELD         |
+| peer_hostname        | String               |     | YES  |         | FIELD         |
+| total_cpu_millicores | Int64                |     | NO   |         | FIELD         |
+| total_memory_bytes   | Int64                |     | NO   |         | FIELD         |
+| cpu_usage_millicores | Int64                |     | NO   |         | FIELD         |
+| memory_usage_bytes   | Int64                |     | NO   |         | FIELD         |
+| version              | String               |     | NO   |         | FIELD         |
+| git_commit           | String               |     | NO   |         | FIELD         |
+| start_time           | TimestampMillisecond |     | YES  |         | FIELD         |
+| uptime               | String               |     | YES  |         | FIELD         |
+| active_time          | String               |     | YES  |         | FIELD         |
+| node_status          | String               |     | YES  |         | FIELD         |
++----------------------+----------------------+-----+------+---------+---------------+
 
 -- SQLNESS REPLACE version node_version
--- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
+-- SQLNESS REPLACE (\d+\.\d+(?:\.\d+)*-[a-zA-Z0-9.-]+) Version
 -- SQLNESS REPLACE (\s[a-z0-9]{7,10}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{19,}) Start_time
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
@@ -32,7 +35,7 @@ SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, a
 +++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|0|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||1|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||2|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||0|FLOWNODE|Address|Version|Hash|Start_time|Duration|Duration||1|FRONTEND|Address|Version|Hash|Start_time|Duration|Duration||1|METASRV|Address|Version|Hash|Start_time|Duration||+++++++++
 
 -- SQLNESS REPLACE version node_version
--- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
+-- SQLNESS REPLACE (\d+\.\d+(?:\.\d+)*-[a-zA-Z0-9.-]+) Version
 -- SQLNESS REPLACE (\s[a-z0-9]{7,10}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{19,}) Start_time
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
@@ -43,7 +46,7 @@ SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, a
 +++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|1|METASRV|Address|Version|Hash|Start_time|Duration||+++++++++
 
 -- SQLNESS REPLACE version node_version
--- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
+-- SQLNESS REPLACE (\d+\.\d+(?:\.\d+)*-[a-zA-Z0-9.-]+) Version
 -- SQLNESS REPLACE (\s[a-z0-9]{7,10}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{19,}) Start_time
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
@@ -54,7 +57,7 @@ SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, a
 +++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|1|FRONTEND|Address|Version|Hash|Start_time|Duration|Duration|+++++++++
 
 -- SQLNESS REPLACE version node_version
--- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
+-- SQLNESS REPLACE (\d+\.\d+(?:\.\d+)*-[a-zA-Z0-9.-]+) Version
 -- SQLNESS REPLACE (\s[a-z0-9]{7,10}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{19,}) Start_time
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
@@ -65,7 +68,7 @@ SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, a
 +++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|0|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||1|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||2|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||0|FLOWNODE|Address|Version|Hash|Start_time|Duration|Duration||1|METASRV|Address|Version|Hash|Start_time|Duration||+++++++++
 
 -- SQLNESS REPLACE version node_version
--- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
+-- SQLNESS REPLACE (\d+\.\d+(?:\.\d+)*-[a-zA-Z0-9.-]+) Version
 -- SQLNESS REPLACE (\s[a-z0-9]{7,10}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{19,}) Start_time
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
@@ -86,18 +89,18 @@ SELECT peer_id, node_status FROM CLUSTER_INFO WHERE PEER_TYPE = 'DATANODE' ORDER
 | 2       | {"workloads"PLACEHOLDER,"leader_regions"PLACEHOLDER,"follower_regions"PLACEHOLDER} |
 +---------+------------------------------------------------------------------+
 
-SELECT peer_type, cpus!=0, memory_bytes!=0 FROM CLUSTER_INFO ORDER BY peer_type;
+SELECT peer_type, total_cpu_millicores!=0, total_memory_bytes!=0 FROM CLUSTER_INFO ORDER BY peer_type;
 
-+-----------+-------------------------------+---------------------------------------+
-| peer_type | cluster_info.cpus != Int64(0) | cluster_info.memory_bytes != Int64(0) |
-+-----------+-------------------------------+---------------------------------------+
-| DATANODE  | true                          | true                                  |
-| DATANODE  | true                          | true                                  |
-| DATANODE  | true                          | true                                  |
-| FLOWNODE  | true                          | true                                  |
-| FRONTEND  | true                          | true                                  |
-| METASRV   | true                          | true                                  |
-+-----------+-------------------------------+---------------------------------------+
++-----------+-----------------------------------------------+---------------------------------------------+
+| peer_type | cluster_info.total_cpu_millicores != Int64(0) | cluster_info.total_memory_bytes != Int64(0) |
++-----------+-----------------------------------------------+---------------------------------------------+
+| DATANODE  | true                                          | true                                        |
+| DATANODE  | true                                          | true                                        |
+| DATANODE  | true                                          | true                                        |
+| FLOWNODE  | true                                          | true                                        |
+| FRONTEND  | true                                          | true                                        |
+| METASRV   | true                                          | true                                        |
++-----------+-----------------------------------------------+---------------------------------------------+
 
 USE PUBLIC;
 

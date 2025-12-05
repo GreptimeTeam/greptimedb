@@ -18,7 +18,7 @@ use std::fmt::Debug;
 use std::num::NonZeroU64;
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
@@ -36,6 +36,9 @@ use crate::sst::version::LevelMeta;
 
 const LEVEL_COMPACTED: Level = 1;
 
+/// Default value for max compaction input file num.
+const DEFAULT_MAX_INPUT_FILE_NUM: usize = 32;
+
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
 #[derive(Debug)]
@@ -48,6 +51,8 @@ pub struct TwcsPicker {
     pub max_output_file_size: Option<u64>,
     /// Whether the target region is in append mode.
     pub append_mode: bool,
+    /// Max background compaction tasks.
+    pub max_background_tasks: Option<usize>,
 }
 
 impl TwcsPicker {
@@ -71,7 +76,7 @@ impl TwcsPicker {
             {
                 let (kept_files, ignored_files) = files_to_merge
                     .into_iter()
-                    .partition(|fg| fg.size() <= max_size as usize && fg.is_all_level_0());
+                    .partition(|fg| fg.size() <= max_size as usize);
                 files_to_merge = kept_files;
                 info!(
                     "Skipped {} large files in append mode for region {}, window {}, max_size: {}",
@@ -88,10 +93,10 @@ impl TwcsPicker {
             // because after compaction there will be no overlapping files.
             let filter_deleted = !files.overlapping && found_runs <= 2 && !self.append_mode;
             if found_runs == 0 {
-                return output;
+                continue;
             }
 
-            let inputs = if found_runs > 1 {
+            let mut inputs = if found_runs > 1 {
                 reduce_runs(sorted_runs)
             } else {
                 let run = sorted_runs.last().unwrap();
@@ -102,7 +107,32 @@ impl TwcsPicker {
                 merge_seq_files(run.items(), self.max_output_file_size)
             };
 
-            if !inputs.is_empty() {
+            // Limits the number of input files.
+            let total_input_files: usize = inputs.iter().map(|fg| fg.num_files()).sum();
+            if total_input_files > DEFAULT_MAX_INPUT_FILE_NUM {
+                // Sorts file groups by size first.
+                inputs.sort_unstable_by_key(|fg| fg.size());
+                let mut num_picked_files = 0;
+                inputs = inputs
+                    .into_iter()
+                    .take_while(|fg| {
+                        let current_group_file_num = fg.num_files();
+                        if current_group_file_num + num_picked_files <= DEFAULT_MAX_INPUT_FILE_NUM {
+                            num_picked_files += current_group_file_num;
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                info!(
+                    "Compaction for region {} enforces max input file num limit: {}, current total: {}, input: {:?}",
+                    region_id, DEFAULT_MAX_INPUT_FILE_NUM, total_input_files, inputs
+                );
+            }
+
+            if inputs.len() > 1 {
+                // If we have more than one group to compact.
                 log_pick_result(
                     region_id,
                     *window,
@@ -119,6 +149,16 @@ impl TwcsPicker {
                     filter_deleted,
                     output_time_range: None, // we do not enforce output time range in twcs compactions.
                 });
+
+                if let Some(max_background_tasks) = self.max_background_tasks
+                    && output.len() >= max_background_tasks
+                {
+                    debug!(
+                        "Region ({:?}) compaction task size larger than max background tasks({}), remaining tasks discarded",
+                        region_id, max_background_tasks
+                    );
+                    break;
+                }
             }
         }
         output
@@ -680,6 +720,7 @@ mod tests {
                 time_window_seconds: None,
                 max_output_file_size: None,
                 append_mode: false,
+                max_background_tasks: None,
             }
             .build_output(RegionId::from_u64(0), &mut windows, active_window);
 
@@ -829,6 +870,266 @@ mod tests {
                 max_output_file_size
             );
         }
+    }
+
+    #[test]
+    fn test_build_output_multiple_windows_with_zero_runs() {
+        let file_ids = (0..6).map(|_| FileId::random()).collect::<Vec<_>>();
+
+        let files = [
+            // Window 0: Contains 3 files but not forming any runs (not enough files in sequence to reach trigger_file_num)
+            new_file_handle_with_sequence(file_ids[0], 0, 999, 0, 1),
+            new_file_handle_with_sequence(file_ids[1], 0, 999, 0, 2),
+            new_file_handle_with_sequence(file_ids[2], 0, 999, 0, 3),
+            // Window 3: Contains files that will form 2 runs
+            new_file_handle_with_sequence(file_ids[3], 3000, 3999, 0, 4),
+            new_file_handle_with_sequence(file_ids[4], 3000, 3999, 0, 5),
+            new_file_handle_with_sequence(file_ids[5], 3000, 3999, 0, 6),
+        ];
+
+        let mut windows = assign_to_windows(files.iter(), 3);
+
+        // Create picker with trigger_file_num of 4 so single files won't form runs in first window
+        let picker = TwcsPicker {
+            trigger_file_num: 4, // High enough to prevent runs in first window
+            time_window_seconds: Some(3),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+        };
+
+        let active_window = find_latest_window_in_seconds(files.iter(), 3);
+        let output = picker.build_output(RegionId::from_u64(123), &mut windows, active_window);
+
+        assert!(
+            !output.is_empty(),
+            "Should have output from windows with runs, even when one window has 0 runs"
+        );
+
+        let all_output_files: Vec<_> = output
+            .iter()
+            .flat_map(|o| o.inputs.iter())
+            .map(|f| f.file_id().file_id())
+            .collect();
+
+        assert!(
+            all_output_files.contains(&file_ids[3])
+                || all_output_files.contains(&file_ids[4])
+                || all_output_files.contains(&file_ids[5]),
+            "Output should contain files from the window with runs"
+        );
+    }
+
+    #[test]
+    fn test_build_output_single_window_zero_runs() {
+        let file_ids = (0..2).map(|_| FileId::random()).collect::<Vec<_>>();
+
+        let large_file_1 = new_file_handle_with_size_and_sequence(file_ids[0], 0, 999, 0, 1, 2000); // 2000 bytes
+        let large_file_2 = new_file_handle_with_size_and_sequence(file_ids[1], 0, 999, 0, 2, 2500); // 2500 bytes
+
+        let files = [large_file_1, large_file_2];
+
+        let mut windows = assign_to_windows(files.iter(), 3);
+
+        let picker = TwcsPicker {
+            trigger_file_num: 2,
+            time_window_seconds: Some(3),
+            max_output_file_size: Some(1000),
+            append_mode: true,
+            max_background_tasks: None,
+        };
+
+        let active_window = find_latest_window_in_seconds(files.iter(), 3);
+        let output = picker.build_output(RegionId::from_u64(456), &mut windows, active_window);
+
+        // Should return empty output (no compaction needed)
+        assert!(
+            output.is_empty(),
+            "Should return empty output when no runs are found after filtering"
+        );
+    }
+
+    #[test]
+    fn test_max_background_tasks_truncation() {
+        let file_ids = (0..10).map(|_| FileId::random()).collect::<Vec<_>>();
+        let max_background_tasks = 3;
+
+        // Create files across multiple windows that will generate multiple compaction outputs
+        let files = [
+            // Window 0: 4 files that will form a run
+            new_file_handle_with_sequence(file_ids[0], 0, 999, 0, 1),
+            new_file_handle_with_sequence(file_ids[1], 0, 999, 0, 2),
+            new_file_handle_with_sequence(file_ids[2], 0, 999, 0, 3),
+            new_file_handle_with_sequence(file_ids[3], 0, 999, 0, 4),
+            // Window 3: 4 files that will form another run
+            new_file_handle_with_sequence(file_ids[4], 3000, 3999, 0, 5),
+            new_file_handle_with_sequence(file_ids[5], 3000, 3999, 0, 6),
+            new_file_handle_with_sequence(file_ids[6], 3000, 3999, 0, 7),
+            new_file_handle_with_sequence(file_ids[7], 3000, 3999, 0, 8),
+            // Window 6: 4 files that will form another run
+            new_file_handle_with_sequence(file_ids[8], 6000, 6999, 0, 9),
+            new_file_handle_with_sequence(file_ids[9], 6000, 6999, 0, 10),
+        ];
+
+        let mut windows = assign_to_windows(files.iter(), 3);
+
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: Some(3),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: Some(max_background_tasks),
+        };
+
+        let active_window = find_latest_window_in_seconds(files.iter(), 3);
+        let output = picker.build_output(RegionId::from_u64(123), &mut windows, active_window);
+
+        // Should have at most max_background_tasks outputs
+        assert!(
+            output.len() <= max_background_tasks,
+            "Output should be truncated to max_background_tasks: expected <= {}, got {}",
+            max_background_tasks,
+            output.len()
+        );
+
+        // Without max_background_tasks, should have more outputs
+        let picker_no_limit = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: Some(3),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+        };
+
+        let mut windows_no_limit = assign_to_windows(files.iter(), 3);
+        let output_no_limit = picker_no_limit.build_output(
+            RegionId::from_u64(123),
+            &mut windows_no_limit,
+            active_window,
+        );
+
+        // Without limit, should have more outputs (if there are enough windows)
+        if output_no_limit.len() > max_background_tasks {
+            assert!(
+                output_no_limit.len() > output.len(),
+                "Without limit should have more outputs than with limit"
+            );
+        }
+    }
+
+    #[test]
+    fn test_max_background_tasks_no_truncation_when_under_limit() {
+        let file_ids = (0..4).map(|_| FileId::random()).collect::<Vec<_>>();
+        let max_background_tasks = 10; // Larger than expected outputs
+
+        // Create files in one window that will generate one compaction output
+        let files = [
+            new_file_handle_with_sequence(file_ids[0], 0, 999, 0, 1),
+            new_file_handle_with_sequence(file_ids[1], 0, 999, 0, 2),
+            new_file_handle_with_sequence(file_ids[2], 0, 999, 0, 3),
+            new_file_handle_with_sequence(file_ids[3], 0, 999, 0, 4),
+        ];
+
+        let mut windows = assign_to_windows(files.iter(), 3);
+
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: Some(3),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: Some(max_background_tasks),
+        };
+
+        let active_window = find_latest_window_in_seconds(files.iter(), 3);
+        let output = picker.build_output(RegionId::from_u64(123), &mut windows, active_window);
+
+        // Should have all outputs since we're under the limit
+        assert!(
+            output.len() <= max_background_tasks,
+            "Output should be within limit"
+        );
+        // Should have at least one output
+        assert!(!output.is_empty(), "Should have at least one output");
+    }
+
+    #[test]
+    fn test_pick_multiple_runs() {
+        common_telemetry::init_default_ut_logging();
+
+        let num_files = 8;
+        let file_ids = (0..num_files).map(|_| FileId::random()).collect::<Vec<_>>();
+
+        // Create files with different sequences so they form multiple runs
+        let files: Vec<_> = file_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, file_id)| {
+                new_file_handle_with_size_and_sequence(
+                    *file_id,
+                    0,
+                    999,
+                    0,
+                    (idx + 1) as u64,
+                    1024 * 1024,
+                )
+            })
+            .collect();
+
+        let mut windows = assign_to_windows(files.iter(), 3);
+
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: Some(3),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+        };
+
+        let active_window = find_latest_window_in_seconds(files.iter(), 3);
+        let output = picker.build_output(RegionId::from_u64(123), &mut windows, active_window);
+
+        assert_eq!(1, output.len());
+        assert_eq!(output[0].inputs.len(), 2);
+    }
+
+    #[test]
+    fn test_limit_max_input_files() {
+        common_telemetry::init_default_ut_logging();
+
+        let num_files = 50;
+        let file_ids = (0..num_files).map(|_| FileId::random()).collect::<Vec<_>>();
+
+        // Create files with different sequences so they form 2 runs
+        let files: Vec<_> = file_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, file_id)| {
+                new_file_handle_with_size_and_sequence(
+                    *file_id,
+                    (idx / 2 * 10) as i64,
+                    (idx / 2 * 10 + 5) as i64,
+                    0,
+                    (idx + 1) as u64,
+                    1024 * 1024,
+                )
+            })
+            .collect();
+
+        let mut windows = assign_to_windows(files.iter(), 3);
+
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: Some(3),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+        };
+
+        let active_window = find_latest_window_in_seconds(files.iter(), 3);
+        let output = picker.build_output(RegionId::from_u64(123), &mut windows, active_window);
+
+        assert_eq!(1, output.len());
+        assert_eq!(output[0].inputs.len(), 32);
     }
 
     // TODO(hl): TTL tester that checks if get_expired_ssts function works as expected.

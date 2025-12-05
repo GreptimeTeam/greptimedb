@@ -15,6 +15,7 @@
 use bytes::BufMut;
 use chrono::{NaiveDate, NaiveDateTime};
 use pgwire::types::ToSqlText;
+use pgwire::types::format::FormatOptions;
 use postgres_types::{IsNull, ToSql, Type};
 use session::session_config::{PGDateOrder, PGDateTimeStyle};
 
@@ -58,6 +59,7 @@ impl ToSqlText for StylingDate {
         &self,
         ty: &Type,
         out: &mut bytes::BytesMut,
+        format_options: &FormatOptions,
     ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
     where
         Self: Sized,
@@ -71,7 +73,7 @@ impl ToSqlText for StylingDate {
                 out.put_slice(fmt.as_bytes());
             }
             _ => {
-                self.0.to_sql_text(ty, out)?;
+                self.0.to_sql_text(ty, out, format_options)?;
             }
         }
         Ok(IsNull::No)
@@ -83,6 +85,7 @@ impl ToSqlText for StylingDateTime {
         &self,
         ty: &Type,
         out: &mut bytes::BytesMut,
+        format_options: &FormatOptions,
     ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
     where
         Self: Sized,
@@ -103,7 +106,7 @@ impl ToSqlText for StylingDateTime {
                 out.put_slice(fmt.as_bytes());
             }
             _ => {
-                self.0.to_sql_text(ty, out)?;
+                self.0.to_sql_text(ty, out, format_options)?;
             }
         }
         Ok(IsNull::No)
@@ -151,7 +154,9 @@ mod tests {
             let styling_date = StylingDate(naive_date, PGDateTimeStyle::ISO, PGDateOrder::MDY);
             let expected = "1997-12-17";
             let mut out = bytes::BytesMut::new();
-            let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
+            let is_null = styling_date
+                .to_sql_text(&Type::DATE, &mut out, &FormatOptions::default())
+                .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
         }
@@ -160,7 +165,9 @@ mod tests {
             let styling_date = StylingDate(naive_date, PGDateTimeStyle::ISO, PGDateOrder::YMD);
             let expected = "1997-12-17";
             let mut out = bytes::BytesMut::new();
-            let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
+            let is_null = styling_date
+                .to_sql_text(&Type::DATE, &mut out, &FormatOptions::default())
+                .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
         }
@@ -169,7 +176,9 @@ mod tests {
             let styling_date = StylingDate(naive_date, PGDateTimeStyle::ISO, PGDateOrder::DMY);
             let expected = "1997-12-17";
             let mut out = bytes::BytesMut::new();
-            let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
+            let is_null = styling_date
+                .to_sql_text(&Type::DATE, &mut out, &FormatOptions::default())
+                .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
         }
@@ -178,7 +187,9 @@ mod tests {
             let styling_date = StylingDate(naive_date, PGDateTimeStyle::German, PGDateOrder::MDY);
             let expected = "17.12.1997";
             let mut out = bytes::BytesMut::new();
-            let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
+            let is_null = styling_date
+                .to_sql_text(&Type::DATE, &mut out, &FormatOptions::default())
+                .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
         }
@@ -187,7 +198,9 @@ mod tests {
             let styling_date = StylingDate(naive_date, PGDateTimeStyle::German, PGDateOrder::YMD);
             let expected = "17.12.1997";
             let mut out = bytes::BytesMut::new();
-            let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
+            let is_null = styling_date
+                .to_sql_text(&Type::DATE, &mut out, &FormatOptions::default())
+                .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
         }
@@ -196,7 +209,9 @@ mod tests {
             let styling_date = StylingDate(naive_date, PGDateTimeStyle::German, PGDateOrder::DMY);
             let expected = "17.12.1997";
             let mut out = bytes::BytesMut::new();
-            let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
+            let is_null = styling_date
+                .to_sql_text(&Type::DATE, &mut out, &FormatOptions::default())
+                .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
         }
@@ -205,7 +220,9 @@ mod tests {
             let styling_date = StylingDate(naive_date, PGDateTimeStyle::Postgres, PGDateOrder::MDY);
             let expected = "12-17-1997";
             let mut out = bytes::BytesMut::new();
-            let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
+            let is_null = styling_date
+                .to_sql_text(&Type::DATE, &mut out, &FormatOptions::default())
+                .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
         }
@@ -214,7 +231,9 @@ mod tests {
             let styling_date = StylingDate(naive_date, PGDateTimeStyle::Postgres, PGDateOrder::YMD);
             let expected = "12-17-1997";
             let mut out = bytes::BytesMut::new();
-            let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
+            let is_null = styling_date
+                .to_sql_text(&Type::DATE, &mut out, &FormatOptions::default())
+                .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
         }
@@ -223,7 +242,9 @@ mod tests {
             let styling_date = StylingDate(naive_date, PGDateTimeStyle::Postgres, PGDateOrder::DMY);
             let expected = "17-12-1997";
             let mut out = bytes::BytesMut::new();
-            let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
+            let is_null = styling_date
+                .to_sql_text(&Type::DATE, &mut out, &FormatOptions::default())
+                .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
         }
@@ -232,7 +253,9 @@ mod tests {
             let styling_date = StylingDate(naive_date, PGDateTimeStyle::SQL, PGDateOrder::MDY);
             let expected = "12/17/1997";
             let mut out = bytes::BytesMut::new();
-            let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
+            let is_null = styling_date
+                .to_sql_text(&Type::DATE, &mut out, &FormatOptions::default())
+                .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
         }
@@ -241,7 +264,9 @@ mod tests {
             let styling_date = StylingDate(naive_date, PGDateTimeStyle::SQL, PGDateOrder::YMD);
             let expected = "12/17/1997";
             let mut out = bytes::BytesMut::new();
-            let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
+            let is_null = styling_date
+                .to_sql_text(&Type::DATE, &mut out, &FormatOptions::default())
+                .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
         }
@@ -250,7 +275,9 @@ mod tests {
             let styling_date = StylingDate(naive_date, PGDateTimeStyle::SQL, PGDateOrder::DMY);
             let expected = "17/12/1997";
             let mut out = bytes::BytesMut::new();
-            let is_null = styling_date.to_sql_text(&Type::DATE, &mut out).unwrap();
+            let is_null = styling_date
+                .to_sql_text(&Type::DATE, &mut out, &FormatOptions::default())
+                .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
         }
@@ -267,7 +294,7 @@ mod tests {
             let expected = "2021-09-01 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
-                .to_sql_text(&Type::TIMESTAMP, &mut out)
+                .to_sql_text(&Type::TIMESTAMP, &mut out, &FormatOptions::default())
                 .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
@@ -278,7 +305,7 @@ mod tests {
             let expected = "2021-09-01 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
-                .to_sql_text(&Type::TIMESTAMP, &mut out)
+                .to_sql_text(&Type::TIMESTAMP, &mut out, &FormatOptions::default())
                 .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
@@ -289,7 +316,7 @@ mod tests {
             let expected = "2021-09-01 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
-                .to_sql_text(&Type::TIMESTAMP, &mut out)
+                .to_sql_text(&Type::TIMESTAMP, &mut out, &FormatOptions::default())
                 .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
@@ -301,7 +328,7 @@ mod tests {
             let expected = "01.09.2021 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
-                .to_sql_text(&Type::TIMESTAMP, &mut out)
+                .to_sql_text(&Type::TIMESTAMP, &mut out, &FormatOptions::default())
                 .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
@@ -313,7 +340,7 @@ mod tests {
             let expected = "01.09.2021 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
-                .to_sql_text(&Type::TIMESTAMP, &mut out)
+                .to_sql_text(&Type::TIMESTAMP, &mut out, &FormatOptions::default())
                 .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
@@ -325,7 +352,7 @@ mod tests {
             let expected = "01.09.2021 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
-                .to_sql_text(&Type::TIMESTAMP, &mut out)
+                .to_sql_text(&Type::TIMESTAMP, &mut out, &FormatOptions::default())
                 .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
@@ -337,7 +364,7 @@ mod tests {
             let expected = "Wed Sep 01 12:34:56.789012 2021";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
-                .to_sql_text(&Type::TIMESTAMP, &mut out)
+                .to_sql_text(&Type::TIMESTAMP, &mut out, &FormatOptions::default())
                 .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
@@ -349,7 +376,7 @@ mod tests {
             let expected = "Wed Sep 01 12:34:56.789012 2021";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
-                .to_sql_text(&Type::TIMESTAMP, &mut out)
+                .to_sql_text(&Type::TIMESTAMP, &mut out, &FormatOptions::default())
                 .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
@@ -361,7 +388,7 @@ mod tests {
             let expected = "Wed 01 Sep 12:34:56.789012 2021";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
-                .to_sql_text(&Type::TIMESTAMP, &mut out)
+                .to_sql_text(&Type::TIMESTAMP, &mut out, &FormatOptions::default())
                 .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
@@ -372,7 +399,7 @@ mod tests {
             let expected = "09/01/2021 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
-                .to_sql_text(&Type::TIMESTAMP, &mut out)
+                .to_sql_text(&Type::TIMESTAMP, &mut out, &FormatOptions::default())
                 .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
@@ -383,7 +410,7 @@ mod tests {
             let expected = "09/01/2021 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
-                .to_sql_text(&Type::TIMESTAMP, &mut out)
+                .to_sql_text(&Type::TIMESTAMP, &mut out, &FormatOptions::default())
                 .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());
@@ -394,7 +421,7 @@ mod tests {
             let expected = "01/09/2021 12:34:56.789012";
             let mut out = bytes::BytesMut::new();
             let is_null = styling_datetime
-                .to_sql_text(&Type::TIMESTAMP, &mut out)
+                .to_sql_text(&Type::TIMESTAMP, &mut out, &FormatOptions::default())
                 .unwrap();
             assert!(matches!(is_null, IsNull::No));
             assert_eq!(out, expected.as_bytes());

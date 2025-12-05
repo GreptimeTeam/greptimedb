@@ -73,6 +73,7 @@ mod tests {
             projection: vec![sqlparser::ast::SelectItem::Wildcard(
                 WildcardAdditionalOptions::default(),
             )],
+            exclude: None,
             into: None,
             from: vec![sqlparser::ast::TableWithJoins {
                 relation: sqlparser::ast::TableFactor::Table {
@@ -112,9 +113,8 @@ mod tests {
                 with: None,
                 body: Box::new(sqlparser::ast::SetExpr::Select(Box::new(select))),
                 order_by: None,
-                limit: None,
-                limit_by: vec![],
-                offset: None,
+                limit_clause: None,
+                pipe_operators: vec![],
                 fetch: None,
                 locks: vec![],
                 for_clause: None,

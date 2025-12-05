@@ -76,6 +76,7 @@ pub struct StoreConfig {
     pub setup_etcd: bool,
     pub(crate) setup_pg: Option<ServiceProvider>,
     pub(crate) setup_mysql: Option<ServiceProvider>,
+    pub enable_flat_format: bool,
 }
 
 #[derive(Clone)]

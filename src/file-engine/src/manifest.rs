@@ -94,7 +94,9 @@ impl FileRegionManifest {
             builder.push_column_metadata(column.clone());
         }
         builder.primary_key(self.primary_key.clone());
-        let metadata = builder.build().context(InvalidMetadataSnafu)?;
+        let metadata = builder
+            .build_without_validation()
+            .context(InvalidMetadataSnafu)?;
 
         Ok(Arc::new(metadata))
     }
@@ -125,5 +127,51 @@ impl FileRegionManifest {
             .get(name)
             .cloned()
             .context(MissingRequiredFieldSnafu { name })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::SemanticType;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+
+    use super::*;
+
+    #[test]
+    fn metadata_allows_internal_column_name() {
+        let manifest = FileRegionManifest {
+            region_id: RegionId::new(1, 0),
+            column_metadatas: vec![
+                ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "__primary_key",
+                        ConcreteDataType::string_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 1,
+                },
+                ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Timestamp,
+                    column_id: 2,
+                },
+            ],
+            primary_key: vec![1],
+            options: HashMap::default(),
+        };
+
+        let metadata = manifest.metadata().unwrap();
+        assert!(
+            metadata
+                .column_metadatas
+                .iter()
+                .any(|c| c.column_schema.name == "__primary_key")
+        );
     }
 }

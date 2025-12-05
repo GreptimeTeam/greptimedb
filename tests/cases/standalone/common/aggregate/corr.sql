@@ -5,7 +5,6 @@
 SELECT corr(NULL,NULL);
 
 -- Single value returns NULL
--- FIXME(dennis): datafusion returns 0.0 here, should be NULL
 SELECT corr(1,1);
 
 -- Test with table

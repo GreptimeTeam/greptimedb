@@ -24,8 +24,10 @@ pub(crate) mod open_candidate_region;
 pub mod test_util;
 pub(crate) mod update_metadata;
 pub(crate) mod upgrade_candidate_region;
+pub(crate) mod utils;
 
 use std::any::Any;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,12 +38,11 @@ use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::RegionFailureDetectorControllerRef;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
-use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::topic_region::{ReplayCheckpoint, TopicRegionKey};
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
-use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock};
+use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_procedure::error::{
@@ -56,9 +57,9 @@ pub use manager::{
     RegionMigrationManagerRef, RegionMigrationProcedureTask, RegionMigrationProcedureTracker,
     RegionMigrationTriggerReason,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, TableId};
 use tokio::time::Instant;
 
 use self::migration_start::RegionMigrationStart;
@@ -73,6 +74,25 @@ use crate::service::mailbox::MailboxRef;
 /// The default timeout for region migration.
 pub const DEFAULT_REGION_MIGRATION_TIMEOUT: Duration = Duration::from_secs(120);
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SingleOrMultiple<T> {
+    Single(T),
+    Multiple(Vec<T>),
+}
+
+fn single_or_multiple_from<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    let helper = SingleOrMultiple::<T>::deserialize(deserializer)?;
+    Ok(match helper {
+        SingleOrMultiple::Single(x) => vec![x],
+        SingleOrMultiple::Multiple(xs) => xs,
+    })
+}
+
 /// It's shared in each step and available even after recovering.
 ///
 /// It will only be updated/stored after the Red node has succeeded.
@@ -81,15 +101,23 @@ pub const DEFAULT_REGION_MIGRATION_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistentContext {
     /// The table catalog.
-    pub(crate) catalog: String,
+    #[deprecated(note = "use `catalog_and_schema` instead")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) catalog: Option<String>,
     /// The table schema.
-    pub(crate) schema: String,
+    #[deprecated(note = "use `catalog_and_schema` instead")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) schema: Option<String>,
+    /// The catalog and schema of the regions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) catalog_and_schema: Vec<(String, String)>,
     /// The [Peer] of migration source.
     pub(crate) from_peer: Peer,
     /// The [Peer] of migration destination.
     pub(crate) to_peer: Peer,
     /// The [RegionId] of migration region.
-    pub(crate) region_id: RegionId,
+    #[serde(deserialize_with = "single_or_multiple_from", alias = "region_id")]
+    pub(crate) region_ids: Vec<RegionId>,
     /// The timeout for downgrading leader region and upgrading candidate region operations.
     #[serde(with = "humantime_serde", default = "default_timeout")]
     pub(crate) timeout: Duration,
@@ -98,20 +126,80 @@ pub struct PersistentContext {
     pub(crate) trigger_reason: RegionMigrationTriggerReason,
 }
 
+impl PersistentContext {
+    pub fn new(
+        catalog_and_schema: Vec<(String, String)>,
+        from_peer: Peer,
+        to_peer: Peer,
+        region_ids: Vec<RegionId>,
+        timeout: Duration,
+        trigger_reason: RegionMigrationTriggerReason,
+    ) -> Self {
+        #[allow(deprecated)]
+        Self {
+            catalog: None,
+            schema: None,
+            catalog_and_schema,
+            from_peer,
+            to_peer,
+            region_ids,
+            timeout,
+            trigger_reason,
+        }
+    }
+}
+
 fn default_timeout() -> Duration {
     Duration::from_secs(10)
 }
 
 impl PersistentContext {
     pub fn lock_key(&self) -> Vec<StringKey> {
-        let region_id = self.region_id;
-        let lock_key = vec![
-            CatalogLock::Read(&self.catalog).into(),
-            SchemaLock::read(&self.catalog, &self.schema).into(),
-            RegionLock::Write(region_id).into(),
-        ];
+        let mut lock_keys =
+            Vec::with_capacity(self.region_ids.len() + 2 + self.catalog_and_schema.len() * 2);
+        #[allow(deprecated)]
+        if let (Some(catalog), Some(schema)) = (&self.catalog, &self.schema) {
+            lock_keys.push(CatalogLock::Read(catalog).into());
+            lock_keys.push(SchemaLock::read(catalog, schema).into());
+        }
+        for (catalog, schema) in self.catalog_and_schema.iter() {
+            lock_keys.push(CatalogLock::Read(catalog).into());
+            lock_keys.push(SchemaLock::read(catalog, schema).into());
+        }
 
-        lock_key
+        // Sort the region ids to ensure the same order of region ids.
+        let mut region_ids = self.region_ids.clone();
+        region_ids.sort_unstable();
+        for region_id in region_ids {
+            lock_keys.push(RegionLock::Write(region_id).into());
+        }
+        lock_keys
+    }
+
+    /// Returns the table ids of the regions.
+    ///
+    /// The return value is a set of table ids.
+    pub fn region_table_ids(&self) -> Vec<TableId> {
+        self.region_ids
+            .iter()
+            .map(|region_id| region_id.table_id())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// Returns the table regions map.
+    ///
+    /// The key is the table id, the value is the region ids of the table.
+    pub fn table_regions(&self) -> HashMap<TableId, Vec<RegionId>> {
+        let mut table_regions = HashMap::new();
+        for region_id in &self.region_ids {
+            table_regions
+                .entry(region_id.table_id())
+                .or_insert_with(Vec::new)
+                .push(*region_id);
+        }
+        table_regions
     }
 }
 
@@ -227,25 +315,18 @@ pub struct VolatileContext {
     /// `opening_region_guard` will be set after the
     /// [OpenCandidateRegion](crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion) step.
     ///
-    /// `opening_region_guard` should be consumed after
+    /// `opening_region_guards` should be consumed after
     /// the corresponding [RegionRoute](common_meta::rpc::router::RegionRoute) of the opening region
     /// was written into [TableRouteValue](common_meta::key::table_route::TableRouteValue).
-    opening_region_guard: Option<OperatingRegionGuard>,
-    /// `table_route` is stored via previous steps for future use.
-    table_route: Option<DeserializedValueWithBytes<TableRouteValue>>,
-    /// `datanode_table` is stored via previous steps for future use.
-    from_peer_datanode_table: Option<DatanodeTableValue>,
-    /// `table_info` is stored via previous steps for future use.
-    ///
-    /// `table_info` should remain unchanged during the procedure;
-    /// no other DDL procedure executed concurrently for the current table.
-    table_info: Option<DeserializedValueWithBytes<TableInfoValue>>,
+    opening_region_guards: Vec<OperatingRegionGuard>,
     /// The deadline of leader region lease.
     leader_region_lease_deadline: Option<Instant>,
-    /// The last_entry_id of leader region.
-    leader_region_last_entry_id: Option<u64>,
-    /// The last_entry_id of leader metadata region (Only used for metric engine).
-    leader_region_metadata_last_entry_id: Option<u64>,
+    /// The datanode table values.
+    from_peer_datanode_table_values: Option<HashMap<TableId, DatanodeTableValue>>,
+    /// The last_entry_ids of leader regions.
+    leader_region_last_entry_ids: HashMap<RegionId, u64>,
+    /// The last_entry_ids of leader metadata regions (Only used for metric engine).
+    leader_region_metadata_last_entry_ids: HashMap<RegionId, u64>,
     /// Metrics of region migration.
     metrics: Metrics,
 }
@@ -264,13 +345,15 @@ impl VolatileContext {
     }
 
     /// Sets the `leader_region_last_entry_id`.
-    pub fn set_last_entry_id(&mut self, last_entry_id: u64) {
-        self.leader_region_last_entry_id = Some(last_entry_id)
+    pub fn set_last_entry_id(&mut self, region_id: RegionId, last_entry_id: u64) {
+        self.leader_region_last_entry_ids
+            .insert(region_id, last_entry_id);
     }
 
     /// Sets the `leader_region_metadata_last_entry_id`.
-    pub fn set_metadata_last_entry_id(&mut self, last_entry_id: u64) {
-        self.leader_region_metadata_last_entry_id = Some(last_entry_id);
+    pub fn set_metadata_last_entry_id(&mut self, region_id: RegionId, last_entry_id: u64) {
+        self.leader_region_metadata_last_entry_ids
+            .insert(region_id, last_entry_id);
     }
 }
 
@@ -319,7 +402,7 @@ impl DefaultContextFactory {
 impl ContextFactory for DefaultContextFactory {
     fn new_context(self, persistent_ctx: PersistentContext) -> Context {
         Context {
-            persistent_ctx: Arc::new(persistent_ctx),
+            persistent_ctx,
             volatile_ctx: self.volatile_ctx,
             in_memory: self.in_memory_key,
             table_metadata_manager: self.table_metadata_manager,
@@ -334,7 +417,7 @@ impl ContextFactory for DefaultContextFactory {
 
 /// The context of procedure execution.
 pub struct Context {
-    persistent_ctx: Arc<PersistentContext>,
+    persistent_ctx: PersistentContext,
     volatile_ctx: VolatileContext,
     in_memory: KvBackendRef,
     table_metadata_manager: TableMetadataManagerRef,
@@ -393,35 +476,135 @@ impl Context {
         &self.server_addr
     }
 
+    /// Returns the table ids of the regions.
+    pub fn region_table_ids(&self) -> Vec<TableId> {
+        self.persistent_ctx
+            .region_ids
+            .iter()
+            .map(|region_id| region_id.table_id())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// Returns the `table_routes` of [VolatileContext] if any.
+    /// Otherwise, returns the value retrieved from remote.
+    ///
+    /// Retry:
+    /// - Failed to retrieve the metadata of table.
+    pub async fn get_table_route_values(
+        &self,
+    ) -> Result<HashMap<TableId, DeserializedValueWithBytes<TableRouteValue>>> {
+        let table_ids = self.persistent_ctx.region_table_ids();
+        let table_routes = self
+            .table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .batch_get_with_raw_bytes(&table_ids)
+            .await
+            .context(error::TableMetadataManagerSnafu)
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: format!("Failed to get table routes: {table_ids:?}"),
+            })?;
+        let table_routes = table_ids
+            .into_iter()
+            .zip(table_routes)
+            .filter_map(|(table_id, table_route)| {
+                table_route.map(|table_route| (table_id, table_route))
+            })
+            .collect::<HashMap<_, _>>();
+        Ok(table_routes)
+    }
+
     /// Returns the `table_route` of [VolatileContext] if any.
     /// Otherwise, returns the value retrieved from remote.
     ///
     /// Retry:
     /// - Failed to retrieve the metadata of table.
     pub async fn get_table_route_value(
-        &mut self,
-    ) -> Result<&DeserializedValueWithBytes<TableRouteValue>> {
-        let table_route_value = &mut self.volatile_ctx.table_route;
+        &self,
+        table_id: TableId,
+    ) -> Result<DeserializedValueWithBytes<TableRouteValue>> {
+        let table_route_value = self
+            .table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .get_with_raw_bytes(table_id)
+            .await
+            .context(error::TableMetadataManagerSnafu)
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: format!("Failed to get table routes: {table_id:}"),
+            })?
+            .context(error::TableRouteNotFoundSnafu { table_id })?;
+        Ok(table_route_value)
+    }
 
-        if table_route_value.is_none() {
-            let table_id = self.persistent_ctx.region_id.table_id();
-            let table_route = self
+    /// Returns the `from_peer_datanode_table_values` of [VolatileContext] if any.
+    /// Otherwise, returns the value retrieved from remote.
+    ///
+    /// Retry:
+    /// - Failed to retrieve the metadata of datanode table.
+    pub async fn get_from_peer_datanode_table_values(
+        &mut self,
+    ) -> Result<&HashMap<TableId, DatanodeTableValue>> {
+        let from_peer_datanode_table_values =
+            &mut self.volatile_ctx.from_peer_datanode_table_values;
+        if from_peer_datanode_table_values.is_none() {
+            let table_ids = self.persistent_ctx.region_table_ids();
+            let datanode_table_keys = table_ids
+                .iter()
+                .map(|table_id| DatanodeTableKey {
+                    datanode_id: self.persistent_ctx.from_peer.id,
+                    table_id: *table_id,
+                })
+                .collect::<Vec<_>>();
+            let datanode_table_values = self
                 .table_metadata_manager
-                .table_route_manager()
-                .table_route_storage()
-                .get_with_raw_bytes(table_id)
+                .datanode_table_manager()
+                .batch_get(&datanode_table_keys)
                 .await
                 .context(error::TableMetadataManagerSnafu)
                 .map_err(BoxedError::new)
                 .with_context(|_| error::RetryLaterWithSourceSnafu {
-                    reason: format!("Failed to get TableRoute: {table_id}"),
+                    reason: format!("Failed to get DatanodeTable: {table_ids:?}"),
                 })?
-                .context(error::TableRouteNotFoundSnafu { table_id })?;
-
-            *table_route_value = Some(table_route);
+                .into_iter()
+                .map(|(k, v)| (k.table_id, v))
+                .collect();
+            *from_peer_datanode_table_values = Some(datanode_table_values);
         }
+        Ok(from_peer_datanode_table_values.as_ref().unwrap())
+    }
 
-        Ok(table_route_value.as_ref().unwrap())
+    /// Returns the `from_peer_datanode_table_value` of [VolatileContext] if any.
+    /// Otherwise, returns the value retrieved from remote.
+    ///
+    /// Retry:
+    /// - Failed to retrieve the metadata of datanode table.
+    pub async fn get_from_peer_datanode_table_value(
+        &self,
+        table_id: TableId,
+    ) -> Result<DatanodeTableValue> {
+        let datanode_table_value = self
+            .table_metadata_manager
+            .datanode_table_manager()
+            .get(&DatanodeTableKey {
+                datanode_id: self.persistent_ctx.from_peer.id,
+                table_id,
+            })
+            .await
+            .context(error::TableMetadataManagerSnafu)
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: format!("Failed to get DatanodeTable: {table_id}"),
+            })?
+            .context(error::DatanodeTableNotFoundSnafu {
+                table_id,
+                datanode_id: self.persistent_ctx.from_peer.id,
+            })?;
+        Ok(datanode_table_value)
     }
 
     /// Notifies the RegionSupervisor to register failure detectors of failed region.
@@ -430,11 +613,18 @@ impl Context {
     /// Now, we need to register the failure detector for the failed region again.
     pub async fn register_failure_detectors(&self) {
         let datanode_id = self.persistent_ctx.from_peer.id;
-        let region_id = self.persistent_ctx.region_id;
-
+        let region_ids = &self.persistent_ctx.region_ids;
+        let detecting_regions = region_ids
+            .iter()
+            .map(|region_id| (datanode_id, *region_id))
+            .collect::<Vec<_>>();
         self.region_failure_detector_controller
-            .register_failure_detectors(vec![(datanode_id, region_id)])
+            .register_failure_detectors(detecting_regions)
             .await;
+        info!(
+            "Registered failure detectors after migration failures for datanode {}, regions {:?}",
+            datanode_id, region_ids
+        );
     }
 
     /// Notifies the RegionSupervisor to deregister failure detectors.
@@ -443,10 +633,14 @@ impl Context {
     /// We need to deregister the failure detectors for the original region if the procedure is finished.
     pub async fn deregister_failure_detectors(&self) {
         let datanode_id = self.persistent_ctx.from_peer.id;
-        let region_id = self.persistent_ctx.region_id;
+        let region_ids = &self.persistent_ctx.region_ids;
+        let detecting_regions = region_ids
+            .iter()
+            .map(|region_id| (datanode_id, *region_id))
+            .collect::<Vec<_>>();
 
         self.region_failure_detector_controller
-            .deregister_failure_detectors(vec![(datanode_id, region_id)])
+            .deregister_failure_detectors(detecting_regions)
             .await;
     }
 
@@ -456,118 +650,52 @@ impl Context {
     /// so we need to deregister the failure detectors for the candidate region if the procedure is aborted.
     pub async fn deregister_failure_detectors_for_candidate_region(&self) {
         let to_peer_id = self.persistent_ctx.to_peer.id;
-        let region_id = self.persistent_ctx.region_id;
+        let region_ids = &self.persistent_ctx.region_ids;
+        let detecting_regions = region_ids
+            .iter()
+            .map(|region_id| (to_peer_id, *region_id))
+            .collect::<Vec<_>>();
 
         self.region_failure_detector_controller
-            .deregister_failure_detectors(vec![(to_peer_id, region_id)])
+            .deregister_failure_detectors(detecting_regions)
             .await;
     }
 
-    /// Removes the `table_route` of [VolatileContext], returns true if any.
-    pub fn remove_table_route_value(&mut self) -> bool {
-        let value = self.volatile_ctx.table_route.take();
-        value.is_some()
-    }
-
-    /// Returns the `table_info` of [VolatileContext] if any.
-    /// Otherwise, returns the value retrieved from remote.
-    ///
-    /// Retry:
-    /// - Failed to retrieve the metadata of table.
-    pub async fn get_table_info_value(
-        &mut self,
-    ) -> Result<&DeserializedValueWithBytes<TableInfoValue>> {
-        let table_info_value = &mut self.volatile_ctx.table_info;
-
-        if table_info_value.is_none() {
-            let table_id = self.persistent_ctx.region_id.table_id();
-            let table_info = self
-                .table_metadata_manager
-                .table_info_manager()
-                .get(table_id)
-                .await
-                .context(error::TableMetadataManagerSnafu)
-                .map_err(BoxedError::new)
-                .with_context(|_| error::RetryLaterWithSourceSnafu {
-                    reason: format!("Failed to get TableInfo: {table_id}"),
-                })?
-                .context(error::TableInfoNotFoundSnafu { table_id })?;
-
-            *table_info_value = Some(table_info);
-        }
-
-        Ok(table_info_value.as_ref().unwrap())
-    }
-
-    /// Returns the `table_info` of [VolatileContext] if any.
-    /// Otherwise, returns the value retrieved from remote.
-    ///
-    /// Retry:
-    /// - Failed to retrieve the metadata of datanode.
-    pub async fn get_from_peer_datanode_table_value(&mut self) -> Result<&DatanodeTableValue> {
-        let datanode_value = &mut self.volatile_ctx.from_peer_datanode_table;
-
-        if datanode_value.is_none() {
-            let table_id = self.persistent_ctx.region_id.table_id();
-            let datanode_id = self.persistent_ctx.from_peer.id;
-
-            let datanode_table = self
-                .table_metadata_manager
-                .datanode_table_manager()
-                .get(&DatanodeTableKey {
-                    datanode_id,
-                    table_id,
-                })
-                .await
-                .context(error::TableMetadataManagerSnafu)
-                .map_err(BoxedError::new)
-                .with_context(|_| error::RetryLaterWithSourceSnafu {
-                    reason: format!("Failed to get DatanodeTable: ({datanode_id},{table_id})"),
-                })?
-                .context(error::DatanodeTableNotFoundSnafu {
-                    table_id,
-                    datanode_id,
-                })?;
-
-            *datanode_value = Some(datanode_table);
-        }
-
-        Ok(datanode_value.as_ref().unwrap())
-    }
-
-    /// Fetches the replay checkpoint for the given topic.
-    pub async fn fetch_replay_checkpoint(&self, topic: &str) -> Result<Option<ReplayCheckpoint>> {
-        let region_id = self.region_id();
-        let topic_region_key = TopicRegionKey::new(region_id, topic);
-        let value = self
+    /// Fetches the replay checkpoints for the given topic region keys.
+    pub async fn get_replay_checkpoints(
+        &self,
+        topic_region_keys: Vec<TopicRegionKey<'_>>,
+    ) -> Result<HashMap<RegionId, ReplayCheckpoint>> {
+        let topic_region_values = self
             .table_metadata_manager
             .topic_region_manager()
-            .get(topic_region_key)
+            .batch_get(topic_region_keys)
             .await
             .context(error::TableMetadataManagerSnafu)?;
 
-        Ok(value.and_then(|value| value.checkpoint))
-    }
+        let replay_checkpoints = topic_region_values
+            .into_iter()
+            .flat_map(|(key, value)| value.checkpoint.map(|value| (key, value)))
+            .collect::<HashMap<_, _>>();
 
-    /// Returns the [RegionId].
-    pub fn region_id(&self) -> RegionId {
-        self.persistent_ctx.region_id
+        Ok(replay_checkpoints)
     }
 
     /// Broadcasts the invalidate table cache message.
     pub async fn invalidate_table_cache(&self) -> Result<()> {
-        let table_id = self.region_id().table_id();
+        let table_ids = self.region_table_ids();
+        let mut cache_idents = Vec::with_capacity(table_ids.len());
+        for table_id in &table_ids {
+            cache_idents.push(CacheIdent::TableId(*table_id));
+        }
         // ignore the result
         let ctx = common_meta::cache_invalidator::Context::default();
-        let _ = self
-            .cache_invalidator
-            .invalidate(&ctx, &[CacheIdent::TableId(table_id)])
-            .await;
+        let _ = self.cache_invalidator.invalidate(&ctx, &cache_idents).await;
         Ok(())
     }
 
     /// Returns the [PersistentContext] of the procedure.
-    pub fn persistent_ctx(&self) -> Arc<PersistentContext> {
+    pub fn persistent_ctx(&self) -> PersistentContext {
         self.persistent_ctx.clone()
     }
 }
@@ -609,7 +737,7 @@ pub struct RegionMigrationData<'a> {
 pub(crate) struct RegionMigrationProcedure {
     state: Box<dyn State>,
     context: Context,
-    _guard: Option<RegionMigrationProcedureGuard>,
+    _guards: Vec<RegionMigrationProcedureGuard>,
 }
 
 impl RegionMigrationProcedure {
@@ -618,22 +746,22 @@ impl RegionMigrationProcedure {
     pub fn new(
         persistent_context: PersistentContext,
         context_factory: impl ContextFactory,
-        guard: Option<RegionMigrationProcedureGuard>,
+        guards: Vec<RegionMigrationProcedureGuard>,
     ) -> Self {
         let state = Box::new(RegionMigrationStart {});
-        Self::new_inner(state, persistent_context, context_factory, guard)
+        Self::new_inner(state, persistent_context, context_factory, guards)
     }
 
     fn new_inner(
         state: Box<dyn State>,
         persistent_context: PersistentContext,
         context_factory: impl ContextFactory,
-        guard: Option<RegionMigrationProcedureGuard>,
+        guards: Vec<RegionMigrationProcedureGuard>,
     ) -> Self {
         Self {
             state,
             context: context_factory.new_context(persistent_context),
-            _guard: guard,
+            _guards: guards,
         }
     }
 
@@ -646,47 +774,52 @@ impl RegionMigrationProcedure {
             persistent_ctx,
             state,
         } = serde_json::from_str(json).context(FromJsonSnafu)?;
+        let guards = persistent_ctx
+            .region_ids
+            .iter()
+            .flat_map(|region_id| {
+                tracker.insert_running_procedure(&RegionMigrationProcedureTask {
+                    region_id: *region_id,
+                    from_peer: persistent_ctx.from_peer.clone(),
+                    to_peer: persistent_ctx.to_peer.clone(),
+                    timeout: persistent_ctx.timeout,
+                    trigger_reason: persistent_ctx.trigger_reason,
+                })
+            })
+            .collect::<Vec<_>>();
 
-        let guard = tracker.insert_running_procedure(&RegionMigrationProcedureTask {
-            region_id: persistent_ctx.region_id,
-            from_peer: persistent_ctx.from_peer.clone(),
-            to_peer: persistent_ctx.to_peer.clone(),
-            timeout: persistent_ctx.timeout,
-            trigger_reason: persistent_ctx.trigger_reason,
-        });
         let context = context_factory.new_context(persistent_ctx);
 
         Ok(Self {
             state,
             context,
-            _guard: guard,
+            _guards: guards,
         })
     }
 
-    async fn rollback_inner(&mut self) -> Result<()> {
+    async fn rollback_inner(&mut self, procedure_ctx: &ProcedureContext) -> Result<()> {
         let _timer = METRIC_META_REGION_MIGRATION_EXECUTE
             .with_label_values(&["rollback"])
             .start_timer();
-
-        let table_id = self.context.region_id().table_id();
-        let region_id = self.context.region_id();
-        self.context.remove_table_route_value();
-        let table_metadata_manager = self.context.table_metadata_manager.clone();
-        let table_route = self.context.get_table_route_value().await?;
-
-        // Safety: It must be a physical table route.
-        let downgraded = table_route
-            .region_routes()
-            .unwrap()
-            .iter()
-            .filter(|route| route.region.id == region_id)
-            .any(|route| route.is_leader_downgrading());
-
-        if downgraded {
-            info!("Rollbacking downgraded region leader table route, region: {region_id}");
-            table_metadata_manager
-                    .update_leader_region_status(table_id, table_route, |route| {
-                        if route.region.id == region_id {
+        let ctx = &self.context;
+        let table_regions = ctx.persistent_ctx.table_regions();
+        for (table_id, regions) in table_regions {
+            let table_lock = TableLock::Write(table_id).into();
+            let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
+            let table_route = ctx.get_table_route_value(table_id).await?;
+            let region_routes = table_route.region_routes().unwrap();
+            let downgraded = region_routes
+                .iter()
+                .filter(|route| regions.contains(&route.region.id))
+                .any(|route| route.is_leader_downgrading());
+            if downgraded {
+                info!(
+                    "Rollbacking downgraded region leader table route, table: {table_id}, regions: {regions:?}"
+                );
+                let table_metadata_manager = &ctx.table_metadata_manager;
+                table_metadata_manager
+                    .update_leader_region_status(table_id, &table_route, |route| {
+                        if regions.contains(&route.region.id) {
                             Some(None)
                         } else {
                             None
@@ -696,10 +829,13 @@ impl RegionMigrationProcedure {
                     .context(error::TableMetadataManagerSnafu)
                     .map_err(BoxedError::new)
                     .with_context(|_| error::RetryLaterWithSourceSnafu {
-                        reason: format!("Failed to update the table route during the rollback downgraded leader region: {region_id}"),
+                        reason: format!("Failed to update the table route during the rollback downgraded leader region: {regions:?}"),
                     })?;
+            }
         }
-
+        self.context
+            .deregister_failure_detectors_for_candidate_region()
+            .await;
         self.context.register_failure_detectors().await;
 
         Ok(())
@@ -712,8 +848,8 @@ impl Procedure for RegionMigrationProcedure {
         Self::TYPE_NAME
     }
 
-    async fn rollback(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<()> {
-        self.rollback_inner()
+    async fn rollback(&mut self, ctx: &ProcedureContext) -> ProcedureResult<()> {
+        self.rollback_inner(ctx)
             .await
             .map_err(ProcedureError::external)
     }
@@ -742,14 +878,14 @@ impl Procedure for RegionMigrationProcedure {
                     Err(ProcedureError::retry_later(e))
                 } else {
                     // Consumes the opening region guard before deregistering the failure detectors.
-                    self.context.volatile_ctx.opening_region_guard.take();
+                    self.context.volatile_ctx.opening_region_guards.clear();
                     self.context
                         .deregister_failure_detectors_for_candidate_region()
                         .await;
                     error!(
                         e;
-                        "Region migration procedure failed, region_id: {}, from_peer: {}, to_peer: {}, {}",
-                        self.context.region_id(),
+                        "Region migration procedure failed, regions: {:?}, from_peer: {}, to_peer: {}, {}",
+                        self.context.persistent_ctx.region_ids,
                         self.context.persistent_ctx.from_peer,
                         self.context.persistent_ctx.to_peer,
                         self.context.volatile_ctx.metrics,
@@ -776,7 +912,7 @@ impl Procedure for RegionMigrationProcedure {
     }
 
     fn user_metadata(&self) -> Option<UserMetadata> {
-        Some(UserMetadata::new(self.context.persistent_ctx()))
+        Some(UserMetadata::new(Arc::new(self.context.persistent_ctx())))
     }
 }
 
@@ -790,7 +926,6 @@ mod tests {
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::rpc::router::{Region, RegionRoute};
 
-    use super::update_metadata::UpdateMetadata;
     use super::*;
     use crate::handler::HeartbeatMailbox;
     use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
@@ -813,7 +948,7 @@ mod tests {
         let env = TestingEnv::new();
         let context = env.context_factory();
 
-        let procedure = RegionMigrationProcedure::new(persistent_context, context, None);
+        let procedure = RegionMigrationProcedure::new(persistent_context, context, vec![]);
 
         let key = procedure.lock_key();
         let keys = key.keys_to_lock().cloned().collect::<Vec<_>>();
@@ -830,16 +965,27 @@ mod tests {
         let env = TestingEnv::new();
         let context = env.context_factory();
 
-        let procedure = RegionMigrationProcedure::new(persistent_context, context, None);
+        let procedure = RegionMigrationProcedure::new(persistent_context, context, vec![]);
 
         let serialized = procedure.dump().unwrap();
-        let expected = r#"{"persistent_ctx":{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105,"timeout":"10s","trigger_reason":"Unknown"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
+        let expected = r#"{"persistent_ctx":{"catalog_and_schema":[["greptime","public"]],"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_ids":[4398046511105],"timeout":"10s","trigger_reason":"Unknown"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
         assert_eq!(expected, serialized);
     }
 
     #[test]
     fn test_backward_compatibility() {
-        let persistent_ctx = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        let persistent_ctx = PersistentContext {
+            #[allow(deprecated)]
+            catalog: Some("greptime".into()),
+            #[allow(deprecated)]
+            schema: Some("public".into()),
+            catalog_and_schema: vec![],
+            from_peer: Peer::empty(1),
+            to_peer: Peer::empty(2),
+            region_ids: vec![RegionId::new(1024, 1)],
+            timeout: Duration::from_secs(10),
+            trigger_reason: RegionMigrationTriggerReason::default(),
+        };
         // NOTES: Changes it will break backward compatibility.
         let serialized = r#"{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105}"#;
         let deserialized: PersistentContext = serde_json::from_str(serialized).unwrap();
@@ -874,7 +1020,7 @@ mod tests {
             let persistent_context = new_persistent_context();
             let context_factory = env.context_factory();
             let state = Box::<MockState>::default();
-            RegionMigrationProcedure::new_inner(state, persistent_context, context_factory, None)
+            RegionMigrationProcedure::new_inner(state, persistent_context, context_factory, vec![])
         }
 
         let ctx = TestingEnv::procedure_context();
@@ -897,7 +1043,9 @@ mod tests {
         let mut procedure =
             RegionMigrationProcedure::from_json(&serialized, context_factory, tracker.clone())
                 .unwrap();
-        assert!(tracker.contains(procedure.context.persistent_ctx.region_id));
+        for region_id in &procedure.context.persistent_ctx.region_ids {
+            assert!(tracker.contains(*region_id));
+        }
 
         for _ in 1..3 {
             status = Some(procedure.execute(&ctx).await.unwrap());
@@ -937,9 +1085,34 @@ mod tests {
         vec![
             // MigrationStart
             Step::next(
-                "Should be the update metadata for downgrading",
+                "Should be the open candidate region",
                 None,
-                Assertion::simple(assert_update_metadata_downgrade, assert_need_persist),
+                Assertion::simple(assert_open_candidate_region, assert_need_persist),
+            ),
+            // OpenCandidateRegion
+            Step::next(
+                "Should be the flush leader region",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| Ok(new_open_region_reply(id, true, None))),
+                )),
+                Assertion::simple(assert_flush_leader_region, assert_no_persist),
+            ),
+            // Flush Leader Region
+            Step::next(
+                "Should be the flush leader region",
+                Some(mock_datanode_reply(
+                    from_peer_id,
+                    Arc::new(move |id| {
+                        Ok(new_flush_region_reply_for_region(
+                            id,
+                            RegionId::new(1024, 1),
+                            true,
+                            None,
+                        ))
+                    }),
+                )),
+                Assertion::simple(assert_update_metadata_downgrade, assert_no_persist),
             ),
             // UpdateMetadata::Downgrade
             Step::next(
@@ -998,7 +1171,7 @@ mod tests {
         let to_peer_id = persistent_context.to_peer.id;
         let from_peer = persistent_context.from_peer.clone();
         let to_peer = persistent_context.to_peer.clone();
-        let region_id = persistent_context.region_id;
+        let region_id = persistent_context.region_ids[0];
         let table_info = new_test_table_info(1024, vec![1]).into();
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
@@ -1026,61 +1199,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_procedure_flow_idempotent() {
-        common_telemetry::init_default_ut_logging();
-
-        let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
-        let state = Box::new(RegionMigrationStart);
-
-        // The table metadata.
-        let from_peer_id = persistent_context.from_peer.id;
-        let to_peer_id = persistent_context.to_peer.id;
-        let from_peer = persistent_context.from_peer.clone();
-        let to_peer = persistent_context.to_peer.clone();
-        let region_id = persistent_context.region_id;
-        let table_info = new_test_table_info(1024, vec![1]).into();
-        let region_routes = vec![RegionRoute {
-            region: Region::new_test(region_id),
-            leader_peer: Some(from_peer),
-            follower_peers: vec![to_peer],
-            ..Default::default()
-        }];
-
-        let suite = ProcedureMigrationTestSuite::new(persistent_context, state);
-        suite.init_table_metadata(table_info, region_routes).await;
-
-        let steps = procedure_flow_steps(from_peer_id, to_peer_id);
-        let setup_to_latest_persisted_state = Step::setup(
-            "Sets state to UpdateMetadata::Downgrade",
-            merge_before_test_fn(vec![
-                setup_state(Arc::new(|| Box::new(UpdateMetadata::Downgrade))),
-                Arc::new(reset_volatile_ctx),
-            ]),
-        );
-
-        let steps = [
-            steps.clone(),
-            vec![setup_to_latest_persisted_state.clone()],
-            steps.clone()[1..].to_vec(),
-            vec![setup_to_latest_persisted_state],
-            steps.clone()[1..].to_vec(),
-        ]
-        .concat();
-        let timer = Instant::now();
-
-        // Run the table tests.
-        let runner = ProcedureMigrationSuiteRunner::new(suite)
-            .steps(steps.clone())
-            .run_once()
-            .await;
-
-        // Ensure it didn't run into the slow path.
-        assert!(timer.elapsed().as_secs() < REGION_LEASE_SECS / 2);
-
-        runner.suite.verify_table_metadata().await;
-    }
-
-    #[tokio::test]
     async fn test_procedure_flow_open_candidate_region_retryable_error() {
         common_telemetry::init_default_ut_logging();
 
@@ -1090,7 +1208,7 @@ mod tests {
         // The table metadata.
         let to_peer_id = persistent_context.to_peer.id;
         let from_peer = persistent_context.from_peer.clone();
-        let region_id = persistent_context.region_id;
+        let region_id = persistent_context.region_ids[0];
         let table_info = new_test_table_info(1024, vec![1]).into();
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
@@ -1178,13 +1296,12 @@ mod tests {
         let from_peer_id = persistent_context.from_peer.id;
         let to_peer_id = persistent_context.to_peer.id;
         let from_peer = persistent_context.from_peer.clone();
-        let to_peer = persistent_context.to_peer.clone();
-        let region_id = persistent_context.region_id;
+        let region_id = persistent_context.region_ids[0];
         let table_info = new_test_table_info(1024, vec![1]).into();
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(from_peer),
-            follower_peers: vec![to_peer],
+            follower_peers: vec![],
             ..Default::default()
         }];
 
@@ -1194,9 +1311,34 @@ mod tests {
         let steps = vec![
             // MigrationStart
             Step::next(
-                "Should be the update metadata for downgrading",
+                "Should be the open candidate region",
                 None,
-                Assertion::simple(assert_update_metadata_downgrade, assert_need_persist),
+                Assertion::simple(assert_open_candidate_region, assert_need_persist),
+            ),
+            // OpenCandidateRegion
+            Step::next(
+                "Should be the flush leader region",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| Ok(new_open_region_reply(id, true, None))),
+                )),
+                Assertion::simple(assert_flush_leader_region, assert_no_persist),
+            ),
+            // Flush Leader Region
+            Step::next(
+                "Should be the flush leader region",
+                Some(mock_datanode_reply(
+                    from_peer_id,
+                    Arc::new(move |id| {
+                        Ok(new_flush_region_reply_for_region(
+                            id,
+                            RegionId::new(1024, 1),
+                            true,
+                            None,
+                        ))
+                    }),
+                )),
+                Assertion::simple(assert_update_metadata_downgrade, assert_no_persist),
             ),
             // UpdateMetadata::Downgrade
             Step::next(
@@ -1240,9 +1382,9 @@ mod tests {
         ];
 
         let setup_to_latest_persisted_state = Step::setup(
-            "Sets state to UpdateMetadata::Downgrade",
+            "Sets state to OpenCandidateRegion",
             merge_before_test_fn(vec![
-                setup_state(Arc::new(|| Box::new(UpdateMetadata::Downgrade))),
+                setup_state(Arc::new(|| Box::new(OpenCandidateRegion))),
                 Arc::new(reset_volatile_ctx),
             ]),
         );
@@ -1274,7 +1416,7 @@ mod tests {
         let to_peer_id = persistent_context.to_peer.id;
         let from_peer_id = persistent_context.from_peer.id;
         let from_peer = persistent_context.from_peer.clone();
-        let region_id = persistent_context.region_id;
+        let region_id = persistent_context.region_ids[0];
         let table_info = new_test_table_info(1024, vec![1]).into();
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),

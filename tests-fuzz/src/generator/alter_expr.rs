@@ -219,16 +219,9 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprSetTableOptionsGenerator<
             .iter()
             .map(|idx| match all_options[*idx] {
                 AlterTableOption::Ttl(_) => {
-                    let ttl_type = rng.random_range(0..3);
-                    match ttl_type {
-                        0 => {
-                            let duration: u32 = rng.random();
-                            AlterTableOption::Ttl(Ttl::Duration((duration as i64).into()))
-                        }
-                        1 => AlterTableOption::Ttl(Ttl::Instant),
-                        2 => AlterTableOption::Ttl(Ttl::Forever),
-                        _ => unreachable!(),
-                    }
+                    // The database purges expired files in background so it's hard to check
+                    // non-forever TTL.
+                    AlterTableOption::Ttl(Ttl::Forever)
                 }
                 AlterTableOption::TwcsTimeWindow(_) => {
                     let time_window: u32 = rng.random();

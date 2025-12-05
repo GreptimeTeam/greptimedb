@@ -76,12 +76,13 @@ impl StatementExecutor {
             )
             .await
             .context(error::WriteStreamToFileSnafu { path }),
-            Format::Json(_) => stream_to_json(
+            Format::Json(format) => stream_to_json(
                 Box::pin(DfRecordBatchStreamAdapter::new(stream)),
                 object_store,
                 path,
                 threshold,
                 WRITE_CONCURRENCY,
+                format,
             )
             .await
             .context(error::WriteStreamToFileSnafu { path }),

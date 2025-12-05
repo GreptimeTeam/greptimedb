@@ -41,7 +41,9 @@ use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::{METRIC_NUM_SERIES, Millisecond};
+use crate::extension_plan::{
+    METRIC_NUM_SERIES, Millisecond, resolve_column_name, serialize_column_index,
+};
 use crate::metrics::PROMQL_SERIES_COUNT;
 
 /// Manipulate the input record batch to make it suitable for Instant Operator.
@@ -59,6 +61,13 @@ pub struct InstantManipulate {
     /// A optional column for validating staleness
     field_column: Option<String>,
     input: LogicalPlan,
+    unfix: Option<UnfixIndices>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
+struct UnfixIndices {
+    pub time_index_idx: u64,
+    pub field_index_idx: u64,
 }
 
 impl UserDefinedLogicalNodeCore for InstantManipulate {
@@ -97,15 +106,51 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
             ));
         }
 
-        Ok(Self {
-            start: self.start,
-            end: self.end,
-            lookback_delta: self.lookback_delta,
-            interval: self.interval,
-            time_index_column: self.time_index_column.clone(),
-            field_column: self.field_column.clone(),
-            input: inputs.into_iter().next().unwrap(),
-        })
+        let input: LogicalPlan = inputs.into_iter().next().unwrap();
+        let input_schema = input.schema();
+
+        if let Some(unfix) = &self.unfix {
+            // transform indices to names
+            let time_index_column = resolve_column_name(
+                unfix.time_index_idx,
+                input_schema,
+                "InstantManipulate",
+                "time index",
+            )?;
+
+            let field_column = if unfix.field_index_idx == u64::MAX {
+                None
+            } else {
+                Some(resolve_column_name(
+                    unfix.field_index_idx,
+                    input_schema,
+                    "InstantManipulate",
+                    "field",
+                )?)
+            };
+
+            Ok(Self {
+                start: self.start,
+                end: self.end,
+                lookback_delta: self.lookback_delta,
+                interval: self.interval,
+                time_index_column,
+                field_column,
+                input,
+                unfix: None,
+            })
+        } else {
+            Ok(Self {
+                start: self.start,
+                end: self.end,
+                lookback_delta: self.lookback_delta,
+                interval: self.interval,
+                time_index_column: self.time_index_column.clone(),
+                field_column: self.field_column.clone(),
+                input,
+                unfix: None,
+            })
+        }
     }
 }
 
@@ -127,6 +172,7 @@ impl InstantManipulate {
             time_index_column,
             field_column,
             input,
+            unfix: None,
         }
     }
 
@@ -148,13 +194,22 @@ impl InstantManipulate {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
+        let time_index_idx = serialize_column_index(self.input.schema(), &self.time_index_column);
+
+        let field_index_idx = self
+            .field_column
+            .as_ref()
+            .map(|name| serialize_column_index(self.input.schema(), name))
+            .unwrap_or(u64::MAX);
+
         pb::InstantManipulate {
             start: self.start,
             end: self.end,
             interval: self.interval,
             lookback_delta: self.lookback_delta,
-            time_index: self.time_index_column.clone(),
-            field_index: self.field_column.clone().unwrap_or_default(),
+            time_index_idx,
+            field_index_idx,
+            ..Default::default()
         }
         .encode_to_vec()
     }
@@ -166,19 +221,21 @@ impl InstantManipulate {
             produce_one_row: false,
             schema: Arc::new(DFSchema::empty()),
         });
-        let field_column = if pb_instant_manipulate.field_index.is_empty() {
-            None
-        } else {
-            Some(pb_instant_manipulate.field_index)
+
+        let unfix = UnfixIndices {
+            time_index_idx: pb_instant_manipulate.time_index_idx,
+            field_index_idx: pb_instant_manipulate.field_index_idx,
         };
+
         Ok(Self {
             start: pb_instant_manipulate.start,
             end: pb_instant_manipulate.end,
             lookback_delta: pb_instant_manipulate.lookback_delta,
             interval: pb_instant_manipulate.interval,
-            time_index_column: pb_instant_manipulate.time_index,
-            field_column,
+            time_index_column: String::new(),
+            field_column: None,
             input: placeholder_plan,
+            unfix: Some(unfix),
         })
     }
 }

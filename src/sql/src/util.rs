@@ -15,10 +15,16 @@
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 
-use sqlparser::ast::{Expr, ObjectName, SetExpr, SqlOption, TableFactor, Value, ValueWithSpan};
+use itertools::Itertools;
+use serde::Serialize;
+use snafu::ensure;
+use sqlparser::ast::{
+    Array, Expr, Ident, ObjectName, SetExpr, SqlOption, TableFactor, Value, ValueWithSpan,
+};
+use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::ObjectNamePartExt;
-use crate::error::{InvalidSqlSnafu, InvalidTableOptionValueSnafu, Result};
+use crate::error::{InvalidExprAsOptionValueSnafu, InvalidSqlSnafu, Result};
 use crate::statements::create::SqlOrTql;
 
 /// Format an [ObjectName] without any quote of its idents.
@@ -42,29 +48,114 @@ pub fn format_raw_object_name(name: &ObjectName) -> String {
     format!("{}", Inner { name })
 }
 
-pub fn parse_option_string(option: SqlOption) -> Result<(String, String)> {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Visit, VisitMut)]
+pub struct OptionValue(Expr);
+
+impl OptionValue {
+    fn try_new(expr: Expr) -> Result<Self> {
+        ensure!(
+            matches!(expr, Expr::Value(_) | Expr::Identifier(_) | Expr::Array(_)),
+            InvalidExprAsOptionValueSnafu {
+                error: format!("{expr} not accepted")
+            }
+        );
+        Ok(Self(expr))
+    }
+
+    fn expr_as_string(expr: &Expr) -> Option<&str> {
+        match expr {
+            Expr::Value(ValueWithSpan { value, .. }) => match value {
+                Value::SingleQuotedString(s)
+                | Value::DoubleQuotedString(s)
+                | Value::TripleSingleQuotedString(s)
+                | Value::TripleDoubleQuotedString(s)
+                | Value::SingleQuotedByteStringLiteral(s)
+                | Value::DoubleQuotedByteStringLiteral(s)
+                | Value::TripleSingleQuotedByteStringLiteral(s)
+                | Value::TripleDoubleQuotedByteStringLiteral(s)
+                | Value::SingleQuotedRawStringLiteral(s)
+                | Value::DoubleQuotedRawStringLiteral(s)
+                | Value::TripleSingleQuotedRawStringLiteral(s)
+                | Value::TripleDoubleQuotedRawStringLiteral(s)
+                | Value::EscapedStringLiteral(s)
+                | Value::UnicodeStringLiteral(s)
+                | Value::NationalStringLiteral(s)
+                | Value::HexStringLiteral(s) => Some(s),
+                Value::DollarQuotedString(s) => Some(&s.value),
+                Value::Number(s, _) => Some(s),
+                _ => None,
+            },
+            Expr::Identifier(ident) => Some(&ident.value),
+            _ => None,
+        }
+    }
+
+    pub fn as_string(&self) -> Option<&str> {
+        Self::expr_as_string(&self.0)
+    }
+
+    pub fn as_list(&self) -> Option<Vec<&str>> {
+        let expr = &self.0;
+        match expr {
+            Expr::Value(_) | Expr::Identifier(_) => self.as_string().map(|s| vec![s]),
+            Expr::Array(array) => array
+                .elem
+                .iter()
+                .map(Self::expr_as_string)
+                .collect::<Option<Vec<_>>>(),
+            _ => None,
+        }
+    }
+}
+
+impl From<String> for OptionValue {
+    fn from(value: String) -> Self {
+        Self(Expr::Identifier(Ident::new(value)))
+    }
+}
+
+impl From<&str> for OptionValue {
+    fn from(value: &str) -> Self {
+        Self(Expr::Identifier(Ident::new(value)))
+    }
+}
+
+impl From<Vec<&str>> for OptionValue {
+    fn from(value: Vec<&str>) -> Self {
+        Self(Expr::Array(Array {
+            elem: value
+                .into_iter()
+                .map(|x| Expr::Identifier(Ident::new(x)))
+                .collect(),
+            named: false,
+        }))
+    }
+}
+
+impl Display for OptionValue {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if let Some(s) = self.as_string() {
+            write!(f, "'{s}'")
+        } else if let Some(s) = self.as_list() {
+            write!(
+                f,
+                "[{}]",
+                s.into_iter().map(|x| format!("'{x}'")).join(", ")
+            )
+        } else {
+            write!(f, "'{}'", self.0)
+        }
+    }
+}
+
+pub fn parse_option_string(option: SqlOption) -> Result<(String, OptionValue)> {
     let SqlOption::KeyValue { key, value } = option else {
         return InvalidSqlSnafu {
             msg: "Expecting a key-value pair in the option",
         }
         .fail();
     };
-    let v = match value {
-        Expr::Value(ValueWithSpan {
-            value: Value::SingleQuotedString(v),
-            ..
-        })
-        | Expr::Value(ValueWithSpan {
-            value: Value::DoubleQuotedString(v),
-            ..
-        }) => v,
-        Expr::Identifier(v) => v.value,
-        Expr::Value(ValueWithSpan {
-            value: Value::Number(v, _),
-            ..
-        }) => v.clone(),
-        value => return InvalidTableOptionValueSnafu { key, value }.fail(),
-    };
+    let v = OptionValue::try_new(value)?;
     let k = key.value.to_lowercase();
     Ok((k, v))
 }
@@ -120,7 +211,7 @@ fn extract_tables_from_set_expr(set_expr: &SetExpr, names: &mut HashSet<ObjectNa
             extract_tables_from_set_expr(left, names);
             extract_tables_from_set_expr(right, names);
         }
-        SetExpr::Values(_) | SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Table(_) => {}
+        _ => {}
     };
 }
 

@@ -309,5 +309,8 @@ pub(crate) fn convert_column_data_type_to_value_data_ident(
         ColumnDataType::Vector => format_ident!("VectorValue"),
         ColumnDataType::List => format_ident!("ListValue"),
         ColumnDataType::Struct => format_ident!("StructValue"),
+        ColumnDataType::Dictionary => {
+            panic!("Dictionary data type is not supported in row macros yet")
+        }
     }
 }

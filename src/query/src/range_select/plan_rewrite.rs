@@ -244,6 +244,9 @@ fn parse_expr_list(args: &[Expr], start: usize, len: usize) -> DFResult<Vec<Expr
                 | Expr::BinaryExpr(_)
                 | Expr::ScalarFunction(_),
             ) => args[i].clone(),
+            Some(Expr::Alias(alias)) if matches!(*alias.expr, Expr::ScalarFunction(_)) => {
+                args[i].clone()
+            }
             other => {
                 return Err(dispose_parse_error(*other));
             }

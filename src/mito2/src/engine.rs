@@ -21,6 +21,8 @@ mod append_mode_test;
 #[cfg(test)]
 mod basic_test;
 #[cfg(test)]
+mod batch_catchup_test;
+#[cfg(test)]
 mod batch_open_test;
 #[cfg(test)]
 mod bump_committed_sequence_test;
@@ -29,7 +31,7 @@ mod catchup_test;
 #[cfg(test)]
 mod close_test;
 #[cfg(test)]
-mod compaction_test;
+pub(crate) mod compaction_test;
 #[cfg(test)]
 mod create_test;
 #[cfg(test)]
@@ -40,6 +42,8 @@ mod edit_region_test;
 mod filter_deleted_test;
 #[cfg(test)]
 mod flush_test;
+#[cfg(test)]
+mod index_build_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
 #[cfg(test)]
@@ -67,6 +71,11 @@ mod sync_test;
 #[cfg(test)]
 mod truncate_test;
 
+#[cfg(test)]
+mod remap_manifests_test;
+
+mod puffin_index;
+
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -77,8 +86,9 @@ use async_trait::async_trait;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
-use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::{info, tracing};
+use common_recordbatch::{MemoryPermit, QueryMemoryTracker, SendableRecordBatchStream};
+use common_stat::get_total_memory_bytes;
+use common_telemetry::{info, tracing, warn};
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use futures::future::{join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
@@ -87,37 +97,45 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::LogStore;
-use store_api::logstore::provider::Provider;
+use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
 };
 use store_api::region_engine::{
     BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
-    RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
+    RegionStatistic, RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    SettableRegionRoleState, SyncManifestResponse,
 };
-use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
-use store_api::sst_entry::{ManifestSstEntry, StorageSstEntry};
-use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
+use store_api::region_request::{
+    AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+};
+use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
+use store_api::storage::{FileId, FileRefsManifest, RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::{Semaphore, oneshot};
 
+use crate::access_layer::RegionFilePathFactory;
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::MitoConfig;
+use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
     InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
-    SerdeJsonSnafu, SerializeColumnMetadataSnafu,
+    SerdeJsonSnafu, SerializeColumnMetadataSnafu, SerializeManifestSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
+use crate::gc::GcLimiterRef;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableStats;
-use crate::metrics::HANDLE_REQUEST_ELAPSED;
+use crate::metrics::{
+    HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_USAGE_BYTES, SCAN_REQUESTS_REJECTED_TOTAL,
+};
 use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, RegionFileId};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::wal::entry_distributor::{
     DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE, build_wal_entry_distributor_and_receivers,
@@ -136,6 +154,7 @@ pub struct MitoEngineBuilder<'a, S: LogStore> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     plugins: Plugins,
+    max_concurrent_queries: usize,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
@@ -151,6 +170,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         file_ref_manager: FileReferenceManagerRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
+        max_concurrent_queries: usize,
     ) -> Self {
         Self {
             data_home,
@@ -161,6 +181,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             file_ref_manager,
             plugins,
             partition_expr_fetcher,
+            max_concurrent_queries,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         }
@@ -193,10 +214,22 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         )
         .await?;
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
+        let total_memory = get_total_memory_bytes().max(0) as u64;
+        let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
+        let scan_memory_tracker =
+            QueryMemoryTracker::new(scan_memory_limit, self.max_concurrent_queries)
+                .with_on_update(|usage| {
+                    SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+                })
+                .with_on_reject(|| {
+                    SCAN_REQUESTS_REJECTED_TOTAL.inc();
+                });
+
         let inner = EngineInner {
             workers,
             config,
             wal_raw_entry_reader,
+            scan_memory_tracker,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         };
@@ -239,6 +272,7 @@ impl MitoEngine {
             file_ref_manager,
             partition_expr_fetcher,
             plugins,
+            0, // Default: no limit on concurrent queries
         );
         builder.try_build().await
     }
@@ -255,6 +289,38 @@ impl MitoEngine {
         self.inner.workers.file_ref_manager()
     }
 
+    pub fn gc_limiter(&self) -> GcLimiterRef {
+        self.inner.workers.gc_limiter()
+    }
+
+    /// Get all tmp ref files for given region ids, excluding files that's already in manifest.
+    pub async fn get_snapshot_of_file_refs(
+        &self,
+        file_handle_regions: impl IntoIterator<Item = RegionId>,
+        manifest_regions: HashMap<RegionId, Vec<RegionId>>,
+    ) -> Result<FileRefsManifest> {
+        let file_ref_mgr = self.file_ref_manager();
+
+        let file_handle_regions = file_handle_regions.into_iter().collect::<Vec<_>>();
+        // Convert region IDs to MitoRegionRef objects, ignore regions that do not exist on current datanode
+        // as regions on other datanodes are not managed by this engine.
+        let query_regions: Vec<MitoRegionRef> = file_handle_regions
+            .into_iter()
+            .filter_map(|region_id| self.find_region(region_id))
+            .collect();
+
+        let related_regions: Vec<(MitoRegionRef, Vec<RegionId>)> = manifest_regions
+            .into_iter()
+            .filter_map(|(related_region, queries)| {
+                self.find_region(related_region).map(|r| (r, queries))
+            })
+            .collect();
+
+        file_ref_mgr
+            .get_snapshot_of_file_refs(query_regions, related_regions)
+            .await
+    }
+
     /// Returns true if the specific region exists.
     pub fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.inner.workers.is_region_exists(region_id)
@@ -263,6 +329,11 @@ impl MitoEngine {
     /// Returns true if the specific region exists.
     pub fn is_region_opening(&self, region_id: RegionId) -> bool {
         self.inner.workers.is_region_opening(region_id)
+    }
+
+    /// Returns true if the specific region is catching up.
+    pub fn is_region_catching_up(&self, region_id: RegionId) -> bool {
+        self.inner.workers.is_region_catching_up(region_id)
     }
 
     /// Returns the region disk/memory statistic.
@@ -307,7 +378,11 @@ impl MitoEngine {
     }
 
     /// Returns a scanner to scan for `request`.
-    async fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+    pub(crate) async fn scanner(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<Scanner> {
         self.scan_region(region_id, request)?.scanner().await
     }
 
@@ -351,7 +426,7 @@ impl MitoEngine {
         self.find_region(id)
     }
 
-    pub(crate) fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
+    pub fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         self.inner.workers.get_region(region_id)
     }
 
@@ -434,6 +509,91 @@ impl MitoEngine {
         results
     }
 
+    /// Lists metadata about all puffin index targets stored in the engine.
+    pub async fn all_index_metas(&self) -> Vec<PuffinIndexMetaEntry> {
+        let node_id = self.inner.workers.file_ref_manager().node_id();
+        let cache_manager = self.inner.workers.cache_manager();
+        let puffin_metadata_cache = cache_manager.puffin_metadata_cache().cloned();
+        let bloom_filter_cache = cache_manager.bloom_filter_index_cache().cloned();
+        let inverted_index_cache = cache_manager.inverted_index_cache().cloned();
+
+        let mut results = Vec::new();
+
+        for region in self.inner.workers.all_regions() {
+            let manifest_entries = region.manifest_sst_entries().await;
+            let access_layer = region.access_layer.clone();
+            let table_dir = access_layer.table_dir().to_string();
+            let path_type = access_layer.path_type();
+            let object_store = access_layer.object_store().clone();
+            let puffin_factory = access_layer.puffin_manager_factory().clone();
+            let path_factory = RegionFilePathFactory::new(table_dir, path_type);
+
+            let entry_futures = manifest_entries.into_iter().map(|entry| {
+                let object_store = object_store.clone();
+                let path_factory = path_factory.clone();
+                let puffin_factory = puffin_factory.clone();
+                let puffin_metadata_cache = puffin_metadata_cache.clone();
+                let bloom_filter_cache = bloom_filter_cache.clone();
+                let inverted_index_cache = inverted_index_cache.clone();
+
+                async move {
+                    let Some(index_file_path) = entry.index_file_path.as_ref() else {
+                        return Vec::new();
+                    };
+
+                    let Some(index_file_id) = entry.index_file_id.as_ref() else {
+                        return Vec::new();
+                    };
+                    let file_id = match FileId::parse_str(index_file_id) {
+                        Ok(file_id) => file_id,
+                        Err(err) => {
+                            warn!(
+                                err;
+                                "Failed to parse puffin index file id, table_dir: {}, file_id: {}",
+                                entry.table_dir,
+                                index_file_id
+                            );
+                            return Vec::new();
+                        }
+                    };
+                    let region_file_id = RegionFileId::new(entry.region_id, file_id);
+                    let context = IndexEntryContext {
+                        table_dir: &entry.table_dir,
+                        index_file_path: index_file_path.as_str(),
+                        region_id: entry.region_id,
+                        table_id: entry.table_id,
+                        region_number: entry.region_number,
+                        region_group: entry.region_group,
+                        region_sequence: entry.region_sequence,
+                        file_id: index_file_id,
+                        index_file_size: entry.index_file_size,
+                        node_id,
+                    };
+
+                    let manager = puffin_factory
+                        .build(object_store, path_factory)
+                        .with_puffin_metadata_cache(puffin_metadata_cache);
+
+                    collect_index_entries_from_puffin(
+                        manager,
+                        region_file_id,
+                        context,
+                        bloom_filter_cache,
+                        inverted_index_cache,
+                    )
+                    .await
+                }
+            });
+
+            let mut meta_stream = stream::iter(entry_futures).buffer_unordered(8); // Parallelism is 8.
+            while let Some(mut metas) = meta_stream.next().await {
+                results.append(&mut metas);
+            }
+        }
+
+        results
+    }
+
     /// Lists all SSTs from the storage layer of all regions in the engine.
     pub fn all_ssts_from_storage(&self) -> impl Stream<Item = Result<StorageSstEntry>> {
         let node_id = self.inner.workers.file_ref_manager().node_id();
@@ -486,6 +646,8 @@ struct EngineInner {
     config: Arc<MitoConfig>,
     /// The Wal raw entry reader.
     wal_raw_entry_reader: Arc<dyn RawEntryReader>,
+    /// Memory tracker for table scans.
+    scan_memory_tracker: QueryMemoryTracker,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
@@ -653,6 +815,122 @@ impl EngineInner {
         Ok(responses)
     }
 
+    async fn catchup_topic_regions(
+        &self,
+        provider: Provider,
+        region_requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<Vec<(RegionId, Result<AffectedRows>)>> {
+        let now = Instant::now();
+        let region_ids = region_requests
+            .iter()
+            .map(|(region_id, _)| *region_id)
+            .collect::<Vec<_>>();
+        let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
+            provider.clone(),
+            self.wal_raw_entry_reader.clone(),
+            &region_ids,
+            DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
+        );
+
+        let mut responses = Vec::with_capacity(region_requests.len());
+        for ((region_id, request), entry_receiver) in
+            region_requests.into_iter().zip(entry_receivers)
+        {
+            let (request, receiver) =
+                WorkerRequest::new_catchup_region_request(region_id, request, Some(entry_receiver));
+            self.workers.submit_to_worker(region_id, request).await?;
+            responses.push(async move { receiver.await.context(RecvSnafu)? });
+        }
+
+        // Wait for entries distribution.
+        let distribution =
+            common_runtime::spawn_global(async move { distributor.distribute().await });
+        // Wait for worker returns.
+        let responses = join_all(responses).await;
+        distribution.await.context(JoinSnafu)??;
+
+        let num_failure = responses.iter().filter(|r| r.is_err()).count();
+        info!(
+            "Caught up {} regions for topic '{}', failures: {}, elapsed: {:?}",
+            region_ids.len() - num_failure,
+            // Safety: provider is kafka provider.
+            provider.as_kafka_provider().unwrap(),
+            num_failure,
+            now.elapsed(),
+        );
+
+        Ok(region_ids.into_iter().zip(responses).collect())
+    }
+
+    async fn handle_batch_catchup_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<Vec<(RegionId, Result<AffectedRows>)>> {
+        let mut responses = Vec::with_capacity(requests.len());
+        let mut topic_regions: HashMap<Arc<KafkaProvider>, Vec<_>> = HashMap::new();
+        let mut remaining_region_requests = vec![];
+
+        for (region_id, request) in requests {
+            match self.workers.get_region(region_id) {
+                Some(region) => match region.provider.as_kafka_provider() {
+                    Some(provider) => {
+                        topic_regions
+                            .entry(provider.clone())
+                            .or_default()
+                            .push((region_id, request));
+                    }
+                    None => {
+                        remaining_region_requests.push((region_id, request));
+                    }
+                },
+                None => responses.push((region_id, RegionNotFoundSnafu { region_id }.fail())),
+            }
+        }
+
+        let semaphore = Arc::new(Semaphore::new(parallelism));
+
+        if !topic_regions.is_empty() {
+            let mut tasks = Vec::with_capacity(topic_regions.len());
+            for (provider, region_requests) in topic_regions {
+                let semaphore_moved = semaphore.clone();
+                tasks.push(async move {
+                    // Safety: semaphore must exist
+                    let _permit = semaphore_moved.acquire().await.unwrap();
+                    self.catchup_topic_regions(Provider::Kafka(provider), region_requests)
+                        .await
+                })
+            }
+
+            let r = try_join_all(tasks).await?;
+            responses.extend(r.into_iter().flatten());
+        }
+
+        if !remaining_region_requests.is_empty() {
+            let mut tasks = Vec::with_capacity(remaining_region_requests.len());
+            let mut region_ids = Vec::with_capacity(remaining_region_requests.len());
+            for (region_id, request) in remaining_region_requests {
+                let semaphore_moved = semaphore.clone();
+                region_ids.push(region_id);
+                tasks.push(async move {
+                    // Safety: semaphore must exist
+                    let _permit = semaphore_moved.acquire().await.unwrap();
+                    let (request, receiver) =
+                        WorkerRequest::new_catchup_region_request(region_id, request, None);
+
+                    self.workers.submit_to_worker(region_id, request).await?;
+
+                    receiver.await.context(RecvSnafu)?
+                })
+            }
+
+            let results = join_all(tasks).await;
+            responses.extend(region_ids.into_iter().zip(results));
+        }
+
+        Ok(responses)
+    }
+
     /// Handles [RegionRequest] and return its executed result.
     async fn handle_request(
         &self,
@@ -694,8 +972,7 @@ impl EngineInner {
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
-        .with_start_time(query_start)
-        .with_flat_format(self.config.enable_experimental_flat_format);
+        .with_start_time(query_start);
 
         #[cfg(feature = "enterprise")]
         let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);
@@ -754,6 +1031,28 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)?
     }
 
+    async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse> {
+        let region_id = request.region_id;
+        let (request, receiver) = WorkerRequest::try_from_remap_manifests_request(request)?;
+        self.workers.submit_to_worker(region_id, request).await?;
+        let manifests = receiver.await.context(RecvSnafu)??;
+
+        let new_manifests = manifests
+            .into_iter()
+            .map(|(region_id, manifest)| {
+                Ok((
+                    region_id,
+                    serde_json::to_string(&manifest)
+                        .context(SerializeManifestSnafu { region_id })?,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        Ok(RemapManifestsResponse { new_manifests })
+    }
+
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.workers.get_region(region_id).map(|region| {
             if region.is_follower() {
@@ -780,6 +1079,29 @@ impl RegionEngine for MitoEngine {
         // TODO(weny): add metrics.
         self.inner
             .handle_batch_open_requests(parallelism, requests)
+            .await
+            .map(|responses| {
+                responses
+                    .into_iter()
+                    .map(|(region_id, response)| {
+                        (
+                            region_id,
+                            response.map(RegionResponse::new).map_err(BoxedError::new),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .map_err(BoxedError::new)
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn handle_batch_catchup_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<BatchResponses, BoxedError> {
+        self.inner
+            .handle_batch_catchup_requests(parallelism, requests)
             .await
             .map(|responses| {
                 responses
@@ -836,6 +1158,10 @@ impl RegionEngine for MitoEngine {
             .region_scanner()
             .await
             .map_err(BoxedError::new)
+    }
+
+    fn register_query_memory_permit(&self) -> Option<Arc<MemoryPermit>> {
+        Some(Arc::new(self.inner.scan_memory_tracker.register_permit()))
     }
 
     async fn get_committed_sequence(
@@ -901,6 +1227,16 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)?;
 
         Ok(SyncManifestResponse::Mito { synced })
+    }
+
+    async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse, BoxedError> {
+        self.inner
+            .remap_manifests(request)
+            .await
+            .map_err(BoxedError::new)
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
@@ -982,6 +1318,15 @@ impl MitoEngine {
 
         let config = Arc::new(config);
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
+        let total_memory = get_total_memory_bytes().max(0) as u64;
+        let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
+        let scan_memory_tracker = QueryMemoryTracker::new(scan_memory_limit, 0)
+            .with_on_update(|usage| {
+                SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+            })
+            .with_on_reject(|| {
+                SCAN_REQUESTS_REJECTED_TOTAL.inc();
+            });
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
@@ -998,6 +1343,7 @@ impl MitoEngine {
                 .await?,
                 config,
                 wal_raw_entry_reader,
+                scan_memory_tracker,
                 #[cfg(feature = "enterprise")]
                 extension_range_provider_factory: None,
             }),

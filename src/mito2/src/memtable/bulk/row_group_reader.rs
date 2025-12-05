@@ -169,4 +169,23 @@ impl MemtableRowGroupReaderBuilder {
         )
         .context(ReadDataPartSnafu)
     }
+
+    /// Computes whether to skip field filters for a specific row group based on PreFilterMode.
+    pub(crate) fn compute_skip_fields(
+        &self,
+        context: &BulkIterContextRef,
+        row_group_idx: usize,
+    ) -> bool {
+        use crate::sst::parquet::file_range::{PreFilterMode, row_group_contains_delete};
+
+        match context.pre_filter_mode() {
+            PreFilterMode::All => false,
+            PreFilterMode::SkipFields => true,
+            PreFilterMode::SkipFieldsOnDelete => {
+                // Check if this specific row group contains delete op
+                row_group_contains_delete(&self.parquet_metadata, row_group_idx, "memtable")
+                    .unwrap_or(true)
+            }
+        }
+    }
 }

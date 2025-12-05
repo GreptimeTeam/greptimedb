@@ -22,12 +22,15 @@
 //! `foo_merge`'s input arg is the same as `foo_state`'s output, and its output is the same as `foo`'s input.
 //!
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use arrow::array::StructArray;
 use arrow_schema::{FieldRef, Fields};
 use common_telemetry::debug;
 use datafusion::functions_aggregate::all_default_aggregate_functions;
+use datafusion::functions_aggregate::count::Count;
+use datafusion::functions_aggregate::min_max::{Max, Min};
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::physical_planner::create_aggregate_expr_and_maybe_filter;
@@ -272,7 +275,7 @@ impl StateMergeHelper {
 }
 
 /// Wrapper to make an aggregate function out of a state function.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StateWrapper {
     inner: AggregateUDF,
     name: String,
@@ -411,6 +414,51 @@ impl AggregateUDFImpl for StateWrapper {
     /// Coerce types also do nothing, as optimizer should be able to already make struct types
     fn coerce_types(&self, arg_types: &[DataType]) -> datafusion_common::Result<Vec<DataType>> {
         self.inner.coerce_types(arg_types)
+    }
+
+    fn value_from_stats(
+        &self,
+        statistics_args: &datafusion_expr::StatisticsArgs,
+    ) -> Option<ScalarValue> {
+        let inner = self.inner().inner().as_any();
+        // only count/min/max need special handling here, for getting result from statistics
+        // the result of count/min/max is also the result of count_state so can return directly
+        let can_use_stat = inner.is::<Count>() || inner.is::<Max>() || inner.is::<Min>();
+        if !can_use_stat {
+            return None;
+        }
+
+        // fix return type by extract the first field's data type from the struct type
+        let state_type = if let DataType::Struct(fields) = &statistics_args.return_type {
+            if fields.is_empty() {
+                return None;
+            }
+            fields[0].data_type().clone()
+        } else {
+            return None;
+        };
+
+        let fixed_args = datafusion_expr::StatisticsArgs {
+            statistics: statistics_args.statistics,
+            return_type: &state_type,
+            is_distinct: statistics_args.is_distinct,
+            exprs: statistics_args.exprs,
+        };
+
+        let ret = self.inner().value_from_stats(&fixed_args)?;
+
+        // wrap the result into struct scalar value
+        let fields = if let DataType::Struct(fields) = &statistics_args.return_type {
+            fields
+        } else {
+            return None;
+        };
+
+        let array = ret.to_array().ok()?;
+
+        let struct_array = StructArray::new(fields.clone(), vec![array], None);
+        let ret = ScalarValue::Struct(Arc::new(struct_array));
+        Some(ret)
     }
 }
 
@@ -613,6 +661,20 @@ impl AggregateUDFImpl for MergeWrapper {
         _args: datafusion_expr::function::StateFieldsArgs,
     ) -> datafusion_common::Result<Vec<FieldRef>> {
         self.original_phy_expr.state_fields()
+    }
+}
+
+impl PartialEq for MergeWrapper {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+impl Eq for MergeWrapper {}
+
+impl Hash for MergeWrapper {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.inner.hash(state);
     }
 }
 

@@ -15,4 +15,4 @@
 pub(crate) mod applier;
 pub(crate) mod creator;
 
-const INDEX_BLOB_TYPE: &str = "greptime-inverted-index-v1";
+pub(crate) const INDEX_BLOB_TYPE: &str = "greptime-inverted-index-v1";

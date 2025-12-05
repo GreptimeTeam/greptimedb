@@ -273,8 +273,9 @@ fn collect_fields(column_schemas: &[ColumnSchema]) -> Result<FieldsAndIndices> {
             _ => None,
         };
         if let Some(extype) = extype {
-            let metadata = HashMap::from([(TYPE_KEY.to_string(), extype.to_string())]);
-            field = field.with_metadata(metadata);
+            field
+                .metadata_mut()
+                .insert(TYPE_KEY.to_string(), extype.to_string());
         }
         fields.push(field);
         ensure!(
@@ -368,8 +369,7 @@ impl TryFrom<DFSchemaRef> for Schema {
     type Error = Error;
 
     fn try_from(value: DFSchemaRef) -> Result<Self> {
-        let s: ArrowSchema = value.as_ref().into();
-        s.try_into()
+        value.inner().clone().try_into()
     }
 }
 

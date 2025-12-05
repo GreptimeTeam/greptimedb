@@ -92,5 +92,6 @@ jobs:
         mode:
           - name: "Basic"
           - name: "Remote WAL"
+          - name: "Flat format"
     steps:
       - run: 'echo "No action required"'

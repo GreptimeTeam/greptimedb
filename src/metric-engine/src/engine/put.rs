@@ -16,13 +16,15 @@ use api::v1::{Rows, WriteHint};
 use common_telemetry::{error, info};
 use snafu::{OptionExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::region_request::{AffectedRows, RegionPutRequest};
+use store_api::region_request::{
+    AffectedRows, RegionDeleteRequest, RegionPutRequest, RegionRequest,
+};
 use store_api::storage::{RegionId, TableId};
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
     ColumnNotFoundSnafu, ForbiddenPhysicalAlterSnafu, LogicalRegionNotFoundSnafu,
-    PhysicalRegionNotFoundSnafu, Result,
+    PhysicalRegionNotFoundSnafu, Result, UnsupportedRegionRequestSnafu,
 };
 use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_OPERATION_ELAPSED};
 use crate::row_modifier::RowsIter;
@@ -50,6 +52,27 @@ impl MetricEngineInner {
         }
     }
 
+    /// Dispatch region delete request
+    pub async fn delete_region(
+        &self,
+        region_id: RegionId,
+        request: RegionDeleteRequest,
+    ) -> Result<AffectedRows> {
+        if self.is_physical_region(region_id) {
+            info!(
+                "Metric region received delete request {request:?} on physical region {region_id:?}"
+            );
+            FORBIDDEN_OPERATION_COUNT.inc();
+
+            UnsupportedRegionRequestSnafu {
+                request: RegionRequest::Delete(request),
+            }
+            .fail()
+        } else {
+            self.delete_logical_region(region_id, request).await
+        }
+    }
+
     async fn put_logical_region(
         &self,
         logical_region_id: RegionId,
@@ -59,30 +82,13 @@ impl MetricEngineInner {
             .with_label_values(&["put"])
             .start_timer();
 
-        let (physical_region_id, data_region_id, primary_key_encoding) = {
-            let state = self.state.read().unwrap();
-            let physical_region_id = *state
-                .logical_regions()
-                .get(&logical_region_id)
-                .with_context(|| LogicalRegionNotFoundSnafu {
-                    region_id: logical_region_id,
-                })?;
-            let data_region_id = to_data_region_id(physical_region_id);
+        let (physical_region_id, data_region_id, primary_key_encoding) =
+            self.find_data_region_meta(logical_region_id)?;
 
-            let primary_key_encoding = state.get_primary_key_encoding(data_region_id).context(
-                PhysicalRegionNotFoundSnafu {
-                    region_id: data_region_id,
-                },
-            )?;
-
-            (physical_region_id, data_region_id, primary_key_encoding)
-        };
-
-        self.verify_put_request(logical_region_id, physical_region_id, &request)
+        self.verify_rows(logical_region_id, physical_region_id, &request.rows)
             .await?;
 
         // write to data region
-
         // TODO: retrieve table name
         self.modify_rows(
             physical_region_id,
@@ -95,19 +101,74 @@ impl MetricEngineInner {
                 primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
             });
         }
-        self.data_region.write_data(data_region_id, request).await
+        self.data_region
+            .write_data(data_region_id, RegionRequest::Put(request))
+            .await
     }
 
-    /// Verifies a put request for a logical region against its corresponding metadata region.
+    async fn delete_logical_region(
+        &self,
+        logical_region_id: RegionId,
+        mut request: RegionDeleteRequest,
+    ) -> Result<AffectedRows> {
+        let _timer = MITO_OPERATION_ELAPSED
+            .with_label_values(&["delete"])
+            .start_timer();
+
+        let (physical_region_id, data_region_id, primary_key_encoding) =
+            self.find_data_region_meta(logical_region_id)?;
+
+        self.verify_rows(logical_region_id, physical_region_id, &request.rows)
+            .await?;
+
+        // write to data region
+        // TODO: retrieve table name
+        self.modify_rows(
+            physical_region_id,
+            logical_region_id.table_id(),
+            &mut request.rows,
+            primary_key_encoding,
+        )?;
+        if primary_key_encoding == PrimaryKeyEncoding::Sparse {
+            request.hint = Some(WriteHint {
+                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+            });
+        }
+        self.data_region
+            .write_data(data_region_id, RegionRequest::Delete(request))
+            .await
+    }
+
+    fn find_data_region_meta(
+        &self,
+        logical_region_id: RegionId,
+    ) -> Result<(RegionId, RegionId, PrimaryKeyEncoding)> {
+        let state = self.state.read().unwrap();
+        let physical_region_id = *state
+            .logical_regions()
+            .get(&logical_region_id)
+            .with_context(|| LogicalRegionNotFoundSnafu {
+                region_id: logical_region_id,
+            })?;
+        let data_region_id = to_data_region_id(physical_region_id);
+        let primary_key_encoding = state.get_primary_key_encoding(data_region_id).context(
+            PhysicalRegionNotFoundSnafu {
+                region_id: data_region_id,
+            },
+        )?;
+        Ok((physical_region_id, data_region_id, primary_key_encoding))
+    }
+
+    /// Verifies a request for a logical region against its corresponding metadata region.
     ///
     /// Includes:
     /// - Check if the logical region exists
     /// - Check if the columns exist
-    async fn verify_put_request(
+    async fn verify_rows(
         &self,
         logical_region_id: RegionId,
         physical_region_id: RegionId,
-        request: &RegionPutRequest,
+        rows: &Rows,
     ) -> Result<()> {
         // Check if the region exists
         let data_region_id = to_data_region_id(physical_region_id);
@@ -128,7 +189,7 @@ impl MetricEngineInner {
                 region_id: data_region_id,
             })?
             .physical_columns();
-        for col in &request.rows.schema {
+        for col in &rows.schema {
             ensure!(
                 physical_columns.contains_key(&col.column_name),
                 ColumnNotFoundSnafu {
@@ -211,15 +272,15 @@ mod tests {
             .unwrap();
         let batches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
-+-------------------------+----------------+------------+----------------------+-------+
-| greptime_timestamp      | greptime_value | __table_id | __tsid               | job   |
-+-------------------------+----------------+------------+----------------------+-------+
-| 1970-01-01T00:00:00     | 0.0            | 3          | 12881218023286672757 | tag_0 |
-| 1970-01-01T00:00:00.001 | 1.0            | 3          | 12881218023286672757 | tag_0 |
-| 1970-01-01T00:00:00.002 | 2.0            | 3          | 12881218023286672757 | tag_0 |
-| 1970-01-01T00:00:00.003 | 3.0            | 3          | 12881218023286672757 | tag_0 |
-| 1970-01-01T00:00:00.004 | 4.0            | 3          | 12881218023286672757 | tag_0 |
-+-------------------------+----------------+------------+----------------------+-------+";
++-------------------------+----------------+------------+---------------------+-------+
+| greptime_timestamp      | greptime_value | __table_id | __tsid              | job   |
++-------------------------+----------------+------------+---------------------+-------+
+| 1970-01-01T00:00:00     | 0.0            | 3          | 2955007454552897459 | tag_0 |
+| 1970-01-01T00:00:00.001 | 1.0            | 3          | 2955007454552897459 | tag_0 |
+| 1970-01-01T00:00:00.002 | 2.0            | 3          | 2955007454552897459 | tag_0 |
+| 1970-01-01T00:00:00.003 | 3.0            | 3          | 2955007454552897459 | tag_0 |
+| 1970-01-01T00:00:00.004 | 4.0            | 3          | 2955007454552897459 | tag_0 |
++-------------------------+----------------+------------+---------------------+-------+";
         assert_eq!(expected, batches.pretty_print().unwrap(), "physical region");
 
         // read data from logical region

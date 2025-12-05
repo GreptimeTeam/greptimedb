@@ -76,7 +76,7 @@ impl Function for GeohashFunction {
     }
 
     fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
-        Ok(DataType::Utf8)
+        Ok(DataType::Utf8View)
     }
 
     fn signature(&self) -> &Signature {
@@ -176,7 +176,7 @@ impl Function for GeohashNeighboursFunction {
         Ok(DataType::List(Arc::new(Field::new(
             "item",
             DataType::Utf8View,
-            false,
+            true,
         ))))
     }
 

@@ -36,6 +36,7 @@ use crate::error::{
     self, ConvertArrowArrayToScalarsSnafu, ConvertScalarToArrowArraySnafu, Error,
     InconsistentStructFieldsAndItemsSnafu, Result, TryFromValueSnafu,
 };
+use crate::json::value::{JsonValue, JsonValueRef};
 use crate::prelude::*;
 use crate::type_id::LogicalTypeId;
 use crate::types::{IntervalType, ListType, StructType};
@@ -81,8 +82,12 @@ pub enum Value {
     IntervalDayTime(IntervalDayTime),
     IntervalMonthDayNano(IntervalMonthDayNano),
 
+    // Collection types:
     List(ListValue),
     Struct(StructValue),
+
+    // Json Logical types:
+    Json(Box<JsonValue>),
 }
 
 impl Display for Value {
@@ -144,6 +149,9 @@ impl Display for Value {
                     .join(", ");
                 write!(f, "{{ {items} }}")
             }
+            Value::Json(json_data) => {
+                write!(f, "Json({})", json_data)
+            }
         }
     }
 }
@@ -190,6 +198,7 @@ macro_rules! define_data_type_func {
                 $struct::Struct(struct_value) => {
                     ConcreteDataType::struct_datatype(struct_value.struct_type().clone())
                 }
+                $struct::Json(v) => v.data_type(),
             }
         }
     };
@@ -200,7 +209,11 @@ impl Value {
 
     /// Returns true if this is a null value.
     pub fn is_null(&self) -> bool {
-        matches!(self, Value::Null)
+        match self {
+            Value::Null => true,
+            Value::Json(inner) => inner.is_null(),
+            _ => false,
+        }
     }
 
     /// Cast itself to [ListValue].
@@ -253,6 +266,7 @@ impl Value {
             Value::Duration(v) => ValueRef::Duration(*v),
             Value::Decimal128(v) => ValueRef::Decimal128(*v),
             Value::Struct(v) => ValueRef::Struct(StructValueRef::Ref(v)),
+            Value::Json(v) => ValueRef::Json(Box::new((**v).as_ref())),
         }
     }
 
@@ -322,6 +336,7 @@ impl Value {
             Value::UInt8(v) => Some(*v as _),
             Value::UInt16(v) => Some(*v as _),
             Value::UInt32(v) => Some(*v as _),
+            Value::Json(inner) => inner.as_i64(),
             _ => None,
         }
     }
@@ -333,6 +348,7 @@ impl Value {
             Value::UInt16(v) => Some(*v as _),
             Value::UInt32(v) => Some(*v as _),
             Value::UInt64(v) => Some(*v),
+            Value::Json(inner) => inner.as_u64(),
             _ => None,
         }
     }
@@ -349,6 +365,7 @@ impl Value {
             Value::UInt16(v) => Some(*v as _),
             Value::UInt32(v) => Some(*v as _),
             Value::UInt64(v) => Some(*v as _),
+            Value::Json(inner) => inner.as_f64_lossy(),
             _ => None,
         }
     }
@@ -365,6 +382,15 @@ impl Value {
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Value::Boolean(b) => Some(*b),
+            Value::Json(inner) => inner.as_bool(),
+            _ => None,
+        }
+    }
+
+    /// Extract the inner JSON value from a JSON type.
+    pub fn into_json_inner(self) -> Option<Value> {
+        match self {
+            Value::Json(v) => Some((*v).into_value()),
             _ => None,
         }
     }
@@ -411,6 +437,7 @@ impl Value {
             },
             Value::Decimal128(_) => LogicalTypeId::Decimal128,
             Value::Struct(_) => LogicalTypeId::Struct,
+            Value::Json(_) => LogicalTypeId::Json,
         }
     }
 
@@ -420,11 +447,11 @@ impl Value {
         let value_type_id = self.logical_type_id();
         let output_type_id = output_type.logical_type_id();
         ensure!(
-            // Json type leverage Value(Binary) for storage.
             output_type_id == value_type_id
                 || self.is_null()
                 || (output_type_id == LogicalTypeId::Json
-                    && value_type_id == LogicalTypeId::Binary),
+                    && (value_type_id == LogicalTypeId::Binary
+                        || value_type_id == LogicalTypeId::Json)),
             error::ToScalarValueSnafu {
                 reason: format!(
                     "expect value to return output_type {output_type_id:?}, actual: {value_type_id:?}",
@@ -444,7 +471,13 @@ impl Value {
             Value::Int64(v) => ScalarValue::Int64(Some(*v)),
             Value::Float32(v) => ScalarValue::Float32(Some(v.0)),
             Value::Float64(v) => ScalarValue::Float64(Some(v.0)),
-            Value::String(v) => ScalarValue::Utf8(Some(v.as_utf8().to_string())),
+            Value::String(v) => {
+                let s = v.as_utf8().to_string();
+                match output_type {
+                    ConcreteDataType::String(t) if t.is_large() => ScalarValue::LargeUtf8(Some(s)),
+                    _ => ScalarValue::Utf8(Some(s)),
+                }
+            }
             Value::Binary(v) => ScalarValue::Binary(Some(v.to_vec())),
             Value::Date(v) => ScalarValue::Date32(Some(v.val())),
             Value::Null => to_null_scalar_value(output_type)?,
@@ -466,6 +499,12 @@ impl Value {
             Value::Struct(struct_value) => {
                 let struct_type = output_type.as_struct().unwrap();
                 struct_value.try_to_scalar_value(struct_type)?
+            }
+            Value::Json(_) => {
+                return error::ToScalarValueSnafu {
+                    reason: "unsupported for json value",
+                }
+                .fail();
             }
         };
 
@@ -523,7 +562,8 @@ impl Value {
             | Value::String(_)
             | Value::Boolean(_)
             | Value::List(_)
-            | Value::Struct(_) => None,
+            | Value::Struct(_)
+            | Value::Json(_) => None,
         }
     }
 }
@@ -575,7 +615,13 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
         ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) | ConcreteDataType::Vector(_) => {
             ScalarValue::Binary(None)
         }
-        ConcreteDataType::String(_) => ScalarValue::Utf8(None),
+        ConcreteDataType::String(t) => {
+            if t.is_large() {
+                ScalarValue::LargeUtf8(None)
+            } else {
+                ScalarValue::Utf8(None)
+            }
+        }
         ConcreteDataType::Date(_) => ScalarValue::Date32(None),
         ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit(), None),
         ConcreteDataType::Interval(v) => match v {
@@ -830,6 +876,12 @@ impl From<&[u8]> for Value {
     }
 }
 
+impl From<()> for Value {
+    fn from(_: ()) -> Self {
+        Value::Null
+    }
+}
+
 impl TryFrom<Value> for serde_json::Value {
     type Error = serde_json::Error;
 
@@ -866,12 +918,11 @@ impl TryFrom<Value> for serde_json::Value {
             Value::Duration(v) => serde_json::to_value(v.value())?,
             Value::Decimal128(v) => serde_json::to_value(v.to_string())?,
             Value::Struct(v) => {
-                let map = v
-                    .fields
-                    .clone() // TODO:(sunng87) remove in next patch when into_parts is merged
+                let (items, struct_type) = v.into_parts();
+                let map = struct_type
                     .fields()
                     .iter()
-                    .zip(v.take_items().into_iter())
+                    .zip(items.into_iter())
                     .map(|(field, value)| {
                         Ok((
                             field.name().to_string(),
@@ -881,6 +932,7 @@ impl TryFrom<Value> for serde_json::Value {
                     .collect::<serde_json::Result<Map<String, serde_json::Value>>>()?;
                 serde_json::Value::Object(map)
             }
+            Value::Json(v) => (*v).into(),
         };
 
         Ok(json_value)
@@ -894,13 +946,13 @@ pub struct ListValue {
     items: Vec<Value>,
     /// Inner values datatype, to distinguish empty lists of different datatypes.
     /// Restricted by DataFusion, cannot use null datatype for empty list.
-    datatype: ConcreteDataType,
+    datatype: Arc<ConcreteDataType>,
 }
 
 impl Eq for ListValue {}
 
 impl ListValue {
-    pub fn new(items: Vec<Value>, datatype: ConcreteDataType) -> Self {
+    pub fn new(items: Vec<Value>, datatype: Arc<ConcreteDataType>) -> Self {
         Self { items, datatype }
     }
 
@@ -912,11 +964,24 @@ impl ListValue {
         self.items
     }
 
-    pub fn datatype(&self) -> &ConcreteDataType {
-        &self.datatype
+    pub fn into_parts(self) -> (Vec<Value>, Arc<ConcreteDataType>) {
+        (self.items, self.datatype)
     }
 
-    fn try_to_scalar_value(&self, output_type: &ListType) -> Result<ScalarValue> {
+    /// List value's inner type data type
+    pub fn datatype(&self) -> Arc<ConcreteDataType> {
+        self.datatype.clone()
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn try_to_scalar_value(&self, output_type: &ListType) -> Result<ScalarValue> {
         let vs = self
             .items
             .iter()
@@ -936,12 +1001,13 @@ impl ListValue {
             .first()
             .map(|x| x.as_value_ref().data_size() * self.items.len())
             .unwrap_or(0)
+            + std::mem::size_of::<Arc<ConcreteDataType>>()
     }
 }
 
 impl Default for ListValue {
     fn default() -> ListValue {
-        ListValue::new(vec![], ConcreteDataType::null_datatype())
+        ListValue::new(vec![], Arc::new(ConcreteDataType::null_datatype()))
     }
 }
 
@@ -979,6 +1045,13 @@ impl StructValue {
         Ok(Self { items, fields })
     }
 
+    /// Create a new struct value.
+    ///
+    /// Panics if the number of items does not match the number of fields.
+    pub fn new(items: Vec<Value>, fields: StructType) -> Self {
+        Self::try_new(items, fields).unwrap()
+    }
+
     pub fn items(&self) -> &[Value] {
         &self.items
     }
@@ -987,15 +1060,28 @@ impl StructValue {
         self.items
     }
 
+    pub fn into_parts(self) -> (Vec<Value>, StructType) {
+        (self.items, self.fields)
+    }
+
     pub fn struct_type(&self) -> &StructType {
         &self.fields
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 
     fn estimated_size(&self) -> usize {
         self.items
             .iter()
             .map(|x| x.as_value_ref().data_size())
-            .sum()
+            .sum::<usize>()
+            + std::mem::size_of::<StructType>()
     }
 
     fn try_to_scalar_value(&self, output_type: &StructType) -> Result<ScalarValue> {
@@ -1018,7 +1104,7 @@ impl StructValue {
 
 impl Default for StructValue {
     fn default() -> StructValue {
-        StructValue::try_new(vec![], StructType::new(vec![])).unwrap()
+        StructValue::try_new(vec![], StructType::new(Arc::new(vec![]))).unwrap()
     }
 }
 
@@ -1065,7 +1151,7 @@ impl TryFrom<ScalarValue> for Value {
                     .flatten()
                     .map(|x| x.try_into())
                     .collect::<Result<Vec<Value>>>()?;
-                Value::List(ListValue::new(items, datatype))
+                Value::List(ListValue::new(items, Arc::new(datatype)))
             }
             ScalarValue::Date32(d) => d.map(|x| Value::Date(Date::new(x))).unwrap_or(Value::Null),
             ScalarValue::TimestampSecond(t, _) => t
@@ -1131,7 +1217,9 @@ impl TryFrom<ScalarValue> for Value {
                     .collect::<Result<Vec<Value>>>()?;
                 Value::Struct(StructValue::try_new(items, struct_type)?)
             }
-            ScalarValue::Decimal256(_, _, _)
+            ScalarValue::Decimal32(_, _, _)
+            | ScalarValue::Decimal64(_, _, _)
+            | ScalarValue::Decimal256(_, _, _)
             | ScalarValue::FixedSizeList(_)
             | ScalarValue::LargeList(_)
             | ScalarValue::Dictionary(_, _)
@@ -1178,6 +1266,7 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::List(v) => v.to_value(),
             ValueRef::Decimal128(v) => Value::Decimal128(v),
             ValueRef::Struct(v) => v.to_value(),
+            ValueRef::Json(v) => Value::Json(Box::new(JsonValue::from(*v))),
         }
     }
 }
@@ -1220,6 +1309,8 @@ pub enum ValueRef<'a> {
     // Compound types:
     List(ListValueRef<'a>),
     Struct(StructValueRef<'a>),
+
+    Json(Box<JsonValueRef<'a>>),
 }
 
 macro_rules! impl_as_for_value_ref {
@@ -1244,60 +1335,65 @@ impl<'a> ValueRef<'a> {
 
     /// Returns true if this is null.
     pub fn is_null(&self) -> bool {
-        matches!(self, ValueRef::Null)
+        match self {
+            ValueRef::Null => true,
+            ValueRef::Json(v) => v.is_null(),
+            _ => false,
+        }
     }
 
     /// Cast itself to binary slice.
-    pub fn as_binary(&self) -> Result<Option<&'a [u8]>> {
+    pub fn try_into_binary(&self) -> Result<Option<&'a [u8]>> {
         impl_as_for_value_ref!(self, Binary)
     }
 
     /// Cast itself to string slice.
-    pub fn as_string(&self) -> Result<Option<&'a str>> {
+    pub fn try_into_string(&self) -> Result<Option<&'a str>> {
         impl_as_for_value_ref!(self, String)
     }
 
     /// Cast itself to boolean.
-    pub fn as_boolean(&self) -> Result<Option<bool>> {
+    pub fn try_into_boolean(&self) -> Result<Option<bool>> {
         impl_as_for_value_ref!(self, Boolean)
     }
 
-    pub fn as_i8(&self) -> Result<Option<i8>> {
+    pub fn try_into_i8(&self) -> Result<Option<i8>> {
         impl_as_for_value_ref!(self, Int8)
     }
 
-    pub fn as_u8(&self) -> Result<Option<u8>> {
+    pub fn try_into_u8(&self) -> Result<Option<u8>> {
         impl_as_for_value_ref!(self, UInt8)
     }
 
-    pub fn as_i16(&self) -> Result<Option<i16>> {
+    pub fn try_into_i16(&self) -> Result<Option<i16>> {
         impl_as_for_value_ref!(self, Int16)
     }
 
-    pub fn as_u16(&self) -> Result<Option<u16>> {
+    pub fn try_into_u16(&self) -> Result<Option<u16>> {
         impl_as_for_value_ref!(self, UInt16)
     }
 
-    pub fn as_i32(&self) -> Result<Option<i32>> {
+    pub fn try_into_i32(&self) -> Result<Option<i32>> {
         impl_as_for_value_ref!(self, Int32)
     }
 
-    pub fn as_u32(&self) -> Result<Option<u32>> {
+    pub fn try_into_u32(&self) -> Result<Option<u32>> {
         impl_as_for_value_ref!(self, UInt32)
     }
 
-    pub fn as_i64(&self) -> Result<Option<i64>> {
+    pub fn try_into_i64(&self) -> Result<Option<i64>> {
         impl_as_for_value_ref!(self, Int64)
     }
 
-    pub fn as_u64(&self) -> Result<Option<u64>> {
+    pub fn try_into_u64(&self) -> Result<Option<u64>> {
         impl_as_for_value_ref!(self, UInt64)
     }
 
-    pub fn as_f32(&self) -> Result<Option<f32>> {
+    pub fn try_into_f32(&self) -> Result<Option<f32>> {
         match self {
             ValueRef::Null => Ok(None),
             ValueRef::Float32(f) => Ok(Some(f.0)),
+            ValueRef::Json(v) => Ok(v.as_f32()),
             other => error::CastTypeSnafu {
                 msg: format!("Failed to cast value ref {:?} to ValueRef::Float32", other,),
             }
@@ -1305,10 +1401,11 @@ impl<'a> ValueRef<'a> {
         }
     }
 
-    pub fn as_f64(&self) -> Result<Option<f64>> {
+    pub fn try_into_f64(&self) -> Result<Option<f64>> {
         match self {
             ValueRef::Null => Ok(None),
             ValueRef::Float64(f) => Ok(Some(f.0)),
+            ValueRef::Json(v) => Ok(v.as_f64()),
             other => error::CastTypeSnafu {
                 msg: format!("Failed to cast value ref {:?} to ValueRef::Float64", other,),
             }
@@ -1317,50 +1414,51 @@ impl<'a> ValueRef<'a> {
     }
 
     /// Cast itself to [Date].
-    pub fn as_date(&self) -> Result<Option<Date>> {
+    pub fn try_into_date(&self) -> Result<Option<Date>> {
         impl_as_for_value_ref!(self, Date)
     }
 
     /// Cast itself to [Timestamp].
-    pub fn as_timestamp(&self) -> Result<Option<Timestamp>> {
+    pub fn try_into_timestamp(&self) -> Result<Option<Timestamp>> {
         impl_as_for_value_ref!(self, Timestamp)
     }
 
     /// Cast itself to [Time].
-    pub fn as_time(&self) -> Result<Option<Time>> {
+    pub fn try_into_time(&self) -> Result<Option<Time>> {
         impl_as_for_value_ref!(self, Time)
     }
 
-    pub fn as_duration(&self) -> Result<Option<Duration>> {
+    pub fn try_into_duration(&self) -> Result<Option<Duration>> {
         impl_as_for_value_ref!(self, Duration)
     }
 
     /// Cast itself to [IntervalYearMonth].
-    pub fn as_interval_year_month(&self) -> Result<Option<IntervalYearMonth>> {
+    pub fn try_into_interval_year_month(&self) -> Result<Option<IntervalYearMonth>> {
         impl_as_for_value_ref!(self, IntervalYearMonth)
     }
 
     /// Cast itself to [IntervalDayTime].
-    pub fn as_interval_day_time(&self) -> Result<Option<IntervalDayTime>> {
+    pub fn try_into_interval_day_time(&self) -> Result<Option<IntervalDayTime>> {
         impl_as_for_value_ref!(self, IntervalDayTime)
     }
 
     /// Cast itself to [IntervalMonthDayNano].
-    pub fn as_interval_month_day_nano(&self) -> Result<Option<IntervalMonthDayNano>> {
+    pub fn try_into_interval_month_day_nano(&self) -> Result<Option<IntervalMonthDayNano>> {
         impl_as_for_value_ref!(self, IntervalMonthDayNano)
     }
 
     /// Cast itself to [ListValueRef].
-    pub fn as_list(&self) -> Result<Option<ListValueRef<'_>>> {
+    pub fn try_into_list(&self) -> Result<Option<ListValueRef<'_>>> {
         impl_as_for_value_ref!(self, List)
     }
 
-    pub fn as_struct(&self) -> Result<Option<StructValueRef<'_>>> {
+    /// Cast itself to [StructValueRef].
+    pub fn try_into_struct(&self) -> Result<Option<StructValueRef<'_>>> {
         impl_as_for_value_ref!(self, Struct)
     }
 
     /// Cast itself to [Decimal128].
-    pub fn as_decimal128(&self) -> Result<Option<Decimal128>> {
+    pub fn try_into_decimal128(&self) -> Result<Option<Decimal128>> {
         impl_as_for_value_ref!(self, Decimal128)
     }
 }
@@ -1454,7 +1552,7 @@ pub enum ListValueRef<'a> {
     },
     RefList {
         val: Vec<ValueRef<'a>>,
-        item_datatype: ConcreteDataType,
+        item_datatype: Arc<ConcreteDataType>,
     },
 }
 
@@ -1471,9 +1569,9 @@ impl ListValueRef<'_> {
         }
     }
     /// Returns the inner element's data type.
-    fn datatype(&self) -> ConcreteDataType {
+    fn datatype(&self) -> Arc<ConcreteDataType> {
         match self {
-            ListValueRef::Indexed { vector, .. } => vector.data_type(),
+            ListValueRef::Indexed { vector, .. } => vector.item_type(),
             ListValueRef::Ref { val } => val.datatype().clone(),
             ListValueRef::RefList { item_datatype, .. } => item_datatype.clone(),
         }
@@ -1614,13 +1712,20 @@ impl ValueRef<'_> {
             ValueRef::List(v) => match v {
                 ListValueRef::Indexed { vector, .. } => vector.memory_size() / vector.len(),
                 ListValueRef::Ref { val } => val.estimated_size(),
-                ListValueRef::RefList { val, .. } => val.iter().map(|v| v.data_size()).sum(),
+                ListValueRef::RefList { val, .. } => {
+                    val.iter().map(|v| v.data_size()).sum::<usize>()
+                        + std::mem::size_of::<Arc<ConcreteDataType>>()
+                }
             },
             ValueRef::Struct(val) => match val {
                 StructValueRef::Indexed { vector, .. } => vector.memory_size() / vector.len(),
                 StructValueRef::Ref(val) => val.estimated_size(),
-                StructValueRef::RefList { val, .. } => val.iter().map(|v| v.data_size()).sum(),
+                StructValueRef::RefList { val, .. } => {
+                    val.iter().map(|v| v.data_size()).sum::<usize>()
+                        + std::mem::size_of::<StructType>()
+                }
             },
+            ValueRef::Json(v) => v.data_size(),
         }
     }
 }
@@ -1632,11 +1737,12 @@ pub(crate) mod tests {
     use num_traits::Float;
 
     use super::*;
+    use crate::json::value::{JsonVariant, JsonVariantRef};
     use crate::types::StructField;
     use crate::vectors::ListVectorBuilder;
 
     pub(crate) fn build_struct_type() -> StructType {
-        StructType::new(vec![
+        StructType::new(Arc::new(vec![
             StructField::new("id".to_string(), ConcreteDataType::int32_datatype(), false),
             StructField::new(
                 "name".to_string(),
@@ -1649,7 +1755,12 @@ pub(crate) mod tests {
                 ConcreteDataType::string_datatype(),
                 true,
             ),
-        ])
+            StructField::new(
+                "awards".to_string(),
+                ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::boolean_datatype())),
+                true,
+            ),
+        ]))
     }
 
     pub(crate) fn build_struct_value() -> StructValue {
@@ -1660,6 +1771,7 @@ pub(crate) mod tests {
             Value::String("tom".into()),
             Value::UInt8(25),
             Value::String("94038".into()),
+            Value::List(build_list_value()),
         ];
         StructValue::try_new(struct_items, struct_type).unwrap()
     }
@@ -1671,14 +1783,19 @@ pub(crate) mod tests {
             ScalarValue::Utf8(Some("tom".into())).to_array().unwrap(),
             ScalarValue::UInt8(Some(25)).to_array().unwrap(),
             ScalarValue::Utf8(Some("94038".into())).to_array().unwrap(),
+            build_scalar_list_value().to_array().unwrap(),
         ];
         let struct_arrow_array = StructArray::new(struct_type.as_arrow_fields(), arrays, None);
         ScalarValue::Struct(Arc::new(struct_arrow_array))
     }
 
+    pub fn build_list_type() -> ConcreteDataType {
+        ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::boolean_datatype()))
+    }
+
     pub(crate) fn build_list_value() -> ListValue {
         let items = vec![Value::Boolean(true), Value::Boolean(false)];
-        ListValue::new(items, ConcreteDataType::boolean_datatype())
+        ListValue::new(items, Arc::new(ConcreteDataType::boolean_datatype()))
     }
 
     pub(crate) fn build_scalar_list_value() -> ScalarValue {
@@ -1804,7 +1921,10 @@ pub(crate) mod tests {
             build_scalar_list_value().try_into().unwrap()
         );
         assert_eq!(
-            Value::List(ListValue::new(vec![], ConcreteDataType::uint32_datatype())),
+            Value::List(ListValue::new(
+                vec![],
+                Arc::new(ConcreteDataType::uint32_datatype())
+            )),
             ScalarValue::List(ScalarValue::new_list(&[], &ArrowDataType::UInt32, true))
                 .try_into()
                 .unwrap()
@@ -2071,15 +2191,13 @@ pub(crate) mod tests {
             &ConcreteDataType::binary_datatype(),
             &Value::Binary(Bytes::from(b"world".as_slice())),
         );
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
         check_type_and_value(
-            &ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()),
-            &Value::List(ListValue::new(
-                vec![Value::Int32(10)],
-                ConcreteDataType::int32_datatype(),
-            )),
+            &ConcreteDataType::list_datatype(item_type.clone()),
+            &Value::List(ListValue::new(vec![Value::Int32(10)], item_type.clone())),
         );
         check_type_and_value(
-            &ConcreteDataType::list_datatype(ConcreteDataType::null_datatype()),
+            &ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::null_datatype())),
             &Value::List(ListValue::default()),
         );
         check_type_and_value(
@@ -2139,17 +2257,64 @@ pub(crate) mod tests {
             &Value::Decimal128(Decimal128::new(1, 38, 10)),
         );
 
+        let item_type = Arc::new(ConcreteDataType::boolean_datatype());
         check_type_and_value(
-            &ConcreteDataType::list_datatype(ConcreteDataType::boolean_datatype()),
+            &ConcreteDataType::list_datatype(item_type.clone()),
             &Value::List(ListValue::new(
                 vec![Value::Boolean(true)],
-                ConcreteDataType::boolean_datatype(),
+                item_type.clone(),
             )),
         );
 
         check_type_and_value(
             &ConcreteDataType::struct_datatype(build_struct_type()),
             &Value::Struct(build_struct_value()),
+        );
+
+        check_type_and_value(
+            &ConcreteDataType::json_native_datatype(ConcreteDataType::boolean_datatype()),
+            &Value::Json(Box::new(true.into())),
+        );
+
+        check_type_and_value(
+            &ConcreteDataType::json_native_datatype(build_list_type()),
+            &Value::Json(Box::new([true].into())),
+        );
+
+        check_type_and_value(
+            &ConcreteDataType::json_native_datatype(ConcreteDataType::struct_datatype(
+                StructType::new(Arc::new(vec![
+                    StructField::new(
+                        "address".to_string(),
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    StructField::new("age".to_string(), ConcreteDataType::uint64_datatype(), true),
+                    StructField::new(
+                        "awards".to_string(),
+                        ConcreteDataType::list_datatype(Arc::new(
+                            ConcreteDataType::boolean_datatype(),
+                        )),
+                        true,
+                    ),
+                    StructField::new("id".to_string(), ConcreteDataType::int64_datatype(), true),
+                    StructField::new(
+                        "name".to_string(),
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                ])),
+            )),
+            &Value::Json(Box::new(
+                [
+                    ("id", JsonVariant::from(1i64)),
+                    ("name", "Alice".into()),
+                    ("age", 1u64.into()),
+                    ("address", "blah".into()),
+                    ("awards", [true, false].into()),
+                ]
+                .into(),
+            )),
         );
     }
 
@@ -2255,7 +2420,7 @@ pub(crate) mod tests {
             json_value,
             to_json(Value::List(ListValue {
                 items: vec![Value::Int32(123)],
-                datatype: ConcreteDataType::int32_datatype(),
+                datatype: Arc::new(ConcreteDataType::int32_datatype()),
             }))
         );
 
@@ -2265,7 +2430,7 @@ pub(crate) mod tests {
                 Value::String("tomcat".into()),
                 Value::Boolean(true),
             ],
-            StructType::new(vec![
+            StructType::new(Arc::new(vec![
                 StructField::new("num".to_string(), ConcreteDataType::int64_datatype(), true),
                 StructField::new(
                     "name".to_string(),
@@ -2277,11 +2442,41 @@ pub(crate) mod tests {
                     ConcreteDataType::boolean_datatype(),
                     true,
                 ),
-            ]),
+            ])),
         )
         .unwrap();
         assert_eq!(
-            serde_json::Value::try_from(Value::Struct(struct_value)).unwrap(),
+            serde_json::Value::try_from(Value::Struct(struct_value.clone())).unwrap(),
+            serde_json::json!({
+                "num": 42,
+                "name": "tomcat",
+                "yes_or_no": true
+            })
+        );
+
+        // string wrapped in json
+        assert_eq!(
+            serde_json::Value::try_from(Value::Json(Box::new("hello".into()))).unwrap(),
+            serde_json::json!("hello")
+        );
+
+        // list wrapped in json
+        assert_eq!(
+            serde_json::Value::try_from(Value::Json(Box::new([1i64, 2, 3,].into()))).unwrap(),
+            serde_json::json!([1, 2, 3])
+        );
+
+        // struct wrapped in json
+        assert_eq!(
+            serde_json::Value::try_from(Value::Json(Box::new(
+                [
+                    ("num".to_string(), JsonVariant::from(42i64)),
+                    ("name".to_string(), "tomcat".into()),
+                    ("yes_or_no".to_string(), true.into()),
+                ]
+                .into()
+            )))
+            .unwrap(),
             serde_json::json!({
                 "num": 42,
                 "name": "tomcat",
@@ -2293,6 +2488,7 @@ pub(crate) mod tests {
     #[test]
     fn test_null_value() {
         assert!(Value::Null.is_null());
+        assert!(Value::Json(Box::new(JsonValue::null())).is_null());
         assert!(!Value::Boolean(true).is_null());
         assert!(Value::Null < Value::Boolean(false));
         assert!(Value::Boolean(true) > Value::Null);
@@ -2381,11 +2577,11 @@ pub(crate) mod tests {
             };
         }
 
-        check_as_null!(as_binary);
-        check_as_null!(as_string);
-        check_as_null!(as_boolean);
-        check_as_null!(as_date);
-        check_as_null!(as_list);
+        check_as_null!(try_into_binary);
+        check_as_null!(try_into_string);
+        check_as_null!(try_into_boolean);
+        check_as_null!(try_into_list);
+        check_as_null!(try_into_struct);
 
         macro_rules! check_as_correct {
             ($data: expr, $Variant: ident, $method: ident) => {
@@ -2393,27 +2589,29 @@ pub(crate) mod tests {
             };
         }
 
-        check_as_correct!("hello", String, as_string);
-        check_as_correct!("hello".as_bytes(), Binary, as_binary);
-        check_as_correct!(true, Boolean, as_boolean);
-        check_as_correct!(Date::new(123), Date, as_date);
-        check_as_correct!(Time::new_second(12), Time, as_time);
-        check_as_correct!(Duration::new_second(12), Duration, as_duration);
+        check_as_correct!("hello", String, try_into_string);
+        check_as_correct!("hello".as_bytes(), Binary, try_into_binary);
+        check_as_correct!(true, Boolean, try_into_boolean);
+        check_as_correct!(Date::new(123), Date, try_into_date);
+        check_as_correct!(Time::new_second(12), Time, try_into_time);
+        check_as_correct!(Duration::new_second(12), Duration, try_into_duration);
 
         let list = build_list_value();
-        check_as_correct!(ListValueRef::Ref { val: &list }, List, as_list);
+        check_as_correct!(ListValueRef::Ref { val: &list }, List, try_into_list);
 
         let struct_value = build_struct_value();
-        check_as_correct!(StructValueRef::Ref(&struct_value), Struct, as_struct);
+        check_as_correct!(StructValueRef::Ref(&struct_value), Struct, try_into_struct);
 
         let wrong_value = ValueRef::Int32(12345);
-        assert!(wrong_value.as_binary().is_err());
-        assert!(wrong_value.as_string().is_err());
-        assert!(wrong_value.as_boolean().is_err());
-        assert!(wrong_value.as_date().is_err());
-        assert!(wrong_value.as_list().is_err());
-        assert!(wrong_value.as_time().is_err());
-        assert!(wrong_value.as_timestamp().is_err());
+        assert!(wrong_value.try_into_binary().is_err());
+        assert!(wrong_value.try_into_string().is_err());
+        assert!(wrong_value.try_into_boolean().is_err());
+        assert!(wrong_value.try_into_list().is_err());
+        assert!(wrong_value.try_into_struct().is_err());
+        assert!(wrong_value.try_into_date().is_err());
+        assert!(wrong_value.try_into_time().is_err());
+        assert!(wrong_value.try_into_timestamp().is_err());
+        assert!(wrong_value.try_into_duration().is_err());
     }
 
     #[test]
@@ -2457,7 +2655,7 @@ pub(crate) mod tests {
         assert_eq!(
             Value::List(ListValue::new(
                 vec![],
-                ConcreteDataType::timestamp_second_datatype(),
+                Arc::new(ConcreteDataType::timestamp_second_datatype()),
             ))
             .to_string(),
             "TimestampSecond[]"
@@ -2465,7 +2663,7 @@ pub(crate) mod tests {
         assert_eq!(
             Value::List(ListValue::new(
                 vec![],
-                ConcreteDataType::timestamp_millisecond_datatype(),
+                Arc::new(ConcreteDataType::timestamp_millisecond_datatype()),
             ))
             .to_string(),
             "TimestampMillisecond[]"
@@ -2473,7 +2671,7 @@ pub(crate) mod tests {
         assert_eq!(
             Value::List(ListValue::new(
                 vec![],
-                ConcreteDataType::timestamp_microsecond_datatype(),
+                Arc::new(ConcreteDataType::timestamp_microsecond_datatype()),
             ))
             .to_string(),
             "TimestampMicrosecond[]"
@@ -2481,7 +2679,7 @@ pub(crate) mod tests {
         assert_eq!(
             Value::List(ListValue::new(
                 vec![],
-                ConcreteDataType::timestamp_nanosecond_datatype(),
+                Arc::new(ConcreteDataType::timestamp_nanosecond_datatype()),
             ))
             .to_string(),
             "TimestampNanosecond[]"
@@ -2489,8 +2687,23 @@ pub(crate) mod tests {
 
         assert_eq!(
             Value::Struct(build_struct_value()).to_string(),
-            "{ id: 1, name: tom, age: 25, address: 94038 }"
+            "{ id: 1, name: tom, age: 25, address: 94038, awards: Boolean[true, false] }"
         );
+
+        assert_eq!(
+            Value::Json(Box::new(
+                [
+                    ("id", JsonVariant::from(1i64)),
+                    ("name", "tom".into()),
+                    ("age", 25u64.into()),
+                    ("address", "94038".into()),
+                    ("awards", [true, false].into()),
+                ]
+                .into()
+            ))
+            .to_string(),
+            "Json({ address: 94038, age: 25, awards: [true, false], id: 1, name: tom })"
+        )
     }
 
     #[test]
@@ -2600,9 +2813,9 @@ pub(crate) mod tests {
         assert_eq!(
             build_scalar_list_value(),
             Value::List(build_list_value())
-                .try_to_scalar_value(&ConcreteDataType::list_datatype(
+                .try_to_scalar_value(&ConcreteDataType::list_datatype(Arc::new(
                     ConcreteDataType::boolean_datatype()
-                ))
+                )))
                 .unwrap()
         );
     }
@@ -2747,9 +2960,9 @@ pub(crate) mod tests {
         assert_eq!(
             ScalarValue::new_null_list(ArrowDataType::Boolean, true, 1),
             Value::Null
-                .try_to_scalar_value(&ConcreteDataType::list_datatype(
-                    ConcreteDataType::boolean_datatype(),
-                ))
+                .try_to_scalar_value(&ConcreteDataType::list_datatype(Arc::new(
+                    ConcreteDataType::boolean_datatype()
+                )))
                 .unwrap()
         );
 
@@ -2764,11 +2977,10 @@ pub(crate) mod tests {
     #[test]
     fn test_list_value_to_scalar_value() {
         let items = vec![Value::Int32(-1), Value::Null];
-        let list = Value::List(ListValue::new(items, ConcreteDataType::int32_datatype()));
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
+        let list = Value::List(ListValue::new(items, item_type.clone()));
         let df_list = list
-            .try_to_scalar_value(&ConcreteDataType::list_datatype(
-                ConcreteDataType::int32_datatype(),
-            ))
+            .try_to_scalar_value(&ConcreteDataType::list_datatype(item_type.clone()))
             .unwrap();
         assert!(matches!(df_list, ScalarValue::List(_)));
         match df_list {
@@ -2927,10 +3139,10 @@ pub(crate) mod tests {
                         Value::String("hello world".into()),
                         Value::String("greptimedb".into()),
                     ],
-                    datatype: ConcreteDataType::string_datatype(),
+                    datatype: Arc::new(ConcreteDataType::string_datatype()),
                 },
             }),
-            22,
+            30,
         );
 
         let data = vec![
@@ -2938,12 +3150,12 @@ pub(crate) mod tests {
             None,
             Some(vec![Some(4), None, Some(6)]),
         ];
-        let mut builder =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 8);
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
+        let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 8);
         for vec_opt in &data {
             if let Some(vec) = vec_opt {
                 let values = vec.iter().map(|v| Value::from(*v)).collect();
-                let list_value = ListValue::new(values, ConcreteDataType::int32_datatype());
+                let list_value = ListValue::new(values, item_type.clone());
 
                 builder.push(Some(ListValueRef::Ref { val: &list_value }));
             } else {
@@ -2977,7 +3189,21 @@ pub(crate) mod tests {
 
         check_value_ref_size_eq(
             &ValueRef::Struct(StructValueRef::Ref(&build_struct_value())),
-            13,
+            31,
+        );
+
+        check_value_ref_size_eq(
+            &ValueRef::Json(Box::new(
+                [
+                    ("id", JsonVariantRef::from(1i64)),
+                    ("name", "tom".into()),
+                    ("age", 25u64.into()),
+                    ("address", "94038".into()),
+                    ("awards", [true, false].into()),
+                ]
+                .into(),
+            )),
+            48,
         );
     }
 

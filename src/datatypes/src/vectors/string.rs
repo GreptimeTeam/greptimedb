@@ -18,7 +18,9 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayBuilder, ArrayIter, ArrayRef};
 use snafu::ResultExt;
 
-use crate::arrow_array::{MutableStringArray, StringArray};
+use crate::arrow_array::{
+    LargeStringArray, MutableLargeStringArray, MutableStringArray, StringArray,
+};
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
@@ -26,69 +28,93 @@ use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
+/// Internal representation for string arrays
+#[derive(Debug, PartialEq)]
+enum StringArrayData {
+    String(StringArray),
+    LargeString(LargeStringArray),
+}
+
 /// Vector of strings.
 #[derive(Debug, PartialEq)]
 pub struct StringVector {
-    array: StringArray,
+    array: StringArrayData,
 }
 
 impl StringVector {
     pub(crate) fn as_arrow(&self) -> &dyn Array {
-        &self.array
+        match &self.array {
+            StringArrayData::String(array) => array,
+            StringArrayData::LargeString(array) => array,
+        }
+    }
+
+    /// Create a StringVector from a regular StringArray
+    pub fn from_string_array(array: StringArray) -> Self {
+        Self {
+            array: StringArrayData::String(array),
+        }
+    }
+
+    /// Create a StringVector from a LargeStringArray
+    pub fn from_large_string_array(array: LargeStringArray) -> Self {
+        Self {
+            array: StringArrayData::LargeString(array),
+        }
+    }
+
+    pub fn from_slice<T: AsRef<str>>(slice: &[T]) -> Self {
+        Self::from_string_array(StringArray::from_iter(
+            slice.iter().map(|s| Some(s.as_ref())),
+        ))
     }
 }
 
 impl From<StringArray> for StringVector {
     fn from(array: StringArray) -> Self {
-        Self { array }
+        Self::from_string_array(array)
+    }
+}
+
+impl From<LargeStringArray> for StringVector {
+    fn from(array: LargeStringArray) -> Self {
+        Self::from_large_string_array(array)
     }
 }
 
 impl From<Vec<Option<String>>> for StringVector {
     fn from(data: Vec<Option<String>>) -> Self {
-        Self {
-            array: StringArray::from_iter(data),
-        }
+        Self::from_string_array(StringArray::from_iter(data))
     }
 }
 
 impl From<Vec<Option<&str>>> for StringVector {
     fn from(data: Vec<Option<&str>>) -> Self {
-        Self {
-            array: StringArray::from_iter(data),
-        }
+        Self::from_string_array(StringArray::from_iter(data))
     }
 }
 
 impl From<&[Option<String>]> for StringVector {
     fn from(data: &[Option<String>]) -> Self {
-        Self {
-            array: StringArray::from_iter(data),
-        }
+        Self::from_string_array(StringArray::from_iter(data))
     }
 }
 
 impl From<&[Option<&str>]> for StringVector {
     fn from(data: &[Option<&str>]) -> Self {
-        Self {
-            array: StringArray::from_iter(data),
-        }
+        Self::from_string_array(StringArray::from_iter(data))
     }
 }
 
 impl From<Vec<String>> for StringVector {
     fn from(data: Vec<String>) -> Self {
-        Self {
-            array: StringArray::from_iter(data.into_iter().map(Some)),
-        }
+        Self::from_string_array(StringArray::from_iter(data.into_iter().map(Some)))
     }
 }
 
 impl From<Vec<&str>> for StringVector {
     fn from(data: Vec<&str>) -> Self {
-        Self {
-            array: StringArray::from_iter(data.into_iter().map(Some)),
-        }
+        Self::from_string_array(StringArray::from_iter(data.into_iter().map(Some)))
     }
 }
 
@@ -106,67 +132,177 @@ impl Vector for StringVector {
     }
 
     fn len(&self) -> usize {
-        self.array.len()
+        match &self.array {
+            StringArrayData::String(array) => array.len(),
+            StringArrayData::LargeString(array) => array.len(),
+        }
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        Arc::new(self.array.clone())
+        match &self.array {
+            StringArrayData::String(array) => Arc::new(array.clone()),
+            StringArrayData::LargeString(array) => Arc::new(array.clone()),
+        }
     }
 
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
-        Box::new(self.array.clone())
+        match &self.array {
+            StringArrayData::String(array) => Box::new(array.clone()),
+            StringArrayData::LargeString(array) => Box::new(array.clone()),
+        }
     }
 
     fn validity(&self) -> Validity {
-        vectors::impl_validity_for_vector!(self.array)
+        match &self.array {
+            StringArrayData::String(array) => vectors::impl_validity_for_vector!(array),
+            StringArrayData::LargeString(array) => vectors::impl_validity_for_vector!(array),
+        }
     }
 
     fn memory_size(&self) -> usize {
-        self.array.get_buffer_memory_size()
+        match &self.array {
+            StringArrayData::String(array) => array.get_buffer_memory_size(),
+            StringArrayData::LargeString(array) => array.get_buffer_memory_size(),
+        }
     }
 
     fn null_count(&self) -> usize {
-        self.array.null_count()
+        match &self.array {
+            StringArrayData::String(array) => array.null_count(),
+            StringArrayData::LargeString(array) => array.null_count(),
+        }
     }
 
     fn is_null(&self, row: usize) -> bool {
-        self.array.is_null(row)
+        match &self.array {
+            StringArrayData::String(array) => array.is_null(row),
+            StringArrayData::LargeString(array) => array.is_null(row),
+        }
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        Arc::new(Self::from(self.array.slice(offset, length)))
+        match &self.array {
+            StringArrayData::String(array) => {
+                Arc::new(Self::from_string_array(array.slice(offset, length)))
+            }
+            StringArrayData::LargeString(array) => {
+                Arc::new(Self::from_large_string_array(array.slice(offset, length)))
+            }
+        }
     }
 
     fn get(&self, index: usize) -> Value {
-        vectors::impl_get_for_vector!(self.array, index)
+        match &self.array {
+            StringArrayData::String(array) => vectors::impl_get_for_vector!(array, index),
+            StringArrayData::LargeString(array) => vectors::impl_get_for_vector!(array, index),
+        }
     }
 
     fn get_ref(&self, index: usize) -> ValueRef<'_> {
-        vectors::impl_get_ref_for_vector!(self.array, index)
+        match &self.array {
+            StringArrayData::String(array) => vectors::impl_get_ref_for_vector!(array, index),
+            StringArrayData::LargeString(array) => vectors::impl_get_ref_for_vector!(array, index),
+        }
+    }
+}
+
+pub enum StringIter<'a> {
+    String(ArrayIter<&'a StringArray>),
+    LargeString(ArrayIter<&'a LargeStringArray>),
+}
+
+impl<'a> Iterator for StringIter<'a> {
+    type Item = Option<&'a str>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            StringIter::String(iter) => iter.next(),
+            StringIter::LargeString(iter) => iter.next(),
+        }
     }
 }
 
 impl ScalarVector for StringVector {
     type OwnedItem = String;
     type RefItem<'a> = &'a str;
-    type Iter<'a> = ArrayIter<&'a StringArray>;
+    type Iter<'a> = StringIter<'a>;
     type Builder = StringVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
-        if self.array.is_valid(idx) {
-            Some(self.array.value(idx))
-        } else {
-            None
+        match &self.array {
+            StringArrayData::String(array) => {
+                if array.is_valid(idx) {
+                    Some(array.value(idx))
+                } else {
+                    None
+                }
+            }
+            StringArrayData::LargeString(array) => {
+                if array.is_valid(idx) {
+                    Some(array.value(idx))
+                } else {
+                    None
+                }
+            }
         }
     }
 
     fn iter_data(&self) -> Self::Iter<'_> {
-        self.array.iter()
+        match &self.array {
+            StringArrayData::String(array) => StringIter::String(array.iter()),
+            StringArrayData::LargeString(array) => StringIter::LargeString(array.iter()),
+        }
     }
 }
 
+/// Internal representation for mutable string arrays
+enum MutableStringArrayData {
+    String(MutableStringArray),
+    LargeString(MutableLargeStringArray),
+}
+
 pub struct StringVectorBuilder {
-    pub mutable_array: MutableStringArray,
+    mutable_array: MutableStringArrayData,
+}
+
+impl Default for StringVectorBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StringVectorBuilder {
+    /// Create a builder for regular strings
+    pub fn new() -> Self {
+        Self {
+            mutable_array: MutableStringArrayData::String(MutableStringArray::new()),
+        }
+    }
+
+    /// Create a builder for large strings
+    pub fn new_large() -> Self {
+        Self {
+            mutable_array: MutableStringArrayData::LargeString(MutableLargeStringArray::new()),
+        }
+    }
+
+    /// Create a builder for regular strings with capacity
+    pub fn with_string_capacity(capacity: usize) -> Self {
+        Self {
+            mutable_array: MutableStringArrayData::String(MutableStringArray::with_capacity(
+                capacity, 0,
+            )),
+        }
+    }
+
+    /// Create a builder for large strings with capacity
+    pub fn with_large_capacity(capacity: usize) -> Self {
+        Self {
+            mutable_array: MutableStringArrayData::LargeString(
+                MutableLargeStringArray::with_capacity(capacity, 0),
+            ),
+        }
+    }
 }
 
 impl MutableVector for StringVectorBuilder {
@@ -175,7 +311,10 @@ impl MutableVector for StringVectorBuilder {
     }
 
     fn len(&self) -> usize {
-        self.mutable_array.len()
+        match &self.mutable_array {
+            MutableStringArrayData::String(array) => array.len(),
+            MutableStringArrayData::LargeString(array) => array.len(),
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -193,11 +332,16 @@ impl MutableVector for StringVectorBuilder {
     fn to_vector_cloned(&self) -> VectorRef {
         Arc::new(self.finish_cloned())
     }
-
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
-        match value.as_string()? {
-            Some(v) => self.mutable_array.append_value(v),
-            None => self.mutable_array.append_null(),
+        match value.try_into_string()? {
+            Some(v) => match &mut self.mutable_array {
+                MutableStringArrayData::String(array) => array.append_value(v),
+                MutableStringArrayData::LargeString(array) => array.append_value(v),
+            },
+            None => match &mut self.mutable_array {
+                MutableStringArrayData::String(array) => array.append_null(),
+                MutableStringArrayData::LargeString(array) => array.append_null(),
+            },
         }
         Ok(())
     }
@@ -207,7 +351,10 @@ impl MutableVector for StringVectorBuilder {
     }
 
     fn push_null(&mut self) {
-        self.mutable_array.append_null()
+        match &mut self.mutable_array {
+            MutableStringArrayData::String(array) => array.append_null(),
+            MutableStringArrayData::LargeString(array) => array.append_null(),
+        }
     }
 }
 
@@ -216,26 +363,44 @@ impl ScalarVectorBuilder for StringVectorBuilder {
 
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            mutable_array: MutableStringArray::with_capacity(capacity, 0),
+            mutable_array: MutableStringArrayData::String(MutableStringArray::with_capacity(
+                capacity, 0,
+            )),
         }
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
         match value {
-            Some(v) => self.mutable_array.append_value(v),
-            None => self.mutable_array.append_null(),
+            Some(v) => match &mut self.mutable_array {
+                MutableStringArrayData::String(array) => array.append_value(v),
+                MutableStringArrayData::LargeString(array) => array.append_value(v),
+            },
+            None => match &mut self.mutable_array {
+                MutableStringArrayData::String(array) => array.append_null(),
+                MutableStringArrayData::LargeString(array) => array.append_null(),
+            },
         }
     }
 
     fn finish(&mut self) -> Self::VectorType {
-        StringVector {
-            array: self.mutable_array.finish(),
+        match &mut self.mutable_array {
+            MutableStringArrayData::String(array) => {
+                StringVector::from_string_array(array.finish())
+            }
+            MutableStringArrayData::LargeString(array) => {
+                StringVector::from_large_string_array(array.finish())
+            }
         }
     }
 
     fn finish_cloned(&self) -> Self::VectorType {
-        StringVector {
-            array: self.mutable_array.finish_cloned(),
+        match &self.mutable_array {
+            MutableStringArrayData::String(array) => {
+                StringVector::from_string_array(array.finish_cloned())
+            }
+            MutableStringArrayData::LargeString(array) => {
+                StringVector::from_large_string_array(array.finish_cloned())
+            }
         }
     }
 }
@@ -249,7 +414,26 @@ impl Serializable for StringVector {
     }
 }
 
-vectors::impl_try_from_arrow_array_for_vector!(StringArray, StringVector);
+impl StringVector {
+    pub fn try_from_arrow_array(
+        array: impl AsRef<dyn Array>,
+    ) -> crate::error::Result<StringVector> {
+        let array = array.as_ref();
+
+        if let Some(string_array) = array.as_any().downcast_ref::<StringArray>() {
+            Ok(StringVector::from_string_array(string_array.clone()))
+        } else if let Some(large_string_array) = array.as_any().downcast_ref::<LargeStringArray>() {
+            Ok(StringVector::from_large_string_array(
+                large_string_array.clone(),
+            ))
+        } else {
+            Err(crate::error::UnsupportedArrowTypeSnafu {
+                arrow_type: array.data_type().clone(),
+            }
+            .build())
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

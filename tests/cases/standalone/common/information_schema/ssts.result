@@ -10,6 +10,7 @@ DESC TABLE information_schema.ssts_manifest;
 | region_group     | UInt8               |     | NO   |         | FIELD         |
 | region_sequence  | UInt32              |     | NO   |         | FIELD         |
 | file_id          | String              |     | NO   |         | FIELD         |
+| index_file_id    | String              |     | YES  |         | FIELD         |
 | level            | UInt8               |     | NO   |         | FIELD         |
 | file_path        | String              |     | NO   |         | FIELD         |
 | file_size        | UInt64              |     | NO   |         | FIELD         |
@@ -17,6 +18,7 @@ DESC TABLE information_schema.ssts_manifest;
 | index_file_size  | UInt64              |     | YES  |         | FIELD         |
 | num_rows         | UInt64              |     | NO   |         | FIELD         |
 | num_row_groups   | UInt64              |     | NO   |         | FIELD         |
+| num_series       | UInt64              |     | YES  |         | FIELD         |
 | min_ts           | TimestampNanosecond |     | YES  |         | FIELD         |
 | max_ts           | TimestampNanosecond |     | YES  |         | FIELD         |
 | sequence         | UInt64              |     | YES  |         | FIELD         |
@@ -36,9 +38,33 @@ DESC TABLE information_schema.ssts_storage;
 | node_id          | UInt64               |     | YES  |         | FIELD         |
 +------------------+----------------------+-----+------+---------+---------------+
 
+DESC TABLE information_schema.ssts_index_meta;
+
++-----------------+--------+-----+------+---------+---------------+
+| Column          | Type   | Key | Null | Default | Semantic Type |
++-----------------+--------+-----+------+---------+---------------+
+| table_dir       | String |     | NO   |         | FIELD         |
+| index_file_path | String |     | NO   |         | FIELD         |
+| region_id       | UInt64 |     | NO   |         | FIELD         |
+| table_id        | UInt32 |     | NO   |         | FIELD         |
+| region_number   | UInt32 |     | NO   |         | FIELD         |
+| region_group    | UInt8  |     | NO   |         | FIELD         |
+| region_sequence | UInt32 |     | NO   |         | FIELD         |
+| file_id         | String |     | NO   |         | FIELD         |
+| index_file_size | UInt64 |     | YES  |         | FIELD         |
+| index_type      | String |     | NO   |         | FIELD         |
+| target_type     | String |     | NO   |         | FIELD         |
+| target_key      | String |     | NO   |         | FIELD         |
+| target_json     | String |     | NO   |         | FIELD         |
+| blob_size       | UInt64 |     | NO   |         | FIELD         |
+| meta_json       | String |     | YES  |         | FIELD         |
+| node_id         | UInt64 |     | YES  |         | FIELD         |
++-----------------+--------+-----+------+---------+---------------+
+
 CREATE TABLE sst_case (
-  a INT PRIMARY KEY,
+  a INT PRIMARY KEY INVERTED INDEX,
   b STRING SKIPPING INDEX,
+  c STRING FULLTEXT INDEX,
   ts TIMESTAMP TIME INDEX,
 )
 PARTITION ON COLUMNS (a) (
@@ -50,9 +76,9 @@ PARTITION ON COLUMNS (a) (
 Affected Rows: 0
 
 INSERT INTO sst_case VALUES
-  (500, 'a', 1),
-  (1500, 'b', 2),
-  (2500, 'c', 3);
+  (500, 'a', 'a', 1),
+  (1500, 'b', 'b', 2),
+  (2500, 'c', 'c', 3);
 
 Affected Rows: 3
 
@@ -71,13 +97,35 @@ ADMIN FLUSH_TABLE('sst_case');
 -- SQLNESS REPLACE (/public/\d+) /public/<TABLE_ID>
 SELECT * FROM information_schema.ssts_manifest order by file_path;
 
-+----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+-------------------------+-------------------------+----------+------------------+---------+---------+
-| table_dir                  | region_id     | table_id | region_number | region_group | region_sequence | file_id                              | level | file_path                                                                              | file_size | index_file_path                                                                             | index_file_size | num_rows | num_row_groups | min_ts                  | max_ts                  | sequence | origin_region_id | node_id | visible |
-+----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+-------------------------+-------------------------+----------+------------------+---------+---------+
-| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
-| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
-| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
-+----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+-------------------------+-------------------------+----------+------------------+---------+---------+
++----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+------------+-------------------------+-------------------------+----------+------------------+---------+---------+
+| table_dir                  | region_id     | table_id | region_number | region_group | region_sequence | file_id                              | index_file_id                        | level | file_path                                                                              | file_size | index_file_path                                                                             | index_file_size | num_rows | num_row_groups | num_series | min_ts                  | max_ts                  | sequence | origin_region_id | node_id | visible |
++----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+------------+-------------------------+-------------------------+----------+------------------+---------+---------+
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> | <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> | <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> | <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
++----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+------------+-------------------------+-------------------------+----------+------------------+---------+---------+
+
+-- SQLNESS REPLACE (\s+\d+\s+) <NUM>
+-- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,9}) <DATETIME>
+-- SQLNESS REPLACE (/public/\d+/\d+_\d+/index/<UUID>\.puffin) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin
+-- SQLNESS REPLACE (/public/\d+/\d+_\d+) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>
+-- SQLNESS REPLACE (/public/\d+) /public/<TABLE_ID>
+SELECT * FROM information_schema.ssts_index_meta ORDER BY meta_json;
+
++----------------------------+---------------------------------------------------------------------------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-----------------+----------------+-------------+------------+--------------+-----------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------+
+| table_dir                  | index_file_path                                                                             | region_id     | table_id | region_number | region_group | region_sequence | file_id                              | index_file_size | index_type     | target_type | target_key | target_json  | blob_size | meta_json                                                                                                                                                                                                                | node_id |
++----------------------------+---------------------------------------------------------------------------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-----------------+----------------+-------------+------------+--------------+-----------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------+
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| fulltext_bloom | column      |<NUM>| {"column":2} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":1,"rows_per_segment":10240,"segment_count":1},"fulltext":{"analyzer":"English","case_sensitive":false}}                                                                     |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| fulltext_bloom | column      |<NUM>| {"column":2} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":1,"rows_per_segment":10240,"segment_count":1},"fulltext":{"analyzer":"English","case_sensitive":false}}                                                                     |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| fulltext_bloom | column      |<NUM>| {"column":2} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":1,"rows_per_segment":10240,"segment_count":1},"fulltext":{"analyzer":"English","case_sensitive":false}}                                                                     |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| bloom_filter   | column      |<NUM>| {"column":1} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":1,"rows_per_segment":10240,"segment_count":1}}                                                                                                                              |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| bloom_filter   | column      |<NUM>| {"column":1} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":1,"rows_per_segment":10240,"segment_count":1}}                                                                                                                              |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| bloom_filter   | column      |<NUM>| {"column":1} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":1,"rows_per_segment":10240,"segment_count":1}}                                                                                                                              |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| inverted       | column      |<NUM>| {"column":0} |<NUM>| {"inverted":{"base_offset":0,"bitmap_type":"Roaring","fst_size":55,"inverted_index_size":81,"null_bitmap_size":8,"relative_fst_offset":26,"relative_null_bitmap_offset":0,"segment_row_count":1024,"total_row_count":1}} |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| inverted       | column      |<NUM>| {"column":0} |<NUM>| {"inverted":{"base_offset":0,"bitmap_type":"Roaring","fst_size":55,"inverted_index_size":81,"null_bitmap_size":8,"relative_fst_offset":26,"relative_null_bitmap_offset":0,"segment_row_count":1024,"total_row_count":1}} |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| inverted       | column      |<NUM>| {"column":0} |<NUM>| {"inverted":{"base_offset":0,"bitmap_type":"Roaring","fst_size":55,"inverted_index_size":81,"null_bitmap_size":8,"relative_fst_offset":26,"relative_null_bitmap_offset":0,"segment_row_count":1024,"total_row_count":1}} |<NUM>|
++----------------------------+---------------------------------------------------------------------------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-----------------+----------------+-------------+------------+--------------+-----------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------+
 
 -- SQLNESS REPLACE (\s+\d+\s+) <NUM>
 -- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>
@@ -96,9 +144,9 @@ SELECT * FROM information_schema.ssts_storage order by file_path;
 +---------------------------------------------------------------------------------------------+-----------+------------------+---------+
 
 INSERT INTO sst_case VALUES
-  (24, 'foo', 100),
-  (124, 'bar', 200),
-  (1024, 'baz', 300);
+  (24, 'foo', 'foo', 100),
+  (124, 'bar', 'bar', 200),
+  (1024, 'baz', 'baz', 300);
 
 Affected Rows: 3
 
@@ -117,15 +165,43 @@ ADMIN FLUSH_TABLE('sst_case');
 -- SQLNESS REPLACE (/public/\d+) /public/<TABLE_ID>
 SELECT * FROM information_schema.ssts_manifest order by file_path;
 
-+----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+-------------------------+-------------------------+----------+------------------+---------+---------+
-| table_dir                  | region_id     | table_id | region_number | region_group | region_sequence | file_id                              | level | file_path                                                                              | file_size | index_file_path                                                                             | index_file_size | num_rows | num_row_groups | min_ts                  | max_ts                  | sequence | origin_region_id | node_id | visible |
-+----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+-------------------------+-------------------------+----------+------------------+---------+---------+
-| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
-| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
-| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
-| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
-| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
-+----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+-------------------------+-------------------------+----------+------------------+---------+---------+
++----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+------------+-------------------------+-------------------------+----------+------------------+---------+---------+
+| table_dir                  | region_id     | table_id | region_number | region_group | region_sequence | file_id                              | index_file_id                        | level | file_path                                                                              | file_size | index_file_path                                                                             | index_file_size | num_rows | num_row_groups | num_series | min_ts                  | max_ts                  | sequence | origin_region_id | node_id | visible |
++----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+------------+-------------------------+-------------------------+----------+------------------+---------+---------+
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> | <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> | <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> | <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> | <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> | <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
++----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+------------+-------------------------+-------------------------+----------+------------------+---------+---------+
+
+-- SQLNESS REPLACE (\s+\d+\s+) <NUM>
+-- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,9}) <DATETIME>
+-- SQLNESS REPLACE (/public/\d+/\d+_\d+/index/<UUID>\.puffin) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin
+-- SQLNESS REPLACE (/public/\d+/\d+_\d+) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>
+-- SQLNESS REPLACE (/public/\d+) /public/<TABLE_ID>
+SELECT * FROM information_schema.ssts_index_meta ORDER BY meta_json;
+
++----------------------------+---------------------------------------------------------------------------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-----------------+----------------+-------------+------------+--------------+-----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------+
+| table_dir                  | index_file_path                                                                             | region_id     | table_id | region_number | region_group | region_sequence | file_id                              | index_file_size | index_type     | target_type | target_key | target_json  | blob_size | meta_json                                                                                                                                                                                                                 | node_id |
++----------------------------+---------------------------------------------------------------------------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-----------------+----------------+-------------+------------+--------------+-----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------+
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| fulltext_bloom | column      |<NUM>| {"column":2} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":1,"rows_per_segment":10240,"segment_count":1},"fulltext":{"analyzer":"English","case_sensitive":false}}                                                                      |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| fulltext_bloom | column      |<NUM>| {"column":2} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":1,"rows_per_segment":10240,"segment_count":1},"fulltext":{"analyzer":"English","case_sensitive":false}}                                                                      |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| fulltext_bloom | column      |<NUM>| {"column":2} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":1,"rows_per_segment":10240,"segment_count":1},"fulltext":{"analyzer":"English","case_sensitive":false}}                                                                      |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| fulltext_bloom | column      |<NUM>| {"column":2} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":1,"rows_per_segment":10240,"segment_count":1},"fulltext":{"analyzer":"English","case_sensitive":false}}                                                                      |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| bloom_filter   | column      |<NUM>| {"column":1} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":1,"rows_per_segment":10240,"segment_count":1}}                                                                                                                               |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| bloom_filter   | column      |<NUM>| {"column":1} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":1,"rows_per_segment":10240,"segment_count":1}}                                                                                                                               |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| bloom_filter   | column      |<NUM>| {"column":1} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":1,"rows_per_segment":10240,"segment_count":1}}                                                                                                                               |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| bloom_filter   | column      |<NUM>| {"column":1} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":1,"rows_per_segment":10240,"segment_count":1}}                                                                                                                               |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| fulltext_bloom | column      |<NUM>| {"column":2} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":2,"rows_per_segment":10240,"segment_count":1},"fulltext":{"analyzer":"English","case_sensitive":false}}                                                                      |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| bloom_filter   | column      |<NUM>| {"column":1} |<NUM>| {"bloom":{"bloom_filter_size":64,"row_count":2,"rows_per_segment":10240,"segment_count":1}}                                                                                                                               |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| inverted       | column      |<NUM>| {"column":0} |<NUM>| {"inverted":{"base_offset":0,"bitmap_type":"Roaring","fst_size":55,"inverted_index_size":81,"null_bitmap_size":8,"relative_fst_offset":26,"relative_null_bitmap_offset":0,"segment_row_count":1024,"total_row_count":1}}  |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| inverted       | column      |<NUM>| {"column":0} |<NUM>| {"inverted":{"base_offset":0,"bitmap_type":"Roaring","fst_size":55,"inverted_index_size":81,"null_bitmap_size":8,"relative_fst_offset":26,"relative_null_bitmap_offset":0,"segment_row_count":1024,"total_row_count":1}}  |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| inverted       | column      |<NUM>| {"column":0} |<NUM>| {"inverted":{"base_offset":0,"bitmap_type":"Roaring","fst_size":55,"inverted_index_size":81,"null_bitmap_size":8,"relative_fst_offset":26,"relative_null_bitmap_offset":0,"segment_row_count":1024,"total_row_count":1}}  |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| inverted       | column      |<NUM>| {"column":0} |<NUM>| {"inverted":{"base_offset":0,"bitmap_type":"Roaring","fst_size":55,"inverted_index_size":81,"null_bitmap_size":8,"relative_fst_offset":26,"relative_null_bitmap_offset":0,"segment_row_count":1024,"total_row_count":1}}  |<NUM>|
+| data/greptime/public/<TABLE_ID>/ | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| inverted       | column      |<NUM>| {"column":0} |<NUM>| {"inverted":{"base_offset":0,"bitmap_type":"Roaring","fst_size":59,"inverted_index_size":103,"null_bitmap_size":8,"relative_fst_offset":44,"relative_null_bitmap_offset":0,"segment_row_count":1024,"total_row_count":2}} |<NUM>|
++----------------------------+---------------------------------------------------------------------------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-----------------+----------------+-------------+------------+--------------+-----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------+
 
 -- SQLNESS REPLACE (\s+\d+\s+) <NUM>
 -- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>

@@ -36,7 +36,7 @@ impl ParserContext<'_> {
                     expected: "a table name",
                     actual: self.peek_token_as_string(),
                 })?;
-        let table_idents = Self::canonicalize_object_name(raw_table_idents);
+        let table_idents = Self::canonicalize_object_name(raw_table_idents)?;
         ensure!(
             !table_idents.0.is_empty(),
             InvalidTableNameSnafu {

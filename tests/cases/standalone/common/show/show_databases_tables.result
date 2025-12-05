@@ -25,7 +25,7 @@ Affected Rows: 0
 SHOW TABLES;
 
 +---------------------------------------+
-| Tables                                |
+| Tables_in_information_schema          |
 +---------------------------------------+
 | build_info                            |
 | character_sets                        |
@@ -52,31 +52,30 @@ SHOW TABLES;
 | region_peers                          |
 | region_statistics                     |
 | routines                              |
-| runtime_metrics                       |
 | schema_privileges                     |
 | schemata                              |
 | session_status                        |
+| ssts_index_meta                       |
 | ssts_manifest                         |
 | ssts_storage                          |
 | table_constraints                     |
 | table_privileges                      |
 | tables                                |
-| triggers                              |
 | views                                 |
 +---------------------------------------+
 
 SHOW TABLES LIKE 'tables';
 
-+--------+
-| Tables |
-+--------+
-| tables |
-+--------+
++------------------------------+
+| Tables_in_information_schema |
++------------------------------+
+| tables                       |
++------------------------------+
 
 SHOW FULL TABLES;
 
 +---------------------------------------+-----------------+
-| Tables                                | Table_type      |
+| Tables_in_information_schema          | Table_type      |
 +---------------------------------------+-----------------+
 | build_info                            | LOCAL TEMPORARY |
 | character_sets                        | LOCAL TEMPORARY |
@@ -103,16 +102,15 @@ SHOW FULL TABLES;
 | region_peers                          | LOCAL TEMPORARY |
 | region_statistics                     | LOCAL TEMPORARY |
 | routines                              | LOCAL TEMPORARY |
-| runtime_metrics                       | LOCAL TEMPORARY |
 | schema_privileges                     | LOCAL TEMPORARY |
 | schemata                              | LOCAL TEMPORARY |
 | session_status                        | LOCAL TEMPORARY |
+| ssts_index_meta                       | LOCAL TEMPORARY |
 | ssts_manifest                         | LOCAL TEMPORARY |
 | ssts_storage                          | LOCAL TEMPORARY |
 | table_constraints                     | LOCAL TEMPORARY |
 | table_privileges                      | LOCAL TEMPORARY |
 | tables                                | LOCAL TEMPORARY |
-| triggers                              | LOCAL TEMPORARY |
 | views                                 | LOCAL TEMPORARY |
 +---------------------------------------+-----------------+
 
@@ -123,42 +121,41 @@ SHOW TABLE STATUS;
 +++++++++++++++++++
 |Name|Engine|Version|Row_format|Rows|Avg_row_length|Data_length|Max_data_length|Index_length|Data_free|Auto_increment|Create_time|Update_time|Check_time|Collation|Checksum|Create_options|Comment|
 +++++++++++++++++++
-|build_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|character_sets||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|check_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|cluster_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|collation_character_set_applicability||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|collations||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|column_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|column_statistics||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|columns||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|engines||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|events||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|files||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|flows||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|global_status||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|key_column_usage||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|optimizer_trace||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|parameters||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|partitions||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|procedure_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|process_list||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|profiling||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|referential_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|region_peers||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|region_statistics||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|routines||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|runtime_metrics||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|schema_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|schemata||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|session_status||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|ssts_manifest||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|ssts_storage||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|table_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|table_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|triggers||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
-|views||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|build_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|character_sets||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|check_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|cluster_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|collation_character_set_applicability||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|collations||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|column_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|column_statistics||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|columns||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|engines||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|events||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|files||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|flows||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|global_status||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|key_column_usage||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|optimizer_trace||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|parameters||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|partitions||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|procedure_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|process_list||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|profiling||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|referential_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|region_peers||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|region_statistics||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|routines||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|schema_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|schemata||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|session_status||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|ssts_index_meta||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|ssts_manifest||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|ssts_storage||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|table_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|table_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|views||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 +++++++++++++++++++
 
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
@@ -168,7 +165,7 @@ SHOW TABLE STATUS LIKE 'tables';
 +++++++++++++++++++
 |Name|Engine|Version|Row_format|Rows|Avg_row_length|Data_length|Max_data_length|Index_length|Data_free|Auto_increment|Create_time|Update_time|Check_time|Collation|Checksum|Create_options|Comment|
 +++++++++++++++++++
-|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 +++++++++++++++++++
 
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
@@ -178,7 +175,7 @@ SHOW TABLE STATUS WHERE Name = 'tables';
 +++++++++++++++++++
 |Name|Engine|Version|Row_format|Rows|Avg_row_length|Data_length|Max_data_length|Index_length|Data_free|Auto_increment|Create_time|Update_time|Check_time|Collation|Checksum|Create_options|Comment|
 +++++++++++++++++++
-|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|tables||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 +++++++++++++++++++
 
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
@@ -188,7 +185,7 @@ SHOW TABLE STATUS from public;
 +++++++++++++++++++
 |Name|Engine|Version|Row_format|Rows|Avg_row_length|Data_length|Max_data_length|Index_length|Data_free|Auto_increment|Create_time|Update_time|Check_time|Collation|Checksum|Create_options|Comment|
 +++++++++++++++++++
-|numbers|test_engine|11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|numbers|test_engine|11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 +++++++++++++++++++
 
 USE public;

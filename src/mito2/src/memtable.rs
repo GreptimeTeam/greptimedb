@@ -28,7 +28,7 @@ use mito_codec::key_values::KeyValue;
 pub use mito_codec::key_values::KeyValues;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
 use crate::config::MitoConfig;
 use crate::error::{Result, UnsupportedOperationSnafu};
@@ -40,9 +40,11 @@ use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
 use crate::read::prune::PruneTimeIterator;
 use crate::read::scan_region::PredicateGroup;
-use crate::region::options::{MemtableOptions, MergeMode};
+use crate::region::options::{MemtableOptions, MergeMode, RegionOptions};
+use crate::sst::FormatType;
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::SstInfo;
+use crate::sst::parquet::file_range::PreFilterMode;
 
 mod builder;
 pub mod bulk;
@@ -70,6 +72,63 @@ pub enum MemtableConfig {
     PartitionTree(PartitionTreeConfig),
     #[default]
     TimeSeries,
+}
+
+/// Options for querying ranges from a memtable.
+#[derive(Clone)]
+pub struct RangesOptions {
+    /// Whether the ranges are being queried for flush.
+    pub for_flush: bool,
+    /// Mode to pre-filter columns in ranges.
+    pub pre_filter_mode: PreFilterMode,
+    /// Predicate to filter the data.
+    pub predicate: PredicateGroup,
+    /// Sequence range to filter the data.
+    pub sequence: Option<SequenceRange>,
+}
+
+impl Default for RangesOptions {
+    fn default() -> Self {
+        Self {
+            for_flush: false,
+            pre_filter_mode: PreFilterMode::All,
+            predicate: PredicateGroup::default(),
+            sequence: None,
+        }
+    }
+}
+
+impl RangesOptions {
+    /// Creates a new [RangesOptions] for flushing.
+    pub fn for_flush() -> Self {
+        Self {
+            for_flush: true,
+            pre_filter_mode: PreFilterMode::All,
+            predicate: PredicateGroup::default(),
+            sequence: None,
+        }
+    }
+
+    /// Sets the pre-filter mode.
+    #[must_use]
+    pub fn with_pre_filter_mode(mut self, pre_filter_mode: PreFilterMode) -> Self {
+        self.pre_filter_mode = pre_filter_mode;
+        self
+    }
+
+    /// Sets the predicate.
+    #[must_use]
+    pub fn with_predicate(mut self, predicate: PredicateGroup) -> Self {
+        self.predicate = predicate;
+        self
+    }
+
+    /// Sets the sequence range.
+    #[must_use]
+    pub fn with_sequence(mut self, sequence: Option<SequenceRange>) -> Self {
+        self.sequence = sequence;
+        self
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -185,19 +244,16 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<table::predicate::Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator>;
 
     /// Returns the ranges in the memtable.
     ///
-    /// The `for_flush` flag is true if the flush job calls this method for flush.
     /// The returned map contains the range id and the range after applying the predicate.
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
-        for_flush: bool,
+        options: RangesOptions,
     ) -> Result<MemtableRanges>;
 
     /// Returns true if the memtable is empty.
@@ -324,7 +380,7 @@ impl Drop for AllocTracker {
 pub(crate) struct MemtableBuilderProvider {
     write_buffer_manager: Option<WriteBufferManagerRef>,
     config: Arc<MitoConfig>,
-    compact_dispatcher: Option<Arc<CompactDispatcher>>,
+    compact_dispatcher: Arc<CompactDispatcher>,
 }
 
 impl MemtableBuilderProvider {
@@ -332,9 +388,8 @@ impl MemtableBuilderProvider {
         write_buffer_manager: Option<WriteBufferManagerRef>,
         config: Arc<MitoConfig>,
     ) -> Self {
-        let compact_dispatcher = config
-            .enable_experimental_flat_format
-            .then(|| Arc::new(CompactDispatcher::new(config.max_background_compactions)));
+        let compact_dispatcher =
+            Arc::new(CompactDispatcher::new(config.max_background_compactions));
 
         Self {
             write_buffer_manager,
@@ -343,16 +398,19 @@ impl MemtableBuilderProvider {
         }
     }
 
-    pub(crate) fn builder_for_options(
-        &self,
-        options: Option<&MemtableOptions>,
-        dedup: bool,
-        merge_mode: MergeMode,
-    ) -> MemtableBuilderRef {
-        if self.config.enable_experimental_flat_format {
-            common_telemetry::info!(
-                "Overriding memtable config, use BulkMemtable under flat format"
-            );
+    pub(crate) fn builder_for_options(&self, options: &RegionOptions) -> MemtableBuilderRef {
+        let dedup = options.need_dedup();
+        let merge_mode = options.merge_mode();
+        let flat_format = options
+            .sst_format
+            .map(|format| format == FormatType::Flat)
+            .unwrap_or(self.config.default_experimental_flat_format);
+        if flat_format {
+            if options.memtable.is_some() {
+                common_telemetry::info!(
+                    "Overriding memtable config, use BulkMemtable under flat format"
+                );
+            }
 
             return Arc::new(
                 BulkMemtableBuilder::new(
@@ -360,12 +418,12 @@ impl MemtableBuilderProvider {
                     !dedup, // append_mode: true if not dedup, false if dedup
                     merge_mode,
                 )
-                // Safety: We create the dispatcher if flat_format is enabled.
-                .with_compact_dispatcher(self.compact_dispatcher.clone().unwrap()),
+                .with_compact_dispatcher(self.compact_dispatcher.clone()),
             );
         }
 
-        match options {
+        // The format is not flat.
+        match &options.memtable {
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
                 dedup,
@@ -383,23 +441,15 @@ impl MemtableBuilderProvider {
                     self.write_buffer_manager.clone(),
                 ))
             }
-            None => self.default_memtable_builder(dedup, merge_mode),
+            None => self.default_primary_key_memtable_builder(dedup, merge_mode),
         }
     }
 
-    fn default_memtable_builder(&self, dedup: bool, merge_mode: MergeMode) -> MemtableBuilderRef {
-        if self.config.enable_experimental_flat_format {
-            return Arc::new(
-                BulkMemtableBuilder::new(
-                    self.write_buffer_manager.clone(),
-                    !dedup, // append_mode: true if not dedup, false if dedup
-                    merge_mode,
-                )
-                // Safety: We create the dispatcher if flat_format is enabled.
-                .with_compact_dispatcher(self.compact_dispatcher.clone().unwrap()),
-            );
-        }
-
+    fn default_primary_key_memtable_builder(
+        &self,
+        dedup: bool,
+        merge_mode: MergeMode,
+    ) -> MemtableBuilderRef {
         match &self.config.memtable {
             MemtableConfig::PartitionTree(config) => {
                 let mut config = config.clone();

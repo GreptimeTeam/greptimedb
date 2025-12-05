@@ -78,9 +78,6 @@ metasrv_addrs = ["127.0.0.1:3002"]
 ## Operation timeout.
 timeout = "3s"
 
-## Heartbeat timeout.
-heartbeat_timeout = "500ms"
-
 ## DDL timeout.
 ddl_timeout = "10s"
 
@@ -157,6 +154,13 @@ default_ratio = 1.0
 ## Parallelism of the query engine for query sent by flownode.
 ## Default to 1, so it won't use too much cpu or memory
 parallelism = 1
+
+## Memory pool size for query execution operators (aggregation, sorting, join).
+## Supports absolute size (e.g., "1GB", "2GB") or percentage of system memory (e.g., "20%").
+## Setting it to 0 disables the limit (unbounded, default behavior).
+## When this limit is reached, queries will fail with ResourceExhausted error.
+## NOTE: This does NOT limit memory used by table scans.
+memory_pool_size = "50%"
 
 ## The memory options.
 [memory]

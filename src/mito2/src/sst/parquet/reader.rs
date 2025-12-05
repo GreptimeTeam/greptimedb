@@ -52,13 +52,21 @@ use crate::metrics::{
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
-use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
-use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
-use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
-use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
+use crate::sst::index::bloom_filter::applier::{
+    BloomFilterIndexApplierRef, BloomFilterIndexApplyMetrics,
+};
+use crate::sst::index::fulltext_index::applier::{
+    FulltextIndexApplierRef, FulltextIndexApplyMetrics,
+};
+use crate::sst::index::inverted_index::applier::{
+    InvertedIndexApplierRef, InvertedIndexApplyMetrics,
+};
+use crate::sst::parquet::file_range::{
+    FileRangeContext, FileRangeContextRef, PreFilterMode, row_group_contains_delete,
+};
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
-use crate::sst::parquet::row_group::InMemoryRowGroup;
+use crate::sst::parquet::row_group::{InMemoryRowGroup, ParquetFetchMetrics};
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
@@ -91,7 +99,7 @@ macro_rules! handle_index_error {
 /// Parquet SST reader builder.
 pub struct ParquetReaderBuilder {
     /// SST directory.
-    file_dir: String,
+    table_dir: String,
     /// Path type for generating file paths.
     path_type: PathType,
     file_handle: FileHandle,
@@ -106,9 +114,9 @@ pub struct ParquetReaderBuilder {
     /// Strategy to cache SST data.
     cache_strategy: CacheStrategy,
     /// Index appliers.
-    inverted_index_applier: Option<InvertedIndexApplierRef>,
-    bloom_filter_index_applier: Option<BloomFilterIndexApplierRef>,
-    fulltext_index_applier: Option<FulltextIndexApplierRef>,
+    inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
+    bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
+    fulltext_index_appliers: [Option<FulltextIndexApplierRef>; 2],
     /// Expected metadata of the region while reading the SST.
     /// This is usually the latest metadata of the region. The reader use
     /// it get the correct column id of a column by name.
@@ -117,30 +125,33 @@ pub struct ParquetReaderBuilder {
     flat_format: bool,
     /// Whether this reader is for compaction.
     compaction: bool,
+    /// Mode to pre-filter columns.
+    pre_filter_mode: PreFilterMode,
 }
 
 impl ParquetReaderBuilder {
     /// Returns a new [ParquetReaderBuilder] to read specific SST.
     pub fn new(
-        file_dir: String,
+        table_dir: String,
         path_type: PathType,
         file_handle: FileHandle,
         object_store: ObjectStore,
     ) -> ParquetReaderBuilder {
         ParquetReaderBuilder {
-            file_dir,
+            table_dir,
             path_type,
             file_handle,
             object_store,
             predicate: None,
             projection: None,
             cache_strategy: CacheStrategy::Disabled,
-            inverted_index_applier: None,
-            bloom_filter_index_applier: None,
-            fulltext_index_applier: None,
+            inverted_index_appliers: [None, None],
+            bloom_filter_index_appliers: [None, None],
+            fulltext_index_appliers: [None, None],
             expected_metadata: None,
             flat_format: false,
             compaction: false,
+            pre_filter_mode: PreFilterMode::All,
         }
     }
 
@@ -167,33 +178,33 @@ impl ParquetReaderBuilder {
         self
     }
 
-    /// Attaches the inverted index applier to the builder.
+    /// Attaches the inverted index appliers to the builder.
     #[must_use]
-    pub(crate) fn inverted_index_applier(
+    pub(crate) fn inverted_index_appliers(
         mut self,
-        index_applier: Option<InvertedIndexApplierRef>,
+        index_appliers: [Option<InvertedIndexApplierRef>; 2],
     ) -> Self {
-        self.inverted_index_applier = index_applier;
+        self.inverted_index_appliers = index_appliers;
         self
     }
 
-    /// Attaches the bloom filter index applier to the builder.
+    /// Attaches the bloom filter index appliers to the builder.
     #[must_use]
-    pub(crate) fn bloom_filter_index_applier(
+    pub(crate) fn bloom_filter_index_appliers(
         mut self,
-        index_applier: Option<BloomFilterIndexApplierRef>,
+        index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
     ) -> Self {
-        self.bloom_filter_index_applier = index_applier;
+        self.bloom_filter_index_appliers = index_appliers;
         self
     }
 
-    /// Attaches the fulltext index applier to the builder.
+    /// Attaches the fulltext index appliers to the builder.
     #[must_use]
-    pub(crate) fn fulltext_index_applier(
+    pub(crate) fn fulltext_index_appliers(
         mut self,
-        index_applier: Option<FulltextIndexApplierRef>,
+        index_appliers: [Option<FulltextIndexApplierRef>; 2],
     ) -> Self {
-        self.fulltext_index_applier = index_applier;
+        self.fulltext_index_appliers = index_appliers;
         self
     }
 
@@ -218,6 +229,13 @@ impl ParquetReaderBuilder {
         self
     }
 
+    /// Sets the pre-filter mode.
+    #[must_use]
+    pub(crate) fn pre_filter_mode(mut self, pre_filter_mode: PreFilterMode) -> Self {
+        self.pre_filter_mode = pre_filter_mode;
+        self
+    }
+
     /// Builds a [ParquetReader].
     ///
     /// This needs to perform IO operation.
@@ -237,11 +255,13 @@ impl ParquetReaderBuilder {
     ) -> Result<(FileRangeContext, RowGroupSelection)> {
         let start = Instant::now();
 
-        let file_path = self.file_handle.file_path(&self.file_dir, self.path_type);
+        let file_path = self.file_handle.file_path(&self.table_dir, self.path_type);
         let file_size = self.file_handle.meta_ref().file_size;
 
         // Loads parquet metadata of the file.
-        let parquet_meta = self.read_parquet_metadata(&file_path, file_size).await?;
+        let parquet_meta = self
+            .read_parquet_metadata(&file_path, file_size, &mut metrics.metadata_cache_metrics)
+            .await?;
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
         // Gets the metadata stored in the SST.
@@ -321,7 +341,13 @@ impl ParquetReaderBuilder {
 
         let codec = build_primary_key_codec(read_format.metadata());
 
-        let context = FileRangeContext::new(reader_builder, filters, read_format, codec);
+        let context = FileRangeContext::new(
+            reader_builder,
+            filters,
+            read_format,
+            codec,
+            self.pre_filter_mode,
+        );
 
         metrics.build_cost += start.elapsed();
 
@@ -360,25 +386,34 @@ impl ParquetReaderBuilder {
         &self,
         file_path: &str,
         file_size: u64,
+        cache_metrics: &mut MetadataCacheMetrics,
     ) -> Result<Arc<ParquetMetaData>> {
+        let start = Instant::now();
         let _t = READ_STAGE_ELAPSED
             .with_label_values(&["read_parquet_metadata"])
             .start_timer();
 
         let file_id = self.file_handle.file_id();
-        // Tries to get from global cache.
-        if let Some(metadata) = self.cache_strategy.get_parquet_meta_data(file_id).await {
+        // Tries to get from cache with metrics tracking.
+        if let Some(metadata) = self
+            .cache_strategy
+            .get_parquet_meta_data(file_id, cache_metrics)
+            .await
+        {
+            cache_metrics.metadata_load_cost += start.elapsed();
             return Ok(metadata);
         }
 
         // Cache miss, load metadata directly.
         let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);
         let metadata = metadata_loader.load().await?;
+
         let metadata = Arc::new(metadata);
         // Cache the metadata.
         self.cache_strategy
             .put_parquet_meta_data(file_id, metadata.clone());
 
+        cache_metrics.metadata_load_cost += start.elapsed();
         Ok(metadata)
     }
 
@@ -407,7 +442,16 @@ impl ParquetReaderBuilder {
 
         let mut output = RowGroupSelection::new(row_group_size, num_rows as _);
 
-        self.prune_row_groups_by_minmax(read_format, parquet_meta, &mut output, metrics);
+        // Compute skip_fields once for all pruning operations
+        let skip_fields = self.compute_skip_fields(parquet_meta);
+
+        self.prune_row_groups_by_minmax(
+            read_format,
+            parquet_meta,
+            &mut output,
+            metrics,
+            skip_fields,
+        );
         if output.is_empty() {
             return output;
         }
@@ -418,6 +462,7 @@ impl ParquetReaderBuilder {
                 num_row_groups,
                 &mut output,
                 metrics,
+                skip_fields,
             )
             .await;
         if output.is_empty() {
@@ -429,14 +474,21 @@ impl ParquetReaderBuilder {
             num_row_groups,
             &mut output,
             metrics,
+            skip_fields,
         )
         .await;
         if output.is_empty() {
             return output;
         }
 
-        self.prune_row_groups_by_bloom_filter(row_group_size, parquet_meta, &mut output, metrics)
-            .await;
+        self.prune_row_groups_by_bloom_filter(
+            row_group_size,
+            parquet_meta,
+            &mut output,
+            metrics,
+            skip_fields,
+        )
+        .await;
         if output.is_empty() {
             return output;
         }
@@ -447,6 +499,7 @@ impl ParquetReaderBuilder {
                 parquet_meta,
                 &mut output,
                 metrics,
+                skip_fields,
             )
             .await;
         }
@@ -460,50 +513,65 @@ impl ParquetReaderBuilder {
         num_row_groups: usize,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
+        skip_fields: bool,
     ) -> bool {
-        let Some(index_applier) = &self.fulltext_index_applier else {
-            return false;
-        };
         if !self.file_handle.meta_ref().fulltext_index_available() {
             return false;
         }
 
-        let predicate_key = index_applier.predicate_key();
-        // Fast path: return early if the result is in the cache.
-        let cached = self
-            .cache_strategy
-            .index_result_cache()
-            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
-        if let Some(result) = cached.as_ref()
-            && all_required_row_groups_searched(output, result)
-        {
-            apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
-            return true;
-        }
-
-        // Slow path: apply the index from the file.
-        let file_size_hint = self.file_handle.meta_ref().index_file_size();
-        let apply_res = index_applier
-            .apply_fine(self.file_handle.file_id(), Some(file_size_hint))
-            .await;
-        let selection = match apply_res {
-            Ok(Some(res)) => RowGroupSelection::from_row_ids(res, row_group_size, num_row_groups),
-            Ok(None) => return false,
-            Err(err) => {
-                handle_index_error!(err, self.file_handle, INDEX_TYPE_FULLTEXT);
-                return false;
-            }
+        let mut pruned = false;
+        // If skip_fields is true, only apply the first applier (for tags).
+        let appliers = if skip_fields {
+            &self.fulltext_index_appliers[..1]
+        } else {
+            &self.fulltext_index_appliers[..]
         };
+        for index_applier in appliers.iter().flatten() {
+            let predicate_key = index_applier.predicate_key();
+            // Fast path: return early if the result is in the cache.
+            let cached = self
+                .cache_strategy
+                .index_result_cache()
+                .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
+            if let Some(result) = cached.as_ref()
+                && all_required_row_groups_searched(output, result)
+            {
+                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+                pruned = true;
+                continue;
+            }
 
-        self.apply_index_result_and_update_cache(
-            predicate_key,
-            self.file_handle.file_id().file_id(),
-            selection,
-            output,
-            metrics,
-            INDEX_TYPE_FULLTEXT,
-        );
-        true
+            // Slow path: apply the index from the file.
+            let file_size_hint = self.file_handle.meta_ref().index_file_size();
+            let apply_res = index_applier
+                .apply_fine(
+                    self.file_handle.file_id(),
+                    Some(file_size_hint),
+                    metrics.fulltext_index_apply_metrics.as_mut(),
+                )
+                .await;
+            let selection = match apply_res {
+                Ok(Some(res)) => {
+                    RowGroupSelection::from_row_ids(res, row_group_size, num_row_groups)
+                }
+                Ok(None) => continue,
+                Err(err) => {
+                    handle_index_error!(err, self.file_handle, INDEX_TYPE_FULLTEXT);
+                    continue;
+                }
+            };
+
+            self.apply_index_result_and_update_cache(
+                predicate_key,
+                self.file_handle.file_id().file_id(),
+                selection,
+                output,
+                metrics,
+                INDEX_TYPE_FULLTEXT,
+            );
+            pruned = true;
+        }
+        pruned
     }
 
     /// Applies index to prune row groups.
@@ -517,53 +585,66 @@ impl ParquetReaderBuilder {
         num_row_groups: usize,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
+        skip_fields: bool,
     ) -> bool {
-        let Some(index_applier) = &self.inverted_index_applier else {
-            return false;
-        };
         if !self.file_handle.meta_ref().inverted_index_available() {
             return false;
         }
 
-        let predicate_key = index_applier.predicate_key();
-        // Fast path: return early if the result is in the cache.
-        let cached = self
-            .cache_strategy
-            .index_result_cache()
-            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
-        if let Some(result) = cached.as_ref()
-            && all_required_row_groups_searched(output, result)
-        {
-            apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_INVERTED);
-            return true;
-        }
-
-        // Slow path: apply the index from the file.
-        let file_size_hint = self.file_handle.meta_ref().index_file_size();
-        let apply_res = index_applier
-            .apply(self.file_handle.file_id(), Some(file_size_hint))
-            .await;
-        let selection = match apply_res {
-            Ok(output) => RowGroupSelection::from_inverted_index_apply_output(
-                row_group_size,
-                num_row_groups,
-                output,
-            ),
-            Err(err) => {
-                handle_index_error!(err, self.file_handle, INDEX_TYPE_INVERTED);
-                return false;
-            }
+        let mut pruned = false;
+        // If skip_fields is true, only apply the first applier (for tags).
+        let appliers = if skip_fields {
+            &self.inverted_index_appliers[..1]
+        } else {
+            &self.inverted_index_appliers[..]
         };
+        for index_applier in appliers.iter().flatten() {
+            let predicate_key = index_applier.predicate_key();
+            // Fast path: return early if the result is in the cache.
+            let cached = self
+                .cache_strategy
+                .index_result_cache()
+                .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
+            if let Some(result) = cached.as_ref()
+                && all_required_row_groups_searched(output, result)
+            {
+                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_INVERTED);
+                pruned = true;
+                continue;
+            }
 
-        self.apply_index_result_and_update_cache(
-            predicate_key,
-            self.file_handle.file_id().file_id(),
-            selection,
-            output,
-            metrics,
-            INDEX_TYPE_INVERTED,
-        );
-        true
+            // Slow path: apply the index from the file.
+            let file_size_hint = self.file_handle.meta_ref().index_file_size();
+            let apply_res = index_applier
+                .apply(
+                    self.file_handle.file_id(),
+                    Some(file_size_hint),
+                    metrics.inverted_index_apply_metrics.as_mut(),
+                )
+                .await;
+            let selection = match apply_res {
+                Ok(apply_output) => RowGroupSelection::from_inverted_index_apply_output(
+                    row_group_size,
+                    num_row_groups,
+                    apply_output,
+                ),
+                Err(err) => {
+                    handle_index_error!(err, self.file_handle, INDEX_TYPE_INVERTED);
+                    continue;
+                }
+            };
+
+            self.apply_index_result_and_update_cache(
+                predicate_key,
+                self.file_handle.file_id().file_id(),
+                selection,
+                output,
+                metrics,
+                INDEX_TYPE_INVERTED,
+            );
+            pruned = true;
+        }
+        pruned
     }
 
     async fn prune_row_groups_by_bloom_filter(
@@ -572,65 +653,81 @@ impl ParquetReaderBuilder {
         parquet_meta: &ParquetMetaData,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
+        skip_fields: bool,
     ) -> bool {
-        let Some(index_applier) = &self.bloom_filter_index_applier else {
-            return false;
-        };
         if !self.file_handle.meta_ref().bloom_filter_index_available() {
             return false;
         }
 
-        let predicate_key = index_applier.predicate_key();
-        // Fast path: return early if the result is in the cache.
-        let cached = self
-            .cache_strategy
-            .index_result_cache()
-            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
-        if let Some(result) = cached.as_ref()
-            && all_required_row_groups_searched(output, result)
-        {
-            apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_BLOOM);
-            return true;
-        }
-
-        // Slow path: apply the index from the file.
-        let file_size_hint = self.file_handle.meta_ref().index_file_size();
-        let rgs = parquet_meta.row_groups().iter().enumerate().map(|(i, rg)| {
-            (
-                rg.num_rows() as usize,
-                // Optimize: only search the row group that required by `output` and not stored in `cached`.
-                output.contains_non_empty_row_group(i)
-                    && cached
-                        .as_ref()
-                        .map(|c| !c.contains_row_group(i))
-                        .unwrap_or(true),
-            )
-        });
-        let apply_res = index_applier
-            .apply(self.file_handle.file_id(), Some(file_size_hint), rgs)
-            .await;
-        let mut selection = match apply_res {
-            Ok(apply_output) => RowGroupSelection::from_row_ranges(apply_output, row_group_size),
-            Err(err) => {
-                handle_index_error!(err, self.file_handle, INDEX_TYPE_BLOOM);
-                return false;
-            }
+        let mut pruned = false;
+        // If skip_fields is true, only apply the first applier (for tags).
+        let appliers = if skip_fields {
+            &self.bloom_filter_index_appliers[..1]
+        } else {
+            &self.bloom_filter_index_appliers[..]
         };
+        for index_applier in appliers.iter().flatten() {
+            let predicate_key = index_applier.predicate_key();
+            // Fast path: return early if the result is in the cache.
+            let cached = self
+                .cache_strategy
+                .index_result_cache()
+                .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
+            if let Some(result) = cached.as_ref()
+                && all_required_row_groups_searched(output, result)
+            {
+                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_BLOOM);
+                pruned = true;
+                continue;
+            }
 
-        // New searched row groups are added to `selection`, concat them with `cached`.
-        if let Some(cached) = cached.as_ref() {
-            selection.concat(cached);
+            // Slow path: apply the index from the file.
+            let file_size_hint = self.file_handle.meta_ref().index_file_size();
+            let rgs = parquet_meta.row_groups().iter().enumerate().map(|(i, rg)| {
+                (
+                    rg.num_rows() as usize,
+                    // Optimize: only search the row group that required by `output` and not stored in `cached`.
+                    output.contains_non_empty_row_group(i)
+                        && cached
+                            .as_ref()
+                            .map(|c| !c.contains_row_group(i))
+                            .unwrap_or(true),
+                )
+            });
+            let apply_res = index_applier
+                .apply(
+                    self.file_handle.file_id(),
+                    Some(file_size_hint),
+                    rgs,
+                    metrics.bloom_filter_apply_metrics.as_mut(),
+                )
+                .await;
+            let mut selection = match apply_res {
+                Ok(apply_output) => {
+                    RowGroupSelection::from_row_ranges(apply_output, row_group_size)
+                }
+                Err(err) => {
+                    handle_index_error!(err, self.file_handle, INDEX_TYPE_BLOOM);
+                    continue;
+                }
+            };
+
+            // New searched row groups are added to `selection`, concat them with `cached`.
+            if let Some(cached) = cached.as_ref() {
+                selection.concat(cached);
+            }
+
+            self.apply_index_result_and_update_cache(
+                predicate_key,
+                self.file_handle.file_id().file_id(),
+                selection,
+                output,
+                metrics,
+                INDEX_TYPE_BLOOM,
+            );
+            pruned = true;
         }
-
-        self.apply_index_result_and_update_cache(
-            predicate_key,
-            self.file_handle.file_id().file_id(),
-            selection,
-            output,
-            metrics,
-            INDEX_TYPE_BLOOM,
-        );
-        true
+        pruned
     }
 
     async fn prune_row_groups_by_fulltext_bloom(
@@ -639,68 +736,101 @@ impl ParquetReaderBuilder {
         parquet_meta: &ParquetMetaData,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
+        skip_fields: bool,
     ) -> bool {
-        let Some(index_applier) = &self.fulltext_index_applier else {
-            return false;
-        };
         if !self.file_handle.meta_ref().fulltext_index_available() {
             return false;
         }
 
-        let predicate_key = index_applier.predicate_key();
-        // Fast path: return early if the result is in the cache.
-        let cached = self
-            .cache_strategy
-            .index_result_cache()
-            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
-        if let Some(result) = cached.as_ref()
-            && all_required_row_groups_searched(output, result)
-        {
-            apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
-            return true;
-        }
-
-        // Slow path: apply the index from the file.
-        let file_size_hint = self.file_handle.meta_ref().index_file_size();
-        let rgs = parquet_meta.row_groups().iter().enumerate().map(|(i, rg)| {
-            (
-                rg.num_rows() as usize,
-                // Optimize: only search the row group that required by `output` and not stored in `cached`.
-                output.contains_non_empty_row_group(i)
-                    && cached
-                        .as_ref()
-                        .map(|c| !c.contains_row_group(i))
-                        .unwrap_or(true),
-            )
-        });
-        let apply_res = index_applier
-            .apply_coarse(self.file_handle.file_id(), Some(file_size_hint), rgs)
-            .await;
-        let mut selection = match apply_res {
-            Ok(Some(apply_output)) => {
-                RowGroupSelection::from_row_ranges(apply_output, row_group_size)
-            }
-            Ok(None) => return false,
-            Err(err) => {
-                handle_index_error!(err, self.file_handle, INDEX_TYPE_FULLTEXT);
-                return false;
-            }
+        let mut pruned = false;
+        // If skip_fields is true, only apply the first applier (for tags).
+        let appliers = if skip_fields {
+            &self.fulltext_index_appliers[..1]
+        } else {
+            &self.fulltext_index_appliers[..]
         };
+        for index_applier in appliers.iter().flatten() {
+            let predicate_key = index_applier.predicate_key();
+            // Fast path: return early if the result is in the cache.
+            let cached = self
+                .cache_strategy
+                .index_result_cache()
+                .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
+            if let Some(result) = cached.as_ref()
+                && all_required_row_groups_searched(output, result)
+            {
+                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+                pruned = true;
+                continue;
+            }
 
-        // New searched row groups are added to `selection`, concat them with `cached`.
-        if let Some(cached) = cached.as_ref() {
-            selection.concat(cached);
+            // Slow path: apply the index from the file.
+            let file_size_hint = self.file_handle.meta_ref().index_file_size();
+            let rgs = parquet_meta.row_groups().iter().enumerate().map(|(i, rg)| {
+                (
+                    rg.num_rows() as usize,
+                    // Optimize: only search the row group that required by `output` and not stored in `cached`.
+                    output.contains_non_empty_row_group(i)
+                        && cached
+                            .as_ref()
+                            .map(|c| !c.contains_row_group(i))
+                            .unwrap_or(true),
+                )
+            });
+            let apply_res = index_applier
+                .apply_coarse(
+                    self.file_handle.file_id(),
+                    Some(file_size_hint),
+                    rgs,
+                    metrics.fulltext_index_apply_metrics.as_mut(),
+                )
+                .await;
+            let mut selection = match apply_res {
+                Ok(Some(apply_output)) => {
+                    RowGroupSelection::from_row_ranges(apply_output, row_group_size)
+                }
+                Ok(None) => continue,
+                Err(err) => {
+                    handle_index_error!(err, self.file_handle, INDEX_TYPE_FULLTEXT);
+                    continue;
+                }
+            };
+
+            // New searched row groups are added to `selection`, concat them with `cached`.
+            if let Some(cached) = cached.as_ref() {
+                selection.concat(cached);
+            }
+
+            self.apply_index_result_and_update_cache(
+                predicate_key,
+                self.file_handle.file_id().file_id(),
+                selection,
+                output,
+                metrics,
+                INDEX_TYPE_FULLTEXT,
+            );
+            pruned = true;
         }
+        pruned
+    }
 
-        self.apply_index_result_and_update_cache(
-            predicate_key,
-            self.file_handle.file_id().file_id(),
-            selection,
-            output,
-            metrics,
-            INDEX_TYPE_FULLTEXT,
-        );
-        true
+    /// Computes whether to skip field columns when building statistics based on PreFilterMode.
+    fn compute_skip_fields(&self, parquet_meta: &ParquetMetaData) -> bool {
+        match self.pre_filter_mode {
+            PreFilterMode::All => false,
+            PreFilterMode::SkipFields => true,
+            PreFilterMode::SkipFieldsOnDelete => {
+                // Check if any row group contains delete op
+                let file_path = self.file_handle.file_path(&self.table_dir, self.path_type);
+                (0..parquet_meta.num_row_groups()).any(|rg_idx| {
+                    row_group_contains_delete(parquet_meta, rg_idx, &file_path)
+                        .inspect_err(|e| {
+                            warn!(e; "Failed to decode min value of op_type, fallback to not skipping fields");
+                        })
+                        .unwrap_or(false)
+                })
+            }
+        }
     }
 
     /// Prunes row groups by min-max index.
@@ -710,6 +840,7 @@ impl ParquetReaderBuilder {
         parquet_meta: &ParquetMetaData,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
+        skip_fields: bool,
     ) -> bool {
         let Some(predicate) = &self.predicate else {
             return false;
@@ -719,8 +850,12 @@ impl ParquetReaderBuilder {
 
         let region_meta = read_format.metadata();
         let row_groups = parquet_meta.row_groups();
-        let stats =
-            RowGroupPruningStats::new(row_groups, read_format, self.expected_metadata.clone());
+        let stats = RowGroupPruningStats::new(
+            row_groups,
+            read_format,
+            self.expected_metadata.clone(),
+            skip_fields,
+        );
         let prune_schema = self
             .expected_metadata
             .as_ref()
@@ -792,7 +927,7 @@ fn all_required_row_groups_searched(
 }
 
 /// Metrics of filtering rows groups and rows.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ReaderFilterMetrics {
     /// Number of row groups before filtering.
     pub(crate) rg_total: usize,
@@ -815,6 +950,13 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) rows_bloom_filtered: usize,
     /// Number of rows filtered by precise filter.
     pub(crate) rows_precise_filtered: usize,
+
+    /// Optional metrics for inverted index applier.
+    pub(crate) inverted_index_apply_metrics: Option<InvertedIndexApplyMetrics>,
+    /// Optional metrics for bloom filter index applier.
+    pub(crate) bloom_filter_apply_metrics: Option<BloomFilterIndexApplyMetrics>,
+    /// Optional metrics for fulltext index applier.
+    pub(crate) fulltext_index_apply_metrics: Option<FulltextIndexApplyMetrics>,
 }
 
 impl ReaderFilterMetrics {
@@ -831,6 +973,23 @@ impl ReaderFilterMetrics {
         self.rows_inverted_filtered += other.rows_inverted_filtered;
         self.rows_bloom_filtered += other.rows_bloom_filtered;
         self.rows_precise_filtered += other.rows_precise_filtered;
+
+        // Merge optional applier metrics
+        if let Some(other_metrics) = &other.inverted_index_apply_metrics {
+            self.inverted_index_apply_metrics
+                .get_or_insert_with(Default::default)
+                .merge_from(other_metrics);
+        }
+        if let Some(other_metrics) = &other.bloom_filter_apply_metrics {
+            self.bloom_filter_apply_metrics
+                .get_or_insert_with(Default::default)
+                .merge_from(other_metrics);
+        }
+        if let Some(other_metrics) = &other.fulltext_index_apply_metrics {
+            self.fulltext_index_apply_metrics
+                .get_or_insert_with(Default::default)
+                .merge_from(other_metrics);
+        }
     }
 
     /// Reports metrics.
@@ -887,6 +1046,64 @@ impl ReaderFilterMetrics {
     }
 }
 
+/// Metrics for parquet metadata cache operations.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct MetadataCacheMetrics {
+    /// Number of memory cache hits for parquet metadata.
+    pub(crate) mem_cache_hit: usize,
+    /// Number of file cache hits for parquet metadata.
+    pub(crate) file_cache_hit: usize,
+    /// Number of cache misses for parquet metadata.
+    pub(crate) cache_miss: usize,
+    /// Duration to load parquet metadata.
+    pub(crate) metadata_load_cost: Duration,
+}
+
+impl std::fmt::Debug for MetadataCacheMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            mem_cache_hit,
+            file_cache_hit,
+            cache_miss,
+            metadata_load_cost,
+        } = self;
+
+        if self.is_empty() {
+            return write!(f, "{{}}");
+        }
+        write!(f, "{{")?;
+
+        write!(f, "\"metadata_load_cost\":\"{:?}\"", metadata_load_cost)?;
+
+        if *mem_cache_hit > 0 {
+            write!(f, ", \"mem_cache_hit\":{}", mem_cache_hit)?;
+        }
+        if *file_cache_hit > 0 {
+            write!(f, ", \"file_cache_hit\":{}", file_cache_hit)?;
+        }
+        if *cache_miss > 0 {
+            write!(f, ", \"cache_miss\":{}", cache_miss)?;
+        }
+
+        write!(f, "}}")
+    }
+}
+
+impl MetadataCacheMetrics {
+    /// Returns true if the metrics are empty (contain no meaningful data).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.metadata_load_cost.is_zero()
+    }
+
+    /// Adds `other` metrics to this metrics.
+    pub(crate) fn merge_from(&mut self, other: &MetadataCacheMetrics) {
+        self.mem_cache_hit += other.mem_cache_hit;
+        self.file_cache_hit += other.file_cache_hit;
+        self.cache_miss += other.cache_miss;
+        self.metadata_load_cost += other.metadata_load_cost;
+    }
+}
+
 /// Parquet reader metrics.
 #[derive(Debug, Default, Clone)]
 pub struct ReaderMetrics {
@@ -902,6 +1119,10 @@ pub struct ReaderMetrics {
     pub(crate) num_batches: usize,
     /// Number of rows read.
     pub(crate) num_rows: usize,
+    /// Metrics for parquet metadata cache.
+    pub(crate) metadata_cache_metrics: MetadataCacheMetrics,
+    /// Optional metrics for page/row group fetch operations.
+    pub(crate) fetch_metrics: Option<Arc<ParquetFetchMetrics>>,
 }
 
 impl ReaderMetrics {
@@ -913,6 +1134,15 @@ impl ReaderMetrics {
         self.num_record_batches += other.num_record_batches;
         self.num_batches += other.num_batches;
         self.num_rows += other.num_rows;
+        self.metadata_cache_metrics
+            .merge_from(&other.metadata_cache_metrics);
+        if let Some(other_fetch) = &other.fetch_metrics {
+            if let Some(self_fetch) = &self.fetch_metrics {
+                self_fetch.merge_from(other_fetch);
+            } else {
+                self.fetch_metrics = Some(other_fetch.clone());
+            }
+        }
     }
 
     /// Reports total rows.
@@ -967,7 +1197,10 @@ impl RowGroupReaderBuilder {
         &self,
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
+        fetch_metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<ParquetRecordBatchReader> {
+        let fetch_start = Instant::now();
+
         let mut row_group = InMemoryRowGroup::create(
             self.file_handle.region_id(),
             self.file_handle.file_id().file_id(),
@@ -979,11 +1212,16 @@ impl RowGroupReaderBuilder {
         );
         // Fetches data into memory.
         row_group
-            .fetch(&self.projection, row_selection.as_ref())
+            .fetch(&self.projection, row_selection.as_ref(), fetch_metrics)
             .await
             .context(ReadParquetSnafu {
                 path: &self.file_path,
             })?;
+
+        // Record total fetch elapsed time.
+        if let Some(metrics) = fetch_metrics {
+            metrics.data.lock().unwrap().total_fetch_elapsed += fetch_start.elapsed();
+        }
 
         // Builds the parquet reader.
         // Now the row selection is None.
@@ -1128,6 +1366,8 @@ pub struct ParquetReader {
     selection: RowGroupSelection,
     /// Reader of current row group.
     reader_state: ReaderState,
+    /// Metrics for tracking row group fetch operations.
+    fetch_metrics: ParquetFetchMetrics,
 }
 
 #[async_trait]
@@ -1147,14 +1387,20 @@ impl BatchReader for ParquetReader {
             let parquet_reader = self
                 .context
                 .reader_builder()
-                .build(row_group_idx, Some(row_selection))
+                .build(
+                    row_group_idx,
+                    Some(row_selection),
+                    Some(&self.fetch_metrics),
+                )
                 .await?;
 
             // Resets the parquet reader.
-            reader.reset_source(Source::RowGroup(RowGroupReader::new(
-                self.context.clone(),
-                parquet_reader,
-            )));
+            // Compute skip_fields for this row group
+            let skip_fields = self.context.should_skip_fields(row_group_idx);
+            reader.reset_source(
+                Source::RowGroup(RowGroupReader::new(self.context.clone(), parquet_reader)),
+                skip_fields,
+            );
             if let Some(batch) = reader.next_batch().await? {
                 return Ok(Some(batch));
             }
@@ -1201,15 +1447,19 @@ impl ParquetReader {
         context: FileRangeContextRef,
         mut selection: RowGroupSelection,
     ) -> Result<Self> {
+        let fetch_metrics = ParquetFetchMetrics::default();
         // No more items in current row group, reads next row group.
         let reader_state = if let Some((row_group_idx, row_selection)) = selection.pop_first() {
             let parquet_reader = context
                 .reader_builder()
-                .build(row_group_idx, Some(row_selection))
+                .build(row_group_idx, Some(row_selection), Some(&fetch_metrics))
                 .await?;
+            // Compute skip_fields once for this row group
+            let skip_fields = context.should_skip_fields(row_group_idx);
             ReaderState::Readable(PruneReader::new_with_row_group_reader(
                 context.clone(),
                 RowGroupReader::new(context.clone(), parquet_reader),
+                skip_fields,
             ))
         } else {
             ReaderState::Exhausted(ReaderMetrics::default())
@@ -1219,6 +1469,7 @@ impl ParquetReader {
             context,
             selection,
             reader_state,
+            fetch_metrics,
         })
     }
 
@@ -1227,7 +1478,6 @@ impl ParquetReader {
         self.context.read_format().metadata()
     }
 
-    #[cfg(test)]
     pub fn parquet_metadata(&self) -> Arc<ParquetMetaData> {
         self.context.reader_builder().parquet_meta.clone()
     }
@@ -1397,6 +1647,7 @@ impl FlatRowGroupReader {
                 let record_batch = batch_result.context(ArrowReaderSnafu {
                     path: self.context.file_path(),
                 })?;
+
                 // Safety: Only flat format use FlatRowGroupReader.
                 let flat_format = self.context.read_format().as_flat().unwrap();
                 let record_batch =

@@ -75,4 +75,20 @@ lazy_static! {
         &[RESULT_TYPE]
     )
     .unwrap();
+
+    /// Total count of failed region server requests.
+    pub static ref REGION_SERVER_REQUEST_FAILURE_COUNT: IntCounterVec = register_int_counter_vec!(
+        "greptime_datanode_region_request_fail_count",
+        "failed region server requests count",
+        &[REGION_REQUEST_TYPE]
+    )
+    .unwrap();
+
+    /// Total count of failed insert requests to region server.
+    pub static ref REGION_SERVER_INSERT_FAIL_COUNT: IntCounterVec = register_int_counter_vec!(
+        "greptime_datanode_region_failed_insert_count",
+        "failed region server insert requests count",
+        &[REGION_REQUEST_TYPE]
+    )
+    .unwrap();
 }

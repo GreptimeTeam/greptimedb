@@ -20,12 +20,12 @@ use std::time::Instant;
 
 use api::helper::{
     ColumnDataTypeWrapper, is_column_type_value_eq, is_semantic_type_eq, proto_value_type,
-    to_proto_value,
 };
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value, WriteHint};
 use common_telemetry::info;
 use datatypes::prelude::DataType;
+use partition::expr::PartitionExpr;
 use prometheus::HistogramTimer;
 use prost::Message;
 use smallvec::SmallVec;
@@ -35,21 +35,24 @@ use store_api::codec::{PrimaryKeyEncoding, infer_primary_key_encoding_from_hint}
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
-    AffectedRows, RegionAlterRequest, RegionBulkInsertsRequest, RegionCatchupRequest,
-    RegionCloseRequest, RegionCompactRequest, RegionCreateRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    AffectedRows, EnterStagingRequest, RegionAlterRequest, RegionBuildIndexRequest,
+    RegionBulkInsertsRequest, RegionCatchupRequest, RegionCloseRequest, RegionCompactRequest,
+    RegionCreateRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
+    RegionTruncateRequest,
 };
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::{
     CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
-    FlushRegionSnafu, InvalidRequestSnafu, Result, UnexpectedSnafu,
+    FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, MissingPartitionExprSnafu,
+    Result, UnexpectedSnafu,
 };
-use crate::manifest::action::{RegionEdit, TruncateKind};
+use crate::manifest::action::{RegionEdit, RegionManifest, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
+use crate::region::options::RegionOptions;
 use crate::sst::file::FileMeta;
 use crate::sst::index::IndexBuildType;
 use crate::wal::EntryId;
@@ -411,7 +414,7 @@ impl WriteRequest {
         };
 
         // Convert default value into proto's value.
-        Ok(to_proto_value(default_value))
+        Ok(api::helper::to_grpc_value(default_value))
     }
 }
 
@@ -593,19 +596,19 @@ pub(crate) enum WorkerRequest {
     /// Keep the manifest of a region up to date.
     SyncRegion(RegionSyncRequest),
 
-    /// Build indexes of a region.
-    #[allow(dead_code)]
-    BuildIndexRegion(RegionBuildIndexRequest),
-
     /// Bulk inserts request and region metadata.
     BulkInserts {
         metadata: Option<RegionMetadataRef>,
         request: RegionBulkInsertsRequest,
         sender: OptionOutputTx,
     },
+
+    /// Remap manifests request.
+    RemapManifests(RemapManifestsRequest),
 }
 
 impl WorkerRequest {
+    /// Creates a new open region request.
     pub(crate) fn new_open_region_request(
         region_id: RegionId,
         request: RegionOpenRequest,
@@ -619,6 +622,21 @@ impl WorkerRequest {
             request: DdlRequest::Open((request, entry_receiver)),
         });
 
+        (worker_request, receiver)
+    }
+
+    /// Creates a new catchup region request.
+    pub(crate) fn new_catchup_region_request(
+        region_id: RegionId,
+        request: RegionCatchupRequest,
+        entry_receiver: Option<WalEntryReceiver>,
+    ) -> (WorkerRequest, Receiver<Result<AffectedRows>>) {
+        let (sender, receiver) = oneshot::channel();
+        let worker_request = WorkerRequest::Ddl(SenderDdlRequest {
+            region_id,
+            sender: sender.into(),
+            request: DdlRequest::Catchup((request, entry_receiver)),
+        });
         (worker_request, receiver)
     }
 
@@ -646,7 +664,8 @@ impl WorkerRequest {
             }
             RegionRequest::Delete(v) => {
                 let mut write_request =
-                    WriteRequest::new(region_id, OpType::Delete, v.rows, region_metadata.clone())?;
+                    WriteRequest::new(region_id, OpType::Delete, v.rows, region_metadata.clone())?
+                        .with_hint(v.hint);
                 if write_request.primary_key_encoding() == PrimaryKeyEncoding::Dense
                     && let Some(region_metadata) = &region_metadata
                 {
@@ -692,6 +711,11 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Compact(v),
             }),
+            RegionRequest::BuildIndex(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: sender.into(),
+                request: DdlRequest::BuildIndex(v),
+            }),
             RegionRequest::Truncate(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
@@ -700,7 +724,12 @@ impl WorkerRequest {
             RegionRequest::Catchup(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
-                request: DdlRequest::Catchup(v),
+                request: DdlRequest::Catchup((v, None)),
+            }),
+            RegionRequest::EnterStaging(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: sender.into(),
+                request: DdlRequest::EnterStaging(v),
             }),
             RegionRequest::BulkInserts(region_bulk_inserts_request) => WorkerRequest::BulkInserts {
                 metadata: region_metadata,
@@ -742,6 +771,48 @@ impl WorkerRequest {
             receiver,
         )
     }
+
+    /// Converts [RemapManifestsRequest] from a [RemapManifestsRequest](store_api::region_engine::RemapManifestsRequest).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the partition expression is invalid or missing.
+    /// Returns an error if the new partition expressions are not found for some regions.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn try_from_remap_manifests_request(
+        store_api::region_engine::RemapManifestsRequest {
+            region_id,
+            input_regions,
+            region_mapping,
+            new_partition_exprs,
+        }: store_api::region_engine::RemapManifestsRequest,
+    ) -> Result<(
+        WorkerRequest,
+        Receiver<Result<HashMap<RegionId, RegionManifest>>>,
+    )> {
+        let (sender, receiver) = oneshot::channel();
+        let new_partition_exprs = new_partition_exprs
+            .into_iter()
+            .map(|(k, v)| {
+                Ok((
+                    k,
+                    PartitionExpr::from_json_str(&v)
+                        .context(InvalidPartitionExprSnafu { expr: v })?
+                        .context(MissingPartitionExprSnafu { region_id: k })?,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+
+        let request = RemapManifestsRequest {
+            region_id,
+            input_regions,
+            region_mapping,
+            new_partition_exprs,
+            sender,
+        };
+
+        Ok((WorkerRequest::RemapManifests(request), receiver))
+    }
 }
 
 /// DDL request to a region.
@@ -754,8 +825,10 @@ pub(crate) enum DdlRequest {
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
+    BuildIndex(RegionBuildIndexRequest),
     Truncate(RegionTruncateRequest),
-    Catchup(RegionCatchupRequest),
+    Catchup((RegionCatchupRequest, Option<WalEntryReceiver>)),
+    EnterStaging(EnterStagingRequest),
 }
 
 /// Sender and Ddl request.
@@ -778,8 +851,9 @@ pub(crate) enum BackgroundNotify {
     FlushFailed(FlushFailed),
     /// Index build has finished.
     IndexBuildFinished(IndexBuildFinished),
+    /// Index build has been stopped (aborted or succeeded).
+    IndexBuildStopped(IndexBuildStopped),
     /// Index build has failed.
-    #[allow(dead_code)]
     IndexBuildFailed(IndexBuildFailed),
     /// Compaction has finished.
     CompactionFinished(CompactionFinished),
@@ -791,6 +865,8 @@ pub(crate) enum BackgroundNotify {
     RegionChange(RegionChangeResult),
     /// Region edit result.
     RegionEdit(RegionEditResult),
+    /// Enter staging result.
+    EnterStaging(EnterStagingResult),
 }
 
 /// Notifies a flush job is finished.
@@ -808,6 +884,8 @@ pub(crate) struct FlushFinished {
     pub(crate) edit: RegionEdit,
     /// Memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
+    /// Whether the region is in staging mode.
+    pub(crate) is_staging: bool,
 }
 
 impl FlushFinished {
@@ -844,10 +922,17 @@ pub(crate) struct IndexBuildFinished {
     pub(crate) edit: RegionEdit,
 }
 
+/// Notifies an index build job has been stopped.
+#[derive(Debug)]
+pub(crate) struct IndexBuildStopped {
+    #[allow(dead_code)]
+    pub(crate) region_id: RegionId,
+    pub(crate) file_id: FileId,
+}
+
 /// Notifies an index build job has failed.
 #[derive(Debug)]
 pub(crate) struct IndexBuildFailed {
-    #[allow(dead_code)]
     pub(crate) err: Arc<Error>,
 }
 
@@ -919,6 +1004,23 @@ pub(crate) struct RegionChangeResult {
     pub(crate) sender: OptionOutputTx,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+    /// Used for index build in schema change.
+    pub(crate) need_index: bool,
+    /// New options for the region.
+    pub(crate) new_options: Option<RegionOptions>,
+}
+
+/// Notifies the region the result of entering staging.
+#[derive(Debug)]
+pub(crate) struct EnterStagingResult {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// The new partition expression to apply.
+    pub(crate) partition_expr: String,
+    /// Result sender.
+    pub(crate) sender: OptionOutputTx,
+    /// Result from the manifest manager.
+    pub(crate) result: Result<()>,
 }
 
 /// Request to edit a region directly.
@@ -941,10 +1043,12 @@ pub(crate) struct RegionEditResult {
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+    /// Whether region state need to be set to Writable after handling this request.
+    pub(crate) update_region_state: bool,
 }
 
 #[derive(Debug)]
-pub(crate) struct RegionBuildIndexRequest {
+pub(crate) struct BuildIndexRequest {
     pub(crate) region_id: RegionId,
     pub(crate) build_type: IndexBuildType,
     /// files need to build index, empty means all.
@@ -957,6 +1061,20 @@ pub(crate) struct RegionSyncRequest {
     pub(crate) manifest_version: ManifestVersion,
     /// Returns the latest manifest version and a boolean indicating whether new maniefst is installed.
     pub(crate) sender: Sender<Result<(ManifestVersion, bool)>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RemapManifestsRequest {
+    /// The [`RegionId`] of a staging region used to obtain table directory and storage configuration for the remap operation.
+    pub(crate) region_id: RegionId,
+    /// Regions to remap manifests from.
+    pub(crate) input_regions: Vec<RegionId>,
+    /// For each old region, which new regions should receive its files
+    pub(crate) region_mapping: HashMap<RegionId, Vec<RegionId>>,
+    /// New partition expressions for the new regions.
+    pub(crate) new_partition_exprs: HashMap<RegionId, PartitionExpr>,
+    /// Result sender.
+    pub(crate) sender: Sender<Result<HashMap<RegionId, RegionManifest>>>,
 }
 
 #[cfg(test)]

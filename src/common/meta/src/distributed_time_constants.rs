@@ -41,6 +41,17 @@ pub const POSTGRES_KEEP_ALIVE_SECS: u64 = 30;
 /// In a lease, there are two opportunities for renewal.
 pub const META_KEEP_ALIVE_INTERVAL_SECS: u64 = META_LEASE_SECS / 2;
 
+/// The timeout of the heartbeat request.
+pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1);
+
+/// The keep-alive interval of the heartbeat channel.
+pub const HEARTBEAT_CHANNEL_KEEP_ALIVE_INTERVAL_SECS: Duration =
+    Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1);
+
+/// The keep-alive timeout of the heartbeat channel.
+pub const HEARTBEAT_CHANNEL_KEEP_ALIVE_TIMEOUT_SECS: Duration =
+    Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1);
+
 /// The default mailbox round-trip timeout.
 pub const MAILBOX_RTT_SECS: u64 = 1;
 

@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use arrow::datatypes::{DataType as ArrowDataType, Field};
 use arrow_schema::Fields;
 use serde::{Deserialize, Serialize};
@@ -22,7 +25,7 @@ use crate::vectors::StructVectorBuilder;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct StructType {
-    fields: Vec<StructField>,
+    fields: Arc<Vec<StructField>>,
 }
 
 impl TryFrom<&Fields> for StructType {
@@ -38,13 +41,18 @@ impl TryFrom<&Fields> for StructType {
                 ))
             })
             .collect::<Result<Vec<StructField>, Self::Error>>()?;
-        Ok(StructType { fields })
+        Ok(StructType {
+            fields: Arc::new(fields),
+        })
     }
 }
 
-impl From<Vec<StructField>> for StructType {
-    fn from(fields: Vec<StructField>) -> Self {
-        StructType { fields }
+impl<const N: usize> From<[StructField; N]> for StructType {
+    fn from(value: [StructField; N]) -> Self {
+        let value: Box<[StructField]> = Box::new(value);
+        Self {
+            fields: Arc::new(value.into_vec()),
+        }
     }
 }
 
@@ -54,7 +62,7 @@ impl DataType for StructType {
             "Struct<{}>",
             self.fields
                 .iter()
-                .map(|f| f.name())
+                .map(|f| format!(r#""{}": {}"#, f.name(), f.data_type()))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -87,12 +95,14 @@ impl DataType for StructType {
 }
 
 impl StructType {
-    pub fn new(fields: Vec<StructField>) -> Self {
-        StructType { fields }
+    pub fn new(fields: Arc<Vec<StructField>>) -> Self {
+        StructType {
+            fields: fields.clone(),
+        }
     }
 
-    pub fn fields(&self) -> &[StructField] {
-        &self.fields
+    pub fn fields(&self) -> Arc<Vec<StructField>> {
+        self.fields.clone()
     }
 
     pub fn as_arrow_fields(&self) -> Fields {
@@ -108,6 +118,7 @@ pub struct StructField {
     name: String,
     data_type: ConcreteDataType,
     nullable: bool,
+    metadata: BTreeMap<String, String>,
 }
 
 impl StructField {
@@ -116,11 +127,16 @@ impl StructField {
             name,
             data_type,
             nullable,
+            metadata: BTreeMap::new(),
         }
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn take_name(self) -> String {
+        self.name
     }
 
     pub fn data_type(&self) -> &ConcreteDataType {
@@ -131,11 +147,26 @@ impl StructField {
         self.nullable
     }
 
+    pub(crate) fn insert_metadata(&mut self, key: impl ToString, value: impl ToString) {
+        self.metadata.insert(key.to_string(), value.to_string());
+    }
+
+    #[expect(unused)]
+    pub(crate) fn metadata(&self, key: &str) -> Option<&str> {
+        self.metadata.get(key).map(String::as_str)
+    }
+
     pub fn to_df_field(&self) -> Field {
+        let metadata = self
+            .metadata
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         Field::new(
             self.name.clone(),
             self.data_type.as_arrow_type(),
             self.nullable,
         )
+        .with_metadata(metadata)
     }
 }

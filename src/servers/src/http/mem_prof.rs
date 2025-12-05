@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #[cfg(feature = "mem-prof")]
+use axum::Form;
+#[cfg(feature = "mem-prof")]
 use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -122,6 +124,60 @@ pub async fn deactivate_heap_prof_handler() -> crate::error::Result<impl IntoRes
 #[cfg(not(feature = "mem-prof"))]
 #[axum_macros::debug_handler]
 pub async fn heap_prof_status_handler() -> crate::error::Result<impl IntoResponse> {
+    Ok((
+        StatusCode::NOT_IMPLEMENTED,
+        "The 'mem-prof' feature is disabled",
+    ))
+}
+
+#[cfg(feature = "mem-prof")]
+#[derive(Deserialize)]
+pub struct GdumpToggleForm {
+    activate: bool,
+}
+
+#[cfg(feature = "mem-prof")]
+#[axum_macros::debug_handler]
+pub async fn gdump_toggle_handler(
+    Form(form): Form<GdumpToggleForm>,
+) -> crate::error::Result<impl IntoResponse> {
+    use snafu::ResultExt;
+
+    use crate::error::DumpProfileDataSnafu;
+
+    common_mem_prof::set_gdump_active(form.activate).context(DumpProfileDataSnafu)?;
+
+    let msg = if form.activate {
+        "gdump activated"
+    } else {
+        "gdump deactivated"
+    };
+    Ok((StatusCode::OK, msg))
+}
+
+#[cfg(not(feature = "mem-prof"))]
+#[axum_macros::debug_handler]
+pub async fn gdump_toggle_handler() -> crate::error::Result<impl IntoResponse> {
+    Ok((
+        StatusCode::NOT_IMPLEMENTED,
+        "The 'mem-prof' feature is disabled",
+    ))
+}
+
+#[cfg(feature = "mem-prof")]
+#[axum_macros::debug_handler]
+pub async fn gdump_status_handler() -> crate::error::Result<impl IntoResponse> {
+    use snafu::ResultExt;
+
+    use crate::error::DumpProfileDataSnafu;
+
+    let is_active = common_mem_prof::is_gdump_active().context(DumpProfileDataSnafu)?;
+    Ok((StatusCode::OK, format!("{{\"active\": {}}}", is_active)))
+}
+
+#[cfg(not(feature = "mem-prof"))]
+#[axum_macros::debug_handler]
+pub async fn gdump_status_handler() -> crate::error::Result<impl IntoResponse> {
     Ok((
         StatusCode::NOT_IMPLEMENTED,
         "The 'mem-prof' feature is disabled",

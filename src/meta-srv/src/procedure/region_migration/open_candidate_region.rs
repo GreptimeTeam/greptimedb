@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::ops::Div;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
@@ -65,33 +66,43 @@ impl OpenCandidateRegion {
     /// Abort(non-retry):
     /// - Datanode Table is not found.
     async fn build_open_region_instruction(&self, ctx: &mut Context) -> Result<Instruction> {
-        let pc = &ctx.persistent_ctx;
-        let table_id = pc.region_id.table_id();
-        let region_number = pc.region_id.region_number();
-        let candidate_id = pc.to_peer.id;
-        let datanode_table_value = ctx.get_from_peer_datanode_table_value().await?;
+        let region_ids = ctx.persistent_ctx.region_ids.clone();
+        let from_peer_id = ctx.persistent_ctx.from_peer.id;
+        let to_peer_id = ctx.persistent_ctx.to_peer.id;
+        let datanode_table_values = ctx.get_from_peer_datanode_table_values().await?;
+        let mut open_regions = Vec::with_capacity(region_ids.len());
 
-        let RegionInfo {
-            region_storage_path,
-            region_options,
-            region_wal_options,
-            engine,
-        } = datanode_table_value.region_info.clone();
-
-        let open_instruction = Instruction::OpenRegion(OpenRegion::new(
-            RegionIdent {
-                datanode_id: candidate_id,
-                table_id,
-                region_number,
+        for region_id in region_ids {
+            let table_id = region_id.table_id();
+            let region_number = region_id.region_number();
+            let datanode_table_value = datanode_table_values.get(&table_id).context(
+                error::DatanodeTableNotFoundSnafu {
+                    table_id,
+                    datanode_id: from_peer_id,
+                },
+            )?;
+            let RegionInfo {
+                region_storage_path,
+                region_options,
+                region_wal_options,
                 engine,
-            },
-            &region_storage_path,
-            region_options,
-            region_wal_options,
-            true,
-        ));
+            } = datanode_table_value.region_info.clone();
 
-        Ok(open_instruction)
+            open_regions.push(OpenRegion::new(
+                RegionIdent {
+                    datanode_id: to_peer_id,
+                    table_id,
+                    region_number,
+                    engine,
+                },
+                &region_storage_path,
+                region_options,
+                region_wal_options,
+                true,
+            ));
+        }
+
+        Ok(Instruction::OpenRegions(open_regions))
     }
 
     /// Opens the candidate region.
@@ -111,25 +122,27 @@ impl OpenCandidateRegion {
     ) -> Result<()> {
         let pc = &ctx.persistent_ctx;
         let vc = &mut ctx.volatile_ctx;
-        let region_id = pc.region_id;
+        let region_ids = &pc.region_ids;
         let candidate = &pc.to_peer;
 
         // This method might be invoked multiple times.
         // Only registers the guard if `opening_region_guard` is absent.
-        if vc.opening_region_guard.is_none() {
-            // Registers the opening region.
-            let guard = ctx
-                .opening_region_keeper
-                .register(candidate.id, region_id)
-                .context(error::RegionOpeningRaceSnafu {
-                    peer_id: candidate.id,
-                    region_id,
-                })?;
-            vc.opening_region_guard = Some(guard);
+        if vc.opening_region_guards.is_empty() {
+            for region_id in region_ids {
+                // Registers the opening region.
+                let guard = ctx
+                    .opening_region_keeper
+                    .register(candidate.id, *region_id)
+                    .context(error::RegionOpeningRaceSnafu {
+                        peer_id: candidate.id,
+                        region_id: *region_id,
+                    })?;
+                vc.opening_region_guards.push(guard);
+            }
         }
 
         let msg = MailboxMessage::json_message(
-            &format!("Open candidate region: {}", region_id),
+            &format!("Open candidate regions: {:?}", region_ids),
             &format!("Metasrv@{}", ctx.server_addr()),
             &format!("Datanode-{}@{}", candidate.id, candidate.addr),
             common_time::util::current_time_millis(),
@@ -139,23 +152,26 @@ impl OpenCandidateRegion {
             input: open_instruction.to_string(),
         })?;
 
+        let operation_timeout =
+            ctx.next_operation_timeout()
+                .context(error::ExceededDeadlineSnafu {
+                    operation: "Open candidate region",
+                })?;
+        let operation_timeout = operation_timeout.div(2).max(OPEN_CANDIDATE_REGION_TIMEOUT);
         let ch = Channel::Datanode(candidate.id);
         let now = Instant::now();
-        let receiver = ctx
-            .mailbox
-            .send(&ch, msg, OPEN_CANDIDATE_REGION_TIMEOUT)
-            .await?;
+        let receiver = ctx.mailbox.send(&ch, msg, operation_timeout).await?;
 
         match receiver.await {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
                 info!(
-                    "Received open region reply: {:?}, region: {}, elapsed: {:?}",
+                    "Received open region reply: {:?}, region: {:?}, elapsed: {:?}",
                     reply,
-                    region_id,
+                    region_ids,
                     now.elapsed()
                 );
-                let InstructionReply::OpenRegion(SimpleReply { result, error }) = reply else {
+                let InstructionReply::OpenRegions(SimpleReply { result, error }) = reply else {
                     return error::UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
                         reason: "expect open region reply",
@@ -168,7 +184,7 @@ impl OpenCandidateRegion {
                 } else {
                     error::RetryLaterSnafu {
                         reason: format!(
-                            "Region {region_id} is not opened by datanode {:?}, error: {error:?}, elapsed: {:?}",
+                            "Region {region_ids:?} is not opened by datanode {:?}, error: {error:?}, elapsed: {:?}",
                             candidate,
                             now.elapsed()
                         ),
@@ -178,7 +194,7 @@ impl OpenCandidateRegion {
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
-                    "Mailbox received timeout for open candidate region {region_id} on datanode {:?}, elapsed: {:?}",
+                    "Mailbox received timeout for open candidate region {region_ids:?} on datanode {:?}, elapsed: {:?}",
                     candidate,
                     now.elapsed()
                 );
@@ -215,7 +231,7 @@ mod tests {
     }
 
     fn new_mock_open_instruction(datanode_id: DatanodeId, region_id: RegionId) -> Instruction {
-        Instruction::OpenRegion(OpenRegion {
+        Instruction::OpenRegions(vec![OpenRegion {
             region_ident: RegionIdent {
                 datanode_id,
                 table_id: region_id.table_id(),
@@ -226,7 +242,7 @@ mod tests {
             region_options: Default::default(),
             region_wal_options: Default::default(),
             skip_wal_replay: true,
-        })
+        }])
     }
 
     #[tokio::test]
@@ -251,7 +267,7 @@ mod tests {
         // from_peer: 1
         // to_peer: 2
         let persistent_context = new_persistent_context();
-        let region_id = persistent_context.region_id;
+        let region_id = persistent_context.region_ids[0];
         let to_peer_id = persistent_context.to_peer.id;
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
@@ -272,7 +288,7 @@ mod tests {
         // from_peer: 1
         // to_peer: 2
         let persistent_context = new_persistent_context();
-        let region_id = persistent_context.region_id;
+        let region_id = persistent_context.region_ids[0];
         let to_peer_id = persistent_context.to_peer.id;
 
         let env = TestingEnv::new();
@@ -298,7 +314,7 @@ mod tests {
         // from_peer: 1
         // to_peer: 2
         let persistent_context = new_persistent_context();
-        let region_id = persistent_context.region_id;
+        let region_id = persistent_context.region_ids[0];
         let to_peer_id = persistent_context.to_peer.id;
 
         let mut env = TestingEnv::new();
@@ -331,7 +347,7 @@ mod tests {
         // from_peer: 1
         // to_peer: 2
         let persistent_context = new_persistent_context();
-        let region_id = persistent_context.region_id;
+        let region_id = persistent_context.region_ids[0];
         let to_peer_id = persistent_context.to_peer.id;
 
         let mut env = TestingEnv::new();
@@ -366,7 +382,7 @@ mod tests {
         // from_peer: 1
         // to_peer: 2
         let persistent_context = new_persistent_context();
-        let region_id = persistent_context.region_id;
+        let region_id = persistent_context.region_ids[0];
         let to_peer_id = persistent_context.to_peer.id;
         let mut env = TestingEnv::new();
 
@@ -406,14 +422,14 @@ mod tests {
         // to_peer: 2
         let persistent_context = new_persistent_context();
         let from_peer_id = persistent_context.from_peer.id;
-        let region_id = persistent_context.region_id;
+        let region_id = persistent_context.region_ids[0];
         let to_peer_id = persistent_context.to_peer.id;
         let mut env = TestingEnv::new();
 
         // Prepares table
         let table_info = new_test_table_info(1024, vec![1]).into();
         let region_routes = vec![RegionRoute {
-            region: Region::new_test(persistent_context.region_id),
+            region: Region::new_test(region_id),
             leader_peer: Some(Peer::empty(from_peer_id)),
             ..Default::default()
         }];
@@ -441,10 +457,7 @@ mod tests {
         let procedure_ctx = new_procedure_context();
         let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
         let vc = ctx.volatile_ctx;
-        assert_eq!(
-            vc.opening_region_guard.unwrap().info(),
-            (to_peer_id, region_id)
-        );
+        assert_eq!(vc.opening_region_guards[0].info(), (to_peer_id, region_id));
 
         let flush_leader_region = next.as_any().downcast_ref::<PreFlushRegion>().unwrap();
         assert_matches!(flush_leader_region, PreFlushRegion);

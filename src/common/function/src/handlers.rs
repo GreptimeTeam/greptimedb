@@ -25,7 +25,9 @@ use common_query::Output;
 use common_query::error::Result;
 use session::context::QueryContextRef;
 use store_api::storage::RegionId;
-use table::requests::{CompactTableRequest, DeleteRequest, FlushTableRequest, InsertRequest};
+use table::requests::{
+    BuildIndexTableRequest, CompactTableRequest, DeleteRequest, FlushTableRequest, InsertRequest,
+};
 
 /// A trait for handling table mutations in `QueryEngine`.
 #[async_trait]
@@ -44,6 +46,13 @@ pub trait TableMutationHandler: Send + Sync {
     async fn compact(
         &self,
         request: CompactTableRequest,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows>;
+
+    /// Trigger an index build task for the table.
+    async fn build_index(
+        &self,
+        request: BuildIndexTableRequest,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows>;
 

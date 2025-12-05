@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::fmt::Display;
-use std::str::FromStr;
 
 use chrono::{FixedOffset, TimeZone};
 use chrono_tz::{OffsetComponents, Tz};
@@ -102,7 +101,7 @@ impl Timezone {
                 .parse::<u32>()
                 .context(ParseOffsetStrSnafu { raw: tz_string })?;
             Self::hours_mins_opt(hrs, mins)
-        } else if let Ok(tz) = Tz::from_str(tz_string) {
+        } else if let Ok(tz) = Tz::from_str_insensitive(tz_string) {
             Ok(Self::Named(tz))
         } else {
             ParseTimezoneNameSnafu { raw: tz_string }.fail()
@@ -202,6 +201,10 @@ mod tests {
         assert_eq!(
             Timezone::Named(Tz::Asia__Shanghai),
             Timezone::from_tz_string("Asia/Shanghai").unwrap()
+        );
+        assert_eq!(
+            Timezone::Named(Tz::Asia__Shanghai),
+            Timezone::from_tz_string("Asia/ShangHai").unwrap()
         );
         assert_eq!(
             Timezone::Named(Tz::UTC),

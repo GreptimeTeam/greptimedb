@@ -28,11 +28,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
 use common_base::readable_size::ReadableSize;
+use common_stat::get_total_memory_readable;
 use mito_codec::key_values::KeyValue;
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{Result, UnsupportedOperationSnafu};
@@ -43,7 +44,7 @@ use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable,
     MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
-    MemtableStats, PredicateGroup,
+    MemtableStats, RangesOptions,
 };
 use crate::region::options::MergeMode;
 
@@ -91,9 +92,9 @@ pub struct PartitionTreeConfig {
 impl Default for PartitionTreeConfig {
     fn default() -> Self {
         let mut fork_dictionary_bytes = ReadableSize::mb(512);
-        if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+        if let Some(total_memory) = get_total_memory_readable() {
             let adjust_dictionary_bytes =
-                std::cmp::min(sys_memory / DICTIONARY_SIZE_FACTOR, fork_dictionary_bytes);
+                std::cmp::min(total_memory / DICTIONARY_SIZE_FACTOR, fork_dictionary_bytes);
             if adjust_dictionary_bytes.0 > 0 {
                 fork_dictionary_bytes = adjust_dictionary_bytes;
             }
@@ -181,7 +182,7 @@ impl Memtable for PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator> {
         self.tree.read(projection, predicate, sequence, None)
     }
@@ -189,10 +190,10 @@ impl Memtable for PartitionTreeMemtable {
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
-        _for_flush: bool,
+        options: RangesOptions,
     ) -> Result<MemtableRanges> {
+        let predicate = options.predicate;
+        let sequence = options.sequence;
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {
             tree: self.tree.clone(),
@@ -314,7 +315,7 @@ impl PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator> {
         self.tree.read(projection, predicate, sequence, None)
     }
@@ -361,7 +362,7 @@ struct PartitionTreeIterBuilder {
     tree: Arc<PartitionTree>,
     projection: Option<Vec<ColumnId>>,
     predicate: Option<Predicate>,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
 }
 
 impl IterBuilder for PartitionTreeIterBuilder {
@@ -383,6 +384,7 @@ mod tests {
     use api::v1::helper::{field_column_schema, row, tag_column_schema, time_index_column_schema};
     use api::v1::value::ValueData;
     use api::v1::{Mutation, OpType, Rows, SemanticType};
+    use common_query::prelude::{greptime_timestamp, greptime_value};
     use common_time::Timestamp;
     use datafusion_common::Column;
     use datafusion_expr::{BinaryExpr, Expr, Literal, Operator};
@@ -428,7 +430,13 @@ mod tests {
 
         let expected_ts = kvs
             .iter()
-            .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
+            .map(|kv| {
+                kv.timestamp()
+                    .try_into_timestamp()
+                    .unwrap()
+                    .unwrap()
+                    .value()
+            })
             .collect::<Vec<_>>();
 
         let iter = memtable.iter(None, None, None).unwrap();
@@ -687,7 +695,7 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "greptime_timestamp",
+                    greptime_timestamp(),
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     false,
                 ),
@@ -696,7 +704,7 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "greptime_value",
+                    greptime_value(),
                     ConcreteDataType::float64_datatype(),
                     true,
                 ),

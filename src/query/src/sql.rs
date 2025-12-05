@@ -15,6 +15,7 @@
 mod show_create_table;
 
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
@@ -34,7 +35,7 @@ use common_datasource::util::find_dir_and_filename;
 use common_meta::SchemaOptions;
 use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_query::Output;
-use common_query::prelude::GREPTIME_TIMESTAMP;
+use common_query::prelude::greptime_timestamp;
 use common_recordbatch::RecordBatches;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_time::Timestamp;
@@ -52,7 +53,7 @@ use regex::Regex;
 use session::context::{Channel, QueryContextRef};
 pub use show_create_table::create_table_stmt;
 use snafu::{OptionExt, ResultExt, ensure};
-use sql::ast::Ident;
+use sql::ast::{Ident, visit_expressions_mut};
 use sql::parser::ParserContext;
 use sql::statements::OptionMap;
 use sql::statements::create::{CreateDatabase, CreateFlow, CreateView, Partitions, SqlOrTql};
@@ -68,13 +69,11 @@ use table::metadata::TableInfoRef;
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 
 use crate::QueryEngineRef;
-use crate::dataframe::DataFrame;
 use crate::error::{self, Result, UnsupportedVariableSnafu};
 use crate::planner::DfLogicalPlanner;
 
 const SCHEMAS_COLUMN: &str = "Database";
 const OPTIONS_COLUMN: &str = "Options";
-const TABLES_COLUMN: &str = "Tables";
 const VIEWS_COLUMN: &str = "Views";
 const FLOWS_COLUMN: &str = "Flows";
 const FIELD_COLUMN: &str = "Field";
@@ -211,6 +210,29 @@ pub async fn show_databases(
     .await
 }
 
+/// Replaces column identifier references in a SQL expression.
+/// Used for backward compatibility where old column names should work with new ones.
+fn replace_column_in_expr(expr: &mut sqlparser::ast::Expr, from_column: &str, to_column: &str) {
+    let _ = visit_expressions_mut(expr, |e| {
+        match e {
+            sqlparser::ast::Expr::Identifier(ident) => {
+                if ident.value.eq_ignore_ascii_case(from_column) {
+                    ident.value = to_column.to_string();
+                }
+            }
+            sqlparser::ast::Expr::CompoundIdentifier(idents) => {
+                if let Some(last) = idents.last_mut()
+                    && last.value.eq_ignore_ascii_case(from_column)
+                {
+                    last.value = to_column.to_string();
+                }
+            }
+            _ => {}
+        }
+        ControlFlow::<()>::Continue(())
+    });
+}
+
 /// Cast a `show` statement execution into a query from tables in  `information_schema`.
 /// - `table_name`: the table name in `information_schema`,
 /// - `projects`: query projection, a list of `(column, renamed_column)`,
@@ -248,7 +270,7 @@ async fn query_from_information_schema_table(
             ),
         })?;
 
-    let DataFrame::DataFusion(dataframe) = query_engine.read_table(table)?;
+    let dataframe = query_engine.read_table(table)?;
 
     // Apply filters
     let dataframe = filters.into_iter().try_fold(dataframe, |df, expr| {
@@ -541,15 +563,15 @@ pub async fn show_tables(
         query_ctx.current_schema()
     };
 
-    // (dennis): MySQL rename `table_name` to `Tables_in_{schema}`, but we use `Tables` instead.
-    // I don't want to modify this currently, our dashboard may depend on it.
+    // MySQL renames `table_name` to `Tables_in_{schema}` for protocol compatibility
+    let tables_column = format!("Tables_in_{}", schema_name);
     let projects = if stmt.full {
         vec![
-            (tables::TABLE_NAME, TABLES_COLUMN),
+            (tables::TABLE_NAME, tables_column.as_str()),
             (tables::TABLE_TYPE, TABLE_TYPE_COLUMN),
         ]
     } else {
-        vec![(tables::TABLE_NAME, TABLES_COLUMN)]
+        vec![(tables::TABLE_NAME, tables_column.as_str())]
     };
     let filters = vec![
         col(tables::TABLE_SCHEMA).eq(lit(schema_name.clone())),
@@ -557,6 +579,16 @@ pub async fn show_tables(
     ];
     let like_field = Some(tables::TABLE_NAME);
     let sort = vec![col(tables::TABLE_NAME).sort(true, true)];
+
+    // Transform the WHERE clause for backward compatibility:
+    // Replace "Tables" with "Tables_in_{schema}" to support old queries
+    let kind = match stmt.kind {
+        ShowKind::Where(mut filter) => {
+            replace_column_in_expr(&mut filter, "Tables", &tables_column);
+            ShowKind::Where(filter)
+        }
+        other => other,
+    };
 
     query_from_information_schema_table(
         query_engine,
@@ -568,7 +600,7 @@ pub async fn show_tables(
         filters,
         like_field,
         sort,
-        stmt.kind,
+        kind,
     )
     .await
 }
@@ -1195,14 +1227,14 @@ pub fn file_column_schemas_to_table(
 
     let timestamp_type = ConcreteDataType::timestamp_millisecond_datatype();
     let default_zero = Value::Timestamp(Timestamp::new_millisecond(0));
-    let timestamp_column_schema = ColumnSchema::new(GREPTIME_TIMESTAMP, timestamp_type, false)
+    let timestamp_column_schema = ColumnSchema::new(greptime_timestamp(), timestamp_type, false)
         .with_time_index(true)
         .with_default_constraint(Some(ColumnDefaultConstraint::Value(default_zero)))
         .unwrap();
 
     if let Some(column_schema) = column_schemas
         .iter_mut()
-        .find(|column_schema| column_schema.name == GREPTIME_TIMESTAMP)
+        .find(|column_schema| column_schema.name == greptime_timestamp())
     {
         // Replace the column schema with the default one
         *column_schema = timestamp_column_schema;
@@ -1210,7 +1242,7 @@ pub fn file_column_schemas_to_table(
         column_schemas.push(timestamp_column_schema);
     }
 
-    (column_schemas, GREPTIME_TIMESTAMP.to_string())
+    (column_schemas, greptime_timestamp().to_string())
 }
 
 /// This function checks if the column schemas from a file can be matched with
@@ -1440,8 +1472,7 @@ mod test {
                 ..
             }) => {
                 let record = record.take().first().cloned().unwrap();
-                let data = record.column(0);
-                Ok(data.get(0).to_string())
+                Ok(record.iter_column_as_string(0).next().unwrap().unwrap())
             }
             Ok(_) => unreachable!(),
             Err(e) => Err(e),

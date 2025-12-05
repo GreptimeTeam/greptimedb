@@ -50,7 +50,7 @@ impl Function for VersionFunction {
                 )
             }
             Channel::Postgres => {
-                format!("16.3-greptimedb-{}", common_version::version())
+                format!("PostgreSQL 16.3 GreptimeDB {}", common_version::version())
             }
             _ => common_version::version().to_string(),
         };

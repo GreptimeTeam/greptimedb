@@ -2,6 +2,10 @@
 ## @toml2docs:none-default
 default_timezone = "UTC"
 
+## The default column prefix for auto-created time index and value columns.
+## @toml2docs:none-default
+default_column_prefix = "greptime"
+
 ## The maximum in-flight write bytes.
 ## @toml2docs:none-default
 #+ max_in_flight_write_bytes = "500MB"
@@ -31,6 +35,10 @@ timeout = "0s"
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
 ## Set to 0 to disable limit.
 body_limit = "64MB"
+## Maximum total memory for all concurrent HTTP request bodies.
+## Set to 0 to disable the limit. Default: "0" (unlimited)
+## @toml2docs:none-default
+#+ max_total_body_memory = "1GB"
 ## HTTP CORS support, it's turned on by default
 ## This allows browser to access http APIs without CORS restrictions
 enable_cors = true
@@ -54,6 +62,10 @@ bind_addr = "127.0.0.1:4001"
 server_addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
+## Maximum total memory for all concurrent gRPC request messages.
+## Set to 0 to disable the limit. Default: "0" (unlimited)
+## @toml2docs:none-default
+#+ max_total_message_memory = "1GB"
 ## Compression mode for frontend side Arrow IPC service. Available options:
 ## - `none`: disable all compression
 ## - `transport`: only enable gRPC transport compression (zstd)
@@ -214,9 +226,6 @@ metasrv_addrs = ["127.0.0.1:3002"]
 ## Operation timeout.
 timeout = "3s"
 
-## Heartbeat timeout.
-heartbeat_timeout = "500ms"
-
 ## DDL timeout.
 ddl_timeout = "10s"
 
@@ -243,6 +252,13 @@ parallelism = 0
 ## Whether to allow query fallback when push down optimize fails.
 ## Default to false, meaning when push down optimize failed, return error msg
 allow_query_fallback = false
+
+## Memory pool size for query execution operators (aggregation, sorting, join).
+## Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").
+## Setting it to 0 disables the limit (unbounded, default behavior).
+## When this limit is reached, queries will fail with ResourceExhausted error.
+## NOTE: This does NOT limit memory used by table scans (only applies to datanodes).
+memory_pool_size = "50%"
 
 ## Datanode options.
 [datanode]
@@ -309,21 +325,6 @@ sample_ratio = 1.0
 
 ## The TTL of the `slow_queries` system table. Default is `90d` when `record_type` is `system_table`.
 ttl = "90d"
-
-## The frontend can export its metrics and send to Prometheus compatible service (e.g. `greptimedb` itself) from remote-write API.
-## This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.
-[export_metrics]
-## whether enable export metrics.
-enable = false
-## The interval of export metrics.
-write_interval = "30s"
-
-[export_metrics.remote_write]
-## The prometheus remote write endpoint that the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=greptime_metrics`.
-url = ""
-
-## HTTP headers of Prometheus remote-write carry.
-headers = { }
 
 ## The tracing options. Only effect when compiled with `tokio-console` feature.
 #+ [tracing]

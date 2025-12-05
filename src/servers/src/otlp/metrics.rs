@@ -15,7 +15,7 @@
 use ahash::{HashMap, HashSet};
 use api::v1::{RowInsertRequests, Value};
 use common_grpc::precision::Precision;
-use common_query::prelude::{GREPTIME_COUNT, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{GREPTIME_COUNT, greptime_timestamp, greptime_value};
 use lazy_static::lazy_static;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
@@ -481,7 +481,7 @@ fn write_timestamp(
     if legacy_mode {
         row_writer::write_ts_to_nanos(
             table,
-            GREPTIME_TIMESTAMP,
+            greptime_timestamp(),
             Some(time_nano),
             Precision::Nanosecond,
             row,
@@ -489,7 +489,7 @@ fn write_timestamp(
     } else {
         row_writer::write_ts_to_millis(
             table,
-            GREPTIME_TIMESTAMP,
+            greptime_timestamp(),
             Some(time_nano / 1000000),
             Precision::Millisecond,
             row,
@@ -571,7 +571,7 @@ fn encode_gauge(
             metric_ctx,
         )?;
 
-        write_data_point_value(table, &mut row, GREPTIME_VALUE, &data_point.value)?;
+        write_data_point_value(table, &mut row, greptime_value(), &data_point.value)?;
         table.add_row(row);
     }
 
@@ -606,7 +606,7 @@ fn encode_sum(
             data_point.time_unix_nano as i64,
             metric_ctx,
         )?;
-        write_data_point_value(table, &mut row, GREPTIME_VALUE, &data_point.value)?;
+        write_data_point_value(table, &mut row, greptime_value(), &data_point.value)?;
         table.add_row(row);
     }
 
@@ -680,7 +680,7 @@ fn encode_histogram(
             accumulated_count += count;
             row_writer::write_f64(
                 &mut bucket_table,
-                GREPTIME_VALUE,
+                greptime_value(),
                 accumulated_count as f64,
                 &mut bucket_row,
             )?;
@@ -700,7 +700,7 @@ fn encode_histogram(
                 metric_ctx,
             )?;
 
-            row_writer::write_f64(&mut sum_table, GREPTIME_VALUE, sum, &mut sum_row)?;
+            row_writer::write_f64(&mut sum_table, greptime_value(), sum, &mut sum_row)?;
             sum_table.add_row(sum_row);
         }
 
@@ -717,7 +717,7 @@ fn encode_histogram(
 
         row_writer::write_f64(
             &mut count_table,
-            GREPTIME_VALUE,
+            greptime_value(),
             data_point.count as f64,
             &mut count_row,
         )?;
@@ -807,7 +807,7 @@ fn encode_summary(
                     row_writer::write_tag(quantile_table, "quantile", quantile.quantile, &mut row)?;
                     row_writer::write_f64(
                         quantile_table,
-                        GREPTIME_VALUE,
+                        greptime_value(),
                         quantile.value,
                         &mut row,
                     )?;
@@ -833,7 +833,7 @@ fn encode_summary(
 
                 row_writer::write_f64(
                     count_table,
-                    GREPTIME_VALUE,
+                    greptime_value(),
                     data_point.count as f64,
                     &mut row,
                 )?;
@@ -858,7 +858,7 @@ fn encode_summary(
                     metric_ctx,
                 )?;
 
-                row_writer::write_f64(sum_table, GREPTIME_VALUE, data_point.sum, &mut row)?;
+                row_writer::write_f64(sum_table, greptime_value(), data_point.sum, &mut row)?;
 
                 sum_table.add_row(row);
             }
@@ -1494,8 +1494,8 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
-                "greptime_value"
+                greptime_timestamp(),
+                greptime_value()
             ]
         );
     }
@@ -1544,8 +1544,8 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
-                "greptime_value"
+                greptime_timestamp(),
+                greptime_value()
             ]
         );
     }
@@ -1594,9 +1594,9 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
+                greptime_timestamp(),
                 "quantile",
-                "greptime_value"
+                greptime_value()
             ]
         );
 
@@ -1612,8 +1612,8 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
-                "greptime_value"
+                greptime_timestamp(),
+                greptime_value()
             ]
         );
 
@@ -1629,8 +1629,8 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
-                "greptime_value"
+                greptime_timestamp(),
+                greptime_value()
             ]
         );
     }
@@ -1681,9 +1681,9 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
+                greptime_timestamp(),
                 "le",
-                "greptime_value",
+                greptime_value(),
             ]
         );
 
@@ -1699,8 +1699,8 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
-                "greptime_value"
+                greptime_timestamp(),
+                greptime_value()
             ]
         );
 
@@ -1716,8 +1716,8 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
-                "greptime_value"
+                greptime_timestamp(),
+                greptime_value()
             ]
         );
     }

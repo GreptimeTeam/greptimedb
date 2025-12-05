@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_query::prelude::greptime_timestamp;
 use greptime_proto::v1::value::ValueData::StringValue;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
 use lazy_static::lazy_static;
@@ -38,7 +39,7 @@ lazy_static! {
             SemanticType::Field,
         ),
         common::make_column_schema(
-            "greptime_timestamp".to_string(),
+            greptime_timestamp().to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
         ),

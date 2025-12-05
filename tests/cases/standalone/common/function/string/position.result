@@ -1,0 +1,278 @@
+-- String position/search function tests
+-- POSITION function
+SELECT POSITION('world' IN 'hello world');
+
++-------------------------------------------+
+| strpos(Utf8("hello world"),Utf8("world")) |
++-------------------------------------------+
+| 7                                         |
++-------------------------------------------+
+
+SELECT POSITION('xyz' IN 'hello world');
+
++-----------------------------------------+
+| strpos(Utf8("hello world"),Utf8("xyz")) |
++-----------------------------------------+
+| 0                                       |
++-----------------------------------------+
+
+SELECT POSITION('' IN 'hello world');
+
++--------------------------------------+
+| strpos(Utf8("hello world"),Utf8("")) |
++--------------------------------------+
+| 1                                    |
++--------------------------------------+
+
+SELECT POSITION('world' IN '');
+
++--------------------------------+
+| strpos(Utf8(""),Utf8("world")) |
++--------------------------------+
+| 0                              |
++--------------------------------+
+
+-- STRPOS function (same as POSITION)
+SELECT STRPOS('hello world', 'world');
+
++-------------------------------------------+
+| strpos(Utf8("hello world"),Utf8("world")) |
++-------------------------------------------+
+| 7                                         |
++-------------------------------------------+
+
+SELECT STRPOS('hello world', 'xyz');
+
++-----------------------------------------+
+| strpos(Utf8("hello world"),Utf8("xyz")) |
++-----------------------------------------+
+| 0                                       |
++-----------------------------------------+
+
+SELECT STRPOS('hello world', 'hello');
+
++-------------------------------------------+
+| strpos(Utf8("hello world"),Utf8("hello")) |
++-------------------------------------------+
+| 1                                         |
++-------------------------------------------+
+
+SELECT STRPOS('hello world', 'o');
+
++---------------------------------------+
+| strpos(Utf8("hello world"),Utf8("o")) |
++---------------------------------------+
+| 5                                     |
++---------------------------------------+
+
+-- INSTR function
+SELECT INSTR('hello world', 'world');
+
++------------------------------------------+
+| instr(Utf8("hello world"),Utf8("world")) |
++------------------------------------------+
+| 7                                        |
++------------------------------------------+
+
+SELECT INSTR('hello world', 'o');
+
++--------------------------------------+
+| instr(Utf8("hello world"),Utf8("o")) |
++--------------------------------------+
+| 5                                    |
++--------------------------------------+
+
+SELECT INSTR('hello world', 'xyz');
+
++----------------------------------------+
+| instr(Utf8("hello world"),Utf8("xyz")) |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+-- Case sensitive search
+SELECT POSITION('WORLD' IN 'hello world');
+
++-------------------------------------------+
+| strpos(Utf8("hello world"),Utf8("WORLD")) |
++-------------------------------------------+
+| 0                                         |
++-------------------------------------------+
+
+SELECT POSITION('World' IN 'hello world');
+
++-------------------------------------------+
+| strpos(Utf8("hello world"),Utf8("World")) |
++-------------------------------------------+
+| 0                                         |
++-------------------------------------------+
+
+-- LEFT and RIGHT functions
+SELECT LEFT('hello world', 5);
+
++------------------------------------+
+| left(Utf8("hello world"),Int64(5)) |
++------------------------------------+
+| hello                              |
++------------------------------------+
+
+SELECT RIGHT('hello world', 5);
+
++-------------------------------------+
+| right(Utf8("hello world"),Int64(5)) |
++-------------------------------------+
+| world                               |
++-------------------------------------+
+
+-- More than string length
+SELECT LEFT('hello', 10);
+
++-------------------------------+
+| left(Utf8("hello"),Int64(10)) |
++-------------------------------+
+| hello                         |
++-------------------------------+
+
+-- More than string length
+SELECT RIGHT('hello', 10);
+
++--------------------------------+
+| right(Utf8("hello"),Int64(10)) |
++--------------------------------+
+| hello                          |
++--------------------------------+
+
+-- Test with NULL values
+SELECT POSITION('world' IN NULL);
+
++----------------------------+
+| strpos(NULL,Utf8("world")) |
++----------------------------+
+|                            |
++----------------------------+
+
+SELECT POSITION(NULL IN 'hello world');
+
++----------------------------------+
+| strpos(Utf8("hello world"),NULL) |
++----------------------------------+
+|                                  |
++----------------------------------+
+
+SELECT LEFT(NULL, 5);
+
++---------------------+
+| left(NULL,Int64(5)) |
++---------------------+
+|                     |
++---------------------+
+
+SELECT RIGHT('hello', NULL);
+
++---------------------------+
+| right(Utf8("hello"),NULL) |
++---------------------------+
+|                           |
++---------------------------+
+
+-- Test with table data
+CREATE TABLE position_test(s VARCHAR, "search" VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO position_test VALUES
+    ('hello world', 'world', 1000),
+    ('hello world', 'hello', 2000),
+    ('hello world', 'xyz', 3000),
+    ('programming', 'gram', 4000),
+    ('database', 'base', 5000);
+
+Affected Rows: 5
+
+SELECT s, "search", POSITION("search" IN s) AS a, STRPOS(s, "search") AS b FROM position_test ORDER BY ts;
+
++-------------+--------+---+---+
+| s           | search | a | b |
++-------------+--------+---+---+
+| hello world | world  | 7 | 7 |
+| hello world | hello  | 1 | 1 |
+| hello world | xyz    | 0 | 0 |
+| programming | gram   | 4 | 4 |
+| database    | base   | 5 | 5 |
++-------------+--------+---+---+
+
+-- Test LEFT and RIGHT with table data
+SELECT s, LEFT(s, 5), RIGHT(s, 5) FROM position_test ORDER BY ts;
+
++-------------+--------------------------------+---------------------------------+
+| s           | left(position_test.s,Int64(5)) | right(position_test.s,Int64(5)) |
++-------------+--------------------------------+---------------------------------+
+| hello world | hello                          | world                           |
+| hello world | hello                          | world                           |
+| hello world | hello                          | world                           |
+| programming | progr                          | mming                           |
+| database    | datab                          | abase                           |
++-------------+--------------------------------+---------------------------------+
+
+-- Unicode position tests
+SELECT POSITION('世' IN 'hello世界');
+
++--------------------------------------+
+| strpos(Utf8("hello世界"),Utf8("世")) |
++--------------------------------------+
+| 6                                    |
++--------------------------------------+
+
+SELECT POSITION('界' IN 'hello世界');
+
++--------------------------------------+
+| strpos(Utf8("hello世界"),Utf8("界")) |
++--------------------------------------+
+| 7                                    |
++--------------------------------------+
+
+SELECT STRPOS('café shop', 'é');
+
++-------------------------------------+
+| strpos(Utf8("café shop"),Utf8("é")) |
++-------------------------------------+
+| 4                                   |
++-------------------------------------+
+
+SELECT LEFT('中文测试', 2);
+
++---------------------------------+
+| left(Utf8("中文测试"),Int64(2)) |
++---------------------------------+
+| 中文                            |
++---------------------------------+
+
+SELECT RIGHT('中文测试', 2);
+
++----------------------------------+
+| right(Utf8("中文测试"),Int64(2)) |
++----------------------------------+
+| 测试                             |
++----------------------------------+
+
+-- Multiple occurrences (finds first one)
+SELECT POSITION('o' IN 'hello world');
+
++---------------------------------------+
+| strpos(Utf8("hello world"),Utf8("o")) |
++---------------------------------------+
+| 5                                     |
++---------------------------------------+
+
+SELECT STRPOS('hello world', 'l');
+
++---------------------------------------+
+| strpos(Utf8("hello world"),Utf8("l")) |
++---------------------------------------+
+| 3                                     |
++---------------------------------------+
+
+DROP TABLE position_test;
+
+Affected Rows: 0
+

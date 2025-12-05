@@ -13,7 +13,10 @@
 // limitations under the License.
 
 use common_error::ext::BoxedError;
+use common_meta::lock_key::TableLock;
 use common_meta::rpc::router::LeaderState;
+use common_procedure::ContextProviderRef;
+use common_telemetry::{error, info};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -37,39 +40,47 @@ impl UpdateMetadata {
     ///   It will only update **other region** info. Therefore, It's safe to retry after failure.
     ///
     /// - There is no other DDL procedure executed concurrently for the current table.
-    pub async fn downgrade_leader_region(&self, ctx: &mut Context) -> Result<()> {
+    pub async fn downgrade_leader_region(
+        &self,
+        ctx: &mut Context,
+        ctx_provider: &ContextProviderRef,
+    ) -> Result<()> {
         let table_metadata_manager = ctx.table_metadata_manager.clone();
         let from_peer_id = ctx.persistent_ctx.from_peer.id;
-        let region_id = ctx.region_id();
-        let table_id = region_id.table_id();
-        let current_table_route_value = ctx.get_table_route_value().await?;
+        let table_regions = ctx.persistent_ctx.table_regions();
 
-        // TODO(weny): ensures the leader region peer is the `from_peer`.
-        if let Err(err) = table_metadata_manager
-            .update_leader_region_status(table_id, current_table_route_value, |route| {
-                if route.region.id == region_id
-                    && route
-                        .leader_peer
-                        .as_ref()
-                        .is_some_and(|leader_peer| leader_peer.id == from_peer_id)
-                {
-                    Some(Some(LeaderState::Downgrading))
-                } else {
-                    None
-                }
-            })
-            .await
-            .context(error::TableMetadataManagerSnafu)
-        {
-            ctx.remove_table_route_value();
-            return Err(BoxedError::new(err)).context(error::RetryLaterWithSourceSnafu {
-                reason: format!(
-                    "Failed to update the table route during the downgrading leader region, region_id: {region_id}, from_peer_id: {from_peer_id}"
-                ),
-            });
+        for (table_id, regions) in table_regions {
+            let table_lock = TableLock::Write(table_id).into();
+            let _guard = ctx_provider.acquire_lock(&table_lock).await;
+
+            let current_table_route_value = ctx.get_table_route_value(table_id).await?;
+            if let Err(err) = table_metadata_manager
+                .update_leader_region_status(table_id, &current_table_route_value, |route| {
+                    if regions.contains(&route.region.id)
+                        && route
+                            .leader_peer
+                            .as_ref()
+                            .is_some_and(|leader_peer| leader_peer.id == from_peer_id)
+                    {
+                        Some(Some(LeaderState::Downgrading))
+                    } else {
+                        None
+                    }
+                })
+                .await
+                .context(error::TableMetadataManagerSnafu)
+            {
+                error!(err; "Failed to update the table route during the downgrading leader region, regions: {regions:?}, from_peer_id: {from_peer_id}");
+                return Err(BoxedError::new(err)).with_context(|_| error::RetryLaterWithSourceSnafu {
+                    reason: format!(
+                        "Failed to update the table route during the downgrading leader region, regions: {regions:?}, from_peer_id: {from_peer_id}"
+                    ),
+                });
+            }
+            info!(
+                "Downgrading leader region table route success, table_id: {table_id}, regions: {regions:?}, from_peer_id: {from_peer_id}"
+            );
         }
-
-        ctx.remove_table_route_value();
 
         Ok(())
     }
@@ -78,10 +89,13 @@ impl UpdateMetadata {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
-    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
+    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_procedure_test::MockContextProvider;
     use store_api::storage::RegionId;
 
     use crate::error::Error;
@@ -107,69 +121,16 @@ mod tests {
         let env = TestingEnv::new();
         let persistent_context = new_persistent_context();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        let provider = Arc::new(MockContextProvider::new(HashMap::new())) as _;
 
-        let err = state.downgrade_leader_region(&mut ctx).await.unwrap_err();
+        let err = state
+            .downgrade_leader_region(&mut ctx, &provider)
+            .await
+            .unwrap_err();
 
         assert_matches!(err, Error::TableRouteNotFound { .. });
 
         assert!(!err.is_retryable());
-    }
-
-    #[tokio::test]
-    async fn test_failed_to_update_table_route_error() {
-        let state = UpdateMetadata::Downgrade;
-        let persistent_context = new_persistent_context();
-        let from_peer = persistent_context.from_peer.clone();
-
-        let env = TestingEnv::new();
-        let mut ctx = env.context_factory().new_context(persistent_context);
-        let table_id = ctx.region_id().table_id();
-
-        let table_info = new_test_table_info(1024, vec![1, 2]).into();
-        let region_routes = vec![
-            RegionRoute {
-                region: Region::new_test(RegionId::new(1024, 1)),
-                leader_peer: Some(from_peer.clone()),
-                ..Default::default()
-            },
-            RegionRoute {
-                region: Region::new_test(RegionId::new(1024, 2)),
-                leader_peer: Some(Peer::empty(4)),
-                ..Default::default()
-            },
-        ];
-
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
-
-        let table_metadata_manager = env.table_metadata_manager();
-        let original_table_route = table_metadata_manager
-            .table_route_manager()
-            .table_route_storage()
-            .get_with_raw_bytes(table_id)
-            .await
-            .unwrap()
-            .unwrap();
-
-        // modifies the table route.
-        table_metadata_manager
-            .update_leader_region_status(table_id, &original_table_route, |route| {
-                if route.region.id == RegionId::new(1024, 2) {
-                    Some(Some(LeaderState::Downgrading))
-                } else {
-                    None
-                }
-            })
-            .await
-            .unwrap();
-
-        // sets the old table route.
-        ctx.volatile_ctx.table_route = Some(original_table_route);
-
-        let err = state.downgrade_leader_region(&mut ctx).await.unwrap_err();
-        assert!(ctx.volatile_ctx.table_route.is_none());
-        assert!(err.is_retryable());
-        assert!(format!("{err:?}").contains("Failed to update the table route"));
     }
 
     #[tokio::test]
@@ -179,7 +140,7 @@ mod tests {
 
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
-        let table_id = ctx.region_id().table_id();
+        let table_id = ctx.persistent_ctx.region_ids[0].table_id();
 
         let table_info = new_test_table_info(1024, vec![1, 2]).into();
         let region_routes = vec![RegionRoute {
@@ -212,7 +173,6 @@ mod tests {
         // It should remain unchanged.
         assert_eq!(latest_table_route.version().unwrap(), 0);
         assert!(!latest_table_route.region_routes().unwrap()[0].is_leader_downgrading());
-        assert!(ctx.volatile_ctx.table_route.is_none());
     }
 
     #[tokio::test]
@@ -223,7 +183,7 @@ mod tests {
 
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
-        let table_id = ctx.region_id().table_id();
+        let table_id = ctx.persistent_ctx.region_ids[0].table_id();
 
         let table_info = new_test_table_info(1024, vec![1, 2]).into();
         let region_routes = vec![RegionRoute {
@@ -254,6 +214,5 @@ mod tests {
             .unwrap();
 
         assert!(latest_table_route.region_routes().unwrap()[0].is_leader_downgrading());
-        assert!(ctx.volatile_ctx.table_route.is_none());
     }
 }

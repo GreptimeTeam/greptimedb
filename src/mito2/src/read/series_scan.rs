@@ -284,6 +284,10 @@ fn new_channel_list(num_partitions: usize) -> (SenderList, ReceiverList) {
 }
 
 impl RegionScanner for SeriesScan {
+    fn name(&self) -> &str {
+        "SeriesScan"
+    }
+
     fn properties(&self) -> &ScannerProperties {
         &self.properties
     }
@@ -314,8 +318,12 @@ impl RegionScanner for SeriesScan {
         Ok(())
     }
 
-    fn has_predicate(&self) -> bool {
-        let predicate = self.stream_ctx.input.predicate();
+    fn has_predicate_without_region(&self) -> bool {
+        let predicate = self
+            .stream_ctx
+            .input
+            .predicate_group()
+            .predicate_without_region();
         predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
     }
 
@@ -419,6 +427,7 @@ impl SeriesDistributor {
                     &part_metrics,
                     range_builder_list.clone(),
                     &mut sources,
+                    self.semaphore.clone(),
                 )
                 .await?;
             }
@@ -503,6 +512,7 @@ impl SeriesDistributor {
                     &part_metrics,
                     range_builder_list.clone(),
                     &mut sources,
+                    self.semaphore.clone(),
                 )
                 .await?;
             }

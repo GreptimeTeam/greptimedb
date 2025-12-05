@@ -135,6 +135,7 @@ async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
     let region = follower_engine.get_region(region_id).unwrap();
     assert!(!region.is_writable());
     assert!(resp.is_ok());
+    assert!(!follower_engine.is_region_catching_up(region_id));
 
     // Scans
     let request = ScanRequest::default();
@@ -256,7 +257,7 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
         .await
         .unwrap_err();
     let err = err.as_any().downcast_ref::<Error>().unwrap();
-
+    assert!(!follower_engine.is_region_catching_up(region_id));
     assert_matches!(err, Error::Unexpected { .. });
 
     // It should ignore requests to writable regions.
@@ -692,8 +693,18 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
 
 #[tokio::test]
 async fn test_catchup_not_exist() {
+    test_catchup_not_exist_with_format(false).await;
+    test_catchup_not_exist_with_format(true).await;
+}
+
+async fn test_catchup_not_exist_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let non_exist_region_id = RegionId::new(1, 1);
 
@@ -708,4 +719,34 @@ async fn test_catchup_not_exist() {
         .await
         .unwrap_err();
     assert_matches!(err.status_code(), StatusCode::RegionNotFound);
+}
+
+#[tokio::test]
+async fn test_catchup_region_busy() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    let worker = engine.inner.workers.worker(region_id);
+    let catchup_regions = worker.catchup_regions();
+    catchup_regions.insert_region(region_id);
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Catchup(RegionCatchupRequest {
+                set_writable: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_matches!(err.status_code(), StatusCode::RegionBusy);
 }

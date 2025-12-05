@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
 use snafu::{OptionExt, ResultExt, ensure};
@@ -12,7 +11,7 @@ use crate::parser::ParserContext;
 use crate::parsers::utils::convert_month_day_nano_to_duration;
 use crate::statements::OptionMap;
 use crate::statements::create::trigger::{
-    AlertManagerWebhook, ChannelType, CreateTrigger, NotifyChannel, TriggerOn,
+    AlertManagerWebhook, ChannelType, CreateTrigger, DurationExpr, NotifyChannel, TriggerOn,
 };
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
@@ -25,6 +24,8 @@ pub const ANNOTATIONS: &str = "ANNOTATIONS";
 pub const NOTIFY: &str = "NOTIFY";
 pub const WEBHOOK: &str = "WEBHOOK";
 pub const URL: &str = "URL";
+pub const FOR: &str = "FOR";
+pub const KEEP_FIRING_FOR: &str = "KEEP_FIRING_FOR";
 
 const TIMEOUT: &str = "timeout";
 
@@ -38,13 +39,15 @@ impl<'a> ParserContext<'a> {
     /// ```sql
     /// -- CREATE TRIGGER
     /// [IF NOT EXISTS] <trigger_name>
-    ///    ON (<query_expression>)
-    ///            EVERY <interval_expression>
-    ///    [LABELS (<label_name>=<label_val>, ...)]
-    ///    [ANNOTATIONS (<annotation_name>=<annotation_val>, ...)]
-    ///    NOTIFY(
-    ///            WEBHOOK <notify_name1> URL '<url1>' [WITH (<parameter1>=<value1>, ...)],
-    ///            WEBHOOK <notify_name2> URL '<url2>' [WITH (<parameter2>=<value2>, ...)]
+    ///     ON (<query_expression>)
+    ///         EVERY <interval_expression>
+    ///     [FOR <interval_expression>]
+    ///     [KEEP_FIRING_FOR <interval_expression>]
+    ///     [LABELS (<label_name>=<label_val>, ...)]
+    ///     [ANNOTATIONS (<annotation_name>=<annotation_val>, ...)]
+    ///     NOTIFY(
+    ///         WEBHOOK <notify_name1> URL '<url1>' [WITH (<parameter1>=<value1>, ...)],
+    ///         WEBHOOK <notify_name2> URL '<url2>' [WITH (<parameter2>=<value2>, ...)]
     ///     )
     /// ```
     ///
@@ -57,6 +60,8 @@ impl<'a> ParserContext<'a> {
         let mut may_labels = None;
         let mut may_annotations = None;
         let mut notify_channels = vec![];
+        let mut r#for = None;
+        let mut keep_firing_for = None;
 
         loop {
             let next_token = self.parser.peek_token();
@@ -81,10 +86,18 @@ impl<'a> ParserContext<'a> {
                     let channels = self.parse_trigger_notify(true)?;
                     notify_channels.extend(channels);
                 }
+                Token::Word(w) if w.value.eq_ignore_ascii_case(FOR) => {
+                    self.parser.next_token();
+                    r#for.replace(self.parse_trigger_for(true)?);
+                }
+                Token::Word(w) if w.value.eq_ignore_ascii_case(KEEP_FIRING_FOR) => {
+                    self.parser.next_token();
+                    keep_firing_for.replace(self.parse_trigger_keep_firing_for(true)?);
+                }
                 Token::EOF => break,
                 _ => {
                     return self.expected(
-                        "`ON` or `LABELS` or `ANNOTATIONS` or `NOTIFY` keyword",
+                        "`ON` or `LABELS` or `ANNOTATIONS` or `NOTIFY` keyword or `FOR` or `KEEP_FIRING_FOR`",
                         next_token,
                     );
                 }
@@ -104,6 +117,8 @@ impl<'a> ParserContext<'a> {
             trigger_name,
             if_not_exists,
             trigger_on,
+            r#for,
+            keep_firing_for,
             labels,
             annotations,
             channels: notify_channels,
@@ -149,7 +164,7 @@ impl<'a> ParserContext<'a> {
             return self.expected("`EVERY` keyword", self.parser.peek_token());
         }
 
-        let (month_day_nano, raw_interval_expr) = self.parse_interval_month_day_nano()?;
+        let (month_day_nano, raw_expr) = self.parse_interval_month_day_nano()?;
 
         // Trigger Interval (month_day_nano): the months field is prohibited,
         // as the length of a month is ambiguous.
@@ -169,11 +184,88 @@ impl<'a> ParserContext<'a> {
             interval
         };
 
+        let query_interval = DurationExpr {
+            duration: interval,
+            raw_expr,
+        };
+
         Ok(TriggerOn {
             query,
-            interval,
-            raw_interval_expr,
+            query_interval,
         })
+    }
+
+    pub(crate) fn parse_trigger_for(
+        &mut self,
+        is_first_keyword_matched: bool,
+    ) -> Result<DurationExpr> {
+        if !is_first_keyword_matched {
+            if let Token::Word(w) = self.parser.peek_token().token
+                && w.value.eq_ignore_ascii_case(FOR)
+            {
+                self.parser.next_token();
+            } else {
+                return self.expected("`FOR` keyword", self.parser.peek_token());
+            }
+        }
+
+        let (month_day_nano, raw_expr) = self.parse_interval_month_day_nano()?;
+
+        // Trigger Interval (month_day_nano): the months field is prohibited,
+        // as the length of a month is ambiguous.
+        ensure!(
+            month_day_nano.months == 0,
+            error::InvalidIntervalSnafu {
+                reason: "year and month is not supported in trigger FOR duration".to_string()
+            }
+        );
+
+        let duration = convert_month_day_nano_to_duration(month_day_nano)?;
+
+        let duration = if duration < Duration::from_secs(1) {
+            Duration::from_secs(1)
+        } else {
+            duration
+        };
+
+        Ok(DurationExpr { duration, raw_expr })
+    }
+
+    pub(crate) fn parse_trigger_keep_firing_for(
+        &mut self,
+        is_first_keyword_matched: bool,
+    ) -> Result<DurationExpr> {
+        if !is_first_keyword_matched {
+            if let Token::Word(w) = self.parser.peek_token().token
+                && w.value.eq_ignore_ascii_case(KEEP_FIRING_FOR)
+            {
+                self.parser.next_token();
+            } else {
+                return self.expected("`KEEP_FIRING_FOR` keyword", self.parser.peek_token());
+            }
+        }
+
+        let (month_day_nano, raw_expr) = self.parse_interval_month_day_nano()?;
+
+        // Trigger Interval (month_day_nano): the months field is prohibited,
+        // as the length of a month is ambiguous.
+        ensure!(
+            month_day_nano.months == 0,
+            error::InvalidIntervalSnafu {
+                reason: "year and month is not supported in trigger KEEP_FIRING_FOR duration"
+                    .to_string()
+            }
+        );
+
+        let duration = convert_month_day_nano_to_duration(month_day_nano)?;
+
+        let duration = if duration < Duration::from_secs(1) {
+            Duration::from_secs(1)
+        } else {
+            duration
+        };
+
+        Ok(DurationExpr { duration, raw_expr })
     }
 
     /// The SQL format as follows:
@@ -210,11 +302,11 @@ impl<'a> ParserContext<'a> {
             .context(error::SyntaxSnafu)?
             .into_iter()
             .map(parse_option_string)
-            .collect::<Result<HashMap<String, String>>>()?;
+            .collect::<Result<Vec<_>>>()?;
         self.parser
             .expect_token(&Token::RParen)
             .context(error::SyntaxSnafu)?;
-        Ok(options.into())
+        Ok(OptionMap::new(options))
     }
 
     /// The SQL format as follows:
@@ -251,11 +343,11 @@ impl<'a> ParserContext<'a> {
             .context(error::SyntaxSnafu)?
             .into_iter()
             .map(parse_option_string)
-            .collect::<Result<HashMap<String, String>>>()?;
+            .collect::<Result<Vec<_>>>()?;
         self.parser
             .expect_token(&Token::RParen)
             .context(error::SyntaxSnafu)?;
-        Ok(options.into())
+        Ok(OptionMap::new(options))
     }
 
     /// The SQL format as follows:
@@ -374,9 +466,9 @@ impl<'a> ParserContext<'a> {
             .context(error::SyntaxSnafu)?
             .into_iter()
             .map(parse_option_string)
-            .collect::<Result<HashMap<String, String>>>()?;
+            .collect::<Result<Vec<_>>>()?;
 
-        for key in options.keys() {
+        for (key, _) in options.iter() {
             ensure!(
                 validate_webhook_option(key),
                 error::InvalidTriggerWebhookOptionSnafu { key: key.clone() }
@@ -385,7 +477,7 @@ impl<'a> ParserContext<'a> {
 
         let webhook = AlertManagerWebhook {
             url,
-            options: options.into(),
+            options: OptionMap::new(options),
         };
 
         Ok(NotifyChannel {
@@ -436,6 +528,8 @@ IF NOT EXISTS cpu_monitor
         ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 1)
                 EVERY '5 minute'::INTERVAL
         LABELS (label_name=label_val)
+        FOR '1ms'::INTERVAL
+        KEEP_FIRING_FOR '10 minute'::INTERVAL
         ANNOTATIONS (annotation_name=annotation_val)
         NOTIFY(
                 WEBHOOK alert_manager_1 URL 'http://127.0.0.1:9093' WITH (timeout='1m'),
@@ -452,6 +546,8 @@ IF NOT EXISTS cpu_monitor
             )
         LABELS (label_name=label_val)
         ANNOTATIONS (annotation_name=annotation_val)
+        KEEP_FIRING_FOR '10 minute'::INTERVAL
+        FOR '1ms'::INTERVAL
         ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 1)
                 EVERY '5 minute'::INTERVAL
         "#
@@ -476,15 +572,14 @@ IF NOT EXISTS cpu_monitor
         );
         let TriggerOn {
             query,
-            interval,
-            raw_interval_expr,
+            query_interval,
         } = &create_trigger.trigger_on;
         assert_eq!(
             query.to_string(),
             "(SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 1)"
         );
-        assert_eq!(*interval, Duration::from_secs(300));
-        assert_eq!(raw_interval_expr.clone(), "'5 minute'::INTERVAL");
+        assert_eq!(query_interval.duration, Duration::from_secs(300));
+        assert_eq!(query_interval.raw_expr.clone(), "'5 minute'::INTERVAL");
         assert_eq!(create_trigger.labels.len(), 1);
         assert_eq!(
             create_trigger.labels.get("label_name").unwrap(),
@@ -509,6 +604,13 @@ IF NOT EXISTS cpu_monitor
         assert_eq!(webhook2.url.to_string(), "'http://127.0.0.1:9094'");
         assert_eq!(webhook2.options.len(), 1);
         assert_eq!(webhook2.options.get("timeout").unwrap(), "2m");
+
+        let r#for = create_trigger.r#for.as_ref().unwrap();
+        assert_eq!(r#for.duration, Duration::from_secs(1));
+        assert_eq!(r#for.raw_expr, "'1ms'::INTERVAL");
+        let keep_firing_for = create_trigger.keep_firing_for.as_ref().unwrap();
+        assert_eq!(keep_firing_for.duration, Duration::from_secs(600));
+        assert_eq!(keep_firing_for.raw_expr, "'10 minute'::INTERVAL");
     }
 
     #[test]
@@ -518,12 +620,11 @@ IF NOT EXISTS cpu_monitor
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
         let TriggerOn {
             query,
-            interval,
-            raw_interval_expr: raw_interval,
+            query_interval: interval,
         } = ctx.parse_trigger_on(false).unwrap();
         assert_eq!(query.to_string(), "(SELECT * FROM cpu_usage)");
-        assert_eq!(interval, Duration::from_secs(300));
-        assert_eq!(raw_interval, "'5 minute'::INTERVAL");
+        assert_eq!(interval.duration, Duration::from_secs(300));
+        assert_eq!(interval.raw_expr, "'5 minute'::INTERVAL");
 
         // Invalid, since missing `ON` keyword.
         let sql = "SELECT * FROM cpu_usage EVERY '5 minute'::INTERVAL";
@@ -559,7 +660,7 @@ IF NOT EXISTS cpu_monitor
         let sql = "ON (SELECT * FROM cpu_usage) EVERY '1ms'::INTERVAL";
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
         let trigger_on = ctx.parse_trigger_on(false).unwrap();
-        assert_eq!(trigger_on.interval, Duration::from_secs(1));
+        assert_eq!(trigger_on.query_interval.duration, Duration::from_secs(1));
     }
 
     #[test]
@@ -738,5 +839,67 @@ IF NOT EXISTS cpu_monitor
     fn test_validate_notify_option() {
         assert!(validate_webhook_option(TIMEOUT));
         assert!(!validate_webhook_option("invalid_option"));
+    }
+
+    #[test]
+    fn test_parse_trigger_for() {
+        // Normal.
+        let sql = "FOR '10 minute'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let expr = ctx.parse_trigger_for(false).unwrap();
+        assert_eq!(expr.duration, Duration::from_secs(600));
+        assert_eq!(expr.raw_expr, "'10 minute'::INTERVAL");
+
+        // Invalid, missing FOR keyword.
+        let sql = "'10 minute'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        assert!(ctx.parse_trigger_for(false).is_err());
+
+        // Invalid, year not allowed.
+        let sql = "FOR '1 year'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        assert!(ctx.parse_trigger_for(false).is_err());
+
+        // Invalid, month not allowed.
+        let sql = "FOR '1 month'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        assert!(ctx.parse_trigger_for(false).is_err());
+
+        // Valid, interval less than 1 second is clamped.
+        let sql = "FOR '1ms'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let expr = ctx.parse_trigger_for(false).unwrap();
+        assert_eq!(expr.duration, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_parse_trigger_keep_firing_for() {
+        // Normal.
+        let sql = "KEEP_FIRING_FOR '10 minute'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let expr = ctx.parse_trigger_keep_firing_for(false).unwrap();
+        assert_eq!(expr.duration, Duration::from_secs(600));
+        assert_eq!(expr.raw_expr, "'10 minute'::INTERVAL");
+
+        // Invalid, missing KEEP_FIRING_FOR keyword.
+        let sql = "'10 minute'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        assert!(ctx.parse_trigger_keep_firing_for(false).is_err());
+
+        // Invalid, year not allowed.
+        let sql = "KEEP_FIRING_FOR '1 year'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        assert!(ctx.parse_trigger_keep_firing_for(false).is_err());
+
+        // Invalid, month not allowed.
+        let sql = "KEEP_FIRING_FOR '1 month'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        assert!(ctx.parse_trigger_keep_firing_for(false).is_err());
+
+        // Valid, interval less than 1 second is clamped.
+        let sql = "KEEP_FIRING_FOR '1ms'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let expr = ctx.parse_trigger_keep_firing_for(false).unwrap();
+        assert_eq!(expr.duration, Duration::from_secs(1));
     }
 }

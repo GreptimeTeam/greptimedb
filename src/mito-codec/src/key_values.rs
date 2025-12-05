@@ -182,19 +182,19 @@ impl KeyValue<'_> {
             let Some(primary_key) = self.primary_keys().next() else {
                 return 0;
             };
-            let key = primary_key.as_binary().unwrap().unwrap();
+            let key = primary_key.try_into_binary().unwrap().unwrap();
 
             let mut deserializer = Deserializer::new(key);
             deserializer.advance(COLUMN_ID_ENCODE_SIZE);
             let field = SortField::new(ConcreteDataType::uint32_datatype());
             let table_id = field.deserialize(&mut deserializer).unwrap();
-            table_id.as_value_ref().as_u32().unwrap().unwrap()
+            table_id.as_value_ref().try_into_u32().unwrap().unwrap()
         } else {
             let Some(value) = self.primary_keys().next() else {
                 return 0;
             };
 
-            value.as_u32().unwrap().unwrap()
+            value.try_into_u32().unwrap().unwrap()
         }
     }
 
@@ -278,14 +278,41 @@ impl SparseReadRowHelper {
         primary_key_encoding: PrimaryKeyEncoding,
     ) -> SparseReadRowHelper {
         if primary_key_encoding == PrimaryKeyEncoding::Sparse {
-            // We can skip build the indices for sparse primary key encoding.
-            // The order of the columns is encoded primary key, timestamp, field columns.
-            let indices = rows
+            // Optimized case: when schema has exactly 3 columns (primary key, timestamp, and one field),
+            // we can directly use their indices in order without building an explicit mapping.
+            // The column order is: encoded primary key, timestamp, and field.
+            if rows.schema.len() == 3 {
+                let indices = rows
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| Some(index))
+                    .collect();
+                return SparseReadRowHelper {
+                    indices,
+                    num_primary_key_column: 1,
+                };
+            };
+
+            let mut indices = Vec::with_capacity(rows.schema.len());
+            let name_to_index: HashMap<_, _> = rows
                 .schema
                 .iter()
                 .enumerate()
-                .map(|(index, _)| Some(index))
+                .map(|(index, col)| (&col.column_name, index))
                 .collect();
+            indices.extend(
+                rows.schema[0..2]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| Some(index)),
+            );
+            // Iterate columns and find field columns.
+            for column in metadata.field_columns() {
+                // Get index in request for each field column.
+                let index = name_to_index.get(&column.column_schema.name);
+                indices.push(index.copied());
+            }
             return SparseReadRowHelper {
                 indices,
                 num_primary_key_column: 1,

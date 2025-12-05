@@ -195,6 +195,7 @@ pub mod test_data {
                 region_numbers: vec![1, 2, 3],
                 options: TableOptions::default(),
                 created_on: DateTime::default(),
+                updated_on: DateTime::default(),
                 partition_key_indices: vec![],
                 column_ids: vec![],
             },

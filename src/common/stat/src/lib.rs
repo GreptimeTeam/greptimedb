@@ -13,5 +13,7 @@
 // limitations under the License.
 
 mod cgroups;
+mod resource;
 
 pub use cgroups::*;
+pub use resource::*;

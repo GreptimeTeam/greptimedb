@@ -23,6 +23,7 @@ use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
+use uuid::Uuid;
 
 use crate::metasrv::SelectTarget;
 use crate::pubsub::Message;
@@ -299,13 +300,6 @@ pub enum Error {
 
     #[snafu(display("Failed to start http server"))]
     StartHttp {
-        #[snafu(implicit)]
-        location: Location,
-        source: servers::error::Error,
-    },
-
-    #[snafu(display("Failed to init export metrics task"))]
-    InitExportMetricsTask {
         #[snafu(implicit)]
         location: Location,
         source: servers::error::Error,
@@ -989,13 +983,63 @@ pub enum Error {
         #[snafu(source)]
         source: common_meta::error::Error,
     },
+
+    #[snafu(display(
+        "Repartition group {} source region missing, region id: {}",
+        group_id,
+        region_id
+    ))]
+    RepartitionSourceRegionMissing {
+        group_id: Uuid,
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Repartition group {} target region missing, region id: {}",
+        group_id,
+        region_id
+    ))]
+    RepartitionTargetRegionMissing {
+        group_id: Uuid,
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to serialize partition expression: {}", source))]
+    SerializePartitionExpr {
+        #[snafu(source)]
+        source: partition::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Partition expression mismatch, region id: {}, expected: {}, actual: {}",
+        region_id,
+        expected,
+        actual
+    ))]
+    PartitionExprMismatch {
+        region_id: RegionId,
+        expected: String,
+        actual: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl Error {
     /// Returns `true` if the error is retryable.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Error::RetryLater { .. })
-            || matches!(self, Error::RetryLaterWithSource { .. })
+        matches!(
+            self,
+            Error::RetryLater { .. }
+                | Error::RetryLaterWithSource { .. }
+                | Error::MailboxTimeout { .. }
+        )
     }
 }
 
@@ -1044,6 +1088,7 @@ impl ErrorExt for Error {
             | Error::MailboxChannelClosed { .. }
             | Error::IsNotLeader { .. } => StatusCode::IllegalState,
             Error::RetryLaterWithSource { source, .. } => source.status_code(),
+            Error::SerializePartitionExpr { source, .. } => source.status_code(),
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
@@ -1061,12 +1106,14 @@ impl ErrorExt for Error {
             | Error::ParseAddr { .. }
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
-            | Error::InitExportMetricsTask { .. }
             | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. }
             | Error::TomlFormat { .. }
             | Error::HandlerNotFound { .. }
-            | Error::LeaderPeerChanged { .. } => StatusCode::InvalidArguments,
+            | Error::LeaderPeerChanged { .. }
+            | Error::RepartitionSourceRegionMissing { .. }
+            | Error::RepartitionTargetRegionMissing { .. }
+            | Error::PartitionExprMismatch { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
             | Error::InvalidRegionKeyFromUtf8 { .. }

@@ -131,6 +131,7 @@ pub fn build_raw_table_info_from_expr(expr: &CreateTableExpr) -> RawTableInfo {
             region_numbers: vec![],
             options: TableOptions::try_from_iter(&expr.table_options).unwrap(),
             created_on: DateTime::default(),
+            updated_on: DateTime::default(),
             partition_key_indices: vec![],
             column_ids: vec![],
         },

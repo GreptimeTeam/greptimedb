@@ -39,7 +39,6 @@ use crate::sst::{
 ///
 /// This mapper support duplicate and unsorted projection indices.
 /// The output schema is determined by the projection indices.
-#[allow(dead_code)]
 pub struct FlatProjectionMapper {
     /// Metadata of the region.
     metadata: RegionMetadataRef,
@@ -48,6 +47,8 @@ pub struct FlatProjectionMapper {
     /// Ids of columns to project. It keeps ids in the same order as the `projection`
     /// indices to build the mapper.
     /// The mapper won't deduplicate the column ids.
+    ///
+    /// Note that this doesn't contain the `__table_id` and `__tsid`.
     column_ids: Vec<ColumnId>,
     /// Ids and DataTypes of columns of the expected batch.
     /// We can use this to check if the batch is compatible with the expected schema.
