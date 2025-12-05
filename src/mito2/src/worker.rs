@@ -37,7 +37,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_base::Plugins;
-use common_base::readable_size::ReadableSize;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_runtime::JoinHandle;
