@@ -22,9 +22,12 @@ use object_store::config::ObjectStoreConfig;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::raw::{Access, Layer, LayeredAccess, OpDelete, OpList, RpDelete, RpList, oio};
 use object_store::{ObjectStore, ObjectStoreBuilder};
+use tempfile::TempDir;
 use tokio::time::sleep;
 
-use crate::test_util::{FileDirGuard, StorageGuard, StorageType, TempDirGuard, TestGuard};
+use crate::test_util::{
+    FileDirGuard, StorageGuard, StorageType, TempDirGuard, TestGuard, get_test_store_config,
+};
 
 /// A layer that injects delays into storage operations for testing race conditions
 /// and timing-related issues in GC integration tests.
@@ -183,13 +186,12 @@ impl<D: oio::Delete> oio::Delete for DelayedDeleter<D> {
     }
 }
 
-/// Helper function to create an object store with delay layer for testing
-pub fn create_test_store_with_delays(
-    store_type: &StorageType,
+/// Helper function to create an file system object store with delay layer for testing
+pub fn create_fs_test_store_with_delays(
     list_delay: Duration,
     delete_delay: Duration,
     list_per_file_delay: Duration,
-) -> (object_store::ObjectStore, TempDirGuard) {
+) -> (object_store::ObjectStore, TempDir) {
     use object_store::services::Fs;
 
     let temp_dir = common_test_util::temp_dir::create_temp_dir("delayed_store");
@@ -204,7 +206,7 @@ pub fn create_test_store_with_delays(
         ))
         .finish();
 
-    (store, TempDirGuard::None)
+    (store, temp_dir)
 }
 
 /// Helper function to create an object store with delay layer using the same logic as new_object_store
@@ -253,7 +255,7 @@ pub async fn create_test_object_store_manager_with_delays(
     let data_home = data_home_dir.path().to_str().unwrap().to_string();
     let delay_layer = DelayLayer::new(list_delay, delete_delay, list_per_file_delay);
     let (mgr, dir_guard) =
-        build_object_store_manager_with_delays(&StorageType::File, &data_home, delay_layer).await?;
+        build_object_store_manager_with_delays(&store_type, &data_home, delay_layer).await?;
     Ok((
         mgr,
         TestGuard {
@@ -271,8 +273,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delay_layer_basic() {
-        let (store, _temp_dir) = create_test_store_with_delays(
-            &StorageType::File,
+        let (store, _temp_dir) = create_fs_test_store_with_delays(
             Duration::from_millis(100),
             Duration::from_millis(50),
             Duration::from_millis(10),
@@ -300,12 +301,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_delay_layer_with_zero_delays() {
-        let (store, _temp_dir) = create_test_store_with_delays(
-            &StorageType::File,
-            Duration::ZERO,
-            Duration::ZERO,
-            Duration::ZERO,
-        );
+        let (store, _temp_dir) =
+            create_fs_test_store_with_delays(Duration::ZERO, Duration::ZERO, Duration::ZERO);
 
         // All operations should be fast
         let start = std::time::Instant::now();
@@ -320,8 +317,7 @@ mod tests {
     #[tokio::test]
     async fn test_delay_layer_convenience_constructors() {
         // Test list-only delay
-        let (store, _temp_dir) = create_test_store_with_delays(
-            &StorageType::File,
+        let (store, _temp_dir) = create_fs_test_store_with_delays(
             Duration::from_millis(200),
             Duration::ZERO,
             Duration::ZERO,
@@ -333,8 +329,7 @@ mod tests {
         assert!(duration >= Duration::from_millis(200));
 
         // Test delete-only delay
-        let (store, _temp_dir) = create_test_store_with_delays(
-            &StorageType::File,
+        let (store, _temp_dir) = create_fs_test_store_with_delays(
             Duration::ZERO,
             Duration::from_millis(150),
             Duration::ZERO,
