@@ -59,14 +59,14 @@ impl CompactionMemoryManager {
             return Self { inner: None };
         }
 
-        let permits = bytes_to_permits(limit_bytes);
-        let limit_aligned_bytes = permits_to_bytes(permits);
+        let limit_permits = bytes_to_permits(limit_bytes);
+        let limit_aligned_bytes = permits_to_bytes(limit_permits);
         COMPACTION_MEMORY_LIMIT.set(limit_aligned_bytes as i64);
 
         Self {
             inner: Some(Arc::new(Inner {
-                semaphore: Semaphore::new(permits as usize),
-                limit_permits: permits,
+                semaphore: Semaphore::new(limit_permits as usize),
+                limit_permits,
                 notify: Notify::new(),
             })),
         }
