@@ -25,7 +25,7 @@ use mito2::gc::GcConfig;
 
 use crate::cluster::GreptimeDbClusterBuilder;
 use crate::test_util::{StorageType, TempDirGuard, get_test_store_config};
-use crate::tests::gc::{get_table_route, list_sst_files};
+use crate::tests::gc::{get_table_route, list_sst_files_from_storage};
 use crate::tests::test_util::{MockInstanceBuilder, TestContext, execute_sql, wait_procedure};
 
 /// Helper function to create a distributed cluster with GC enabled
@@ -110,7 +110,7 @@ pub async fn test_gc_basic(store_type: &StorageType) {
     let table_id = table.table_info().table_id();
 
     // List SST files before compaction (for verification)
-    let sst_files_before_compaction = list_sst_files(&test_context).await;
+    let sst_files_before_compaction = list_sst_files_from_storage(&test_context).await;
     info!(
         "SST files before compaction: {:?}",
         sst_files_before_compaction
@@ -125,7 +125,7 @@ pub async fn test_gc_basic(store_type: &StorageType) {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // List SST files after compaction (should have both old and new files)
-    let sst_files_after_compaction = list_sst_files(&test_context).await;
+    let sst_files_after_compaction = list_sst_files_from_storage(&test_context).await;
     info!(
         "SST files after compaction: {:?}",
         sst_files_after_compaction
@@ -161,7 +161,7 @@ pub async fn test_gc_basic(store_type: &StorageType) {
     wait_procedure(metasrv.procedure_manager(), procedure_id).await;
 
     // Step 7: Verify GC results
-    let sst_files_after_gc = list_sst_files(&test_context).await;
+    let sst_files_after_gc = list_sst_files_from_storage(&test_context).await;
     info!("SST files after GC: {:?}", sst_files_after_gc);
     assert_eq!(sst_files_after_gc.len(), 1); // Only the compacted file should remain after gc
 

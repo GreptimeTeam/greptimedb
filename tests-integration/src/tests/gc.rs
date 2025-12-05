@@ -64,7 +64,7 @@ pub(crate) async fn get_table_route(
 }
 
 /// Helper function to list all SST files
-pub(crate) async fn list_sst_files(test_context: &TestContext) -> HashSet<String> {
+pub(crate) async fn list_sst_files_from_storage(test_context: &TestContext) -> HashSet<String> {
     let mut sst_files = HashSet::new();
 
     for datanode in test_context.datanodes().values() {
@@ -75,6 +75,25 @@ pub(crate) async fn list_sst_files(test_context: &TestContext) -> HashSet<String
             .try_collect::<Vec<_>>()
             .await
             .unwrap()
+            .into_iter()
+            .map(|e| e.file_path)
+            .collect_vec();
+        sst_files.extend(all_files);
+    }
+
+    sst_files
+}
+
+/// Helper function to list all SST files
+pub(crate) async fn list_sst_files_from_manifest(test_context: &TestContext) -> HashSet<String> {
+    let mut sst_files = HashSet::new();
+
+    for datanode in test_context.datanodes().values() {
+        let region_server = datanode.region_server();
+        let mito = region_server.mito_engine().unwrap();
+        let all_files = mito
+            .all_ssts_from_manifest()
+            .await
             .into_iter()
             .map(|e| e.file_path)
             .collect_vec();
