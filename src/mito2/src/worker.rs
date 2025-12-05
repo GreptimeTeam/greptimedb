@@ -456,8 +456,7 @@ pub async fn write_cache_from_config(
         Some(config.index_cache_percent),
         puffin_manager_factory,
         intermediate_manager,
-        // TODO(yingwen): Enable manifest cache after removing read cache.
-        ReadableSize(0),
+        config.manifest_cache_size,
     )
     .await?;
     Ok(Some(Arc::new(cache)))
