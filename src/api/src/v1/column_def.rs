@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY};
 use datatypes::schema::{
     COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema, FULLTEXT_KEY, FulltextAnalyzer,
-    FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY, SkippingIndexOptions,
-    SkippingIndexType,
+    FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata, SKIPPING_INDEX_KEY,
+    SkippingIndexOptions, SkippingIndexType,
 };
 use greptime_proto::v1::{
     Analyzer, FulltextBackend as PbFulltextBackend, SkippingIndexType as PbSkippingIndexType,
@@ -129,6 +129,31 @@ pub fn try_as_column_def(column_schema: &ColumnSchema, is_primary_key: bool) -> 
         datatype_extension: column_datatype.1,
         options,
     })
+}
+
+/// Collect the [ColumnOptions] into the [Metadata] that can be used in, for example, [ColumnSchema].
+pub fn collect_column_options(column_options: Option<&ColumnOptions>) -> Metadata {
+    let mut metadata = Metadata::default();
+    let Some(ColumnOptions { options }) = column_options else {
+        return metadata;
+    };
+
+    if let Some(v) = options.get(FULLTEXT_GRPC_KEY) {
+        metadata.insert(FULLTEXT_KEY.to_string(), v.clone());
+    }
+    if let Some(v) = options.get(INVERTED_INDEX_GRPC_KEY) {
+        metadata.insert(INVERTED_INDEX_KEY.to_string(), v.clone());
+    }
+    if let Some(v) = options.get(SKIPPING_INDEX_GRPC_KEY) {
+        metadata.insert(SKIPPING_INDEX_KEY.to_string(), v.clone());
+    }
+    if let Some(v) = options.get(EXTENSION_TYPE_NAME_KEY) {
+        metadata.insert(EXTENSION_TYPE_NAME_KEY.to_string(), v.clone());
+    }
+    if let Some(v) = options.get(EXTENSION_TYPE_METADATA_KEY) {
+        metadata.insert(EXTENSION_TYPE_METADATA_KEY.to_string(), v.clone());
+    }
+    metadata
 }
 
 /// Constructs a `ColumnOptions` from the given `ColumnSchema`.

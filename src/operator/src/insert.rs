@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_table_expr::Kind;
 use api::v1::column_def::options_from_skipping;
 use api::v1::region::{
@@ -23,7 +24,7 @@ use api::v1::region::{
 };
 use api::v1::{
     AlterTableExpr, ColumnDataType, ColumnSchema, CreateTableExpr, InsertRequests,
-    RowInsertRequest, RowInsertRequests, SemanticType,
+    ModifyColumnType, ModifyColumnTypes, RowInsertRequest, RowInsertRequests, SemanticType,
 };
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
@@ -40,6 +41,7 @@ use common_query::Output;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
+use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::SkippingIndexOptions;
 use futures_util::future;
 use meter_macros::write_meter;
@@ -67,8 +69,9 @@ use table::requests::{
 use table::table_reference::TableReference;
 
 use crate::error::{
-    CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, FindRegionLeaderSnafu,
-    InvalidInsertRequestSnafu, JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
+    CatalogSnafu, ColumnDataTypeSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu,
+    FindRegionLeaderSnafu, InvalidInsertRequestSnafu, JoinTaskSnafu, RequestInsertsSnafu, Result,
+    TableNotFoundSnafu,
 };
 use crate::expr_helper;
 use crate::region_req_factory::RegionRequestFactory;
@@ -475,6 +478,7 @@ impl Inserter {
     /// Creates or alter tables on demand:
     /// - if table does not exist, create table by inferred CreateExpr
     /// - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`
+    ///   or align the json columns' datatypes with insert values.
     ///
     /// Returns a mapping from table name to table id, where table name is the table name involved in the requests.
     /// This mapping is used in the conversion of RowToRegion.
@@ -558,6 +562,10 @@ impl Inserter {
                         is_single_value,
                     )? {
                         alter_tables.push(alter_expr);
+                    }
+
+                    if let Some(expr) = maybe_alter_json_column_type(ctx, &table, req)? {
+                        alter_tables.push(expr);
                     }
                 }
                 None => {
@@ -978,6 +986,86 @@ impl Inserter {
 
     pub fn partition_manager(&self) -> &PartitionRuleManagerRef {
         &self.partition_manager
+    }
+}
+
+fn maybe_alter_json_column_type(
+    query_context: &QueryContextRef,
+    table: &TableRef,
+    request: &RowInsertRequest,
+) -> Result<Option<AlterTableExpr>> {
+    let Some(rows) = request.rows.as_ref() else {
+        return Ok(None);
+    };
+
+    // Fast path: skip altering json column type if insert request doesn't contain any json values.
+    let row_schema = &rows.schema;
+    if row_schema
+        .iter()
+        .all(|x| x.datatype() != ColumnDataType::Json)
+    {
+        return Ok(None);
+    }
+    let table_schema = table.schema_ref();
+    let mut modify_column_types = vec![];
+
+    for value_schema in row_schema {
+        if let Some(column_schema) = table_schema.column_schema_by_name(&value_schema.column_name)
+            && let Some(column_type) = column_schema.data_type.as_json()
+        {
+            let value_type: ConcreteDataType = ColumnDataTypeWrapper::new(
+                value_schema.datatype(),
+                value_schema.datatype_extension.clone(),
+            )
+            .into();
+            let Some(value_type) = value_type.as_json() else {
+                return InvalidInsertRequestSnafu {
+                    reason: format!(
+                        "expecting json value for json column '{}', but found type {}",
+                        column_schema.name, value_type
+                    ),
+                }
+                .fail();
+            };
+
+            if column_type.is_include(value_type) {
+                continue;
+            }
+
+            let merged = {
+                let mut column_type = column_type.clone();
+                column_type.merge(value_type).map_err(|e| {
+                    InvalidInsertRequestSnafu {
+                        reason: format!("insert json value is conflicting with column type: {e}"),
+                    }
+                    .build()
+                })?;
+                column_type
+            };
+
+            let (target_type, target_type_extension) =
+                ColumnDataTypeWrapper::try_from(ConcreteDataType::Json(merged))
+                    .map(|x| x.into_parts())
+                    .context(ColumnDataTypeSnafu)?;
+            modify_column_types.push(ModifyColumnType {
+                column_name: column_schema.name.clone(),
+                target_type: target_type as i32,
+                target_type_extension,
+            });
+        }
+    }
+
+    if modify_column_types.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(AlterTableExpr {
+            catalog_name: query_context.current_catalog().to_string(),
+            schema_name: query_context.current_schema(),
+            table_name: table.table_info().name.clone(),
+            kind: Some(Kind::ModifyColumnTypes(ModifyColumnTypes {
+                modify_column_types,
+            })),
+        }))
     }
 }
 
