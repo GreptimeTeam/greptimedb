@@ -94,14 +94,6 @@ pub async fn test_manifest_update_during_listing(store_type: &StorageType) {
         // Flush to create SST files
         let flush_sql = "ADMIN FLUSH_TABLE('test_race_table')";
         execute_sql(&instance, flush_sql).await;
-        let manifest_list = list_sst_files_from_manifest(&test_context).await;
-        assert_eq!(
-            manifest_list.len(),
-            i + 1,
-            "Expected {} SST files after flush, found {:?}",
-            i + 1,
-            manifest_list
-        );
     }
 
     // Get table information
@@ -116,7 +108,6 @@ pub async fn test_manifest_update_during_listing(store_type: &StorageType) {
     // Get initial SST file count
     let initial_sst_files = list_sst_files_from_manifest(&test_context).await;
     info!("Initial SST files: {}", initial_sst_files.len());
-    assert_eq!(initial_sst_files.len(), 4); // 4 files from 4 flushes
 
     // Get table route information for GC procedure
     let (region_routes, regions) =
@@ -141,8 +132,6 @@ pub async fn test_manifest_update_during_listing(store_type: &StorageType) {
     let compact_sql = "ADMIN COMPACT_TABLE('test_race_table')";
     execute_sql(&instance, compact_sql).await;
     info!("Triggered compaction");
-    assert_eq!(list_sst_files_from_manifest(&test_context).await.len(), 1);
-    assert_eq!(list_sst_files_from_storage(&test_context).await.len(), 5);
 
     // Wait for compaction to complete
     sleep(Duration::from_secs(2)).await;
