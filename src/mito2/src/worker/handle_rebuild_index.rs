@@ -28,7 +28,7 @@ use crate::region::MitoRegionRef;
 use crate::request::{
     BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, OptionOutputTx,
 };
-use crate::sst::file::{FileHandle, RegionFileId};
+use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
 };
@@ -68,6 +68,7 @@ impl<S> RegionWorkerLoop<S> {
             row_group_size: WriteOptions::default().row_group_size,
             intermediate_manager,
             puffin_manager,
+            write_cache_enabled: self.cache_manager.write_cache().is_some(),
         });
 
         IndexBuildTask {
@@ -216,7 +217,8 @@ impl<S> RegionWorkerLoop<S> {
         let cache_strategy = CacheStrategy::EnableAll(self.cache_manager.clone());
         for file_meta in &request.edit.files_to_add {
             let region_file_id = RegionFileId::new(region_id, file_meta.file_id);
-            cache_strategy.evict_puffin_cache(region_file_id).await;
+            let index_id = RegionIndexId::new(region_file_id, file_meta.index_version);
+            cache_strategy.evict_puffin_cache(index_id).await;
         }
 
         region.version_control.apply_edit(

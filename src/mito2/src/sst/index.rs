@@ -61,7 +61,7 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{
-    ColumnIndexMetadata, FileHandle, FileMeta, IndexType, IndexTypes, RegionFileId,
+    ColumnIndexMetadata, FileHandle, FileMeta, IndexType, IndexTypes, RegionFileId, RegionIndexId,
 };
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
@@ -81,6 +81,8 @@ pub(crate) const TYPE_BLOOM_FILTER_INDEX: &str = "bloom_filter_index";
 pub struct IndexOutput {
     /// Size of the file.
     pub file_size: u64,
+    /// Index version.
+    pub version: u64,
     /// Inverted index output.
     pub inverted_index: InvertedIndexOutput,
     /// Fulltext index output.
@@ -163,7 +165,9 @@ pub type BloomFilterOutput = IndexBaseOutput;
 pub struct Indexer {
     file_id: FileId,
     region_id: RegionId,
+    index_version: u64,
     puffin_manager: Option<SstPuffinManager>,
+    write_cache_enabled: bool,
     inverted_indexer: Option<InvertedIndexer>,
     last_mem_inverted_index: usize,
     fulltext_indexer: Option<FulltextIndexer>,
@@ -236,7 +240,7 @@ impl Indexer {
 #[async_trait::async_trait]
 pub trait IndexerBuilder {
     /// Builds indexer of given file id to [index_file_path].
-    async fn build(&self, file_id: FileId) -> Indexer;
+    async fn build(&self, file_id: FileId, index_version: u64) -> Indexer;
 }
 #[derive(Clone)]
 pub(crate) struct IndexerBuilderImpl {
@@ -244,6 +248,7 @@ pub(crate) struct IndexerBuilderImpl {
     pub(crate) metadata: RegionMetadataRef,
     pub(crate) row_group_size: usize,
     pub(crate) puffin_manager: SstPuffinManager,
+    pub(crate) write_cache_enabled: bool,
     pub(crate) intermediate_manager: IntermediateManager,
     pub(crate) index_options: IndexOptions,
     pub(crate) inverted_index_config: InvertedIndexConfig,
@@ -254,10 +259,12 @@ pub(crate) struct IndexerBuilderImpl {
 #[async_trait::async_trait]
 impl IndexerBuilder for IndexerBuilderImpl {
     /// Sanity check for arguments and create a new [Indexer] if arguments are valid.
-    async fn build(&self, file_id: FileId) -> Indexer {
+    async fn build(&self, file_id: FileId, index_version: u64) -> Indexer {
         let mut indexer = Indexer {
             file_id,
             region_id: self.metadata.region_id,
+            index_version,
+            write_cache_enabled: self.write_cache_enabled,
             ..Default::default()
         };
 
@@ -611,13 +618,20 @@ impl IndexBuildTask {
         &mut self,
         version_control: VersionControlRef,
     ) -> Result<IndexBuildOutcome> {
-        let index_file_id = if self.file_meta.index_file_size > 0 {
-            // Generate new file ID if index file exists to avoid overwrite.
-            FileId::random()
+        // Determine the new index version
+        let new_index_version = if self.file_meta.index_file_size > 0 {
+            // Increment version if index file exists to avoid overwrite.
+            self.file_meta.index_version + 1
         } else {
-            self.file_meta.file_id
+            0 // Default version for new index files
         };
-        let mut indexer = self.indexer_builder.build(index_file_id).await;
+
+        // Use the same file_id but with new version for index file
+        let index_file_id = self.file_meta.file_id;
+        let mut indexer = self
+            .indexer_builder
+            .build(index_file_id, new_index_version)
+            .await;
 
         // Check SST file existence before building index to avoid failure of parquet reader.
         if !self.check_sst_file_exists(&version_control).await {
@@ -677,10 +691,10 @@ impl IndexBuildTask {
             }
 
             // Upload index file if write cache is enabled.
-            self.maybe_upload_index_file(index_output.clone(), index_file_id)
+            self.maybe_upload_index_file(index_output.clone(), index_file_id, new_index_version)
                 .await?;
 
-            let worker_request = match self.update_manifest(index_output, index_file_id).await {
+            let worker_request = match self.update_manifest(index_output, new_index_version).await {
                 Ok(edit) => {
                     let index_build_finished = IndexBuildFinished {
                         region_id: self.file_meta.region_id,
@@ -712,6 +726,7 @@ impl IndexBuildTask {
         &self,
         output: IndexOutput,
         index_file_id: FileId,
+        index_version: u64,
     ) -> Result<()> {
         if let Some(write_cache) = &self.write_cache {
             let file_id = self.file_meta.file_id;
@@ -719,12 +734,14 @@ impl IndexBuildTask {
             let remote_store = self.access_layer.object_store();
             let mut upload_tracker = UploadTracker::new(region_id);
             let mut err = None;
-            let puffin_key = IndexKey::new(region_id, index_file_id, FileType::Puffin);
+            let puffin_key =
+                IndexKey::new(region_id, index_file_id, FileType::Puffin(output.version));
+            let index_id = RegionIndexId::new(RegionFileId::new(region_id, file_id), index_version);
             let puffin_path = RegionFilePathFactory::new(
                 self.access_layer.table_dir().to_string(),
                 self.access_layer.path_type(),
             )
-            .build_index_file_path(RegionFileId::new(region_id, file_id));
+            .build_index_file_path_with_version(index_id);
             if let Err(e) = write_cache
                 .upload(puffin_key, &puffin_path, remote_store)
                 .await
@@ -756,12 +773,12 @@ impl IndexBuildTask {
     async fn update_manifest(
         &mut self,
         output: IndexOutput,
-        index_file_id: FileId,
+        new_index_version: u64,
     ) -> Result<RegionEdit> {
         self.file_meta.available_indexes = output.build_available_indexes();
         self.file_meta.indexes = output.build_indexes();
         self.file_meta.index_file_size = output.file_size;
-        self.file_meta.index_file_id = Some(index_file_id);
+        self.file_meta.index_version = new_index_version;
         let edit = RegionEdit {
             files_to_add: vec![self.file_meta.clone()],
             files_to_remove: vec![],
@@ -1163,6 +1180,10 @@ mod tests {
             unreachable!()
         }
 
+        fn build_index_file_path_with_version(&self, _index_id: RegionIndexId) -> String {
+            unreachable!()
+        }
+
         fn build_sst_file_path(&self, _file_id: RegionFileId) -> String {
             unreachable!()
         }
@@ -1236,6 +1257,7 @@ mod tests {
             metadata,
             row_group_size: 1024,
             puffin_manager,
+            write_cache_enabled: false,
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
@@ -1260,13 +1282,14 @@ mod tests {
             metadata,
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
+            write_cache_enabled: false,
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1290,6 +1313,7 @@ mod tests {
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
+            write_cache_enabled: false,
             intermediate_manager: intm_manager.clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig {
@@ -1299,7 +1323,7 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
@@ -1311,6 +1335,7 @@ mod tests {
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
+            write_cache_enabled: false,
             intermediate_manager: intm_manager.clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
@@ -1320,7 +1345,7 @@ mod tests {
             },
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1332,6 +1357,7 @@ mod tests {
             metadata,
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
+            write_cache_enabled: false,
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
@@ -1341,7 +1367,7 @@ mod tests {
                 ..Default::default()
             },
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1365,13 +1391,14 @@ mod tests {
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
+            write_cache_enabled: false,
             intermediate_manager: intm_manager.clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
@@ -1388,13 +1415,14 @@ mod tests {
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
+            write_cache_enabled: false,
             intermediate_manager: intm_manager.clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1411,13 +1439,14 @@ mod tests {
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
+            write_cache_enabled: false,
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1441,13 +1470,14 @@ mod tests {
             metadata,
             row_group_size: 0,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
+            write_cache_enabled: false,
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random())
+        .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
@@ -1619,7 +1649,7 @@ mod tests {
 
         let puffin_path = location::index_file_path(
             env.access_layer.table_dir(),
-            RegionFileId::new(region_id, file_meta.file_id),
+            RegionIndexId::new(RegionFileId::new(region_id, file_meta.file_id), 0),
             env.access_layer.path_type(),
         );
 
@@ -1761,6 +1791,7 @@ mod tests {
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: write_cache.build_puffin_manager().clone(),
+            write_cache_enabled: true,
             intermediate_manager: write_cache.intermediate_manager().clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
@@ -1812,7 +1843,11 @@ mod tests {
         }
 
         // The write cache should contain the uploaded index file.
-        let index_key = IndexKey::new(region_id, file_meta.file_id, FileType::Puffin);
+        let index_key = IndexKey::new(
+            region_id,
+            file_meta.file_id,
+            FileType::Puffin(sst_info.index_metadata.version),
+        );
         assert!(write_cache.file_cache().contains_key(&index_key));
     }
 

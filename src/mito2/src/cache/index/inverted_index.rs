@@ -26,11 +26,12 @@ use store_api::storage::FileId;
 
 use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache, PageKey};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
+use crate::sst::file::IndexVersion;
 
 const INDEX_TYPE_INVERTED_INDEX: &str = "inverted_index";
 
 /// Cache for inverted index.
-pub type InvertedIndexCache = IndexCache<FileId, InvertedIndexMetas>;
+pub type InvertedIndexCache = IndexCache<(FileId, IndexVersion), InvertedIndexMetas>;
 pub type InvertedIndexCacheRef = Arc<InvertedIndexCache>;
 
 impl InvertedIndexCache {
@@ -48,23 +49,24 @@ impl InvertedIndexCache {
 
     /// Removes all cached entries for the given `file_id`.
     pub fn invalidate_file(&self, file_id: FileId) {
-        self.invalidate_if(move |key| *key == file_id);
+        self.invalidate_if(move |key| key.0 == file_id);
     }
 }
 
 /// Calculates weight for inverted index metadata.
-fn inverted_index_metadata_weight(k: &FileId, v: &Arc<InvertedIndexMetas>) -> u32 {
-    (k.as_bytes().len() + v.encoded_len()) as u32
+fn inverted_index_metadata_weight(k: &(FileId, IndexVersion), v: &Arc<InvertedIndexMetas>) -> u32 {
+    (k.0.as_bytes().len() + size_of::<IndexVersion>() + v.encoded_len()) as u32
 }
 
 /// Calculates weight for inverted index content.
-fn inverted_index_content_weight((k, _): &(FileId, PageKey), v: &Bytes) -> u32 {
-    (k.as_bytes().len() + v.len()) as u32
+fn inverted_index_content_weight((k, _): &((FileId, IndexVersion), PageKey), v: &Bytes) -> u32 {
+    (k.0.as_bytes().len() + size_of::<IndexVersion>() + v.len()) as u32
 }
 
 /// Inverted index blob reader with cache.
 pub struct CachedInvertedIndexBlobReader<R> {
     file_id: FileId,
+    index_version: IndexVersion,
     blob_size: u64,
     inner: R,
     cache: InvertedIndexCacheRef,
@@ -72,9 +74,16 @@ pub struct CachedInvertedIndexBlobReader<R> {
 
 impl<R> CachedInvertedIndexBlobReader<R> {
     /// Creates a new inverted index blob reader with cache.
-    pub fn new(file_id: FileId, blob_size: u64, inner: R, cache: InvertedIndexCacheRef) -> Self {
+    pub fn new(
+        file_id: FileId,
+        index_version: IndexVersion,
+        blob_size: u64,
+        inner: R,
+        cache: InvertedIndexCacheRef,
+    ) -> Self {
         Self {
             file_id,
+            index_version,
             blob_size,
             inner,
             cache,
@@ -96,7 +105,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         let (result, cache_metrics) = self
             .cache
             .get_or_load(
-                self.file_id,
+                (self.file_id, self.index_version),
                 self.blob_size,
                 offset,
                 size,
@@ -129,7 +138,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
             let (page, cache_metrics) = self
                 .cache
                 .get_or_load(
-                    self.file_id,
+                    (self.file_id, self.index_version),
                     self.blob_size,
                     range.start,
                     (range.end - range.start) as u32,
@@ -156,7 +165,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         &self,
         metrics: Option<&'a mut InvertedIndexReadMetrics>,
     ) -> Result<Arc<InvertedIndexMetas>> {
-        if let Some(cached) = self.cache.get_metadata(self.file_id) {
+        if let Some(cached) = self.cache.get_metadata((self.file_id, self.index_version)) {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             if let Some(m) = metrics {
                 m.cache_hit += 1;
@@ -164,7 +173,8 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
             Ok(cached)
         } else {
             let meta = self.inner.metadata(metrics).await?;
-            self.cache.put_metadata(self.file_id, meta.clone());
+            self.cache
+                .put_metadata((self.file_id, self.index_version), meta.clone());
             CACHE_MISS.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(meta)
         }
@@ -299,6 +309,7 @@ mod test {
         // Init a test range reader in local fs.
         let mut env = TestEnv::new().await;
         let file_size = blob.len() as u64;
+        let index_version = 0;
         let store = env.init_object_store_manager();
         let temp_path = "data";
         store.write(temp_path, blob).await.unwrap();
@@ -314,6 +325,7 @@ mod test {
         let reader = InvertedIndexBlobReader::new(range_reader);
         let cached_reader = CachedInvertedIndexBlobReader::new(
             FileId::random(),
+            index_version,
             file_size,
             reader,
             Arc::new(InvertedIndexCache::new(8192, 8192, 50)),
@@ -450,7 +462,7 @@ mod test {
             let (read, _cache_metrics) = cached_reader
                 .cache
                 .get_or_load(
-                    cached_reader.file_id,
+                    (cached_reader.file_id, cached_reader.index_version),
                     file_size,
                     offset,
                     size,

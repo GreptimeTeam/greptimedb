@@ -230,7 +230,7 @@ mod tests {
                 created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
             }],
             index_file_size: 4096,
-            index_file_id: None,
+            index_version: 0,
             num_rows: 1024,
             num_row_groups: 1,
             sequence: NonZeroU64::new(4096),

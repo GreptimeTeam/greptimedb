@@ -215,6 +215,7 @@ impl WriteCache {
             puffin_manager: self
                 .puffin_manager_factory
                 .build(store.clone(), path_provider.clone()),
+            write_cache_enabled: true,
             intermediate_manager: self.intermediate_manager.clone(),
             index_options: write_request.index_options,
             inverted_index_config: write_request.inverted_index_config,
@@ -266,7 +267,7 @@ impl WriteCache {
             upload_tracker.push_uploaded_file(parquet_path);
 
             if sst.index_metadata.file_size > 0 {
-                let puffin_key = IndexKey::new(region_id, sst.file_id, FileType::Puffin);
+                let puffin_key = IndexKey::new(region_id, sst.file_id, FileType::Puffin(0));
                 let puffin_path = upload_request
                     .dest_path_provider
                     .build_index_file_path(RegionFileId::new(region_id, sst.file_id));
@@ -439,7 +440,11 @@ impl UploadTracker {
             file_cache.remove(parquet_key).await;
 
             if sst.index_metadata.file_size > 0 {
-                let puffin_key = IndexKey::new(self.region_id, sst.file_id, FileType::Puffin);
+                let puffin_key = IndexKey::new(
+                    self.region_id,
+                    sst.file_id,
+                    FileType::Puffin(sst.index_metadata.version),
+                );
                 file_cache.remove(puffin_key).await;
             }
         }
@@ -548,7 +553,7 @@ mod tests {
         assert_eq!(remote_data.to_vec(), cache_data.to_vec());
 
         // Check write cache contains the index key
-        let index_key = IndexKey::new(region_id, file_id, FileType::Puffin);
+        let index_key = IndexKey::new(region_id, file_id, FileType::Puffin(0));
         assert!(write_cache.file_cache.contains_key(&index_key));
 
         let remote_index_data = mock_store.read(&index_upload_path).await.unwrap();

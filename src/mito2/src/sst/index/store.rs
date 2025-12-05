@@ -49,6 +49,10 @@ impl InstrumentedStore {
         }
     }
 
+    pub fn store(&self) -> &ObjectStore {
+        &self.object_store
+    }
+
     /// Set the size of the write buffer.
     pub fn with_write_buffer_size(mut self, write_buffer_size: Option<usize>) -> Self {
         self.write_buffer_size = write_buffer_size.filter(|&size| size > 0);

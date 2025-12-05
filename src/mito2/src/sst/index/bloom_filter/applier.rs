@@ -44,7 +44,7 @@ use crate::error::{
     Result,
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
-use crate::sst::file::RegionFileId;
+use crate::sst::file::RegionIndexId;
 use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 pub use crate::sst::index::bloom_filter::applier::builder::BloomFilterIndexApplierBuilder;
@@ -200,7 +200,7 @@ impl BloomFilterIndexApplier {
     /// * `metrics` - Optional mutable reference to collect metrics on demand
     pub async fn apply(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
         row_groups: impl Iterator<Item = (usize, bool)>,
         mut metrics: Option<&mut BloomFilterIndexApplyMetrics>,
@@ -242,6 +242,7 @@ impl BloomFilterIndexApplier {
                 }
                 let reader = CachedBloomFilterIndexBlobReader::new(
                     file_id.file_id(),
+                    file_id.version,
                     *column_id,
                     Tag::Skipping,
                     blob_size,
@@ -286,7 +287,7 @@ impl BloomFilterIndexApplier {
     /// Returus `None` if the column does not have an index.
     async fn blob_reader(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         column_id: ColumnId,
         file_size_hint: Option<u64>,
         metrics: Option<&mut BloomFilterIndexApplyMetrics>,
@@ -328,7 +329,7 @@ impl BloomFilterIndexApplier {
     /// Creates a blob reader from the cached index file
     async fn cached_blob_reader(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         column_id: ColumnId,
         file_size_hint: Option<u64>,
     ) -> Result<Option<BlobReader>> {
@@ -336,7 +337,11 @@ impl BloomFilterIndexApplier {
             return Ok(None);
         };
 
-        let index_key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Puffin);
+        let index_key = IndexKey::new(
+            file_id.region_id(),
+            file_id.file_id(),
+            FileType::Puffin(file_id.version),
+        );
         if file_cache.get(index_key).await.is_none() {
             return Ok(None);
         };
@@ -369,7 +374,7 @@ impl BloomFilterIndexApplier {
     /// Creates a blob reader from the remote index file
     async fn remote_blob_reader(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         column_id: ColumnId,
         file_size_hint: Option<u64>,
     ) -> Result<BlobReader> {
@@ -446,6 +451,7 @@ mod tests {
     use store_api::storage::FileId;
 
     use super::*;
+    use crate::sst::file::RegionFileId;
     use crate::sst::index::bloom_filter::creator::BloomFilterIndexer;
     use crate::sst::index::bloom_filter::creator::tests::{
         mock_object_store, mock_region_metadata, new_batch, new_intm_mgr,
@@ -457,7 +463,7 @@ mod tests {
         object_store: ObjectStore,
         metadata: &RegionMetadata,
         puffin_manager_factory: PuffinManagerFactory,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
     ) -> impl Fn(&[Expr], Vec<(usize, bool)>) -> BoxFuture<'static, Vec<(usize, Vec<Range<usize>>)>>
     + use<'_> {
         move |exprs, row_groups| {
@@ -514,6 +520,7 @@ mod tests {
         let intm_mgr = new_intm_mgr(d.path().to_string_lossy()).await;
         let memory_usage_threshold = Some(1024);
         let file_id = RegionFileId::new(region_metadata.region_id, FileId::random());
+        let file_id = RegionIndexId::new(file_id, 0);
         let table_dir = "table_dir".to_string();
 
         let mut indexer = BloomFilterIndexer::new(

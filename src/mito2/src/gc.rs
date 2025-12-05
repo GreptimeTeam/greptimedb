@@ -330,10 +330,9 @@ impl LocalGcWorker {
 
         // TODO(discord9): for now, ignore async index file as it's design is not stable, need to be improved once
         // index file design is stable
-        let file_pairs: Vec<(FileId, FileId)> = unused_files
-            .iter()
-            .map(|file_id| (*file_id, *file_id))
-            .collect();
+        let file_pairs: Vec<(FileId, u64)> =
+            unused_files.iter().map(|file_id| (*file_id, 0)).collect();
+        // TODO(discord9): gc worker need another major refactor to support versioned index files
 
         debug!(
             "Found {} unused index files to delete for region {}",
@@ -354,7 +353,7 @@ impl LocalGcWorker {
         Ok(unused_files)
     }
 
-    async fn delete_files(&self, region_id: RegionId, file_ids: &[(FileId, FileId)]) -> Result<()> {
+    async fn delete_files(&self, region_id: RegionId, file_ids: &[(FileId, u64)]) -> Result<()> {
         delete_files(
             region_id,
             file_ids,

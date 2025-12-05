@@ -558,7 +558,7 @@ impl ParquetReaderBuilder {
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let apply_res = index_applier
                 .apply_fine(
-                    self.file_handle.file_id(),
+                    self.file_handle.index_id(),
                     Some(file_size_hint),
                     metrics.fulltext_index_apply_metrics.as_mut(),
                 )
@@ -630,7 +630,7 @@ impl ParquetReaderBuilder {
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let apply_res = index_applier
                 .apply(
-                    self.file_handle.file_id(),
+                    self.file_handle.index_id(),
                     Some(file_size_hint),
                     metrics.inverted_index_apply_metrics.as_mut(),
                 )
@@ -709,7 +709,7 @@ impl ParquetReaderBuilder {
             });
             let apply_res = index_applier
                 .apply(
-                    self.file_handle.file_id(),
+                    self.file_handle.index_id(),
                     Some(file_size_hint),
                     rgs,
                     metrics.bloom_filter_apply_metrics.as_mut(),
@@ -792,7 +792,7 @@ impl ParquetReaderBuilder {
             });
             let apply_res = index_applier
                 .apply_coarse(
-                    self.file_handle.file_id(),
+                    self.file_handle.index_id(),
                     Some(file_size_hint),
                     rgs,
                     metrics.fulltext_index_apply_metrics.as_mut(),

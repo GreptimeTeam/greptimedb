@@ -47,8 +47,8 @@ pub struct ManifestSstEntry {
     pub region_sequence: RegionSeq,
     /// Engine-specific file identifier (string form).
     pub file_id: String,
-    /// Engine-specific index file identifier (string form).
-    pub index_file_id: Option<String>,
+    /// Index version, increment when the index file is rebuilt.
+    pub index_version: u64,
     /// SST level.
     pub level: u8,
     /// Full path of the SST file in object store.
@@ -91,7 +91,7 @@ impl ManifestSstEntry {
             ColumnSchema::new("region_group", Ty::uint8_datatype(), false),
             ColumnSchema::new("region_sequence", Ty::uint32_datatype(), false),
             ColumnSchema::new("file_id", Ty::string_datatype(), false),
-            ColumnSchema::new("index_file_id", Ty::string_datatype(), true),
+            ColumnSchema::new("index_version", Ty::uint64_datatype(), false),
             ColumnSchema::new("level", Ty::uint8_datatype(), false),
             ColumnSchema::new("file_path", Ty::string_datatype(), false),
             ColumnSchema::new("file_size", Ty::uint64_datatype(), false),
@@ -119,7 +119,7 @@ impl ManifestSstEntry {
         let region_groups = entries.iter().map(|e| e.region_group);
         let region_sequences = entries.iter().map(|e| e.region_sequence);
         let file_ids = entries.iter().map(|e| e.file_id.as_str());
-        let index_file_ids = entries.iter().map(|e| e.index_file_id.as_ref());
+        let index_versions = entries.iter().map(|e| e.index_version);
         let levels = entries.iter().map(|e| e.level);
         let file_paths = entries.iter().map(|e| e.file_path.as_str());
         let file_sizes = entries.iter().map(|e| e.file_size);
@@ -151,7 +151,7 @@ impl ManifestSstEntry {
             Arc::new(UInt8Array::from_iter_values(region_groups)),
             Arc::new(UInt32Array::from_iter_values(region_sequences)),
             Arc::new(StringArray::from_iter_values(file_ids)),
-            Arc::new(StringArray::from_iter(index_file_ids)),
+            Arc::new(UInt64Array::from_iter(index_versions)),
             Arc::new(UInt8Array::from_iter_values(levels)),
             Arc::new(StringArray::from_iter_values(file_paths)),
             Arc::new(UInt64Array::from_iter_values(file_sizes)),
@@ -437,7 +437,7 @@ mod tests {
                 region_group: region_group1,
                 region_sequence: region_seq1,
                 file_id: "f1".to_string(),
-                index_file_id: None,
+                index_version: 0,
                 level: 1,
                 file_path: "/p1".to_string(),
                 file_size: 100,
@@ -461,7 +461,7 @@ mod tests {
                 region_group: region_group2,
                 region_sequence: region_seq2,
                 file_id: "f2".to_string(),
-                index_file_id: Some("idx".to_string()),
+                index_version: 1,
                 level: 3,
                 file_path: "/p2".to_string(),
                 file_size: 200,
@@ -548,13 +548,13 @@ mod tests {
         assert_eq!("f1", file_ids.value(0));
         assert_eq!("f2", file_ids.value(1));
 
-        let index_file_ids = batch
+        let index_versions = batch
             .column(7)
             .as_any()
-            .downcast_ref::<StringArray>()
+            .downcast_ref::<UInt64Array>()
             .unwrap();
-        assert!(index_file_ids.is_null(0));
-        assert_eq!("idx", index_file_ids.value(1));
+        assert_eq!(0, index_versions.value(0));
+        assert_eq!(1, index_versions.value(1));
 
         let levels = batch
             .column(8)

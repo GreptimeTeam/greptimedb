@@ -163,7 +163,7 @@ impl ObjbenchCommand {
             available_indexes: Default::default(),
             indexes: Default::default(),
             index_file_size: 0,
-            index_file_id: None,
+            index_version: 0,
             num_rows,
             num_row_groups,
             sequence: None,
