@@ -40,7 +40,7 @@ impl ParserContext<'_> {
                             expected: "a table name",
                             actual: self.peek_token_as_string(),
                         })?;
-                let table = Self::canonicalize_object_name(raw_table);
+                let table = Self::canonicalize_object_name(raw_table)?;
                 CommentObject::Table(table)
             }
             Token::Word(word) if word.keyword == Keyword::COLUMN => {
@@ -55,7 +55,7 @@ impl ParserContext<'_> {
                             expected: "a flow name",
                             actual: self.peek_token_as_string(),
                         })?;
-                let flow = Self::canonicalize_object_name(raw_flow);
+                let flow = Self::canonicalize_object_name(raw_flow)?;
                 CommentObject::Flow(flow)
             }
             _ => return self.expected("TABLE, COLUMN or FLOW", target_token),
@@ -88,7 +88,7 @@ impl ParserContext<'_> {
                 expected: "a column reference",
                 actual: self.peek_token_as_string(),
             })?;
-        let canonical = Self::canonicalize_object_name(raw);
+        let canonical = Self::canonicalize_object_name(raw)?;
 
         let mut parts = canonical.0;
         ensure!(
@@ -99,15 +99,18 @@ impl ParserContext<'_> {
         );
 
         let column_part = parts.pop().unwrap();
-        let ObjectNamePart::Identifier(column_ident) = column_part;
+        let ObjectNamePart::Identifier(column_ident) = column_part else {
+            unreachable!("canonicalized object name should only contain identifiers");
+        };
 
         let column = ParserContext::canonicalize_identifier(column_ident);
 
         let mut table_idents: Vec<Ident> = Vec::with_capacity(parts.len());
         for part in parts {
             match part {
-                ObjectNamePart::Identifier(ident) => {
-                    table_idents.push(ident);
+                ObjectNamePart::Identifier(ident) => table_idents.push(ident),
+                ObjectNamePart::Function(_) => {
+                    unreachable!("canonicalized object name should only contain identifiers")
                 }
             }
         }
