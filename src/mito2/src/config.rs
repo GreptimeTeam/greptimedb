@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 use crate::cache::file_cache::DEFAULT_INDEX_CACHE_PERCENT;
+use crate::compaction::memory_manager::OnExhaustedPolicy;
 use crate::error::Result;
 use crate::gc::GcConfig;
 use crate::memtable::MemtableConfig;
@@ -92,6 +93,10 @@ pub struct MitoConfig {
     pub max_background_compactions: usize,
     /// Max number of running background purge jobs (default: number of cpu cores).
     pub max_background_purges: usize,
+    /// Memory budget for compaction tasks. Setting it to 0 or "unlimited" disables the limit.
+    pub experimental_compaction_memory_limit: MemoryLimit,
+    /// Behavior when compaction cannot acquire memory from the budget.
+    pub experimental_compaction_on_exhausted: OnExhaustedPolicy,
 
     // Flush configs:
     /// Interval to auto flush a region if it has not flushed yet (default 30 min).
@@ -178,6 +183,8 @@ impl Default for MitoConfig {
             max_background_flushes: divide_num_cpus(2),
             max_background_compactions: divide_num_cpus(4),
             max_background_purges: get_total_cpu_cores(),
+            experimental_compaction_memory_limit: MemoryLimit::Unlimited,
+            experimental_compaction_on_exhausted: OnExhaustedPolicy::default(),
             auto_flush_interval: Duration::from_secs(30 * 60),
             global_write_buffer_size: ReadableSize::gb(1),
             global_write_buffer_reject_size: ReadableSize::gb(2),

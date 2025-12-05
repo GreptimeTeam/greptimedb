@@ -859,6 +859,8 @@ pub(crate) enum BackgroundNotify {
     CompactionFinished(CompactionFinished),
     /// Compaction has failed.
     CompactionFailed(CompactionFailed),
+    /// Retry compaction when memory becomes available.
+    CompactionRetry,
     /// Truncate result.
     Truncate(TruncateResult),
     /// Region change result.

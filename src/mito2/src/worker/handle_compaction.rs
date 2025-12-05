@@ -122,6 +122,13 @@ impl<S> RegionWorkerLoop<S> {
             .on_compaction_failed(req.region_id, req.err);
     }
 
+    /// Retry a pending compaction once memory becomes available.
+    pub(crate) async fn handle_compaction_retry(&mut self, region_id: RegionId) {
+        self.compaction_scheduler
+            .retry_memory_pending(region_id)
+            .await;
+    }
+
     /// Schedule compaction for the region if necessary.
     pub(crate) async fn schedule_compaction(&mut self, region: &MitoRegionRef) {
         let now = self.time_provider.current_time_millis();

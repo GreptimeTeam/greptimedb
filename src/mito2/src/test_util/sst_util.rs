@@ -123,6 +123,7 @@ pub fn sst_file_handle_with_file_id(file_id: FileId, start_ms: i64, end_ms: i64)
             ),
             level: 0,
             file_size: 0,
+            max_row_group_uncompressed_size: 0,
             available_indexes: Default::default(),
             indexes: Default::default(),
             index_file_size: 0,

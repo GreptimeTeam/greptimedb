@@ -224,6 +224,7 @@ mod tests {
             time_range: FileTimeRange::default(),
             level: 0,
             file_size: 4096,
+            max_row_group_uncompressed_size: 4096,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
             indexes: vec![ColumnIndexMetadata {
                 column_id: 0,

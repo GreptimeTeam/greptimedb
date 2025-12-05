@@ -22,6 +22,7 @@ use snafu::ResultExt;
 use tokio::sync::mpsc;
 
 use crate::compaction::compactor::{CompactionRegion, Compactor};
+use crate::compaction::memory_manager::CompactionMemoryGuard;
 use crate::compaction::picker::{CompactionTask, PickerOutput};
 use crate::error::CompactRegionSnafu;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
@@ -52,6 +53,8 @@ pub(crate) struct CompactionTaskImpl {
     pub(crate) compactor: Arc<dyn Compactor>,
     /// Output of the picker.
     pub(crate) picker_output: PickerOutput,
+    /// Guard to release memory budget after compaction finishes.
+    pub(crate) memory_guard: Option<CompactionMemoryGuard>,
 }
 
 impl Debug for CompactionTaskImpl {
@@ -222,7 +225,7 @@ impl CompactionTaskImpl {
     }
 
     /// Handles compaction failure, notifies all waiters.
-    fn on_failure(&mut self, err: Arc<error::Error>) {
+    pub(crate) fn on_failure(&mut self, err: Arc<error::Error>) {
         COMPACTION_FAILURE_COUNT.inc();
         for waiter in self.waiters.drain(..) {
             waiter.send(Err(err.clone()).context(CompactRegionSnafu {
