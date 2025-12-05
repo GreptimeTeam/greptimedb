@@ -127,6 +127,8 @@ pub struct ParquetReaderBuilder {
     compaction: bool,
     /// Mode to pre-filter columns.
     pre_filter_mode: PreFilterMode,
+    /// Whether to decode primary key values eagerly when reading primary key format SSTs.
+    decode_primary_key_values: bool,
 }
 
 impl ParquetReaderBuilder {
@@ -152,6 +154,7 @@ impl ParquetReaderBuilder {
             flat_format: false,
             compaction: false,
             pre_filter_mode: PreFilterMode::All,
+            decode_primary_key_values: false,
         }
     }
 
@@ -236,6 +239,13 @@ impl ParquetReaderBuilder {
         self
     }
 
+    /// Decodes primary key values eagerly when reading primary key format SSTs.
+    #[must_use]
+    pub(crate) fn decode_primary_key_values(mut self, decode: bool) -> Self {
+        self.decode_primary_key_values = decode;
+        self
+    }
+
     /// Builds a [ParquetReader].
     ///
     /// This needs to perform IO operation.
@@ -292,6 +302,9 @@ impl ParquetReaderBuilder {
                 self.compaction,
             )?
         };
+        if self.decode_primary_key_values {
+            read_format.set_decode_primary_key_values(true);
+        }
         if need_override_sequence(&parquet_meta) {
             read_format
                 .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
