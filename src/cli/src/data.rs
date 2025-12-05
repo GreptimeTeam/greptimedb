@@ -14,6 +14,7 @@
 
 mod export;
 mod import;
+mod storage_export;
 
 use clap::Subcommand;
 use client::DEFAULT_CATALOG_NAME;
