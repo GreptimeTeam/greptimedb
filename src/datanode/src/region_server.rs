@@ -1261,7 +1261,6 @@ impl RegionServerInner {
             .with_context(|_| HandleRegionRequestSnafu { region_id })?
             .new_opened_logical_region_ids()
         else {
-            warn!("No new opened logical regions");
             return Ok(());
         };
 
