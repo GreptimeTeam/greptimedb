@@ -269,7 +269,9 @@ impl ParquetReaderBuilder {
         let file_size = self.file_handle.meta_ref().file_size;
 
         // Loads parquet metadata of the file.
-        let (parquet_meta, cache_miss) = self.read_parquet_metadata(&file_path, file_size, &mut metrics.metadata_cache_metrics).await?;
+        let (parquet_meta, cache_miss) = self
+            .read_parquet_metadata(&file_path, file_size, &mut metrics.metadata_cache_metrics)
+            .await?;
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
         // Gets the metadata stored in the SST.

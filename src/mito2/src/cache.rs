@@ -274,15 +274,15 @@ impl CacheStrategy {
         remote_store: ObjectStore,
         file_size: u64,
     ) {
-        if let CacheStrategy::EnableAll(cache_manager) = self {
-            if let Some(write_cache) = cache_manager.write_cache() {
-                write_cache.file_cache().maybe_download_background(
-                    index_key,
-                    remote_path,
-                    remote_store,
-                    file_size,
-                );
-            }
+        if let CacheStrategy::EnableAll(cache_manager) = self
+            && let Some(write_cache) = cache_manager.write_cache()
+        {
+            write_cache.file_cache().maybe_download_background(
+                index_key,
+                remote_path,
+                remote_store,
+                file_size,
+            );
         }
     }
 }
