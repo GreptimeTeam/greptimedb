@@ -15,11 +15,10 @@
 use std::path::Path;
 use std::result::Result as StdResult;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::channel;
 use std::sync::{Arc, RwLock};
 
+use common_config::file_watcher::{FileWatcherBuilder, FileWatcherConfig};
 use common_telemetry::{error, info};
-use notify::{EventKind, RecursiveMode, Watcher};
 use snafu::ResultExt;
 
 use crate::error::{FileWatchSnafu, Result};
@@ -119,45 +118,27 @@ where
         return Ok(());
     }
 
+    let watch_paths: Vec<_> = tls_config
+        .get_tls_option()
+        .watch_paths()
+        .iter()
+        .map(|p| p.to_path_buf())
+        .collect();
+
     let tls_config_for_watcher = tls_config.clone();
 
-    let (tx, rx) = channel::<notify::Result<notify::Event>>();
-    let mut watcher = notify::recommended_watcher(tx).context(FileWatchSnafu { path: "<none>" })?;
-
-    // Watch all paths returned by the TlsConfigLoader
-    for path in tls_config.get_tls_option().watch_paths() {
-        watcher
-            .watch(path, RecursiveMode::NonRecursive)
-            .with_context(|_| FileWatchSnafu {
-                path: path.display().to_string(),
-            })?;
-    }
-
-    info!("Spawning background task for watching TLS cert/key file changes");
-    std::thread::spawn(move || {
-        let _watcher = watcher;
-        loop {
-            match rx.recv() {
-                Ok(Ok(event)) => {
-                    if let EventKind::Modify(_) | EventKind::Create(_) = event.kind {
-                        info!("Detected TLS cert/key file change: {:?}", event);
-                        if let Err(err) = tls_config_for_watcher.reload() {
-                            error!("Failed to reload TLS config: {}", err);
-                        } else {
-                            info!("Reloaded TLS cert/key file successfully.");
-                            on_reload();
-                        }
-                    }
-                }
-                Ok(Err(err)) => {
-                    error!("Failed to watch TLS cert/key file: {}", err);
-                }
-                Err(err) => {
-                    error!("TLS cert/key file watcher channel closed: {}", err);
-                }
+    FileWatcherBuilder::new()
+        .watch_paths(&watch_paths)
+        .config(FileWatcherConfig::modify_and_create())
+        .spawn(move || {
+            if let Err(err) = tls_config_for_watcher.reload() {
+                error!("Failed to reload TLS config: {}", err);
+            } else {
+                info!("Reloaded TLS cert/key file successfully.");
+                on_reload();
             }
-        }
-    });
+        })
+        .context(FileWatchSnafu)?;
 
     Ok(())
 }

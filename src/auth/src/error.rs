@@ -75,11 +75,12 @@ pub enum Error {
         username: String,
     },
 
-    #[snafu(display("Failed to initialize a watcher for file {}", path))]
+    #[snafu(display("Failed to initialize a file watcher"))]
     FileWatch {
-        path: String,
         #[snafu(source)]
-        error: notify::Error,
+        source: common_config::error::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("User is not authorized to perform this action"))]
