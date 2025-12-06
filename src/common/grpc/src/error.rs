@@ -38,11 +38,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to watch config file path: {}", path))]
+    #[snafu(display("Failed to watch config file"))]
     FileWatch {
-        path: String,
         #[snafu(source)]
-        error: notify::Error,
+        source: common_config::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
