@@ -15,7 +15,7 @@ jobs:
       pull-requests: write
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-cyborg

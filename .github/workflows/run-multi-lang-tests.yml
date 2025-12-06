@@ -59,7 +59,7 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     steps:
       - name: Checkout greptimedb-tests repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: GreptimeTeam/greptimedb-tests
           persist-credentials: false

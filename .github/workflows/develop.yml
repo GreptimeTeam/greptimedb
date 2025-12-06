@@ -27,7 +27,7 @@ jobs:
     name: Check typos and docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: crate-ci/typos@master
@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Check License Header
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: korandoru/hawkeye@v5
@@ -56,7 +56,7 @@ jobs:
         os: [ ubuntu-latest ]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: arduino/setup-protoc@v3
@@ -80,7 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -98,7 +98,7 @@ jobs:
         os: [ ubuntu-latest ]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: arduino/setup-protoc@v3
@@ -155,7 +155,7 @@ jobs:
           sudo docker builder prune -a
           echo "Disk space after:"
           df -h
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: arduino/setup-protoc@v3
@@ -212,7 +212,7 @@ jobs:
           sudo docker builder prune -a
           echo "Disk space after:"
           df -h
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: arduino/setup-protoc@v3
@@ -266,7 +266,7 @@ jobs:
         os: [ ubuntu-latest ]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: arduino/setup-protoc@v3
@@ -327,7 +327,7 @@ jobs:
           sudo docker builder prune -a
           echo "Disk space after:"
           df -h
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - name: Setup Kind
@@ -478,7 +478,7 @@ jobs:
           sudo docker builder prune -a
           echo "Disk space after:"
           df -h
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - name: Setup Kind
@@ -618,7 +618,7 @@ jobs:
             kafka: false
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -650,7 +650,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: arduino/setup-protoc@v3
@@ -668,7 +668,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: arduino/setup-protoc@v3
@@ -694,7 +694,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: arduino/setup-protoc@v3
@@ -717,7 +717,7 @@ jobs:
     name: Check for conflict
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - name: Merge Conflict Finder
@@ -729,7 +729,7 @@ jobs:
     timeout-minutes: 60
     needs: [conflict-check, clippy, fmt, check-udeps]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: arduino/setup-protoc@v3
@@ -785,7 +785,7 @@ jobs:
     runs-on: ubuntu-22.04-8-cores
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: arduino/setup-protoc@v3
@@ -852,7 +852,7 @@ jobs:
   #   runs-on: ubuntu-22.04
   #   timeout-minutes: 60
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v6
   #     - name: Download pre-built binaries
   #       uses: actions/download-artifact@v4
   #       with:
