@@ -14,7 +14,7 @@ jobs:
     steps:
       # Check out the repository
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Install jq (required for the script)
       - name: Install jq
