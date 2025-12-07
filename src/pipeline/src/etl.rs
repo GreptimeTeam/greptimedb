@@ -19,6 +19,8 @@ pub mod processor;
 pub mod transform;
 pub mod value;
 
+use std::collections::HashMap;
+
 use api::v1::Row;
 use common_time::timestamp::TimeUnit;
 use itertools::Itertools;
@@ -233,20 +235,51 @@ pub enum PipelineExecOutput {
 
 /// Output from a successful pipeline transformation.
 ///
-/// Each row can have its own table_suffix for routing to different tables
-/// when using one-to-many expansion with per-row table suffix hints.
+/// Rows are grouped by their ContextOpt, with each row having its own optional
+/// table_suffix for routing to different tables when using one-to-many expansion.
+/// This enables true per-row configuration options where different rows can have
+/// different database settings (TTL, merge mode, etc.).
 #[derive(Debug)]
 pub struct TransformedOutput {
-    pub opt: ContextOpt,
-    /// Each row paired with its optional table suffix
-    pub rows: Vec<(Row, Option<String>)>,
+    /// Rows grouped by their ContextOpt, each with optional table suffix
+    pub rows_by_context: HashMap<ContextOpt, Vec<(Row, Option<String>)>>,
 }
 
 impl PipelineExecOutput {
     // Note: This is a test only function, do not use it in production.
     pub fn into_transformed(self) -> Option<Vec<(Row, Option<String>)>> {
-        if let Self::Transformed(TransformedOutput { rows, .. }) = self {
-            Some(rows)
+        if let Self::Transformed(TransformedOutput { rows_by_context }) = self {
+            // For backward compatibility, merge all rows with a default ContextOpt
+            Some(rows_by_context.into_values().flatten().collect())
+        } else {
+            None
+        }
+    }
+
+    // New method for accessing the HashMap structure directly
+    pub fn into_transformed_hashmap(
+        self,
+    ) -> Option<HashMap<ContextOpt, Vec<(Row, Option<String>)>>> {
+        if let Self::Transformed(TransformedOutput { rows_by_context }) = self {
+            Some(rows_by_context)
+        } else {
+            None
+        }
+    }
+
+    // Backward compatibility helper that returns first ContextOpt with all its rows
+    // or merges all rows with default ContextOpt for multi-context scenarios
+    pub fn into_legacy_format(self) -> Option<(ContextOpt, Vec<(Row, Option<String>)>)> {
+        if let Self::Transformed(TransformedOutput { rows_by_context }) = self {
+            if rows_by_context.len() == 1 {
+                let (opt, rows) = rows_by_context.into_iter().next().unwrap();
+                Some((opt, rows))
+            } else {
+                // Multiple contexts: merge all rows with default ContextOpt for test compatibility
+                let all_rows: Vec<(Row, Option<String>)> =
+                    rows_by_context.into_values().flatten().collect();
+                Some((ContextOpt::default(), all_rows))
+            }
         } else {
             None
         }
@@ -287,13 +320,13 @@ impl Pipeline {
             return Ok(PipelineExecOutput::DispatchedTo(rule.into(), val));
         }
 
-        // For array inputs (one-to-many), extract options from each element
+        // For array inputs (one-to-many), preserve per-row ContextOpt
         // For single object inputs, extract once
-        let (opt, rows) = if val.is_array() {
-            // Array input: extract per-row options in transform_array_elements
-            let rows = match self.transformer() {
+        let rows_by_context = if val.is_array() {
+            // Array input: preserve per-row ContextOpt in HashMap
+            match self.transformer() {
                 TransformerMode::GreptimeTransformer(greptime_transformer) => {
-                    transform_array_elements(
+                    transform_array_elements_to_hashmap(
                         val.as_array_mut().unwrap(),
                         greptime_transformer,
                         self.is_v1(),
@@ -311,41 +344,45 @@ impl Pipeline {
                         pipeline_ctx.pipeline_param,
                         pipeline_ctx.channel,
                     );
-                    values_to_rows(
+                    let rows = values_to_rows(
                         schema_info,
                         val,
                         &n_ctx,
                         None,
                         true,
                         self.tablesuffix.as_ref(),
-                    )?
+                    )?;
+                    // AutoTransform with arrays uses default ContextOpt
+                    HashMap::from([(ContextOpt::default(), rows)])
                 }
-            };
-            (ContextOpt::default(), rows)
+            }
         } else {
             // Single object input
             let mut opt = ContextOpt::from_pipeline_map_to_opt(&mut val)?;
             let table_suffix = opt.resolve_table_suffix(self.tablesuffix.as_ref(), &val);
 
-            let rows = match self.transformer() {
+            match self.transformer() {
                 TransformerMode::GreptimeTransformer(greptime_transformer) => {
                     let values = greptime_transformer.transform_mut(&mut val, self.is_v1())?;
                     if self.is_v1() {
                         // v1 dont combine with auto-transform
                         return Ok(PipelineExecOutput::Transformed(TransformedOutput {
-                            opt,
-                            rows: vec![(Row { values }, table_suffix)],
+                            rows_by_context: HashMap::from([(
+                                opt,
+                                vec![(Row { values }, table_suffix)],
+                            )]),
                         }));
                     }
                     // continue v2 process, and set the rest fields with auto-transform
-                    values_to_rows(
+                    let rows = values_to_rows(
                         schema_info,
                         val,
                         pipeline_ctx,
                         Some(values),
                         false,
                         self.tablesuffix.as_ref(),
-                    )?
+                    )?;
+                    HashMap::from([(opt, rows)])
                 }
                 TransformerMode::AutoTransform(ts_name, time_unit) => {
                     let def = crate::PipelineDefinition::GreptimeIdentityPipeline(Some(
@@ -356,22 +393,21 @@ impl Pipeline {
                         pipeline_ctx.pipeline_param,
                         pipeline_ctx.channel,
                     );
-                    values_to_rows(
+                    let rows = values_to_rows(
                         schema_info,
                         val,
                         &n_ctx,
                         None,
                         true,
                         self.tablesuffix.as_ref(),
-                    )?
+                    )?;
+                    HashMap::from([(opt, rows)])
                 }
-            };
-            (opt, rows)
+            }
         };
 
         Ok(PipelineExecOutput::Transformed(TransformedOutput {
-            opt,
-            rows,
+            rows_by_context,
         }))
     }
 
@@ -455,6 +491,74 @@ fn transform_array_elements(
     }
 
     Ok(rows)
+}
+
+/// Transforms an array of VRL values into rows grouped by their ContextOpt.
+/// Each element can have its own ContextOpt for per-row configuration.
+fn transform_array_elements_to_hashmap(
+    arr: &mut [VrlValue],
+    transformer: &GreptimeTransformer,
+    is_v1: bool,
+    schema_info: &mut SchemaInfo,
+    pipeline_ctx: &PipelineContext<'_>,
+    tablesuffix_template: Option<&TableSuffixTemplate>,
+) -> Result<HashMap<ContextOpt, Vec<(Row, Option<String>)>>> {
+    let mut rows_by_context = HashMap::new();
+
+    for (index, element) in arr.iter_mut().enumerate() {
+        if !element.is_object() {
+            return ArrayElementMustBeObjectSnafu {
+                index,
+                actual_type: element.kind_str().to_string(),
+            }
+            .fail();
+        }
+
+        // Extract ContextOpt and table_suffix for this element
+        let mut opt = ContextOpt::from_pipeline_map_to_opt(element)
+            .map_err(Box::new)
+            .context(TransformArrayElementSnafu { index })?;
+        let table_suffix = opt.resolve_table_suffix(tablesuffix_template, element);
+
+        let values = transformer
+            .transform_mut(element, is_v1)
+            .map_err(Box::new)
+            .context(TransformArrayElementSnafu { index })?;
+
+        if is_v1 {
+            // v1 mode: just use transformer output directly
+            rows_by_context
+                .entry(opt)
+                .or_insert_with(Vec::new)
+                .push((Row { values }, table_suffix));
+        } else {
+            // v2 mode: combine with auto-transform for remaining fields
+            // Note: table_suffix already extracted, pass None to avoid double extraction
+            let element_rows = values_to_rows(
+                schema_info,
+                element.clone(),
+                pipeline_ctx,
+                Some(values),
+                false,
+                None, // table_suffix already extracted above
+            )
+            .map_err(Box::new)
+            .context(TransformArrayElementSnafu { index })?;
+
+            // Apply the already-extracted table_suffix to all rows from this element
+            let rows_with_suffix: Vec<(Row, Option<String>)> = element_rows
+                .into_iter()
+                .map(|(row, _)| (row, table_suffix.clone()))
+                .collect();
+
+            rows_by_context
+                .entry(opt)
+                .or_insert_with(Vec::new)
+                .extend(rows_with_suffix);
+        }
+    }
+
+    Ok(rows_by_context)
 }
 
 pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str) -> Result<usize> {
@@ -1286,5 +1390,199 @@ transform:
             .count();
         assert_eq!(cpu_count, 2);
         assert_eq!(memory_count, 1);
+    }
+
+    /// Test that one-to-many mapping preserves per-row ContextOpt in HashMap
+    #[test]
+    fn test_one_to_many_hashmap_contextopt_preservation() {
+        let pipeline_yaml = r#"
+processors:
+  - epoch:
+      field: timestamp
+      resolution: ms
+  - vrl:
+      source: |
+        events = del(.events)
+        base_ts = del(.timestamp)
+
+        map_values(array!(events)) -> |event| {
+            # Set different TTL values per event type
+            ttl = if event.type == "critical" {
+                "1h"
+            } else if event.type == "warning" {
+                "24h"
+            } else {
+                "7d"
+            }
+
+            {
+                "host": del(.host),
+                "event_type": event.type,
+                "event_value": event.value,
+                "timestamp": base_ts,
+                "greptime_ttl": ttl
+            }
+        }
+
+transform:
+  - field: host
+    type: string
+  - field: event_type
+    type: string
+  - field: event_value
+    type: int32
+  - field: timestamp
+    type: timestamp, ms
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
+        // Input with events that should have different ContextOpt values
+        let input_value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "host": "server1",
+                "timestamp": 1716668197217,
+                "events": [
+                    {"type": "critical", "value": 100},
+                    {"type": "warning", "value": 50},
+                    {"type": "info", "value": 25}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let payload = input_value.into();
+        let result = pipeline
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
+            .unwrap();
+
+        // Extract the HashMap structure
+        let rows_by_context = result.into_transformed_hashmap().unwrap();
+
+        // Should have 3 different ContextOpt groups due to different TTL values
+        assert_eq!(rows_by_context.len(), 3);
+
+        // Verify each ContextOpt group has exactly 1 row and different configurations
+        let mut context_opts = Vec::new();
+        for (opt, rows) in &rows_by_context {
+            assert_eq!(rows.len(), 1); // Each group should have exactly 1 row
+            context_opts.push(opt.clone());
+        }
+
+        // ContextOpts should be different due to different TTL values
+        assert_ne!(context_opts[0], context_opts[1]);
+        assert_ne!(context_opts[1], context_opts[2]);
+        assert_ne!(context_opts[0], context_opts[2]);
+
+        // Verify the rows are correctly structured
+        for rows in rows_by_context.values() {
+            for (row, _table_suffix) in rows {
+                assert_eq!(row.values.len(), 4); // host, event_type, event_value, timestamp
+            }
+        }
+    }
+
+    /// Test that single object input still works with HashMap structure
+    #[test]
+    fn test_single_object_hashmap_compatibility() {
+        let pipeline_yaml = r#"
+processors:
+  - epoch:
+      field: ts
+      resolution: ms
+  - vrl:
+      source: |
+        .processed = true
+        .
+
+transform:
+  - field: name
+    type: string
+  - field: processed
+    type: boolean
+  - field: ts
+    type: timestamp, ms
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
+        let input_value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "name": "test",
+                "ts": 1716668197217
+            }"#,
+        )
+        .unwrap();
+
+        let payload = input_value.into();
+        let result = pipeline
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
+            .unwrap();
+
+        // Extract the HashMap structure
+        let rows_by_context = result.into_transformed_hashmap().unwrap();
+
+        // Single object should produce exactly 1 ContextOpt group
+        assert_eq!(rows_by_context.len(), 1);
+
+        let (_opt, rows) = rows_by_context.into_iter().next().unwrap();
+        assert_eq!(rows.len(), 1);
+
+        // Verify the row structure
+        let (row, _table_suffix) = &rows[0];
+        assert_eq!(row.values.len(), 3); // name, processed, timestamp
+    }
+
+    /// Test that empty arrays work correctly with HashMap structure
+    #[test]
+    fn test_empty_array_hashmap() {
+        let pipeline_yaml = r#"
+processors:
+  - vrl:
+      source: |
+        .events
+
+transform:
+  - field: value
+    type: int32
+  - field: greptime_timestamp
+    type: timestamp, ns
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
+        let input_value: serde_json::Value = serde_json::from_str(r#"{"events": []}"#).unwrap();
+
+        let payload = input_value.into();
+        let result = pipeline
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
+            .unwrap();
+
+        // Extract the HashMap structure
+        let rows_by_context = result.into_transformed_hashmap().unwrap();
+
+        // Empty array should produce empty HashMap
+        assert_eq!(rows_by_context.len(), 0);
     }
 }
