@@ -32,7 +32,7 @@ use jsonb::Number;
 use once_cell::sync::OnceCell;
 use serde_json as serde_json_crate;
 use session::context::Channel;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt};
 use vrl::prelude::{Bytes, VrlValueConvert};
 use vrl::value::{KeyString, Value as VrlValue};
 
@@ -389,13 +389,18 @@ pub(crate) fn values_to_rows(
 
     let mut rows = Vec::with_capacity(arr.len());
     for (index, mut value) in arr.into_iter().enumerate() {
-        ensure!(
-            value.is_object(),
-            ArrayElementMustBeObjectSnafu {
-                index,
-                actual_type: value.kind_str().to_string(),
+        if !value.is_object() {
+            if pipeline_ctx.pipeline_param.skip_error() {
+                // Skip invalid element in an array.
+                continue;
+            } else {
+                return ArrayElementMustBeObjectSnafu {
+                    index,
+                    actual_type: value.kind_str().to_string(),
+                }
+                .fail();
             }
-        );
+        }
 
         // Extract ContextOpt and table_suffix for this element
         let mut opt = ContextOpt::from_pipeline_map_to_opt(&mut value)
@@ -1040,6 +1045,85 @@ mod tests {
 
             let flattened_object = flatten_object(input, max_depth).ok();
             assert_eq!(flattened_object, expected);
+        }
+    }
+
+    use ahash::HashMap as AHashMap;
+    #[test]
+    fn test_values_to_rows_skip_error_handling() {
+        let table_suffix_template: Option<crate::tablesuffix::TableSuffixTemplate> = None;
+
+        // Case 1: skip_error=true, mixed valid/invalid elements
+        {
+            let schema_info = &mut SchemaInfo::default();
+            let input_array = vec![
+                // Valid object
+                serde_json::json!({"name": "Alice", "age": 25}).into(),
+                // Invalid element (string)
+                VrlValue::Bytes("invalid_string".into()),
+                // Valid object
+                serde_json::json!({"name": "Bob", "age": 30}).into(),
+                // Invalid element (number)
+                VrlValue::Integer(42),
+                // Valid object
+                serde_json::json!({"name": "Charlie", "age": 35}).into(),
+            ];
+
+            let params = GreptimePipelineParams::from_map(AHashMap::from_iter([(
+                "skip_error".to_string(),
+                "true".to_string(),
+            )]));
+
+            let pipeline_ctx = PipelineContext::new(
+                &PipelineDefinition::GreptimeIdentityPipeline(None),
+                &params,
+                Channel::Unknown,
+            );
+
+            let result = values_to_rows(
+                schema_info,
+                VrlValue::Array(input_array),
+                &pipeline_ctx,
+                None,
+                true,
+                table_suffix_template.as_ref(),
+            );
+
+            // Should succeed and only process valid objects
+            assert!(result.is_ok());
+            let rows = result.unwrap();
+            assert_eq!(rows.len(), 3); // Only 3 valid objects
+        }
+
+        // Case 2: skip_error=false, invalid elements present
+        {
+            let schema_info = &mut SchemaInfo::default();
+            let input_array = vec![
+                serde_json::json!({"name": "Alice", "age": 25}).into(),
+                VrlValue::Bytes("invalid_string".into()), // This should cause error
+            ];
+
+            let params = GreptimePipelineParams::default(); // skip_error = false
+
+            let pipeline_ctx = PipelineContext::new(
+                &PipelineDefinition::GreptimeIdentityPipeline(None),
+                &params,
+                Channel::Unknown,
+            );
+
+            let result = values_to_rows(
+                schema_info,
+                VrlValue::Array(input_array),
+                &pipeline_ctx,
+                None,
+                true,
+                table_suffix_template.as_ref(),
+            );
+
+            // Should fail with ArrayElementMustBeObject error
+            assert!(result.is_err());
+            let error_msg = result.unwrap_err().to_string();
+            assert!(error_msg.contains("Array element at index 1 must be an object for one-to-many transformation, got string"));
         }
     }
 }
