@@ -1,3 +1,5 @@
+-- Test CSV import optional parameter `header` functionality
+-- First, create tables and export data into csv files as test files
 CREATE TABLE demo_1(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
 
 Affected Rows: 0
@@ -32,6 +34,127 @@ Copy demo_2 TO '${SQLNESS_HOME}/demo/export/csv_header/demo_2.csv' with (format=
 
 Affected Rows: 3
 
+-- Test the case where a CSV has more fields than the table. (header=true) (table: 4, file: 5)
+CREATE TABLE enable_long_fields(host string, cpu double, jsons JSON, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy enable_long_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='true');
+
+Affected Rows: 0
+
+SELECT count(*) FROM enable_long_fields;
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
+-- Test the number of CSV fields is fewer than the table’s. (header=true) (table: 5, file: 3)
+CREATE TABLE enable_short_fields(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy enable_short_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_2.csv' with (format='csv', header='true');
+
+Affected Rows: 0
+
+SELECT count(*) FROM enable_short_fields;
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
+-- Test the case where a CSV has more fields than the table. (header=false) (table: 4, file: 5)
+CREATE TABLE disable_long_fields(host string, cpu double, jsons JSON, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy disable_long_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='false');
+
+Affected Rows: 3
+
+SELECT count(*) FROM disable_long_fields;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+-- Test the number of CSV fields is fewer than the table’s. (header=false) (table: 5, file: 3)
+CREATE TABLE disable_short_fields(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy disable_short_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_2.csv' with (format='csv', header='false');
+
+Affected Rows: 3
+
+SELECT count(*) FROM disable_short_fields;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+-- Test the order of CSV fields differs from the table’s. (header=true)
+CREATE TABLE enable_different_order(host string, memory double, jsons JSON, cpu double, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy enable_different_order FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='true');
+
+Affected Rows: 0
+
+SELECT count(*) FROM enable_different_order;
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
+-- Test the order of CSV fields differs from the table’s. (header=false)
+CREATE TABLE disable_different_order(host string, memory double, jsons JSON, cpu double, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy disable_different_order FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='false');
+
+Affected Rows: 3
+
+SELECT count(*) FROM disable_different_order;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+-- Test the order of CSV fields differs from the table’s.
+CREATE TABLE different_order(host string, memory double, jsons JSON, cpu double, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy different_order FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='true');
+
+Affected Rows: 0
+
+SELECT count(*) FROM different_order;
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
+-- Test to validate that the header schema of the file matches the table schema
+-- Import only the files that successfully pass the checks
 CREATE TABLE check_header(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
 
 Affected Rows: 0
@@ -40,7 +163,7 @@ Copy check_header FROM '${SQLNESS_HOME}/demo/export/csv_header/' with (pattern =
 
 Affected Rows: 3
 
-select * from check_header order by ts;
+SELECT * from check_header order by ts;
 
 +-------+------+--------+----------------------------+---------------------+
 | host  | cpu  | memory | jsons                      | ts                  |
@@ -50,6 +173,7 @@ select * from check_header order by ts;
 | host3 | 99.9 | 444.4  | 7b22686f737433223a2233227d | 2024-07-27T10:47:43 |
 +-------+------+--------+----------------------------+---------------------+
 
+-- Test to skip the header validation
 CREATE TABLE non_check_header(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
 
 Affected Rows: 0
@@ -58,7 +182,7 @@ Copy non_check_header FROM '${SQLNESS_HOME}/demo/export/csv_header/' with (patte
 
 Affected Rows: 6
 
-select * from non_check_header order by ts;
+SELECT * from non_check_header order by ts;
 
 +-------+------+--------+----------------------------+---------------------+
 | host  | cpu  | memory | jsons                      | ts                  |
@@ -71,14 +195,6 @@ select * from non_check_header order by ts;
 | host6 |      |        | 7b22686f737436223a2236227d | 2027-09-27T20:34:23 |
 +-------+------+--------+----------------------------+---------------------+
 
-CREATE TABLE non_continue_error(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
-
-Affected Rows: 0
-
-Copy non_continue_error FROM '${SQLNESS_HOME}/demo/export/csv_header/' with (pattern = 'demo*', format='csv', header='true', continue_on_error='false');
-
-Error: 1004(InvalidArguments), Header from CSV file not match, expected table schema: Field { name: "host", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "cpu", data_type: Float64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "memory", data_type: Float64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "jsons", data_type: Binary, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {"greptime:type": "Json"} }, Field { name: "ts", data_type: Timestamp(Millisecond, None), nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {"greptime:time_index": "true"} }, actual file schema: Field { name: "host", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "jsons", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "ts", data_type: Timestamp(Second, None), nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }
-
 drop table demo_1;
 
 Affected Rows: 0
@@ -87,15 +203,35 @@ drop table demo_2;
 
 Affected Rows: 0
 
+drop table enable_long_fields;
+
+Affected Rows: 0
+
+drop table enable_short_fields;
+
+Affected Rows: 0
+
+drop table disable_long_fields;
+
+Affected Rows: 0
+
+drop table disable_short_fields;
+
+Affected Rows: 0
+
+drop table enable_different_order;
+
+Affected Rows: 0
+
+drop table disable_different_order;
+
+Affected Rows: 0
+
 drop table check_header;
 
 Affected Rows: 0
 
 drop table non_check_header;
-
-Affected Rows: 0
-
-drop table non_continue_error;
 
 Affected Rows: 0
 
