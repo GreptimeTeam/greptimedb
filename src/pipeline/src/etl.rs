@@ -30,8 +30,9 @@ use yaml_rust::{Yaml, YamlLoader};
 
 use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
-    AutoTransformOneTimestampSnafu, Error, IntermediateKeyIndexSnafu, InvalidVersionNumberSnafu,
-    Result, YamlLoadSnafu, YamlParseSnafu,
+    ArrayElementMustBeObjectSnafu, AutoTransformOneTimestampSnafu, Error,
+    IntermediateKeyIndexSnafu, InvalidVersionNumberSnafu, Result, TransformArrayElementSnafu,
+    YamlLoadSnafu, YamlParseSnafu,
 };
 use crate::etl::processor::ProcessorKind;
 use crate::etl::transform::transformer::greptime::values_to_rows;
@@ -406,8 +407,6 @@ fn transform_array_elements(
     pipeline_ctx: &PipelineContext<'_>,
     tablesuffix_template: Option<&TableSuffixTemplate>,
 ) -> Result<Vec<(Row, Option<String>)>> {
-    use crate::error::{ArrayElementMustBeObjectSnafu, TransformArrayElementSnafu};
-
     let mut rows = Vec::with_capacity(arr.len());
 
     for (index, element) in arr.iter_mut().enumerate() {
@@ -1217,7 +1216,7 @@ processors:
       source: |
         events = del(.events)
         base_ts = del(.timestamp)
-        
+
         map_values(array!(events)) -> |event| {
             suffix = "_" + string!(event.category)
             {

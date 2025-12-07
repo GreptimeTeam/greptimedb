@@ -32,14 +32,15 @@ use jsonb::Number;
 use once_cell::sync::OnceCell;
 use serde_json as serde_json_crate;
 use session::context::Channel;
-use snafu::{OptionExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use vrl::prelude::{Bytes, VrlValueConvert};
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    IdentifyPipelineColumnTypeMismatchSnafu, InvalidTimestampSnafu, Result,
-    TimeIndexMustBeNonNullSnafu, TransformColumnNameMustBeUniqueSnafu,
-    TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu, ValueMustBeMapSnafu,
+    ArrayElementMustBeObjectSnafu, IdentifyPipelineColumnTypeMismatchSnafu, InvalidTimestampSnafu,
+    Result, TimeIndexMustBeNonNullSnafu, TransformArrayElementSnafu,
+    TransformColumnNameMustBeUniqueSnafu, TransformMultipleTimestampIndexSnafu,
+    TransformTimestampIndexCountSnafu, ValueMustBeMapSnafu,
 };
 use crate::etl::PipelineDocVersion;
 use crate::etl::ctx_req::ContextOpt;
@@ -379,11 +380,6 @@ pub(crate) fn values_to_rows(
     need_calc_ts: bool,
     tablesuffix_template: Option<&crate::tablesuffix::TableSuffixTemplate>,
 ) -> Result<Vec<(Row, Option<String>)>> {
-    use snafu::ResultExt;
-
-    use crate::error::{ArrayElementMustBeObjectSnafu, TransformArrayElementSnafu};
-    use crate::etl::ctx_req::ContextOpt;
-
     let VrlValue::Array(arr) = values else {
         // Single object: extract table_suffix if template provided
         let table_suffix = tablesuffix_template.and_then(|t| t.apply(&values));
