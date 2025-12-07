@@ -374,7 +374,7 @@ impl StatementExecutor {
 
             if let Some(csv_format) = csv_format_opt
                 && csv_format.header
-                && let Err(e) = ensure_schema_compatible(file_schema, &table_schema)
+                && let Err(e) = check_file_header(file_schema, &table_schema)
             {
                 if csv_format.continue_on_error {
                     continue;
@@ -514,7 +514,7 @@ fn can_cast_types_for_greptime(from: &ArrowDataType, to: &ArrowDataType) -> bool
     can_cast_types(from, to)
 }
 
-fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
+fn check_file_header(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
     if from.fields().len() != to.fields().len() {
         return error::InvalidHeaderSnafu {
             table_schema: to.to_string(),
@@ -523,6 +523,10 @@ fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
         .fail();
     }
 
+    ensure_schema_compatible(from, to)
+}
+
+fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
     let not_match = from
         .fields
         .iter()
