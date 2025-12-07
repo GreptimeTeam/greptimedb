@@ -320,89 +320,37 @@ impl Pipeline {
             return Ok(PipelineExecOutput::DispatchedTo(rule.into(), val));
         }
 
-        // For array inputs (one-to-many), preserve per-row ContextOpt
-        // For single object inputs, extract once
-        let rows_by_context = if val.is_array() {
-            // Array input: preserve per-row ContextOpt in HashMap
-            match self.transformer() {
-                TransformerMode::GreptimeTransformer(greptime_transformer) => {
-                    transform_array_elements_to_hashmap(
-                        val.as_array_mut().unwrap(),
-                        greptime_transformer,
-                        self.is_v1(),
-                        schema_info,
-                        pipeline_ctx,
-                        self.tablesuffix.as_ref(),
-                    )?
-                }
-                TransformerMode::AutoTransform(ts_name, time_unit) => {
-                    let def = crate::PipelineDefinition::GreptimeIdentityPipeline(Some(
-                        IdentityTimeIndex::Epoch(ts_name.clone(), *time_unit, false),
-                    ));
-                    let n_ctx = PipelineContext::new(
-                        &def,
-                        pipeline_ctx.pipeline_param,
-                        pipeline_ctx.channel,
-                    );
-                    let rows = values_to_rows(
-                        schema_info,
-                        val,
-                        &n_ctx,
-                        None,
-                        true,
-                        self.tablesuffix.as_ref(),
-                    )?;
-                    // AutoTransform with arrays uses default ContextOpt
-                    HashMap::from([(ContextOpt::default(), rows)])
-                }
-            }
+        let mut val = if val.is_array() {
+            val
         } else {
-            // Single object input
-            let mut opt = ContextOpt::from_pipeline_map_to_opt(&mut val)?;
-            let table_suffix = opt.resolve_table_suffix(self.tablesuffix.as_ref(), &val);
+            VrlValue::Array(vec![val])
+        };
 
-            match self.transformer() {
-                TransformerMode::GreptimeTransformer(greptime_transformer) => {
-                    let values = greptime_transformer.transform_mut(&mut val, self.is_v1())?;
-                    if self.is_v1() {
-                        // v1 dont combine with auto-transform
-                        return Ok(PipelineExecOutput::Transformed(TransformedOutput {
-                            rows_by_context: HashMap::from([(
-                                opt,
-                                vec![(Row { values }, table_suffix)],
-                            )]),
-                        }));
-                    }
-                    // continue v2 process, and set the rest fields with auto-transform
-                    let rows = values_to_rows(
-                        schema_info,
-                        val,
-                        pipeline_ctx,
-                        Some(values),
-                        false,
-                        self.tablesuffix.as_ref(),
-                    )?;
-                    HashMap::from([(opt, rows)])
-                }
-                TransformerMode::AutoTransform(ts_name, time_unit) => {
-                    let def = crate::PipelineDefinition::GreptimeIdentityPipeline(Some(
-                        IdentityTimeIndex::Epoch(ts_name.clone(), *time_unit, false),
-                    ));
-                    let n_ctx = PipelineContext::new(
-                        &def,
-                        pipeline_ctx.pipeline_param,
-                        pipeline_ctx.channel,
-                    );
-                    let rows = values_to_rows(
-                        schema_info,
-                        val,
-                        &n_ctx,
-                        None,
-                        true,
-                        self.tablesuffix.as_ref(),
-                    )?;
-                    HashMap::from([(opt, rows)])
-                }
+        let rows_by_context = match self.transformer() {
+            TransformerMode::GreptimeTransformer(greptime_transformer) => {
+                transform_array_elements_to_hashmap(
+                    val.as_array_mut().unwrap(),
+                    greptime_transformer,
+                    self.is_v1(),
+                    schema_info,
+                    pipeline_ctx,
+                    self.tablesuffix.as_ref(),
+                )?
+            }
+            TransformerMode::AutoTransform(ts_name, time_unit) => {
+                let def = crate::PipelineDefinition::GreptimeIdentityPipeline(Some(
+                    IdentityTimeIndex::Epoch(ts_name.clone(), *time_unit, false),
+                ));
+                let n_ctx =
+                    PipelineContext::new(&def, pipeline_ctx.pipeline_param, pipeline_ctx.channel);
+                values_to_rows(
+                    schema_info,
+                    val,
+                    &n_ctx,
+                    None,
+                    true,
+                    self.tablesuffix.as_ref(),
+                )?
             }
         };
 
@@ -471,7 +419,9 @@ fn transform_array_elements(
         } else {
             // v2 mode: combine with auto-transform for remaining fields
             // Note: table_suffix already extracted, pass None to avoid double extraction
-            let element_rows = values_to_rows(
+            // ContextOpt was already extracted above, so values_to_rows will return
+            // a HashMap with default ContextOpt.
+            let mut element_rows_map = values_to_rows(
                 schema_info,
                 element.clone(),
                 pipeline_ctx,
@@ -481,6 +431,10 @@ fn transform_array_elements(
             )
             .map_err(Box::new)
             .context(TransformArrayElementSnafu { index })?;
+            // Extract rows from default ContextOpt
+            let element_rows = element_rows_map
+                .remove(&ContextOpt::default())
+                .unwrap_or_default();
             // Apply the already-extracted table_suffix to all rows from this element
             rows.extend(
                 element_rows
@@ -534,7 +488,9 @@ fn transform_array_elements_to_hashmap(
         } else {
             // v2 mode: combine with auto-transform for remaining fields
             // Note: table_suffix already extracted, pass None to avoid double extraction
-            let element_rows = values_to_rows(
+            // ContextOpt was already extracted above, so values_to_rows will return
+            // a HashMap with default ContextOpt.
+            let mut element_rows_map = values_to_rows(
                 schema_info,
                 element.clone(),
                 pipeline_ctx,
@@ -544,6 +500,11 @@ fn transform_array_elements_to_hashmap(
             )
             .map_err(Box::new)
             .context(TransformArrayElementSnafu { index })?;
+
+            // Extract rows from default ContextOpt
+            let element_rows = element_rows_map
+                .remove(&ContextOpt::default())
+                .unwrap_or_default();
 
             // Apply the already-extracted table_suffix to all rows from this element
             let rows_with_suffix: Vec<(Row, Option<String>)> = element_rows

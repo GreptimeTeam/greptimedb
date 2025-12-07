@@ -32,15 +32,14 @@ use jsonb::Number;
 use once_cell::sync::OnceCell;
 use serde_json as serde_json_crate;
 use session::context::Channel;
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 use vrl::prelude::{Bytes, VrlValueConvert};
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
     ArrayElementMustBeObjectSnafu, IdentifyPipelineColumnTypeMismatchSnafu, InvalidTimestampSnafu,
-    Result, TimeIndexMustBeNonNullSnafu, TransformArrayElementSnafu,
-    TransformColumnNameMustBeUniqueSnafu, TransformMultipleTimestampIndexSnafu,
-    TransformTimestampIndexCountSnafu, ValueMustBeMapSnafu,
+    Result, TimeIndexMustBeNonNullSnafu, TransformColumnNameMustBeUniqueSnafu,
+    TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu, ValueMustBeMapSnafu,
 };
 use crate::etl::PipelineDocVersion;
 use crate::etl::ctx_req::ContextOpt;
@@ -364,58 +363,71 @@ fn calc_ts(p_ctx: &PipelineContext, values: &VrlValue) -> Result<Option<ValueDat
     }
 }
 
-/// Converts VRL values to Greptime rows with per-row table suffixes.
+/// Converts VRL values to Greptime rows grouped by their ContextOpt.
 /// # Returns
-/// A vector of (row, table_suffix) pairs. Single object input produces one row,
-/// array input produces one row per array element with its own table_suffix.
+/// A HashMap where keys are `ContextOpt` and values are vectors of (row, table_suffix) pairs.
+/// Single object input produces one ContextOpt group with one row.
+/// Array input groups rows by their per-element ContextOpt values.
 ///
 /// # Errors
 /// - `ArrayElementMustBeObject` if an array element is not an object
-/// - `TransformArrayElement` if transformation fails for a specific element
 pub(crate) fn values_to_rows(
     schema_info: &mut SchemaInfo,
-    values: VrlValue,
+    mut values: VrlValue,
     pipeline_ctx: &PipelineContext<'_>,
     row: Option<Vec<GreptimeValue>>,
     need_calc_ts: bool,
     tablesuffix_template: Option<&crate::tablesuffix::TableSuffixTemplate>,
-) -> Result<Vec<(Row, Option<String>)>> {
+) -> Result<std::collections::HashMap<ContextOpt, Vec<(Row, Option<String>)>>> {
+    let skip_error = pipeline_ctx.pipeline_param.skip_error();
     let VrlValue::Array(arr) = values else {
-        // Single object: extract table_suffix if template provided
-        let table_suffix = tablesuffix_template.and_then(|t| t.apply(&values));
-        let row = values_to_row(schema_info, values, pipeline_ctx, row, need_calc_ts)?;
-        return Ok(vec![(row, table_suffix)]);
+        // Single object: extract ContextOpt and table_suffix
+        let mut result = std::collections::HashMap::new();
+
+        let mut opt = match ContextOpt::from_pipeline_map_to_opt(&mut values) {
+            Ok(r) => r,
+            Err(e) => return if skip_error { Ok(result) } else { Err(e) },
+        };
+
+        let table_suffix = opt.resolve_table_suffix(tablesuffix_template, &values);
+        let row = match values_to_row(schema_info, values, pipeline_ctx, row, need_calc_ts) {
+            Ok(r) => r,
+            Err(e) => return if skip_error { Ok(result) } else { Err(e) },
+        };
+        result.insert(opt, vec![(row, table_suffix)]);
+        return Ok(result);
     };
 
-    let mut rows = Vec::with_capacity(arr.len());
+    let mut rows_by_context: std::collections::HashMap<ContextOpt, Vec<(Row, Option<String>)>> =
+        std::collections::HashMap::new();
     for (index, mut value) in arr.into_iter().enumerate() {
         if !value.is_object() {
-            if pipeline_ctx.pipeline_param.skip_error() {
-                // Skip invalid element in an array.
-                continue;
-            } else {
-                return ArrayElementMustBeObjectSnafu {
+            unwrap_or_continue_if_err!(
+                ArrayElementMustBeObjectSnafu {
                     index,
                     actual_type: value.kind_str().to_string(),
                 }
-                .fail();
-            }
+                .fail(),
+                skip_error
+            );
         }
 
         // Extract ContextOpt and table_suffix for this element
-        let mut opt = ContextOpt::from_pipeline_map_to_opt(&mut value)
-            .map_err(Box::new)
-            .context(TransformArrayElementSnafu { index })?;
+        let mut opt = unwrap_or_continue_if_err!(
+            ContextOpt::from_pipeline_map_to_opt(&mut value),
+            skip_error
+        );
         let table_suffix = opt.resolve_table_suffix(tablesuffix_template, &value);
-
-        let transformed_row =
-            values_to_row(schema_info, value, pipeline_ctx, row.clone(), need_calc_ts)
-                .map_err(Box::new)
-                .context(TransformArrayElementSnafu { index })?;
-
-        rows.push((transformed_row, table_suffix));
+        let transformed_row = unwrap_or_continue_if_err!(
+            values_to_row(schema_info, value, pipeline_ctx, row.clone(), need_calc_ts),
+            skip_error
+        );
+        rows_by_context
+            .entry(opt)
+            .or_insert_with(Vec::new)
+            .push((transformed_row, table_suffix));
     }
-    Ok(rows)
+    Ok(rows_by_context)
 }
 
 /// `need_calc_ts` happens in two cases:
@@ -1091,8 +1103,10 @@ mod tests {
 
             // Should succeed and only process valid objects
             assert!(result.is_ok());
-            let rows = result.unwrap();
-            assert_eq!(rows.len(), 3); // Only 3 valid objects
+            let rows_by_context = result.unwrap();
+            // Count total rows across all ContextOpt groups
+            let total_rows: usize = rows_by_context.values().map(|v| v.len()).sum();
+            assert_eq!(total_rows, 3); // Only 3 valid objects
         }
 
         // Case 2: skip_error=false, invalid elements present
@@ -1125,5 +1139,59 @@ mod tests {
             let error_msg = result.unwrap_err().to_string();
             assert!(error_msg.contains("Array element at index 1 must be an object for one-to-many transformation, got string"));
         }
+    }
+
+    /// Test that values_to_rows correctly groups rows by per-element ContextOpt
+    #[test]
+    fn test_values_to_rows_per_element_context_opt() {
+        let table_suffix_template: Option<crate::tablesuffix::TableSuffixTemplate> = None;
+        let schema_info = &mut SchemaInfo::default();
+
+        // Create array with elements having different TTL values (ContextOpt)
+        let input_array = vec![
+            serde_json::json!({"name": "Alice", "greptime_ttl": "1h"}).into(),
+            serde_json::json!({"name": "Bob", "greptime_ttl": "1h"}).into(),
+            serde_json::json!({"name": "Charlie", "greptime_ttl": "24h"}).into(),
+        ];
+
+        let params = GreptimePipelineParams::default();
+        let pipeline_ctx = PipelineContext::new(
+            &PipelineDefinition::GreptimeIdentityPipeline(None),
+            &params,
+            Channel::Unknown,
+        );
+
+        let result = values_to_rows(
+            schema_info,
+            VrlValue::Array(input_array),
+            &pipeline_ctx,
+            None,
+            true,
+            table_suffix_template.as_ref(),
+        );
+
+        assert!(result.is_ok());
+        let rows_by_context = result.unwrap();
+
+        // Should have 2 different ContextOpt groups (1h TTL and 24h TTL)
+        assert_eq!(rows_by_context.len(), 2);
+
+        // Count rows per group
+        let total_rows: usize = rows_by_context.values().map(|v| v.len()).sum();
+        assert_eq!(total_rows, 3);
+
+        // Verify that rows are correctly grouped by TTL
+        let mut ttl_1h_count = 0;
+        let mut ttl_24h_count = 0;
+        for (_opt, rows) in &rows_by_context {
+            // ContextOpt doesn't expose ttl directly, but we can count by group size
+            if rows.len() == 2 {
+                ttl_1h_count = rows.len();
+            } else if rows.len() == 1 {
+                ttl_24h_count = rows.len();
+            }
+        }
+        assert_eq!(ttl_1h_count, 2); // Alice and Bob with 1h TTL
+        assert_eq!(ttl_24h_count, 1); // Charlie with 24h TTL
     }
 }
