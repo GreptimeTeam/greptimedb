@@ -39,7 +39,10 @@ use crate::error::{
 use crate::etl::processor::ProcessorKind;
 use crate::etl::transform::transformer::greptime::values_to_rows;
 use crate::tablesuffix::TableSuffixTemplate;
-use crate::{ContextOpt, GreptimeTransformer, IdentityTimeIndex, PipelineContext, SchemaInfo};
+use crate::{
+    ContextOpt, GreptimeTransformer, IdentityTimeIndex, PipelineContext, SchemaInfo,
+    unwrap_or_continue_if_err,
+};
 
 const DESCRIPTION: &str = "description";
 const DOC_VERSION: &str = "version";
@@ -328,7 +331,8 @@ impl Pipeline {
 
         let rows_by_context = match self.transformer() {
             TransformerMode::GreptimeTransformer(greptime_transformer) => {
-                transform_array_elements_to_hashmap(
+                transform_array_elements_by_ctx(
+                    // SAFETY: by line 326, val must be an array
                     val.as_array_mut().unwrap(),
                     greptime_transformer,
                     self.is_v1(),
@@ -382,74 +386,9 @@ impl Pipeline {
     }
 }
 
-/// Transforms an array of VRL values into rows with per-row table suffixes.
-fn transform_array_elements(
-    arr: &mut [VrlValue],
-    transformer: &GreptimeTransformer,
-    is_v1: bool,
-    schema_info: &mut SchemaInfo,
-    pipeline_ctx: &PipelineContext<'_>,
-    tablesuffix_template: Option<&TableSuffixTemplate>,
-) -> Result<Vec<(Row, Option<String>)>> {
-    let mut rows = Vec::with_capacity(arr.len());
-
-    for (index, element) in arr.iter_mut().enumerate() {
-        if !element.is_object() {
-            return ArrayElementMustBeObjectSnafu {
-                index,
-                actual_type: element.kind_str().to_string(),
-            }
-            .fail();
-        }
-
-        // Extract ContextOpt and table_suffix for this element
-        let mut opt = ContextOpt::from_pipeline_map_to_opt(element)
-            .map_err(Box::new)
-            .context(TransformArrayElementSnafu { index })?;
-        let table_suffix = opt.resolve_table_suffix(tablesuffix_template, element);
-
-        let values = transformer
-            .transform_mut(element, is_v1)
-            .map_err(Box::new)
-            .context(TransformArrayElementSnafu { index })?;
-
-        if is_v1 {
-            // v1 mode: just use transformer output directly
-            rows.push((Row { values }, table_suffix));
-        } else {
-            // v2 mode: combine with auto-transform for remaining fields
-            // Note: table_suffix already extracted, pass None to avoid double extraction
-            // ContextOpt was already extracted above, so values_to_rows will return
-            // a HashMap with default ContextOpt.
-            let mut element_rows_map = values_to_rows(
-                schema_info,
-                element.clone(),
-                pipeline_ctx,
-                Some(values),
-                false,
-                None, // table_suffix already extracted above
-            )
-            .map_err(Box::new)
-            .context(TransformArrayElementSnafu { index })?;
-            // Extract rows from default ContextOpt
-            let element_rows = element_rows_map
-                .remove(&ContextOpt::default())
-                .unwrap_or_default();
-            // Apply the already-extracted table_suffix to all rows from this element
-            rows.extend(
-                element_rows
-                    .into_iter()
-                    .map(|(row, _)| (row, table_suffix.clone())),
-            );
-        }
-    }
-
-    Ok(rows)
-}
-
 /// Transforms an array of VRL values into rows grouped by their ContextOpt.
 /// Each element can have its own ContextOpt for per-row configuration.
-fn transform_array_elements_to_hashmap(
+fn transform_array_elements_by_ctx(
     arr: &mut [VrlValue],
     transformer: &GreptimeTransformer,
     is_v1: bool,
@@ -457,65 +396,49 @@ fn transform_array_elements_to_hashmap(
     pipeline_ctx: &PipelineContext<'_>,
     tablesuffix_template: Option<&TableSuffixTemplate>,
 ) -> Result<HashMap<ContextOpt, Vec<(Row, Option<String>)>>> {
+    let skip_error = pipeline_ctx.pipeline_param.skip_error();
     let mut rows_by_context = HashMap::new();
 
     for (index, element) in arr.iter_mut().enumerate() {
         if !element.is_object() {
-            return ArrayElementMustBeObjectSnafu {
-                index,
-                actual_type: element.kind_str().to_string(),
-            }
-            .fail();
+            unwrap_or_continue_if_err!(
+                ArrayElementMustBeObjectSnafu {
+                    index,
+                    actual_type: element.kind_str().to_string(),
+                }
+                .fail(),
+                skip_error
+            );
         }
 
-        // Extract ContextOpt and table_suffix for this element
-        let mut opt = ContextOpt::from_pipeline_map_to_opt(element)
-            .map_err(Box::new)
-            .context(TransformArrayElementSnafu { index })?;
-        let table_suffix = opt.resolve_table_suffix(tablesuffix_template, element);
-
-        let values = transformer
-            .transform_mut(element, is_v1)
-            .map_err(Box::new)
-            .context(TransformArrayElementSnafu { index })?;
-
+        let values =
+            unwrap_or_continue_if_err!(transformer.transform_mut(element, is_v1), skip_error);
         if is_v1 {
             // v1 mode: just use transformer output directly
+            let mut opt = unwrap_or_continue_if_err!(
+                ContextOpt::from_pipeline_map_to_opt(element),
+                skip_error
+            );
+            let table_suffix = opt.resolve_table_suffix(tablesuffix_template, element);
             rows_by_context
                 .entry(opt)
                 .or_insert_with(Vec::new)
                 .push((Row { values }, table_suffix));
         } else {
             // v2 mode: combine with auto-transform for remaining fields
-            // Note: table_suffix already extracted, pass None to avoid double extraction
-            // ContextOpt was already extracted above, so values_to_rows will return
-            // a HashMap with default ContextOpt.
-            let mut element_rows_map = values_to_rows(
+            let element_rows_map = values_to_rows(
                 schema_info,
                 element.clone(),
                 pipeline_ctx,
                 Some(values),
                 false,
-                None, // table_suffix already extracted above
+                tablesuffix_template,
             )
             .map_err(Box::new)
             .context(TransformArrayElementSnafu { index })?;
-
-            // Extract rows from default ContextOpt
-            let element_rows = element_rows_map
-                .remove(&ContextOpt::default())
-                .unwrap_or_default();
-
-            // Apply the already-extracted table_suffix to all rows from this element
-            let rows_with_suffix: Vec<(Row, Option<String>)> = element_rows
-                .into_iter()
-                .map(|(row, _)| (row, table_suffix.clone()))
-                .collect();
-
-            rows_by_context
-                .entry(opt)
-                .or_insert_with(Vec::new)
-                .extend(rows_with_suffix);
+            for (k, v) in element_rows_map {
+                rows_by_context.entry(k).or_default().extend(v);
+            }
         }
     }
 

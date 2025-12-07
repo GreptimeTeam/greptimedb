@@ -424,7 +424,7 @@ pub(crate) fn values_to_rows(
         );
         rows_by_context
             .entry(opt)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((transformed_row, table_suffix));
     }
     Ok(rows_by_context)
