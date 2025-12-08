@@ -126,7 +126,7 @@ pub struct MitoConfig {
     /// The remaining capacity is used for data (parquet) files.
     /// Must be between 0 and 100 (exclusive).
     pub index_cache_percent: u8,
-    /// Capacity for manifest cache (default: 0, disabled).
+    /// Capacity for manifest cache (default: 256MB).
     pub manifest_cache_size: ReadableSize,
 
     // Other configs:
