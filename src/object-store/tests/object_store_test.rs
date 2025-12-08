@@ -17,9 +17,9 @@ use std::env;
 use anyhow::Result;
 use common_telemetry::info;
 use common_test_util::temp_dir::create_temp_dir;
+use object_store::ObjectStore;
 use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
-use object_store::ObjectStore;
 use opendal::EntryMode;
 use opendal::services::{Azblob, Gcs, Oss};
 
