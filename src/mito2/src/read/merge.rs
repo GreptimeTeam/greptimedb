@@ -284,19 +284,19 @@ impl MergeReaderBuilder {
 
 /// Metrics for the merge reader.
 #[derive(Debug, Default)]
-struct Metrics {
+pub(crate) struct Metrics {
     /// Total scan cost of the reader.
-    scan_cost: Duration,
+    pub(crate) scan_cost: Duration,
     /// Number of times to fetch batches.
-    num_fetch_by_batches: usize,
+    pub(crate) num_fetch_by_batches: usize,
     /// Number of times to fetch rows.
-    num_fetch_by_rows: usize,
+    pub(crate) num_fetch_by_rows: usize,
     /// Number of input rows.
-    num_input_rows: usize,
+    pub(crate) num_input_rows: usize,
     /// Number of output rows.
-    num_output_rows: usize,
+    pub(crate) num_output_rows: usize,
     /// Cost to fetch batches from sources.
-    fetch_cost: Duration,
+    pub(crate) fetch_cost: Duration,
 }
 
 /// A `Node` represent an individual input data source to be merged.
