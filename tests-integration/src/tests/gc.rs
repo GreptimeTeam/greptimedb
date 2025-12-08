@@ -23,6 +23,7 @@ use futures::TryStreamExt as _;
 use itertools::Itertools;
 use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions, Region2Peers};
 use mito2::gc::GcConfig;
+use rand::rand_core::le;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
@@ -61,6 +62,26 @@ pub(crate) async fn get_table_route(
     }
 
     (region_routes, regions)
+}
+
+/// Helper function to perform checks after GC, check that all sst files are
+/// in storage equal to those in manifest
+pub(crate) async fn sst_equal_check(test_context: &TestContext) {
+    let all_sst_files_in_storage = list_sst_files_from_storage(test_context).await;
+    let all_sst_files_in_manifest = list_sst_files_from_manifest(test_context).await;
+    assert_eq!(
+        all_sst_files_in_storage,
+        all_sst_files_in_manifest,
+        "SST files in storage and manifest do not match after GC, storage-manifest: {:?}, manifest-storage:{:?}",
+        all_sst_files_in_storage
+            .difference(&all_sst_files_in_manifest)
+            .cloned()
+            .collect::<HashSet<_>>(),
+        all_sst_files_in_manifest
+            .difference(&all_sst_files_in_manifest)
+            .cloned()
+            .collect::<HashSet<_>>()
+    );
 }
 
 /// Helper function to list all SST files

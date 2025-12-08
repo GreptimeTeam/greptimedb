@@ -31,7 +31,7 @@ use crate::test_util::{StorageType, TempDirGuard, TestGuard};
 use crate::tests::gc::delay_layer::{DelayLayer, create_test_object_store_manager_with_delays};
 use crate::tests::gc::delay_query::DelayedQueryExecutor;
 use crate::tests::gc::{
-    get_table_route, list_sst_files_from_manifest, list_sst_files_from_storage,
+    get_table_route, list_sst_files_from_manifest, list_sst_files_from_storage, sst_equal_check,
 };
 use crate::tests::test_util::{
     MockInstanceBuilder, TestContext, execute_sql, try_execute_sql_with, wait_procedure,
@@ -169,9 +169,7 @@ pub async fn test_manifest_update_during_listing(store_type: &StorageType) {
     info!("Verifying GC results after manifest changes...");
 
     // Get final SST file count
-    let final_sst_files = list_sst_files_from_storage(&test_context).await;
-    info!("Final SST files: {}", final_sst_files.len());
-    assert_eq!(final_sst_files.len(), 1);
+    sst_equal_check(&test_context).await;
 
     // Verify data integrity for the remaining table
     let count_sql = "SELECT COUNT(*) FROM test_race_table";
@@ -343,7 +341,7 @@ fn trigger_gc(
 /// 1. Create a cluster with GC enabled
 /// 2. Create table and generate initial SST files with historical data
 /// 3. Start a long-running query that scans historical data
-/// 4. Insert new data and trigger flush & compact to remove some files query is referencing
+/// 4. Trigger compaction to create garbage SST files & Insert new data and trigger flush & compact to remove some files query is referencing
 /// 5. Trigger GC while query is still running
 /// 6. Verify files referenced by query are not deleted
 /// 7. Verify query completes successfully
@@ -377,12 +375,12 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
             ts TIMESTAMP TIME INDEX,
             val DOUBLE,
             host STRING
-        ) WITH (append_mode = 'true')
+        )
     "#;
     execute_sql(&instance, create_table_sql).await;
 
     // Step 2: Generate initial SST files with historical data
-    for i in 0..3 {
+    for i in 0..4 {
         let insert_sql = format!(
             r#"
             INSERT INTO test_query_race_table (ts, val, host) VALUES
@@ -418,8 +416,7 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
 
     // Get initial SST file count
     let initial_sst_files = list_sst_files_from_storage(&test_context).await;
-    info!("Initial SST files: {}", initial_sst_files.len());
-    assert_eq!(initial_sst_files.len(), 3); // 3 files from 3 flushes
+    info!("Initial SST files: {:?}", initial_sst_files);
 
     // Get table route information for GC procedure
     let (region_routes, regions) =
@@ -439,10 +436,7 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
         let result = query_executor
             .execute_query(&instance_clone, query_sql)
             .await;
-        info!(
-            "Long-running query completed with result length: {}",
-            result.len()
-        );
+        info!("Long-running query completed: {query_sql}");
         result
     });
 
@@ -450,7 +444,10 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
     info!("Waiting for query to start processing...");
     sleep(Duration::from_secs(2)).await;
 
-    // Step 4: Insert new data and trigger flush & compact while query is running
+    // Step 4: Trigger compaction to create garbage SST files & Insert new data and trigger flush & compact while query is running
+    let compact_sql = "ADMIN COMPACT_TABLE('test_query_race_table')";
+    execute_sql(&instance, compact_sql).await;
+
     info!("Inserting new data and triggering flush & compact while query is running...");
 
     // Insert new data
@@ -467,12 +464,16 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
     execute_sql(&instance, flush_sql).await;
     info!("New data inserted and flushed");
 
+    let sst_files_before_compaction = list_sst_files_from_storage(&test_context).await;
+    info!(
+        "SST files before compaction: {:?}",
+        sst_files_before_compaction
+    );
+
     // Trigger compaction to remove some files that the query might be referencing
     let compact_sql = "ADMIN COMPACT_TABLE('test_query_race_table')";
     execute_sql(&instance, compact_sql).await;
     info!("Compaction triggered");
-    assert_eq!(list_sst_files_from_manifest(&test_context).await.len(), 1);
-    assert_eq!(list_sst_files_from_storage(&test_context).await.len(), 4);
 
     // Wait for compaction to complete
     sleep(Duration::from_secs(2)).await;
@@ -480,8 +481,8 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
     // Get SST file count after compaction (should have both old and new files)
     let sst_files_after_compaction = list_sst_files_from_storage(&test_context).await;
     info!(
-        "SST files after compaction: {}",
-        sst_files_after_compaction.len()
+        "SST files after compaction: {:?}",
+        sst_files_after_compaction
     );
 
     // Step 5: Trigger GC while query is still running
@@ -500,8 +501,8 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
     // Wait for query to complete
     let query_result = query_handle.await.unwrap();
     info!(
-        "Query completed successfully with result length: {}",
-        query_result.len()
+        "Query completed successfully with result: \n{}",
+        query_result
     );
 
     // Wait for GC to complete
@@ -511,6 +512,7 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
     info!("Verifying GC results after query completion...");
 
     // Get final SST file count
+    sst_equal_check(&test_context).await;
     let final_sst_files = list_sst_files_from_storage(&test_context).await;
     info!("Final SST files: {}", final_sst_files.len());
 
@@ -521,7 +523,7 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
 +----------+
 | count(*) |
 +----------+
-| 12       |
+| 15       |
 +----------+"#
         .trim();
     check_output_stream(count_output.data, expected).await;
