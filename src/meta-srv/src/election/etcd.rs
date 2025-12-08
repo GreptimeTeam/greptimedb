@@ -63,22 +63,6 @@ pub struct EtcdElection {
 }
 
 impl EtcdElection {
-    pub async fn with_endpoints<E, S>(
-        leader_value: E,
-        endpoints: S,
-        store_key_prefix: String,
-    ) -> Result<ElectionRef>
-    where
-        E: AsRef<str>,
-        S: AsRef<[E]>,
-    {
-        let client = Client::connect(endpoints, None)
-            .await
-            .context(error::ConnectEtcdSnafu)?;
-
-        Self::with_etcd_client(leader_value, client, store_key_prefix).await
-    }
-
     pub async fn with_etcd_client<E>(
         leader_value: E,
         client: Client,

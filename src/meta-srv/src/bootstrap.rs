@@ -22,6 +22,7 @@ use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
 use common_config::Configurable;
 use common_error::ext::BoxedError;
+use common_meta::distributed_time_constants::default_etcd_client_options;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use common_meta::distributed_time_constants::META_LEASE_SECS;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
@@ -441,7 +442,8 @@ pub async fn create_etcd_client(store_addrs: &[String]) -> Result<Client> {
         .map(|x| x.trim())
         .filter(|x| !x.is_empty())
         .collect::<Vec<_>>();
-    Client::connect(&etcd_endpoints, None)
+    let options = default_etcd_client_options();
+    Client::connect(&etcd_endpoints, Some(options))
         .await
         .context(error::ConnectEtcdSnafu)
 }
