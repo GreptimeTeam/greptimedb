@@ -60,7 +60,6 @@ impl DelayedQueryExecutor {
                 // Calculate the deadline for minimum duration
                 let deadline = start_time + self.min_duration;
                 let mut batches = Vec::new();
-                let mut last_batch_time = start_time;
 
                 // Check if we need to extend the stream life to meet min_duration
                 // do it before processing each batch so if stream only have one batch we still extend its life
@@ -84,7 +83,6 @@ impl DelayedQueryExecutor {
                     if batch.num_rows() > 0 {
                         info!("Processing batch with delay {:?}", self.batch_delay);
                         tokio::time::sleep(self.batch_delay).await;
-                        last_batch_time = std::time::Instant::now();
                     }
 
                     batches.push(batch);

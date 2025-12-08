@@ -25,7 +25,9 @@ use mito2::gc::GcConfig;
 
 use crate::cluster::GreptimeDbClusterBuilder;
 use crate::test_util::{StorageType, TempDirGuard, get_test_store_config};
-use crate::tests::gc::{get_table_route, list_sst_files_from_storage};
+use crate::tests::gc::{
+    get_table_route, list_sst_files_from_manifest, list_sst_files_from_storage, sst_equal_check,
+};
 use crate::tests::test_util::{MockInstanceBuilder, TestContext, execute_sql, wait_procedure};
 
 /// Helper function to create a distributed cluster with GC enabled
@@ -161,9 +163,17 @@ pub async fn test_gc_basic(store_type: &StorageType) {
     wait_procedure(metasrv.procedure_manager(), procedure_id).await;
 
     // Step 7: Verify GC results
+    sst_equal_check(&test_context).await;
     let sst_files_after_gc = list_sst_files_from_storage(&test_context).await;
     info!("SST files after GC: {:?}", sst_files_after_gc);
     assert_eq!(sst_files_after_gc.len(), 1); // Only the compacted file should remain after gc
+
+    let sst_files_in_manifest = list_sst_files_from_manifest(&test_context).await;
+    info!(
+        "SST files in manifest after GC: {:?}",
+        sst_files_in_manifest
+    );
+    assert_eq!(sst_files_in_manifest.len(), 1); // Manifest should also reflect only the compacted file
 
     // Verify that data is still accessible
     let count_sql = "SELECT COUNT(*) FROM test_gc_table";
