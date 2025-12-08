@@ -50,6 +50,9 @@ use crate::{PipelineContext, truthy, unwrap_or_continue_if_err};
 
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
 
+/// Row with potentially designated table suffix.
+pub type RowWithTableSuffix = (Row, Option<String>);
+
 /// fields not in the columns will be discarded
 /// to prevent automatic column creation in GreptimeDB
 #[derive(Debug, Clone)]
@@ -378,7 +381,7 @@ pub(crate) fn values_to_rows(
     row: Option<Vec<GreptimeValue>>,
     need_calc_ts: bool,
     tablesuffix_template: Option<&crate::tablesuffix::TableSuffixTemplate>,
-) -> Result<std::collections::HashMap<ContextOpt, Vec<(Row, Option<String>)>>> {
+) -> Result<std::collections::HashMap<ContextOpt, Vec<RowWithTableSuffix>>> {
     let skip_error = pipeline_ctx.pipeline_param.skip_error();
     let VrlValue::Array(arr) = values else {
         // Single object: extract ContextOpt and table_suffix
@@ -398,7 +401,7 @@ pub(crate) fn values_to_rows(
         return Ok(result);
     };
 
-    let mut rows_by_context: std::collections::HashMap<ContextOpt, Vec<(Row, Option<String>)>> =
+    let mut rows_by_context: std::collections::HashMap<ContextOpt, Vec<RowWithTableSuffix>> =
         std::collections::HashMap::new();
     for (index, mut value) in arr.into_iter().enumerate() {
         if !value.is_object() {
@@ -1183,7 +1186,7 @@ mod tests {
         // Verify that rows are correctly grouped by TTL
         let mut ttl_1h_count = 0;
         let mut ttl_24h_count = 0;
-        for (_opt, rows) in &rows_by_context {
+        for rows in rows_by_context.values() {
             // ContextOpt doesn't expose ttl directly, but we can count by group size
             if rows.len() == 2 {
                 ttl_1h_count = rows.len();

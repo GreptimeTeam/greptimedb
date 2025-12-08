@@ -37,7 +37,7 @@ use crate::error::{
     YamlLoadSnafu, YamlParseSnafu,
 };
 use crate::etl::processor::ProcessorKind;
-use crate::etl::transform::transformer::greptime::values_to_rows;
+use crate::etl::transform::transformer::greptime::{RowWithTableSuffix, values_to_rows};
 use crate::tablesuffix::TableSuffixTemplate;
 use crate::{
     ContextOpt, GreptimeTransformer, IdentityTimeIndex, PipelineContext, SchemaInfo,
@@ -245,12 +245,12 @@ pub enum PipelineExecOutput {
 #[derive(Debug)]
 pub struct TransformedOutput {
     /// Rows grouped by their ContextOpt, each with optional table suffix
-    pub rows_by_context: HashMap<ContextOpt, Vec<(Row, Option<String>)>>,
+    pub rows_by_context: HashMap<ContextOpt, Vec<RowWithTableSuffix>>,
 }
 
 impl PipelineExecOutput {
     // Note: This is a test only function, do not use it in production.
-    pub fn into_transformed(self) -> Option<Vec<(Row, Option<String>)>> {
+    pub fn into_transformed(self) -> Option<Vec<RowWithTableSuffix>> {
         if let Self::Transformed(TransformedOutput { rows_by_context }) = self {
             // For backward compatibility, merge all rows with a default ContextOpt
             Some(rows_by_context.into_values().flatten().collect())
@@ -260,9 +260,7 @@ impl PipelineExecOutput {
     }
 
     // New method for accessing the HashMap structure directly
-    pub fn into_transformed_hashmap(
-        self,
-    ) -> Option<HashMap<ContextOpt, Vec<(Row, Option<String>)>>> {
+    pub fn into_transformed_hashmap(self) -> Option<HashMap<ContextOpt, Vec<RowWithTableSuffix>>> {
         if let Self::Transformed(TransformedOutput { rows_by_context }) = self {
             Some(rows_by_context)
         } else {
@@ -272,14 +270,14 @@ impl PipelineExecOutput {
 
     // Backward compatibility helper that returns first ContextOpt with all its rows
     // or merges all rows with default ContextOpt for multi-context scenarios
-    pub fn into_legacy_format(self) -> Option<(ContextOpt, Vec<(Row, Option<String>)>)> {
+    pub fn into_legacy_format(self) -> Option<(ContextOpt, Vec<RowWithTableSuffix>)> {
         if let Self::Transformed(TransformedOutput { rows_by_context }) = self {
             if rows_by_context.len() == 1 {
                 let (opt, rows) = rows_by_context.into_iter().next().unwrap();
                 Some((opt, rows))
             } else {
                 // Multiple contexts: merge all rows with default ContextOpt for test compatibility
-                let all_rows: Vec<(Row, Option<String>)> =
+                let all_rows: Vec<RowWithTableSuffix> =
                     rows_by_context.into_values().flatten().collect();
                 Some((ContextOpt::default(), all_rows))
             }
@@ -395,7 +393,7 @@ fn transform_array_elements_by_ctx(
     schema_info: &mut SchemaInfo,
     pipeline_ctx: &PipelineContext<'_>,
     tablesuffix_template: Option<&TableSuffixTemplate>,
-) -> Result<HashMap<ContextOpt, Vec<(Row, Option<String>)>>> {
+) -> Result<HashMap<ContextOpt, Vec<RowWithTableSuffix>>> {
     let skip_error = pipeline_ctx.pipeline_param.skip_error();
     let mut rows_by_context = HashMap::new();
 
