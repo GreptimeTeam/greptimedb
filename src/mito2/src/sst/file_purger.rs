@@ -21,7 +21,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::{FileMeta, delete_files};
+use crate::sst::file::{FileMeta, IndexVersion, RegionIndexId, delete_files};
 use crate::sst::file_ref::FileReferenceManagerRef;
 
 /// A worker to delete files in background.
@@ -30,6 +30,10 @@ pub trait FilePurger: Send + Sync + fmt::Debug {
     /// If `is_delete` is true, the file will be deleted from the storage.
     /// Otherwise, only the reference will be removed.
     fn remove_file(&self, file_meta: FileMeta, is_delete: bool);
+
+    /// Remove the index with given version. Notice that this only removes one index file
+    /// given by `version`, ignore the version in `file_meta`.
+    fn remove_index(&self, file_meta: FileMeta, version: IndexVersion, is_delete: bool);
 
     /// Notify the purger of a new file created.
     /// This is useful for object store based storage, where we need to track the file references
@@ -47,6 +51,10 @@ pub struct NoopFilePurger;
 
 impl FilePurger for NoopFilePurger {
     fn remove_file(&self, _file_meta: FileMeta, _is_delete: bool) {
+        // noop
+    }
+
+    fn remove_index(&self, _file_meta: FileMeta, _version: IndexVersion, _is_delete: bool) {
         // noop
     }
 }
@@ -142,12 +150,30 @@ impl LocalFilePurger {
             error!(e; "Failed to schedule the file purge request");
         }
     }
+
+    fn delete_index(&self, file_meta: FileMeta, version: IndexVersion) {
+        let sst_layer = self.sst_layer.clone();
+        if let Err(e) = self.scheduler.schedule(Box::pin(async move {
+            let index_id = RegionIndexId::new(file_meta.file_id(), version);
+            if let Err(e) = sst_layer.delete_index(&index_id).await {
+                error!(e; "Failed to delete index {:?} from storage", index_id);
+            }
+        })) {
+            error!(e; "Failed to schedule the index purge request");
+        }
+    }
 }
 
 impl FilePurger for LocalFilePurger {
     fn remove_file(&self, file_meta: FileMeta, is_delete: bool) {
         if is_delete {
             self.delete_file(file_meta);
+        }
+    }
+
+    fn remove_index(&self, file_meta: FileMeta, version: IndexVersion, is_delete: bool) {
+        if is_delete {
+            self.delete_index(file_meta, version);
         }
     }
 }
@@ -164,6 +190,10 @@ impl FilePurger for ObjectStoreFilePurger {
         // because the file is no longer in use nonetheless.
         self.file_ref_manager.remove_file(&file_meta);
         // TODO(discord9): consider impl a .tombstone file to reduce files needed to list
+    }
+
+    fn remove_index(&self, _file_meta: FileMeta, _version: IndexVersion, _is_delete: bool) {
+        // TODO(discord9): add index reference management for object store based storage
     }
 
     fn new_file(&self, file_meta: &FileMeta) {

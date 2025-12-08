@@ -228,18 +228,21 @@ impl AccessLayer {
 
         // Delete all versions of the index file.
         for version in 0..=index_file_id.version {
-            let path = location::index_file_path(
-                &self.table_dir,
-                RegionIndexId::new(index_file_id.file_id, version),
-                self.path_type,
-            );
-            self.object_store
-                .delete(&path)
-                .await
-                .context(DeleteIndexSnafu {
-                    file_id: region_file_id.file_id(),
-                })?;
+            self.delete_index(&RegionIndexId::new(index_file_id.file_id, version))
+                .await?;
         }
+
+        Ok(())
+    }
+
+    pub(crate) async fn delete_index(&self, region_index_id: &RegionIndexId) -> Result<()> {
+        let path = location::index_file_path(&self.table_dir, *region_index_id, self.path_type);
+        self.object_store
+            .delete(&path)
+            .await
+            .context(DeleteIndexSnafu {
+                file_id: region_index_id.file_id(),
+            })?;
 
         Ok(())
     }
