@@ -16,9 +16,9 @@
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::mem;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::{fmt, mem};
 
 use async_trait::async_trait;
 use common_telemetry::debug;
@@ -318,7 +318,7 @@ impl MergeReaderBuilder {
 }
 
 /// Metrics for the merge reader.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct MergeMetrics {
     /// Total scan cost of the reader.
     pub(crate) scan_cost: Duration,
@@ -330,6 +330,36 @@ pub struct MergeMetrics {
     pub(crate) num_output_rows: usize,
     /// Cost to fetch batches from sources.
     pub(crate) fetch_cost: Duration,
+}
+
+impl fmt::Debug for MergeMetrics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Skip output if scan_cost is zero
+        if self.scan_cost.is_zero() {
+            return write!(f, "{{}}");
+        }
+
+        write!(f, r#"{{"scan_cost":"{:?}""#, self.scan_cost)?;
+
+        if self.num_fetch_by_batches > 0 {
+            write!(
+                f,
+                r#", "num_fetch_by_batches":{}"#,
+                self.num_fetch_by_batches
+            )?;
+        }
+        if self.num_fetch_by_rows > 0 {
+            write!(f, r#", "num_fetch_by_rows":{}"#, self.num_fetch_by_rows)?;
+        }
+        if self.num_output_rows > 0 {
+            write!(f, r#", "num_output_rows":{}"#, self.num_output_rows)?;
+        }
+        if !self.fetch_cost.is_zero() {
+            write!(f, r#", "fetch_cost":"{:?}""#, self.fetch_cost)?;
+        }
+
+        write!(f, "}}")
+    }
 }
 
 impl MergeMetrics {

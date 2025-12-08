@@ -37,6 +37,7 @@ use crate::metrics::{
     IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROW_GROUPS_TOTAL,
     READ_ROWS_IN_ROW_GROUP_TOTAL, READ_ROWS_RETURN, READ_STAGE_ELAPSED,
 };
+use crate::read::merge::{MergeMetrics, MergeMetricsReport};
 use crate::read::range::{RangeBuilderList, RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::{Batch, BoxedBatchStream, BoxedRecordBatchStream, ScannerMetrics, Source};
@@ -130,6 +131,9 @@ pub(crate) struct ScanMetricsSet {
     /// Duration of the series distributor to yield.
     distributor_yield_cost: Duration,
 
+    /// Merge metrics.
+    merge_metrics: MergeMetrics,
+
     /// The stream reached EOF
     stream_eof: bool,
 
@@ -180,6 +184,7 @@ impl fmt::Debug for ScanMetricsSet {
             num_distributor_batches,
             distributor_scan_cost,
             distributor_yield_cost,
+            merge_metrics,
             stream_eof,
             mem_scan_cost,
             mem_rows,
@@ -305,6 +310,11 @@ impl fmt::Debug for ScanMetricsSet {
             && !metrics.is_empty()
         {
             write!(f, ", \"metadata_cache_metrics\":{:?}", metrics)?;
+        }
+
+        // Write merge metrics if not empty
+        if !merge_metrics.scan_cost.is_zero() {
+            write!(f, ", \"merge_metrics\":{:?}", merge_metrics)?;
         }
 
         write!(f, ", \"stream_eof\":{stream_eof}}}")
@@ -531,6 +541,21 @@ impl PartitionMetricsInner {
     }
 }
 
+impl MergeMetricsReport for PartitionMetricsInner {
+    fn report(&self, metrics: &mut MergeMetrics) {
+        let mut scan_metrics = self.metrics.lock().unwrap();
+        // Merge the metrics into scan_metrics
+        scan_metrics.merge_metrics.scan_cost += metrics.scan_cost;
+        scan_metrics.merge_metrics.num_fetch_by_batches += metrics.num_fetch_by_batches;
+        scan_metrics.merge_metrics.num_fetch_by_rows += metrics.num_fetch_by_rows;
+        scan_metrics.merge_metrics.num_output_rows += metrics.num_output_rows;
+        scan_metrics.merge_metrics.fetch_cost += metrics.fetch_cost;
+
+        // Reset the input metrics
+        *metrics = MergeMetrics::default();
+    }
+}
+
 impl Drop for PartitionMetricsInner {
     fn drop(&mut self) {
         self.on_finish(false);
@@ -702,6 +727,11 @@ impl PartitionMetrics {
     /// Returns whether verbose explain is enabled.
     pub(crate) fn explain_verbose(&self) -> bool {
         self.0.explain_verbose
+    }
+
+    /// Returns a MergeMetricsReport trait object for reporting merge metrics.
+    pub(crate) fn merge_metrics_reporter(&self) -> Arc<dyn MergeMetricsReport> {
+        self.0.clone()
     }
 }
 
