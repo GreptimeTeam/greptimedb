@@ -326,8 +326,6 @@ pub struct MergeMetrics {
     pub(crate) num_fetch_by_batches: usize,
     /// Number of times to fetch rows.
     pub(crate) num_fetch_by_rows: usize,
-    /// Number of input rows.
-    pub(crate) num_input_rows: usize,
     /// Number of output rows.
     pub(crate) num_output_rows: usize,
     /// Cost to fetch batches from sources.
@@ -364,7 +362,6 @@ impl Node {
         let start = Instant::now();
         let current_batch = source.next_batch().await?.map(CompareFirst);
         metrics.fetch_cost += start.elapsed();
-        metrics.num_input_rows += current_batch.as_ref().map(|b| b.0.num_rows()).unwrap_or(0);
 
         Ok(Node {
             source,
@@ -404,11 +401,6 @@ impl Node {
         // Ensures batch is not empty.
         self.current_batch = self.source.next_batch().await?.map(CompareFirst);
         metrics.fetch_cost += start.elapsed();
-        metrics.num_input_rows += self
-            .current_batch
-            .as_ref()
-            .map(|b| b.0.num_rows())
-            .unwrap_or(0);
         Ok(current.0)
     }
 
@@ -594,7 +586,6 @@ mod tests {
         )
         .await;
 
-        assert_eq!(8, reader.metrics.num_input_rows);
         assert_eq!(8, reader.metrics.num_output_rows);
     }
 
@@ -713,7 +704,6 @@ mod tests {
         )
         .await;
 
-        assert_eq!(11, reader.metrics.num_input_rows);
         assert_eq!(11, reader.metrics.num_output_rows);
     }
 
