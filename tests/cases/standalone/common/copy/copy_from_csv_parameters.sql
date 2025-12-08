@@ -110,6 +110,8 @@ drop table enable_different_order;
 
 drop table disable_different_order;
 
+drop table different_order;
+
 drop table check_header;
 
 drop table non_check_header;
