@@ -227,6 +227,10 @@ drop table disable_different_order;
 
 Affected Rows: 0
 
+drop table different_order;
+
+Affected Rows: 0
+
 drop table check_header;
 
 Affected Rows: 0
