@@ -160,6 +160,8 @@ async fn test_index_build_type_flush() {
 
 #[tokio::test]
 async fn test_index_build_type_compact() {
+    common_telemetry::init_default_ut_logging();
+
     let mut env = TestEnv::with_prefix("test_index_build_type_compact_").await;
     let listener = Arc::new(IndexBuildListener::default());
     let engine = env
