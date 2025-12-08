@@ -17,6 +17,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::mem;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -26,6 +27,12 @@ use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
 use crate::metrics::READ_STAGE_ELAPSED;
 use crate::read::{Batch, BatchReader, BoxedBatchReader, Source};
+
+/// Trait for reporting merge metrics.
+pub trait MergeMetricsReport: Send + Sync {
+    /// Reports and resets the metrics.
+    fn report(&self, metrics: &mut MergeMetrics);
+}
 
 /// Reader to merge sorted batches.
 ///
@@ -51,7 +58,9 @@ pub struct MergeReader {
     /// Batch to output.
     output_batch: Option<Batch>,
     /// Local metrics.
-    metrics: Metrics,
+    metrics: MergeMetrics,
+    /// Optional metrics reporter.
+    metrics_reporter: Option<Arc<dyn MergeMetricsReport>>,
 }
 
 #[async_trait]
@@ -73,10 +82,12 @@ impl BatchReader for MergeReader {
         if let Some(batch) = self.output_batch.take() {
             self.metrics.scan_cost += start.elapsed();
             self.metrics.num_output_rows += batch.num_rows();
+            self.metrics.maybe_report(&self.metrics_reporter);
             Ok(Some(batch))
         } else {
             // Nothing fetched.
             self.metrics.scan_cost += start.elapsed();
+            self.metrics.maybe_report(&self.metrics_reporter);
             Ok(None)
         }
     }
@@ -85,6 +96,11 @@ impl BatchReader for MergeReader {
 impl Drop for MergeReader {
     fn drop(&mut self) {
         debug!("Merge reader finished, metrics: {:?}", self.metrics);
+
+        // Report any remaining metrics.
+        if let Some(reporter) = &self.metrics_reporter {
+            reporter.report(&mut self.metrics);
+        }
 
         READ_STAGE_ELAPSED
             .with_label_values(&["merge"])
@@ -97,9 +113,12 @@ impl Drop for MergeReader {
 
 impl MergeReader {
     /// Creates and initializes a new [MergeReader].
-    pub async fn new(sources: Vec<Source>) -> Result<MergeReader> {
+    pub async fn new(
+        sources: Vec<Source>,
+        metrics_reporter: Option<Arc<dyn MergeMetricsReport>>,
+    ) -> Result<MergeReader> {
         let start = Instant::now();
-        let mut metrics = Metrics::default();
+        let mut metrics = MergeMetrics::default();
 
         let mut cold = BinaryHeap::with_capacity(sources.len());
         let hot = BinaryHeap::with_capacity(sources.len());
@@ -116,6 +135,7 @@ impl MergeReader {
             cold,
             output_batch: None,
             metrics,
+            metrics_reporter,
         };
         // Initializes the reader.
         reader.refill_hot();
@@ -250,6 +270,8 @@ pub struct MergeReaderBuilder {
     ///
     /// All source must yield batches with the same schema.
     sources: Vec<Source>,
+    /// Optional metrics reporter.
+    metrics_reporter: Option<Arc<dyn MergeMetricsReport>>,
 }
 
 impl MergeReaderBuilder {
@@ -260,7 +282,10 @@ impl MergeReaderBuilder {
 
     /// Creates a builder from sources.
     pub fn from_sources(sources: Vec<Source>) -> MergeReaderBuilder {
-        MergeReaderBuilder { sources }
+        MergeReaderBuilder {
+            sources,
+            metrics_reporter: None,
+        }
     }
 
     /// Pushes a batch reader to sources.
@@ -275,16 +300,26 @@ impl MergeReaderBuilder {
         self
     }
 
+    /// Sets the metrics reporter.
+    pub fn with_metrics_reporter(
+        &mut self,
+        reporter: Option<Arc<dyn MergeMetricsReport>>,
+    ) -> &mut Self {
+        self.metrics_reporter = reporter;
+        self
+    }
+
     /// Builds and initializes the reader, then resets the builder.
     pub async fn build(&mut self) -> Result<MergeReader> {
         let sources = mem::take(&mut self.sources);
-        MergeReader::new(sources).await
+        let metrics_reporter = self.metrics_reporter.take();
+        MergeReader::new(sources, metrics_reporter).await
     }
 }
 
 /// Metrics for the merge reader.
 #[derive(Debug, Default)]
-pub(crate) struct Metrics {
+pub struct MergeMetrics {
     /// Total scan cost of the reader.
     pub(crate) scan_cost: Duration,
     /// Number of times to fetch batches.
@@ -297,6 +332,17 @@ pub(crate) struct Metrics {
     pub(crate) num_output_rows: usize,
     /// Cost to fetch batches from sources.
     pub(crate) fetch_cost: Duration,
+}
+
+impl MergeMetrics {
+    /// Reports the metrics if scan_cost exceeds 10ms and resets them.
+    pub(crate) fn maybe_report(&mut self, reporter: &Option<Arc<dyn MergeMetricsReport>>) {
+        if self.scan_cost.as_millis() > 10 {
+            if let Some(r) = reporter {
+                r.report(self);
+            }
+        }
+    }
 }
 
 /// A `Node` represent an individual input data source to be merged.
@@ -313,7 +359,7 @@ impl Node {
     /// Initialize a node.
     ///
     /// It tries to fetch one batch from the `source`.
-    async fn new(mut source: Source, metrics: &mut Metrics) -> Result<Node> {
+    async fn new(mut source: Source, metrics: &mut MergeMetrics) -> Result<Node> {
         // Ensures batch is not empty.
         let start = Instant::now();
         let current_batch = source.next_batch().await?.map(CompareFirst);
@@ -352,7 +398,7 @@ impl Node {
     ///
     /// # Panics
     /// Panics if the node has reached EOF.
-    async fn fetch_batch(&mut self, metrics: &mut Metrics) -> Result<Batch> {
+    async fn fetch_batch(&mut self, metrics: &mut MergeMetrics) -> Result<Batch> {
         let current = self.current_batch.take().unwrap();
         let start = Instant::now();
         // Ensures batch is not empty.
@@ -390,7 +436,7 @@ impl Node {
     ///
     /// # Panics
     /// Panics if the node is EOF.
-    async fn skip_rows(&mut self, num_to_skip: usize, metrics: &mut Metrics) -> Result<()> {
+    async fn skip_rows(&mut self, num_to_skip: usize, metrics: &mut MergeMetrics) -> Result<()> {
         let batch = self.current_batch();
         debug_assert!(batch.num_rows() >= num_to_skip);
 

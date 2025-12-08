@@ -33,7 +33,7 @@ use crate::error::{ComputeArrowSnafu, Result};
 use crate::memtable::BoxedRecordBatchIterator;
 use crate::metrics::READ_STAGE_ELAPSED;
 use crate::read::BoxedRecordBatchStream;
-use crate::read::merge::Metrics;
+use crate::read::merge::{MergeMetrics, MergeMetricsReport};
 use crate::sst::parquet::flat_format::{
     primary_key_column_index, sequence_column_index, time_index_column_index,
 };
@@ -441,7 +441,9 @@ pub struct FlatMergeIterator {
     /// rows.
     batch_size: usize,
     /// Local metrics.
-    metrics: Metrics,
+    metrics: MergeMetrics,
+    /// Optional metrics reporter.
+    metrics_reporter: Option<Arc<dyn MergeMetricsReport>>,
 }
 
 impl FlatMergeIterator {
@@ -450,9 +452,10 @@ impl FlatMergeIterator {
         schema: SchemaRef,
         iters: Vec<BoxedRecordBatchIterator>,
         batch_size: usize,
+        metrics_reporter: Option<Arc<dyn MergeMetricsReport>>,
     ) -> Result<Self> {
         let start = Instant::now();
-        let metrics = Metrics::default();
+        let metrics = MergeMetrics::default();
         let mut in_progress = BatchBuilder::new(schema, iters.len(), batch_size);
         let mut nodes = Vec::with_capacity(iters.len());
         // Initialize nodes and the buffer.
@@ -476,6 +479,7 @@ impl FlatMergeIterator {
             output_batch: None,
             batch_size,
             metrics,
+            metrics_reporter,
         };
         iter.metrics.scan_cost += start.elapsed();
 
@@ -502,10 +506,12 @@ impl FlatMergeIterator {
         if let Some(batch) = self.output_batch.take() {
             self.metrics.scan_cost += start.elapsed();
             self.metrics.num_output_rows += batch.num_rows();
+            self.metrics.maybe_report(&self.metrics_reporter);
             Ok(Some(batch))
         } else {
             // No more batches.
             self.metrics.scan_cost += start.elapsed();
+            self.metrics.maybe_report(&self.metrics_reporter);
             Ok(None)
         }
     }
@@ -576,6 +582,11 @@ impl Drop for FlatMergeIterator {
     fn drop(&mut self) {
         debug!("Flat merge iterator finished, metrics: {:?}", self.metrics);
 
+        // Report any remaining metrics.
+        if let Some(reporter) = &self.metrics_reporter {
+            reporter.report(&mut self.metrics);
+        }
+
         READ_STAGE_ELAPSED
             .with_label_values(&["flat_merge"])
             .observe(self.metrics.scan_cost.as_secs_f64());
@@ -600,7 +611,9 @@ pub struct FlatMergeReader {
     /// rows.
     batch_size: usize,
     /// Local metrics.
-    metrics: Metrics,
+    metrics: MergeMetrics,
+    /// Optional metrics reporter.
+    metrics_reporter: Option<Arc<dyn MergeMetricsReport>>,
 }
 
 impl FlatMergeReader {
@@ -609,9 +622,10 @@ impl FlatMergeReader {
         schema: SchemaRef,
         iters: Vec<BoxedRecordBatchStream>,
         batch_size: usize,
+        metrics_reporter: Option<Arc<dyn MergeMetricsReport>>,
     ) -> Result<Self> {
         let start = Instant::now();
-        let metrics = Metrics::default();
+        let metrics = MergeMetrics::default();
         let mut in_progress = BatchBuilder::new(schema, iters.len(), batch_size);
         let mut nodes = Vec::with_capacity(iters.len());
         // Initialize nodes and the buffer.
@@ -635,6 +649,7 @@ impl FlatMergeReader {
             output_batch: None,
             batch_size,
             metrics,
+            metrics_reporter,
         };
         reader.metrics.scan_cost += start.elapsed();
 
@@ -661,10 +676,12 @@ impl FlatMergeReader {
         if let Some(batch) = self.output_batch.take() {
             self.metrics.scan_cost += start.elapsed();
             self.metrics.num_output_rows += batch.num_rows();
+            self.metrics.maybe_report(&self.metrics_reporter);
             Ok(Some(batch))
         } else {
             // No more batches.
             self.metrics.scan_cost += start.elapsed();
+            self.metrics.maybe_report(&self.metrics_reporter);
             Ok(None)
         }
     }
@@ -735,6 +752,11 @@ impl FlatMergeReader {
 impl Drop for FlatMergeReader {
     fn drop(&mut self) {
         debug!("Flat merge reader finished, metrics: {:?}", self.metrics);
+
+        // Report any remaining metrics.
+        if let Some(reporter) = &self.metrics_reporter {
+            reporter.report(&mut self.metrics);
+        }
 
         READ_STAGE_ELAPSED
             .with_label_values(&["flat_merge"])
@@ -983,7 +1005,7 @@ mod tests {
             Field::new("__op_type", DataType::UInt8, false),
         ]));
 
-        let mut merge_iter = FlatMergeIterator::new(schema, vec![], 1024).unwrap();
+        let mut merge_iter = FlatMergeIterator::new(schema, vec![], 1024, None).unwrap();
         assert!(merge_iter.next_batch().unwrap().is_none());
     }
 
@@ -1000,7 +1022,7 @@ mod tests {
         let schema = batch.schema();
         let iter = Box::new(new_test_iter(vec![batch.clone()]));
 
-        let merge_iter = FlatMergeIterator::new(schema, vec![iter], 1024).unwrap();
+        let merge_iter = FlatMergeIterator::new(schema, vec![iter], 1024, None).unwrap();
         let result = collect_merge_iterator_batches(merge_iter);
 
         assert_eq!(result.len(), 1);
@@ -1035,7 +1057,7 @@ mod tests {
         let iter1 = Box::new(new_test_iter(vec![batch1.clone(), batch3.clone()]));
         let iter2 = Box::new(new_test_iter(vec![batch2.clone()]));
 
-        let merge_iter = FlatMergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
+        let merge_iter = FlatMergeIterator::new(schema, vec![iter1, iter2], 1024, None).unwrap();
         let result = collect_merge_iterator_batches(merge_iter);
 
         // Results should be sorted by primary key, timestamp, sequence desc
@@ -1065,7 +1087,7 @@ mod tests {
         let iter1 = Box::new(new_test_iter(vec![batch1]));
         let iter2 = Box::new(new_test_iter(vec![batch2]));
 
-        let merge_iter = FlatMergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
+        let merge_iter = FlatMergeIterator::new(schema, vec![iter1, iter2], 1024, None).unwrap();
         let result = collect_merge_iterator_batches(merge_iter);
 
         let expected = vec![
@@ -1104,7 +1126,7 @@ mod tests {
         let iter1 = Box::new(new_test_iter(vec![batch1]));
         let iter2 = Box::new(new_test_iter(vec![batch2]));
 
-        let merge_iter = FlatMergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
+        let merge_iter = FlatMergeIterator::new(schema, vec![iter1, iter2], 1024, None).unwrap();
         let result = collect_merge_iterator_batches(merge_iter);
 
         // Should be sorted by sequence descending for same key/timestamp

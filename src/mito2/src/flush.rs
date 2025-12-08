@@ -820,7 +820,8 @@ fn merge_and_dedup(
     field_column_start: usize,
     input_iters: Vec<BoxedRecordBatchIterator>,
 ) -> Result<BoxedRecordBatchIterator> {
-    let merge_iter = FlatMergeIterator::new(schema.clone(), input_iters, DEFAULT_READ_BATCH_SIZE)?;
+    let merge_iter =
+        FlatMergeIterator::new(schema.clone(), input_iters, DEFAULT_READ_BATCH_SIZE, None)?;
     let maybe_dedup = if options.append_mode {
         // No dedup in append mode
         Box::new(merge_iter) as _

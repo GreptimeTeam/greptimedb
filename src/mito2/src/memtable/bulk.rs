@@ -1013,8 +1013,12 @@ impl MemtableCompactor {
             return Ok(None);
         }
 
-        let merged_iter =
-            FlatMergeIterator::new(arrow_schema.clone(), iterators, DEFAULT_READ_BATCH_SIZE)?;
+        let merged_iter = FlatMergeIterator::new(
+            arrow_schema.clone(),
+            iterators,
+            DEFAULT_READ_BATCH_SIZE,
+            None,
+        )?;
 
         let boxed_iter: BoxedRecordBatchIterator = if dedup {
             // Applies deduplication based on merge mode
