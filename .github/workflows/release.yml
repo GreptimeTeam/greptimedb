@@ -381,7 +381,18 @@ jobs:
 
   publish-github-release:
     name: Create GitHub release and upload artifacts
-    if: ${{ inputs.publish_github_release || github.event_name == 'push' || github.event_name == 'schedule' }}
+    # Use always() to run even when optional jobs (macos, windows) are skipped.
+    # Then check that required jobs succeeded and optional jobs didn't fail.
+    if: |
+      always() &&
+      (inputs.publish_github_release || github.event_name == 'push' || github.event_name == 'schedule') &&
+      needs.allocate-runners.result == 'success' &&
+      (needs.build-linux-amd64-artifacts.result == 'success' || needs.build-linux-amd64-artifacts.result == 'skipped') &&
+      (needs.build-linux-arm64-artifacts.result == 'success' || needs.build-linux-arm64-artifacts.result == 'skipped') &&
+      (needs.build-macos-artifacts.result == 'success' || needs.build-macos-artifacts.result == 'skipped') &&
+      (needs.build-windows-artifacts.result == 'success' || needs.build-windows-artifacts.result == 'skipped') &&
+      (needs.release-images-to-dockerhub.result == 'success' || needs.release-images-to-dockerhub.result == 'skipped') &&
+      (needs.run-multi-lang-tests.result == 'success' || needs.run-multi-lang-tests.result == 'skipped')
     needs: [ # The job have to wait for all the artifacts are built.
       allocate-runners,
       build-linux-amd64-artifacts,
