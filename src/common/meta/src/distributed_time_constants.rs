@@ -14,6 +14,8 @@
 
 use std::time::Duration;
 
+use etcd_client::ConnectOptions;
+
 /// Heartbeat interval time (is the basic unit of various time).
 pub const HEARTBEAT_INTERVAL_MILLIS: u64 = 3000;
 
@@ -51,6 +53,17 @@ pub const HEARTBEAT_CHANNEL_KEEP_ALIVE_INTERVAL_SECS: Duration =
 /// The keep-alive timeout of the heartbeat channel.
 pub const HEARTBEAT_CHANNEL_KEEP_ALIVE_TIMEOUT_SECS: Duration =
     Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1);
+
+/// The default options for the etcd client.
+pub fn default_etcd_client_options() -> ConnectOptions {
+    ConnectOptions::new()
+        .with_keep_alive_while_idle(true)
+        .with_keep_alive(
+            Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1),
+            Duration::from_secs(10),
+        )
+        .with_connect_timeout(Duration::from_secs(10))
+}
 
 /// The default mailbox round-trip timeout.
 pub const MAILBOX_RTT_SECS: u64 = 1;
