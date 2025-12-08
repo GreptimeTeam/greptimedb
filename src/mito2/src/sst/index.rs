@@ -801,6 +801,11 @@ impl IndexBuildTask {
             self.file_meta.region_id,
             self.reason.as_str()
         );
+        // notify the file purger to remove the old index files if any
+        if new_index_version > 0 {
+            self.file_purger
+                .remove_index(self.file_meta.clone(), new_index_version - 1, true);
+        }
         Ok(edit)
     }
 }
