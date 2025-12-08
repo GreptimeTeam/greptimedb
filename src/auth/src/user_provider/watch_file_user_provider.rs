@@ -45,6 +45,7 @@ impl WatchFileUserProvider {
 
         FileWatcherBuilder::new()
             .watch_path(filepath)
+            .context(FileWatchSnafu)?
             .config(FileWatcherConfig::modify_and_create())
             .spawn(move || match load_credential_from_file(&filepath_owned) {
                 Ok(credential) => {

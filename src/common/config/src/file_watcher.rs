@@ -24,7 +24,7 @@ use common_telemetry::{error, info, warn};
 use notify::{EventKind, RecursiveMode, Watcher};
 use snafu::ResultExt;
 
-use crate::error::{FileWatchSnafu, Result};
+use crate::error::{FileWatchSnafu, InvalidPathSnafu, Result};
 
 /// Configuration for the file watcher behavior.
 #[derive(Debug, Clone, Default)]
@@ -71,17 +71,31 @@ impl FileWatcherBuilder {
     }
 
     /// Add a file path to watch.
-    pub fn watch_path<P: AsRef<Path>>(mut self, path: P) -> Self {
-        self.paths.push(path.as_ref().into());
-        self
+    ///
+    /// Returns an error if the path is a directory.
+    pub fn watch_path<P: AsRef<Path>>(mut self, path: P) -> Result<Self> {
+        let path = path.as_ref();
+        snafu::ensure!(
+            path.is_file(),
+            InvalidPathSnafu {
+                path: path.display().to_string(),
+            }
+        );
+        self.paths.push(path.into());
+        Ok(self)
     }
 
     /// Add multiple file paths to watch.
-    pub fn watch_paths<P: AsRef<Path>, I: IntoIterator<Item = P>>(mut self, paths: I) -> Self {
+    ///
+    /// Returns an error if any path is a directory.
+    pub fn watch_paths<P: AsRef<Path>, I: IntoIterator<Item = P>>(
+        mut self,
+        paths: I,
+    ) -> Result<Self> {
         for path in paths {
-            self.paths.push(path.as_ref().into());
+            self = self.watch_path(path)?;
         }
-        self
+        Ok(self)
     }
 
     /// Build and spawn the file watcher with the given callback.
@@ -176,6 +190,7 @@ mod tests {
 
         FileWatcherBuilder::new()
             .watch_path(&file_path)
+            .unwrap()
             .config(FileWatcherConfig::modify_and_create())
             .spawn(move || {
                 counter_clone.fetch_add(1, Ordering::SeqCst);

@@ -58,6 +58,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid path '{}': expected a file, not a directory", path))]
+    InvalidPath {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -65,7 +72,8 @@ impl ErrorExt for Error {
         match self {
             Error::TomlFormat { .. }
             | Error::LoadLayeredConfig { .. }
-            | Error::FileWatch { .. } => StatusCode::InvalidArguments,
+            | Error::FileWatch { .. }
+            | Error::InvalidPath { .. } => StatusCode::InvalidArguments,
             Error::SerdeJson { .. } => StatusCode::Unexpected,
         }
     }
