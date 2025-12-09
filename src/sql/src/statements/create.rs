@@ -17,7 +17,10 @@ use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
 use datatypes::json::JsonStructureSettings;
-use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
+use datatypes::schema::{
+    FulltextOptions, SkippingIndexOptions, VectorDistanceMetric, VectorIndexEngineType,
+    VectorIndexOptions,
+};
 use itertools::Itertools;
 use serde::Serialize;
 use snafu::ResultExt;
@@ -133,6 +136,8 @@ pub struct ColumnExtensions {
     ///
     /// Inverted index doesn't have options at present. There won't be any options in that map.
     pub inverted_index_options: Option<OptionMap>,
+    /// Vector index options for HNSW-based vector similarity search.
+    pub vector_index_options: Option<OptionMap>,
     pub json_datatype_options: Option<OptionMap>,
 }
 
@@ -208,6 +213,15 @@ impl Display for Column {
                 write!(f, " INVERTED INDEX")?;
             }
         }
+
+        if let Some(vector_index_options) = &self.extensions.vector_index_options {
+            if !vector_index_options.is_empty() {
+                let options = vector_index_options.kv_pairs();
+                write!(f, " VECTOR INDEX WITH({})", format_list_comma!(options))?;
+            } else {
+                write!(f, " VECTOR INDEX")?;
+            }
+        }
         Ok(())
     }
 }
@@ -231,6 +245,93 @@ impl ColumnExtensions {
         Ok(Some(
             options.try_into().context(SetSkippingIndexOptionSnafu)?,
         ))
+    }
+
+    pub fn build_vector_index_options(&self) -> Result<Option<VectorIndexOptions>> {
+        let Some(options) = self.vector_index_options.as_ref() else {
+            return Ok(None);
+        };
+
+        let options_map: HashMap<String, String> = options.clone().into_map();
+
+        let engine = options_map
+            .get("engine")
+            .map(|s| {
+                s.parse::<VectorIndexEngineType>().map_err(|e| {
+                    InvalidSqlSnafu {
+                        msg: format!("invalid VECTOR INDEX engine: {e}"),
+                    }
+                    .build()
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        let metric = options_map
+            .get("metric")
+            .map(|s| {
+                s.parse::<VectorDistanceMetric>().map_err(|e| {
+                    InvalidSqlSnafu {
+                        msg: format!("invalid VECTOR INDEX metric: {e}"),
+                    }
+                    .build()
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        let connectivity = options_map
+            .get("connectivity")
+            .map(|s| {
+                s.parse::<u32>().map_err(|_| {
+                    InvalidSqlSnafu {
+                        msg: format!(
+                            "invalid VECTOR INDEX connectivity: {s}, expected positive integer"
+                        ),
+                    }
+                    .build()
+                })
+            })
+            .transpose()?
+            .unwrap_or(16);
+
+        let expansion_add = options_map
+            .get("expansion_add")
+            .map(|s| {
+                s.parse::<u32>().map_err(|_| {
+                    InvalidSqlSnafu {
+                        msg: format!(
+                            "invalid VECTOR INDEX expansion_add: {s}, expected positive integer"
+                        ),
+                    }
+                    .build()
+                })
+            })
+            .transpose()?
+            .unwrap_or(128);
+
+        let expansion_search = options_map
+            .get("expansion_search")
+            .map(|s| {
+                s.parse::<u32>().map_err(|_| {
+                    InvalidSqlSnafu {
+                        msg: format!(
+                            "invalid VECTOR INDEX expansion_search: {s}, expected positive integer"
+                        ),
+                    }
+                    .build()
+                })
+            })
+            .transpose()?
+            .unwrap_or(64);
+
+        Ok(Some(VectorIndexOptions {
+            engine,
+            metric,
+            connectivity,
+            expansion_add,
+            expansion_search,
+        }))
     }
 
     pub fn build_json_structure_settings(&self) -> Result<Option<JsonStructureSettings>> {

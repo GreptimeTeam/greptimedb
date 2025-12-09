@@ -55,7 +55,7 @@ use crate::ast::{
 use crate::error::{
     self, ConvertToGrpcDataTypeSnafu, ConvertValueSnafu, Result,
     SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu, SetJsonStructureSettingsSnafu,
-    SetSkippingIndexOptionSnafu, SqlCommonSnafu,
+    SetSkippingIndexOptionSnafu, SetVectorIndexOptionSnafu, SqlCommonSnafu,
 };
 use crate::statements::create::{Column, ColumnExtensions};
 pub use crate::statements::option_map::OptionMap;
@@ -145,6 +145,12 @@ pub fn column_to_schema(
         column_schema = column_schema
             .with_skipping_options(options)
             .context(SetSkippingIndexOptionSnafu)?;
+    }
+
+    if let Some(options) = column.extensions.build_vector_index_options()? {
+        column_schema = column_schema
+            .with_vector_index_options(&options)
+            .context(SetVectorIndexOptionSnafu)?;
     }
 
     column_schema.set_inverted_index(column.extensions.inverted_index_options.is_some());
@@ -710,6 +716,7 @@ mod tests {
                 skipping_index_options: None,
                 inverted_index_options: None,
                 json_datatype_options: None,
+                vector_index_options: None,
             },
         };
 
