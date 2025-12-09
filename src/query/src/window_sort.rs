@@ -2528,7 +2528,7 @@ mod test {
         async fn run_test(&self) -> Vec<DfRecordBatch> {
             let (ranges, batches): (Vec<_>, Vec<_>) = self.input.clone().into_iter().unzip();
 
-            let mock_input = MockInputExec::new(batches, self.schema.clone());
+            let mock_input = MockInputExec::new(vec![batches], self.schema.clone());
 
             let exec = WindowedSortExec::try_new(
                 self.expression.clone(),
