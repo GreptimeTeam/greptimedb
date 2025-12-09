@@ -274,7 +274,7 @@ impl ColumnExtensions {
         }
 
         if let Some(s) = options_map.get("connectivity") {
-            result.connectivity = s.parse::<u32>().map_err(|_| {
+            let value = s.parse::<u32>().map_err(|_| {
                 InvalidSqlSnafu {
                     msg: format!(
                         "invalid VECTOR INDEX connectivity: {s}, expected positive integer"
@@ -282,10 +282,17 @@ impl ColumnExtensions {
                 }
                 .build()
             })?;
+            if value == 0 {
+                return InvalidSqlSnafu {
+                    msg: "VECTOR INDEX connectivity must be greater than 0".to_string(),
+                }
+                .fail();
+            }
+            result.connectivity = value;
         }
 
         if let Some(s) = options_map.get("expansion_add") {
-            result.expansion_add = s.parse::<u32>().map_err(|_| {
+            let value = s.parse::<u32>().map_err(|_| {
                 InvalidSqlSnafu {
                     msg: format!(
                         "invalid VECTOR INDEX expansion_add: {s}, expected positive integer"
@@ -293,10 +300,17 @@ impl ColumnExtensions {
                 }
                 .build()
             })?;
+            if value == 0 {
+                return InvalidSqlSnafu {
+                    msg: "VECTOR INDEX expansion_add must be greater than 0".to_string(),
+                }
+                .fail();
+            }
+            result.expansion_add = value;
         }
 
         if let Some(s) = options_map.get("expansion_search") {
-            result.expansion_search = s.parse::<u32>().map_err(|_| {
+            let value = s.parse::<u32>().map_err(|_| {
                 InvalidSqlSnafu {
                     msg: format!(
                         "invalid VECTOR INDEX expansion_search: {s}, expected positive integer"
@@ -304,6 +318,13 @@ impl ColumnExtensions {
                 }
                 .build()
             })?;
+            if value == 0 {
+                return InvalidSqlSnafu {
+                    msg: "VECTOR INDEX expansion_search must be greater than 0".to_string(),
+                }
+                .fail();
+            }
+            result.expansion_search = value;
         }
 
         Ok(Some(result))
@@ -968,5 +989,93 @@ AS SELECT number FROM numbers_input where number > 10"#,
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_vector_index_options_validation() {
+        use super::{ColumnExtensions, OptionMap};
+
+        // Test zero connectivity should fail
+        let extensions = ColumnExtensions {
+            fulltext_index_options: None,
+            vector_options: None,
+            skipping_index_options: None,
+            inverted_index_options: None,
+            json_datatype_options: None,
+            vector_index_options: Some(OptionMap::from([(
+                "connectivity".to_string(),
+                "0".to_string(),
+            )])),
+        };
+        let result = extensions.build_vector_index_options();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("connectivity must be greater than 0")
+        );
+
+        // Test zero expansion_add should fail
+        let extensions = ColumnExtensions {
+            fulltext_index_options: None,
+            vector_options: None,
+            skipping_index_options: None,
+            inverted_index_options: None,
+            json_datatype_options: None,
+            vector_index_options: Some(OptionMap::from([(
+                "expansion_add".to_string(),
+                "0".to_string(),
+            )])),
+        };
+        let result = extensions.build_vector_index_options();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expansion_add must be greater than 0")
+        );
+
+        // Test zero expansion_search should fail
+        let extensions = ColumnExtensions {
+            fulltext_index_options: None,
+            vector_options: None,
+            skipping_index_options: None,
+            inverted_index_options: None,
+            json_datatype_options: None,
+            vector_index_options: Some(OptionMap::from([(
+                "expansion_search".to_string(),
+                "0".to_string(),
+            )])),
+        };
+        let result = extensions.build_vector_index_options();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expansion_search must be greater than 0")
+        );
+
+        // Test valid values should succeed
+        let extensions = ColumnExtensions {
+            fulltext_index_options: None,
+            vector_options: None,
+            skipping_index_options: None,
+            inverted_index_options: None,
+            json_datatype_options: None,
+            vector_index_options: Some(OptionMap::from([
+                ("connectivity".to_string(), "32".to_string()),
+                ("expansion_add".to_string(), "200".to_string()),
+                ("expansion_search".to_string(), "100".to_string()),
+            ])),
+        };
+        let result = extensions.build_vector_index_options();
+        assert!(result.is_ok());
+        let options = result.unwrap().unwrap();
+        assert_eq!(options.connectivity, 32);
+        assert_eq!(options.expansion_add, 200);
+        assert_eq!(options.expansion_search, 100);
     }
 }
