@@ -19,7 +19,6 @@ use std::time::Duration;
 use common_procedure::ProcedureWithId;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
-use futures::future::join_all;
 use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions, Region2Peers};
 use mito2::gc::GcConfig;
 use session::context::QueryContext;
@@ -27,8 +26,8 @@ use store_api::storage::RegionId;
 use tokio::time::sleep;
 
 use crate::cluster::GreptimeDbClusterBuilder;
-use crate::test_util::{StorageType, TempDirGuard, TestGuard};
-use crate::tests::gc::delay_layer::{DelayLayer, create_test_object_store_manager_with_delays};
+use crate::test_util::{StorageType, TestGuard};
+use crate::tests::gc::delay_layer::create_test_object_store_manager_with_delays;
 use crate::tests::gc::delay_query::DelayedQueryExecutor;
 use crate::tests::gc::{
     get_table_route, list_sst_files_from_manifest, list_sst_files_from_storage, sst_equal_check,
@@ -117,7 +116,7 @@ pub async fn test_manifest_update_during_listing(store_type: &StorageType) {
     info!("Starting GC operation with delayed listing...");
 
     let gc_handle = trigger_gc(
-        &metasrv,
+        metasrv,
         regions,
         region_routes,
         Duration::from_secs(30), // timeout
@@ -489,7 +488,7 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
     info!("Triggering GC while query is still running...");
 
     let gc_handle = trigger_gc(
-        &metasrv,
+        metasrv,
         regions,
         region_routes,
         Duration::from_secs(30), // timeout
