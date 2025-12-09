@@ -12,24 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::collections::HashSet;
 
 use common_meta::key::TableMetadataManagerRef;
-use common_procedure::ProcedureWithId;
-use common_telemetry::info;
-use common_test_util::recordbatch::check_output_stream;
 use futures::TryStreamExt as _;
 use itertools::Itertools;
-use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions, Region2Peers};
-use mito2::gc::GcConfig;
-use rand::rand_core::le;
+use meta_srv::gc::Region2Peers;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
-use crate::cluster::GreptimeDbClusterBuilder;
-use crate::test_util::{StorageType, TempDirGuard, get_test_store_config};
-use crate::tests::test_util::{MockInstanceBuilder, TestContext, execute_sql, wait_procedure};
+use crate::tests::test_util::TestContext;
 
 mod basic;
 mod delay_layer;
