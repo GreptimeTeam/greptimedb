@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::PathType;
-use store_api::storage::{ColumnId, FileId, RegionId};
+use store_api::storage::{ColumnId, FileId, IndexVersion, RegionId};
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
@@ -82,8 +82,6 @@ pub type Level = u8;
 pub const MAX_LEVEL: Level = 2;
 /// Type to store index types for a column.
 pub type IndexTypes = SmallVec<[IndexType; 4]>;
-/// Index version
-pub type IndexVersion = u64;
 
 /// Cross-region file id.
 ///
@@ -199,7 +197,7 @@ pub struct FileMeta {
     /// Version of the index file.
     /// Used to generate the index file name: "{file_id}.{index_version}.puffin".
     /// Default is 0 (which maps to "{file_id}.puffin" for compatibility).
-    pub index_version: u64,
+    pub index_version: IndexVersion,
     /// Number of rows in the file.
     ///
     /// For historical reasons, this field might be missing in old files. Thus

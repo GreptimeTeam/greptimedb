@@ -565,13 +565,7 @@ fn new_noop_file_purger() -> FilePurgerRef {
     struct Noop;
     impl FilePurger for Noop {
         fn remove_file(&self, _file_meta: FileMeta, _is_delete: bool) {}
-        fn remove_index(
-            &self,
-            _file_meta: FileMeta,
-            _version: mito2::sst::file::IndexVersion,
-            _is_delete: bool,
-        ) {
-        }
+        fn update_index(&self, _file_meta: FileMeta, _version: store_api::storage::IndexVersion) {}
     }
     Arc::new(Noop)
 }

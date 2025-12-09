@@ -24,6 +24,9 @@ use uuid::Uuid;
 use crate::ManifestVersion;
 use crate::storage::RegionId;
 
+/// Index version, incremented when the index file is rebuilt.
+pub type IndexVersion = u64;
+
 #[derive(Debug, Snafu, PartialEq)]
 pub struct ParseIdError {
     source: uuid::Error,
@@ -70,15 +73,21 @@ impl FromStr for FileId {
     }
 }
 
+/// Indicating holding a `FileHandle` reference for a specific file&index in a region.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FileRef {
     pub region_id: RegionId,
     pub file_id: FileId,
+    pub index_version: IndexVersion,
 }
 
 impl FileRef {
-    pub fn new(region_id: RegionId, file_id: FileId) -> Self {
-        Self { region_id, file_id }
+    pub fn new(region_id: RegionId, file_id: FileId, index_version: u64) -> Self {
+        Self {
+            region_id,
+            file_id,
+            index_version,
+        }
     }
 }
 

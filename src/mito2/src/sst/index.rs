@@ -778,6 +778,7 @@ impl IndexBuildTask {
         self.file_meta.available_indexes = output.build_available_indexes();
         self.file_meta.indexes = output.build_indexes();
         self.file_meta.index_file_size = output.file_size;
+        let old_index_version = self.file_meta.index_version;
         self.file_meta.index_version = new_index_version;
         let edit = RegionEdit {
             files_to_add: vec![self.file_meta.clone()],
@@ -804,7 +805,7 @@ impl IndexBuildTask {
         // notify the file purger to remove the old index files if any
         if new_index_version > 0 {
             self.file_purger
-                .remove_index(self.file_meta.clone(), new_index_version - 1, true);
+                .update_index(self.file_meta.clone(), old_index_version);
         }
         Ok(edit)
     }

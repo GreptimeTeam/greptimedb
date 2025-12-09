@@ -22,11 +22,10 @@ use bytes::Bytes;
 use index::inverted_index::error::Result;
 use index::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
 use prost::Message;
-use store_api::storage::FileId;
+use store_api::storage::{FileId, IndexVersion};
 
 use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache, PageKey};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
-use crate::sst::file::IndexVersion;
 
 const INDEX_TYPE_INVERTED_INDEX: &str = "inverted_index";
 
