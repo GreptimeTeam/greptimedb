@@ -167,6 +167,10 @@ impl FileReferenceManager {
     /// Removes a file reference.
     /// If the reference count reaches zero, the file reference will be removed from the manager.
     pub fn remove_file(&self, file_meta: &FileMeta) {
+        debug!(
+            "Removing file ref: region {}, file {} on node {:?}",
+            file_meta.region_id, file_meta.file_id, self.node_id,
+        );
         let region_id = file_meta.region_id;
         let file_ref = FileRef::new(region_id, file_meta.file_id, file_meta.index_version());
 
@@ -202,6 +206,10 @@ impl FileReferenceManager {
             o.remove_entry();
         }
         if remove_file_ref {
+            debug!(
+                "File ref removed: region {}, file {} on node {:?}, remaining files in region: {}",
+                file_meta.region_id, file_meta.file_id, self.node_id, file_cnt,
+            );
             GC_REF_FILE_CNT.dec();
         }
     }

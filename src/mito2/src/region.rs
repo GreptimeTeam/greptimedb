@@ -778,6 +778,22 @@ impl MitoRegion {
     }
 }
 
+#[cfg(feature = "test")]
+impl MitoRegion {
+    /// Returns the manifest context of the region.
+    pub fn manifest_ctx(&self) -> ManifestContextRef {
+        self.manifest_ctx.clone()
+    }
+
+    pub async fn manifest(&self) -> Arc<RegionManifest> {
+        self.manifest_ctx.manifest_manager.read().await.manifest()
+    }
+
+    pub fn file_purger(&self) -> FilePurgerRef {
+        self.file_purger.clone()
+    }
+}
+
 /// Context to update the region manifest.
 #[derive(Debug)]
 pub(crate) struct ManifestContext {

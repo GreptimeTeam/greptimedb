@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use common_procedure::ProcedureWithId;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
+use itertools::Itertools as _;
 use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions, Region2Peers};
 use mito2::gc::GcConfig;
+use mito2::sst::file::FileHandle;
 use session::context::QueryContext;
 use store_api::storage::RegionId;
 use tokio::time::sleep;
@@ -35,6 +37,34 @@ use crate::tests::gc::{
 use crate::tests::test_util::{
     MockInstanceBuilder, TestContext, execute_sql, try_execute_sql_with, wait_procedure,
 };
+
+/// Get file handles for all SST files for all files in the given regions
+async fn get_file_handle_for_regions(
+    test_context: &TestContext,
+    regions: &[RegionId],
+) -> Vec<FileHandle> {
+    let datanode = test_context.datanodes().iter().next().unwrap().1;
+    let mito_engine = datanode.region_server().mito_engine().unwrap();
+    let mut all_file_handles = vec![];
+    for region_id in regions {
+        let region = mito_engine.find_region(*region_id).unwrap();
+        let manifest = region.manifest().await;
+        let files = manifest.files.clone();
+        let file_purger = region.file_purger();
+        let file_handles = files
+            .into_iter()
+            .map(|(_, v)| FileHandle::new(v, file_purger.clone()))
+            .collect_vec();
+        info!(
+            "Region {:?} has {} file handles",
+            region_id,
+            file_handles.len()
+        );
+        all_file_handles.extend(file_handles);
+    }
+
+    all_file_handles
+}
 
 /// Test scenario: Manifest Update During Listing
 ///
@@ -332,19 +362,22 @@ fn trigger_gc(
 
 /// Test scenario: GC Execution During Query
 ///
-/// This test simulates a race condition where GC runs while a long-running query
-/// is holding file references, ensuring that files referenced by active queries
-/// are not deleted prematurely.
+/// This test simulates a race condition where GC runs while file handles are being held,
+/// ensuring that files referenced by active file handles are not deleted prematurely.
 ///
 /// Test steps:
 /// 1. Create a cluster with GC enabled
 /// 2. Create table and generate initial SST files with historical data
-/// 3. Start a long-running query that scans historical data
-/// 4. Trigger compaction to create garbage SST files & Insert new data and trigger flush & compact to remove some files query is referencing
-/// 5. Trigger GC while query is still running
-/// 6. Verify files referenced by query are not deleted
-/// 7. Verify query completes successfully
-/// 8. Verify GC eventually deletes files after query finishes
+/// 3. Acquire file handles for all SST files (simulating a query holding references)
+/// 4. Insert new data and trigger flush & compact to create garbage SST files
+/// 5. Trigger GC while file handles are still being held
+/// 6. Verify that files referenced by handles are not deleted during GC execution
+/// 7. Release file handles (simulating query completion)
+/// 8. Verify data integrity and that GC eventually cleaned up unreferenced files
+/// 9. Trigger final GC to clean up all unreferenced files and verify cleanup
+///
+/// Note: This test uses file handles rather than an actual long-running query to simulate
+/// the scenario where files are referenced during GC execution.
 pub async fn test_gc_execution_during_query(store_type: &StorageType) {
     let test_name = format!("gc_query_race_test_{}", uuid::Uuid::new_v4());
 
@@ -421,27 +454,15 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
     let (region_routes, regions) =
         get_table_route(metasrv.table_metadata_manager(), table_id).await;
 
-    // Step 3: Start a long-running query that scans historical data
-    info!("Starting long-running query that scans historical data...");
+    // Step 3: Simulate long-running query by getting file handles
+    let all_file_handles = get_file_handle_for_regions(&test_context, &regions).await;
 
-    let query_executor = DelayedQueryExecutor::new(
-        Duration::from_millis(500), // batch_delay - delay between processing batches
-        Duration::from_secs(15),    // min_duration - ensure query runs long enough
-    );
-
-    let instance_clone = instance.clone();
-    let query_handle = tokio::spawn(async move {
-        let query_sql = "SELECT * FROM test_query_race_table ORDER BY ts";
-        let result = query_executor
-            .execute_query(&instance_clone, query_sql)
-            .await;
-        info!("Long-running query completed: {query_sql}");
-        result
-    });
-
-    // Wait a bit to ensure query starts processing
-    info!("Waiting for query to start processing...");
-    sleep(Duration::from_secs(2)).await;
+    // Extract file paths from the handles for verification later
+    let referenced_file_paths: HashSet<String> = all_file_handles
+        .iter()
+        .map(|handle| handle.file_id().to_string())
+        .collect();
+    info!("Files referenced by handles: {:?}", referenced_file_paths);
 
     // Step 4: Trigger compaction to create garbage SST files & Insert new data and trigger flush & compact while query is running
     let compact_sql = "ADMIN COMPACT_TABLE('test_query_race_table')";
@@ -489,31 +510,57 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
 
     let gc_handle = trigger_gc(
         metasrv,
-        regions,
-        region_routes,
+        regions.clone(),
+        region_routes.clone(),
         Duration::from_secs(30), // timeout
     );
 
     // Step 6: Wait for both query and GC to complete
     info!("Waiting for query and GC to complete...");
 
-    // Wait for query to complete
-    let query_result = query_handle.await.unwrap();
-    info!(
-        "Query completed successfully with result: \n{}",
-        query_result
-    );
-
+    // vital here first wait for GC to ensure it doesn't delete files needed by query
     // Wait for GC to complete
     gc_handle.await.unwrap();
 
-    // Step 7: Verify results
+    // Step 6: Verify that files referenced by handles were not deleted during GC
+    info!("Verifying that referenced files were not deleted during GC...");
+    let sst_files_after_gc = list_sst_files_from_storage(&test_context).await;
+
+    // Extract file IDs from the storage file paths for comparison
+    let storage_file_ids: HashSet<String> = sst_files_after_gc
+        .iter()
+        .filter_map(|path| {
+            // Extract file ID from path like "/path/to/region_id/file_id.sst"
+            path.split('/')
+                .last()
+                .and_then(|filename| filename.strip_suffix(".parquet"))
+                .map(|file_id_str| file_id_str.to_string())
+        })
+        .collect();
+
+    // Check that all referenced files are still present in storage
+    let missing_files: Vec<&String> = referenced_file_paths
+        .iter()
+        .filter(|file_id| !storage_file_ids.contains(*file_id))
+        .collect();
+
+    assert!(
+        missing_files.is_empty(),
+        "GC deleted files that were still referenced: {:?}",
+        missing_files
+    );
+    info!("All referenced files are still present after GC");
+
+    // Step 7: Simulate end of long-running query by dropping file handles
+    drop(all_file_handles);
+
+    // Step 8: Verify results
     info!("Verifying GC results after query completion...");
 
     // Get final SST file count
     sst_equal_check(&test_context).await;
-    let final_sst_files = list_sst_files_from_storage(&test_context).await;
-    info!("Final SST files: {}", final_sst_files.len());
+    let sst_files_after_gc_store = list_sst_files_from_storage(&test_context).await;
+    info!("Final SST files: {}", sst_files_after_gc_store.len());
 
     // Verify data integrity - all data should still be accessible
     let count_sql = "SELECT COUNT(*) FROM test_query_race_table";
@@ -527,27 +574,46 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
         .trim();
     check_output_stream(count_output.data, expected).await;
 
-    // Verify that the query result contains all expected data
-    assert!(
-        query_result.contains("2023-01-01T10:00:00"),
-        "Query result should contain historical data"
-    );
-    assert!(
-        !query_result.contains("2023-01-05T12:00:00"),
-        "Query result shouldn't contain new data"
-    );
-    assert!(
-        query_result.contains("host0"),
-        "Query result should contain old host data"
-    );
-    assert!(
-        !query_result.contains("host4"),
-        "Query result shouldn't contain new host data"
-    );
-
     // Verify that GC eventually cleaned up files after query finished
     // The exact number depends on compaction results, but should be less than after compaction
     info!("GC execution during query test completed successfully");
+
+    // Step 9: Trigger GC again after releasing file handles to clean up unreferenced files
+    info!("Triggering final GC to clean up unreferenced files...");
+    let final_gc_handle = trigger_gc(
+        metasrv,
+        regions,
+        region_routes,
+        Duration::from_secs(30), // timeout
+    );
+
+    // Wait for final GC to complete
+    info!("Waiting for final GC to complete...");
+    final_gc_handle.await.unwrap();
+
+    // Perform SST equality check after final GC
+    sst_equal_check(&test_context).await;
+
+    // Get final file count after GC cleanup
+    let final_cleanup_sst_files = list_sst_files_from_storage(&test_context).await;
+    info!(
+        "Final SST files after cleanup: {}",
+        final_cleanup_sst_files.len()
+    );
+
+    // Verify that files have been cleaned up (should be fewer than before final GC)
+    assert!(
+        final_cleanup_sst_files.len() <= sst_files_after_gc_store.len(),
+        "Final GC should not increase file count. Before: {}, After: {}",
+        sst_files_after_gc_store.len(),
+        final_cleanup_sst_files.len()
+    );
+
+    // Verify data integrity is still maintained after final cleanup
+    let final_count_output = execute_sql(&instance, count_sql).await;
+    check_output_stream(final_count_output.data, expected).await;
+
+    info!("Final GC cleanup completed successfully");
 }
 
 /// Test runner for GC execution during query race condition test
