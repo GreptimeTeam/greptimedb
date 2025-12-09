@@ -21,7 +21,6 @@ derive_builder = { workspace = true, optional = true }
 futures.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true
-md5 = "0.7"
 moka = { workspace = true, features = ["future"] }
 opendal = { version = "0.54", features = [
     "layers-tracing",
