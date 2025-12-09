@@ -276,6 +276,19 @@ impl fmt::Debug for DedupMetrics {
 }
 
 impl DedupMetrics {
+    /// Merges metrics from another DedupMetrics instance.
+    pub(crate) fn merge(&mut self, other: &DedupMetrics) {
+        let DedupMetrics {
+            num_unselected_rows,
+            num_deleted_rows,
+            dedup_cost,
+        } = other;
+
+        self.num_unselected_rows += *num_unselected_rows;
+        self.num_deleted_rows += *num_deleted_rows;
+        self.dedup_cost += *dedup_cost;
+    }
+
     /// Reports the metrics if dedup_cost exceeds 10ms and resets them.
     pub(crate) fn maybe_report(&mut self, reporter: &Option<Arc<dyn DedupMetricsReport>>) {
         if self.dedup_cost.as_millis() > 10

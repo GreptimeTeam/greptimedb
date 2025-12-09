@@ -554,10 +554,7 @@ impl MergeMetricsReport for PartitionMetricsInner {
     fn report(&self, metrics: &mut MergeMetrics) {
         let mut scan_metrics = self.metrics.lock().unwrap();
         // Merge the metrics into scan_metrics
-        scan_metrics.merge_metrics.scan_cost += metrics.scan_cost;
-        scan_metrics.merge_metrics.num_fetch_by_batches += metrics.num_fetch_by_batches;
-        scan_metrics.merge_metrics.num_fetch_by_rows += metrics.num_fetch_by_rows;
-        scan_metrics.merge_metrics.fetch_cost += metrics.fetch_cost;
+        scan_metrics.merge_metrics.merge(metrics);
 
         // Reset the input metrics
         *metrics = MergeMetrics::default();
@@ -568,9 +565,7 @@ impl DedupMetricsReport for PartitionMetricsInner {
     fn report(&self, metrics: &mut DedupMetrics) {
         let mut scan_metrics = self.metrics.lock().unwrap();
         // Merge the metrics into scan_metrics
-        scan_metrics.dedup_metrics.num_unselected_rows += metrics.num_unselected_rows;
-        scan_metrics.dedup_metrics.num_deleted_rows += metrics.num_deleted_rows;
-        scan_metrics.dedup_metrics.dedup_cost += metrics.dedup_cost;
+        scan_metrics.dedup_metrics.merge(metrics);
 
         // Reset the input metrics
         *metrics = DedupMetrics::default();

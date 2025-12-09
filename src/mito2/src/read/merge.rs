@@ -364,6 +364,23 @@ impl fmt::Debug for MergeMetrics {
 }
 
 impl MergeMetrics {
+    /// Merges metrics from another MergeMetrics instance.
+    pub(crate) fn merge(&mut self, other: &MergeMetrics) {
+        let MergeMetrics {
+            init_cost,
+            scan_cost,
+            num_fetch_by_batches,
+            num_fetch_by_rows,
+            fetch_cost,
+        } = other;
+
+        self.init_cost += *init_cost;
+        self.scan_cost += *scan_cost;
+        self.num_fetch_by_batches += *num_fetch_by_batches;
+        self.num_fetch_by_rows += *num_fetch_by_rows;
+        self.fetch_cost += *fetch_cost;
+    }
+
     /// Reports the metrics if scan_cost exceeds 10ms and resets them.
     pub(crate) fn maybe_report(&mut self, reporter: &Option<Arc<dyn MergeMetricsReport>>) {
         if self.scan_cost.as_millis() > 10
