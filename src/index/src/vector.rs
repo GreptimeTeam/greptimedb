@@ -34,8 +34,14 @@ pub fn distance_metric_to_usearch(metric: VectorDistanceMetric) -> MetricKind {
 ///
 /// Uses SIMD-optimized implementations via nalgebra.
 ///
-/// **Note:** The caller must ensure that the two vectors have the same length.
+/// **Note:** The caller must ensure that the two vectors have the same length
+/// and are non-empty. Empty vectors return 0.0 for all metrics.
 pub fn compute_distance(v1: &[f32], v2: &[f32], metric: VectorDistanceMetric) -> f32 {
+    // Empty vectors are degenerate; return 0.0 uniformly across all metrics.
+    if v1.is_empty() || v2.is_empty() {
+        return 0.0;
+    }
+
     match metric {
         VectorDistanceMetric::L2sq => l2sq(v1, v2),
         VectorDistanceMetric::Cosine => cosine(v1, v2),
@@ -51,6 +57,10 @@ fn l2sq(lhs: &[f32], rhs: &[f32]) -> f32 {
 }
 
 /// Calculates the cosine distance between two vectors.
+///
+/// Returns a value in `[0.0, 2.0]` where 0.0 means identical direction and 2.0 means
+/// opposite direction. For degenerate cases (zero or near-zero magnitude vectors),
+/// returns 1.0 (maximum uncertainty) to avoid NaN and ensure safe index operations.
 fn cosine(lhs: &[f32], rhs: &[f32]) -> f32 {
     let lhs_vec = DVectorView::from_slice(lhs, lhs.len());
     let rhs_vec = DVectorView::from_slice(rhs, rhs.len());
@@ -59,6 +69,7 @@ fn cosine(lhs: &[f32], rhs: &[f32]) -> f32 {
     let lhs_norm = lhs_vec.norm();
     let rhs_norm = rhs_vec.norm();
 
+    // Zero-magnitude vectors have undefined direction; return max distance as safe fallback.
     if dot_product.abs() < f32::EPSILON
         || lhs_norm.abs() < f32::EPSILON
         || rhs_norm.abs() < f32::EPSILON
@@ -68,6 +79,7 @@ fn cosine(lhs: &[f32], rhs: &[f32]) -> f32 {
 
     let cos_similar = dot_product / (lhs_norm * rhs_norm);
     let res = 1.0 - cos_similar;
+    // Clamp near-zero results to exactly 0.0 to avoid floating-point artifacts.
     if res.abs() < f32::EPSILON { 0.0 } else { res }
 }
 
@@ -133,5 +145,19 @@ mod tests {
         // Distance is negated: -32
         let dist = compute_distance(&v1, &v2, VectorDistanceMetric::InnerProduct);
         assert!((dist - (-32.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_compute_distance_empty_vectors() {
+        // Empty vectors should return 0.0 uniformly for all metrics
+        assert_eq!(compute_distance(&[], &[], VectorDistanceMetric::L2sq), 0.0);
+        assert_eq!(
+            compute_distance(&[], &[], VectorDistanceMetric::Cosine),
+            0.0
+        );
+        assert_eq!(
+            compute_distance(&[], &[], VectorDistanceMetric::InnerProduct),
+            0.0
+        );
     }
 }
