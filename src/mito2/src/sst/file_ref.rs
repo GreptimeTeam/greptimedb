@@ -13,12 +13,11 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::f64::consts::E;
 use std::sync::Arc;
 
 use common_telemetry::debug;
 use dashmap::{DashMap, Entry};
-use store_api::storage::{FileRef, FileRefsManifest, IndexVersion, RegionId};
+use store_api::storage::{FileRef, FileRefsManifest, RegionId};
 
 use crate::error::Result;
 use crate::metrics::GC_REF_FILE_CNT;
