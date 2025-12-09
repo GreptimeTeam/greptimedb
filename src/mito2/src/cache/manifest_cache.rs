@@ -370,7 +370,22 @@ impl ManifestCache {
     /// If `check_mtime` is true, only removes directories that have not been modified
     /// for at least 1 hour.
     fn clean_empty_dirs_sync(dir: &PathBuf, check_mtime: bool) -> std::io::Result<()> {
-        Self::remove_empty_dirs_recursive_sync(dir, check_mtime)?;
+        let is_empty = Self::remove_empty_dirs_recursive_sync(dir, check_mtime)?;
+        if is_empty {
+            if let Err(e) = std::fs::remove_dir(&dir) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!(e; "Failed to remove empty root dir {}", dir.display());
+                    return Err(e);
+                } else {
+                    warn!("Empty root dir not found before removal {}", dir.display());
+                }
+            } else {
+                info!(
+                    "Removed empty root dir {} from manifest cache",
+                    dir.display()
+                );
+            }
+        }
         Ok(())
     }
 
@@ -412,11 +427,16 @@ impl ManifestCache {
 
                 let subdir_empty = Self::remove_empty_dirs_recursive_sync(&path, check_mtime)?;
                 if subdir_empty {
-                    if let Err(e) = std::fs::remove_dir(&path)
-                        && e.kind() != std::io::ErrorKind::NotFound
-                    {
-                        warn!(e; "Failed to remove empty directory {}", path.display());
-                        is_empty = false;
+                    if let Err(e) = std::fs::remove_dir(&path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            warn!(e; "Failed to remove empty directory {}", path.display());
+                            is_empty = false;
+                        } else {
+                            info!(
+                                "Empty directory {} not found before removal",
+                                path.display()
+                            );
+                        }
                     } else {
                         info!(
                             "Removed empty directory {} from manifest cache",
