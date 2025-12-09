@@ -51,8 +51,8 @@ async fn get_file_handle_for_regions(
         let files = manifest.files.clone();
         let file_purger = region.file_purger();
         let file_handles = files
-            .into_iter()
-            .map(|(_, v)| FileHandle::new(v, file_purger.clone()))
+            .values()
+            .map(|v| FileHandle::new(v.clone(), file_purger.clone()))
             .collect_vec();
         info!(
             "Region {:?} has {} file handles",
@@ -531,7 +531,7 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
         .filter_map(|path| {
             // Extract file ID from path like "/path/to/region_id/file_id.sst"
             path.split('/')
-                .last()
+                .next_back()
                 .and_then(|filename| filename.strip_suffix(".parquet"))
                 .map(|file_id_str| file_id_str.to_string())
         })
