@@ -727,4 +727,82 @@ mod tests {
         assert_eq!(fulltext_options.analyzer, FulltextAnalyzer::English);
         assert!(fulltext_options.case_sensitive);
     }
+
+    #[test]
+    fn test_column_to_schema_with_vector_index() {
+        use datatypes::schema::{VectorDistanceMetric, VectorIndexEngineType};
+
+        // Test with custom metric and parameters
+        let column = Column {
+            column_def: ColumnDef {
+                name: "embedding".into(),
+                data_type: SqlDataType::Custom(
+                    vec![Ident::new(VECTOR_TYPE_NAME)].into(),
+                    vec!["128".to_string()],
+                ),
+                options: vec![],
+            },
+            extensions: ColumnExtensions {
+                fulltext_index_options: None,
+                vector_options: None,
+                skipping_index_options: None,
+                inverted_index_options: None,
+                json_datatype_options: None,
+                vector_index_options: Some(OptionMap::from([
+                    ("metric".to_string(), "cosine".to_string()),
+                    ("connectivity".to_string(), "32".to_string()),
+                    ("expansion_add".to_string(), "200".to_string()),
+                    ("expansion_search".to_string(), "100".to_string()),
+                ])),
+            },
+        };
+
+        let column_schema = column_to_schema(&column, "ts", None).unwrap();
+        assert_eq!("embedding", column_schema.name);
+        assert!(column_schema.is_vector_indexed());
+
+        let vector_options = column_schema.vector_index_options().unwrap().unwrap();
+        assert_eq!(vector_options.engine, VectorIndexEngineType::Usearch);
+        assert_eq!(vector_options.metric, VectorDistanceMetric::Cosine);
+        assert_eq!(vector_options.connectivity, 32);
+        assert_eq!(vector_options.expansion_add, 200);
+        assert_eq!(vector_options.expansion_search, 100);
+    }
+
+    #[test]
+    fn test_column_to_schema_with_vector_index_defaults() {
+        use datatypes::schema::{VectorDistanceMetric, VectorIndexEngineType};
+
+        // Test with default values (empty options map)
+        let column = Column {
+            column_def: ColumnDef {
+                name: "vec".into(),
+                data_type: SqlDataType::Custom(
+                    vec![Ident::new(VECTOR_TYPE_NAME)].into(),
+                    vec!["64".to_string()],
+                ),
+                options: vec![],
+            },
+            extensions: ColumnExtensions {
+                fulltext_index_options: None,
+                vector_options: None,
+                skipping_index_options: None,
+                inverted_index_options: None,
+                json_datatype_options: None,
+                vector_index_options: Some(OptionMap::default()),
+            },
+        };
+
+        let column_schema = column_to_schema(&column, "ts", None).unwrap();
+        assert_eq!("vec", column_schema.name);
+        assert!(column_schema.is_vector_indexed());
+
+        let vector_options = column_schema.vector_index_options().unwrap().unwrap();
+        // Verify defaults
+        assert_eq!(vector_options.engine, VectorIndexEngineType::Usearch);
+        assert_eq!(vector_options.metric, VectorDistanceMetric::L2sq);
+        assert_eq!(vector_options.connectivity, 16);
+        assert_eq!(vector_options.expansion_add, 128);
+        assert_eq!(vector_options.expansion_search, 64);
+    }
 }

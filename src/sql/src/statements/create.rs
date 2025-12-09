@@ -253,85 +253,60 @@ impl ColumnExtensions {
         };
 
         let options_map: HashMap<String, String> = options.clone().into_map();
+        let mut result = VectorIndexOptions::default();
 
-        let engine = options_map
-            .get("engine")
-            .map(|s| {
-                s.parse::<VectorIndexEngineType>().map_err(|e| {
-                    InvalidSqlSnafu {
-                        msg: format!("invalid VECTOR INDEX engine: {e}"),
-                    }
-                    .build()
-                })
-            })
-            .transpose()?
-            .unwrap_or_default();
+        if let Some(s) = options_map.get("engine") {
+            result.engine = s.parse::<VectorIndexEngineType>().map_err(|e| {
+                InvalidSqlSnafu {
+                    msg: format!("invalid VECTOR INDEX engine: {e}"),
+                }
+                .build()
+            })?;
+        }
 
-        let metric = options_map
-            .get("metric")
-            .map(|s| {
-                s.parse::<VectorDistanceMetric>().map_err(|e| {
-                    InvalidSqlSnafu {
-                        msg: format!("invalid VECTOR INDEX metric: {e}"),
-                    }
-                    .build()
-                })
-            })
-            .transpose()?
-            .unwrap_or_default();
+        if let Some(s) = options_map.get("metric") {
+            result.metric = s.parse::<VectorDistanceMetric>().map_err(|e| {
+                InvalidSqlSnafu {
+                    msg: format!("invalid VECTOR INDEX metric: {e}"),
+                }
+                .build()
+            })?;
+        }
 
-        let connectivity = options_map
-            .get("connectivity")
-            .map(|s| {
-                s.parse::<u32>().map_err(|_| {
-                    InvalidSqlSnafu {
-                        msg: format!(
-                            "invalid VECTOR INDEX connectivity: {s}, expected positive integer"
-                        ),
-                    }
-                    .build()
-                })
-            })
-            .transpose()?
-            .unwrap_or(16);
+        if let Some(s) = options_map.get("connectivity") {
+            result.connectivity = s.parse::<u32>().map_err(|_| {
+                InvalidSqlSnafu {
+                    msg: format!(
+                        "invalid VECTOR INDEX connectivity: {s}, expected positive integer"
+                    ),
+                }
+                .build()
+            })?;
+        }
 
-        let expansion_add = options_map
-            .get("expansion_add")
-            .map(|s| {
-                s.parse::<u32>().map_err(|_| {
-                    InvalidSqlSnafu {
-                        msg: format!(
-                            "invalid VECTOR INDEX expansion_add: {s}, expected positive integer"
-                        ),
-                    }
-                    .build()
-                })
-            })
-            .transpose()?
-            .unwrap_or(128);
+        if let Some(s) = options_map.get("expansion_add") {
+            result.expansion_add = s.parse::<u32>().map_err(|_| {
+                InvalidSqlSnafu {
+                    msg: format!(
+                        "invalid VECTOR INDEX expansion_add: {s}, expected positive integer"
+                    ),
+                }
+                .build()
+            })?;
+        }
 
-        let expansion_search = options_map
-            .get("expansion_search")
-            .map(|s| {
-                s.parse::<u32>().map_err(|_| {
-                    InvalidSqlSnafu {
-                        msg: format!(
-                            "invalid VECTOR INDEX expansion_search: {s}, expected positive integer"
-                        ),
-                    }
-                    .build()
-                })
-            })
-            .transpose()?
-            .unwrap_or(64);
+        if let Some(s) = options_map.get("expansion_search") {
+            result.expansion_search = s.parse::<u32>().map_err(|_| {
+                InvalidSqlSnafu {
+                    msg: format!(
+                        "invalid VECTOR INDEX expansion_search: {s}, expected positive integer"
+                    ),
+                }
+                .build()
+            })?;
+        }
 
-        Ok(Some(VectorIndexOptions {
-            engine,
-            metric,
-            connectivity,
-            expansion_add,
-            expansion_search,
-        }))
+        Ok(Some(result))
     }
 
     pub fn build_json_structure_settings(&self) -> Result<Option<JsonStructureSettings>> {
