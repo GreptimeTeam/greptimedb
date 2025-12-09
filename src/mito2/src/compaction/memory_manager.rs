@@ -15,10 +15,12 @@
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Duration;
 
 use common_telemetry::debug;
+use humantime::{format_duration, parse_duration};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, Semaphore, TryAcquireError};
+use tokio::sync::{Semaphore, TryAcquireError};
 
 use crate::metrics::{
     COMPACTION_MEMORY_IN_USE, COMPACTION_MEMORY_LIMIT, COMPACTION_MEMORY_REJECTED,
@@ -27,17 +29,69 @@ use crate::metrics::{
 /// Minimum bytes controlled by one semaphore permit.
 const PERMIT_GRANULARITY_BYTES: u64 = 1 << 20; // 1 MB
 
+/// Default wait timeout for compaction memory.
+pub const DEFAULT_MEMORY_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Defines how the scheduler reacts when compaction cannot acquire enough memory.
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnExhaustedPolicy {
-    /// Wait until enough memory is released.
-    #[default]
-    Wait,
-    /// Skip the compaction silently.
+    /// Wait until enough memory is released, bounded by timeout.
+    Wait { timeout: Duration },
+    /// Skip the compaction if memory is not immediately available.
     Skip,
-    /// Fail the compaction request immediately.
-    Fail,
+}
+
+impl Default for OnExhaustedPolicy {
+    fn default() -> Self {
+        OnExhaustedPolicy::Wait {
+            timeout: DEFAULT_MEMORY_WAIT_TIMEOUT,
+        }
+    }
+}
+
+impl Serialize for OnExhaustedPolicy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let text = match self {
+            OnExhaustedPolicy::Skip => "skip".to_string(),
+            OnExhaustedPolicy::Wait { timeout } if *timeout == DEFAULT_MEMORY_WAIT_TIMEOUT => {
+                "wait".to_string()
+            }
+            OnExhaustedPolicy::Wait { timeout } => {
+                format!("wait({})", format_duration(*timeout))
+            }
+        };
+        serializer.serialize_str(&text)
+    }
+}
+
+impl<'de> Deserialize<'de> for OnExhaustedPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let lower = raw.to_ascii_lowercase();
+
+        if lower == "skip" {
+            return Ok(OnExhaustedPolicy::Skip);
+        }
+        if lower == "wait" {
+            return Ok(OnExhaustedPolicy::default());
+        }
+        if lower.starts_with("wait(") && lower.ends_with(')') {
+            let inner = &raw[5..raw.len() - 1];
+            let timeout = parse_duration(inner).map_err(serde::de::Error::custom)?;
+            return Ok(OnExhaustedPolicy::Wait { timeout });
+        }
+
+        Err(serde::de::Error::custom(format!(
+            "invalid compaction memory policy: {}, expected wait, wait(<duration>) or skip",
+            raw
+        )))
+    }
 }
 
 /// Global memory manager for compaction tasks.
@@ -49,7 +103,6 @@ pub struct CompactionMemoryManager {
 struct Inner {
     semaphore: Semaphore,
     limit_permits: u32,
-    notify: Notify,
 }
 
 impl CompactionMemoryManager {
@@ -69,7 +122,6 @@ impl CompactionMemoryManager {
             inner: Some(Arc::new(Inner {
                 semaphore: Semaphore::new(limit_permits as usize),
                 limit_permits,
-                notify: Notify::new(),
             })),
         }
     }
@@ -98,6 +150,24 @@ impl CompactionMemoryManager {
             .unwrap_or(0)
     }
 
+    /// Acquires memory, waiting if necessary until enough is available.
+    pub async fn acquire(&self, bytes: u64) -> CompactionMemoryGuard {
+        match &self.inner {
+            None => CompactionMemoryGuard::unlimited(),
+            Some(inner) => {
+                let permits = bytes_to_permits(bytes);
+                if permits == 0 {
+                    return CompactionMemoryGuard::unlimited();
+                }
+
+                let permit = inner.semaphore.acquire_many(permits).await.unwrap();
+                permit.forget();
+                inner.on_acquire();
+                CompactionMemoryGuard::limited(inner.clone(), permits)
+            }
+        }
+    }
+
     /// Tries to acquire memory. Returns Some(guard) on success, None if insufficient.
     pub fn try_acquire(&self, bytes: u64) -> Option<CompactionMemoryGuard> {
         match &self.inner {
@@ -124,33 +194,6 @@ impl CompactionMemoryManager {
             }
         }
     }
-
-    /// Waits until the specified amount of memory becomes available.
-    ///
-    /// Note: This method does not reserve the memory. After this method returns,
-    /// you should call `try_acquire` to attempt to reserve the memory. However,
-    /// there is no guarantee the memory will still be available at that point,
-    /// as another task may acquire it concurrently.
-    pub async fn wait_for_available(&self, bytes: u64) {
-        if bytes == 0 {
-            return;
-        }
-
-        let Some(inner) = self.inner.as_ref() else {
-            return;
-        };
-        let inner = inner.clone();
-        let needed_permits = bytes_to_permits(bytes);
-        loop {
-            // Take a notified handle first to avoid missing notifications between
-            // the availability check and awaiting.
-            let notified = inner.notify.notified();
-            if inner.available_permits_clamped() >= needed_permits {
-                return;
-            }
-            notified.await;
-        }
-    }
 }
 
 impl Inner {
@@ -164,7 +207,6 @@ impl Inner {
         }
         self.semaphore.add_permits(permits as usize);
         self.update_in_use_metric();
-        self.notify.notify_waiters();
     }
 
     fn used_permits(&self) -> u32 {
@@ -479,18 +521,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_wait_for_available_unblocks() {
+    async fn test_acquire_blocks_and_unblocks() {
         let bytes = 2 * PERMIT_GRANULARITY_BYTES;
         let manager = CompactionMemoryManager::new(bytes);
         let guard = manager.try_acquire(bytes).unwrap();
+
+        // Spawn a task that will block on acquire()
         let waiter = {
             let manager = manager.clone();
             tokio::spawn(async move {
-                manager.wait_for_available(bytes).await;
+                // This will block until memory is available
+                let _guard = manager.acquire(bytes).await;
             })
         };
+
         sleep(Duration::from_millis(10)).await;
+        // Release memory - this should unblock the waiter
         drop(guard);
+
+        // Waiter should complete now
         waiter.await.unwrap();
     }
 

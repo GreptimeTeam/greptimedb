@@ -24,7 +24,6 @@ mod twcs;
 mod window;
 
 use std::collections::HashMap;
-use std::mem;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -53,12 +52,11 @@ use crate::compaction::picker::{CompactionTask, PickerOutput, new_picker};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
-    CompactRegionSnafu, CompactionMemoryExhaustedSnafu, Error, GetSchemaMetadataSnafu,
-    ManualCompactionOverrideSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionNotFoundSnafu,
-    RegionTruncatedSnafu, RemoteCompactionSnafu, Result, TimeRangePredicateOverflowSnafu,
-    TimeoutSnafu,
+    CompactRegionSnafu, Error, GetSchemaMetadataSnafu, ManualCompactionOverrideSnafu,
+    RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, RemoteCompactionSnafu, Result,
+    TimeRangePredicateOverflowSnafu, TimeoutSnafu,
 };
-use crate::metrics::{COMPACTION_MEMORY_WAIT, COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
+use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
@@ -66,9 +64,7 @@ use crate::read::{BoxedBatchReader, BoxedRecordBatchStream};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
-use crate::request::{
-    BackgroundNotify, OptionOutputTx, OutputTx, WorkerRequest, WorkerRequestWithTime,
-};
+use crate::request::{OptionOutputTx, OutputTx, WorkerRequestWithTime};
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
 };
@@ -285,21 +281,6 @@ impl CompactionScheduler {
         status.on_failure(err);
     }
 
-    pub(crate) async fn retry_memory_pending(&mut self, region_id: RegionId) {
-        let Some(pending) = ({
-            let Some(status) = self.region_status.get_mut(&region_id) else {
-                return;
-            };
-            status.take_memory_pending()
-        }) else {
-            return;
-        };
-
-        if let Err(e) = self.try_submit_with_memory(pending.task, region_id, pending.memory_bytes) {
-            error!(e; "Failed to submit pending compaction for region {}", region_id);
-        }
-    }
-
     /// Notifies the scheduler that the region is dropped.
     pub(crate) fn on_region_dropped(&mut self, region_id: RegionId) {
         self.remove_region_on_failure(
@@ -457,6 +438,7 @@ impl CompactionScheduler {
         };
 
         // Create a local compaction task.
+        let estimated_bytes = estimate_compaction_bytes(&picker_output);
         let local_compaction_task = Box::new(CompactionTaskImpl {
             request_sender,
             waiters,
@@ -465,11 +447,12 @@ impl CompactionScheduler {
             picker_output,
             compaction_region,
             compactor: Arc::new(DefaultCompactor {}),
-            memory_guard: None,
+            memory_manager: self.memory_manager.clone(),
+            memory_policy: self.memory_policy,
+            estimated_memory_bytes: estimated_bytes,
         });
 
-        let estimated_bytes = estimate_compaction_bytes(&local_compaction_task.picker_output);
-        self.try_submit_with_memory(local_compaction_task, region_id, estimated_bytes)
+        self.submit_compaction_task(local_compaction_task, region_id)
     }
 
     fn submit_compaction_task(
@@ -488,178 +471,6 @@ impl CompactionScheduler {
                 self.region_status.remove(&region_id);
                 e
             })
-    }
-
-    fn try_submit_with_memory(
-        &mut self,
-        mut task: Box<CompactionTaskImpl>,
-        region_id: RegionId,
-        requested_bytes: u64,
-    ) -> Result<()> {
-        match self.memory_manager.try_acquire(requested_bytes) {
-            Some(guard) => {
-                task.memory_guard = Some(guard);
-                self.submit_compaction_task(task, region_id)
-            }
-            None => self.handle_memory_exhausted(region_id, requested_bytes, task),
-        }
-    }
-
-    fn handle_memory_exhausted(
-        &mut self,
-        region_id: RegionId,
-        requested_bytes: u64,
-        task: Box<CompactionTaskImpl>,
-    ) -> Result<()> {
-        let limit_bytes = self.memory_manager.limit_bytes();
-
-        // Check if request exceeds total capacity
-        if limit_bytes > 0 && requested_bytes > limit_bytes {
-            warn!(
-                "Region {} compaction requires {} bytes but total limit is {} bytes; \
-                 request exceeds capacity, policy: {:?}",
-                region_id, requested_bytes, limit_bytes, self.memory_policy
-            );
-            // Handle based on policy even when exceeding limit
-            return match self.memory_policy {
-                OnExhaustedPolicy::Skip => self.skip_compaction_due_to_memory(
-                    region_id,
-                    task,
-                    requested_bytes,
-                    limit_bytes,
-                ),
-                OnExhaustedPolicy::Wait | OnExhaustedPolicy::Fail => {
-                    // Wait policy cannot wait for memory that exceeds total capacity
-                    self.fail_compaction_due_to_memory(
-                        region_id,
-                        task,
-                        requested_bytes,
-                        limit_bytes,
-                    )
-                }
-            };
-        }
-
-        // Handle temporary insufficiency based on policy
-        match self.memory_policy {
-            OnExhaustedPolicy::Wait => {
-                // Store pending task first, fail fast if region is gone
-                let status = self
-                    .region_status
-                    .get_mut(&region_id)
-                    .context(RegionNotFoundSnafu { region_id })?;
-
-                let is_new_pending = status.set_memory_pending(DeferredCompactionTask {
-                    task,
-                    memory_bytes: requested_bytes.max(1),
-                });
-
-                if is_new_pending {
-                    self.spawn_memory_waiter(region_id, requested_bytes.max(1));
-                    info!(
-                        "Region {} compaction waits for {} bytes to become available",
-                        region_id, requested_bytes
-                    );
-                }
-                Ok(())
-            }
-            OnExhaustedPolicy::Skip => {
-                self.skip_compaction_due_to_memory(region_id, task, requested_bytes, limit_bytes)
-            }
-            OnExhaustedPolicy::Fail => {
-                self.fail_compaction_due_to_memory(region_id, task, requested_bytes, limit_bytes)
-            }
-        }
-    }
-
-    fn skip_compaction_due_to_memory(
-        &mut self,
-        region_id: RegionId,
-        mut task: Box<CompactionTaskImpl>,
-        required_bytes: u64,
-        limit_bytes: u64,
-    ) -> Result<()> {
-        warn!(
-            "Skipping compaction for region {} due to memory limit (need {} bytes, limit {} bytes)",
-            region_id, required_bytes, limit_bytes
-        );
-        let failure = Arc::new(
-            CompactionMemoryExhaustedSnafu {
-                region_id,
-                required_bytes,
-                limit_bytes,
-                policy: "skip",
-            }
-            .build(),
-        );
-        let waiters = mem::take(&mut task.waiters);
-        Self::notify_waiters_error(waiters, region_id, failure.clone());
-        self.finish_region_status(region_id, failure);
-        Ok(())
-    }
-
-    fn fail_compaction_due_to_memory(
-        &mut self,
-        region_id: RegionId,
-        mut task: Box<CompactionTaskImpl>,
-        required_bytes: u64,
-        limit_bytes: u64,
-    ) -> Result<()> {
-        error!(
-            "Failing compaction for region {} due to memory limit (need {} bytes, limit {} bytes)",
-            region_id, required_bytes, limit_bytes
-        );
-
-        let make_error = || CompactionMemoryExhaustedSnafu {
-            region_id,
-            required_bytes,
-            limit_bytes,
-            policy: "fail",
-        };
-
-        let failure = Arc::new(make_error().build());
-        let waiters = mem::take(&mut task.waiters);
-        Self::notify_waiters_error(waiters, region_id, failure.clone());
-        self.finish_region_status(region_id, failure);
-        make_error().fail()
-    }
-
-    fn spawn_memory_waiter(&self, region_id: RegionId, bytes: u64) {
-        if bytes == 0 {
-            return;
-        }
-
-        let manager = self.memory_manager.clone();
-        let sender = self.request_sender.clone();
-
-        common_runtime::spawn_global(async move {
-            debug!(
-                "Region {} compaction waiting for {} bytes to become available",
-                region_id, bytes
-            );
-
-            let timer = COMPACTION_MEMORY_WAIT.start_timer();
-            manager.wait_for_available(bytes).await;
-            timer.observe_duration();
-            let _ = sender
-                .send(WorkerRequestWithTime::new(WorkerRequest::Background {
-                    region_id,
-                    notify: BackgroundNotify::CompactionRetry,
-                }))
-                .await;
-        });
-    }
-
-    fn notify_waiters_error(waiters: Vec<OutputTx>, region_id: RegionId, err: Arc<Error>) {
-        for waiter in waiters {
-            waiter.send(Err(err.clone()).context(CompactRegionSnafu { region_id }));
-        }
-    }
-
-    fn finish_region_status(&mut self, region_id: RegionId, failure: Arc<Error>) {
-        if let Some(status) = self.region_status.remove(&region_id) {
-            status.on_failure(failure);
-        }
     }
 
     fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
@@ -719,8 +530,6 @@ struct CompactionStatus {
     waiters: Vec<OutputTx>,
     /// Pending compactions that are supposed to run as soon as current compaction task finished.
     pending_request: Option<PendingCompaction>,
-    /// Compaction blocked by memory budget.
-    memory_pending: Option<DeferredCompactionTask>,
 }
 
 impl CompactionStatus {
@@ -736,7 +545,6 @@ impl CompactionStatus {
             access_layer,
             waiters: Vec::new(),
             pending_request: None,
-            memory_pending: None,
         }
     }
 
@@ -771,10 +579,6 @@ impl CompactionStatus {
                 .send(Err(err.clone()).context(CompactRegionSnafu {
                     region_id: self.region_id,
                 }));
-        }
-
-        if let Some(mut pending_task) = self.memory_pending {
-            pending_task.task.on_failure(err);
         }
     }
 
@@ -815,29 +619,6 @@ impl CompactionStatus {
             schema_metadata_manager,
             max_parallelism,
         }
-    }
-
-    fn set_memory_pending(&mut self, mut pending: DeferredCompactionTask) -> bool {
-        if let Some(mut prev) = self.memory_pending.take() {
-            // If a memory-pending task already exists, merge waiters into the existing task
-            // and keep the larger memory requirement to be safe.
-            let new_waiters = std::mem::take(&mut pending.task.waiters);
-            prev.task.waiters.extend(new_waiters);
-            prev.memory_bytes = prev.memory_bytes.max(pending.memory_bytes);
-            debug!(
-                "Region {} already has memory pending task, merge waiters and keep previous task",
-                self.region_id
-            );
-            self.memory_pending = Some(prev);
-            false
-        } else {
-            self.memory_pending = Some(pending);
-            true
-        }
-    }
-
-    fn take_memory_pending(&mut self) -> Option<DeferredCompactionTask> {
-        self.memory_pending.take()
     }
 }
 
@@ -1021,20 +802,13 @@ struct PendingCompaction {
     pub(crate) max_parallelism: usize,
 }
 
-struct DeferredCompactionTask {
-    task: Box<CompactionTaskImpl>,
-    memory_bytes: u64,
-}
-
 #[cfg(test)]
 mod tests {
     use api::v1::region::StrictWindow;
-    use common_base::AffectedRows;
     use common_datasource::compression::CompressionType;
     use tokio::sync::{Barrier, oneshot};
 
     use super::*;
-    use crate::cache::CacheManager;
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::ManifestContext;
     use crate::sst::FormatType;
@@ -1402,295 +1176,6 @@ mod tests {
         let result = rx.await.unwrap();
         assert_eq!(result.unwrap(), 0); // is there a better way to check this?
         assert_eq!(0, scheduler.region_status.len());
-    }
-
-    struct MemorySchedulerEnv {
-        env: SchedulerEnv,
-        job_scheduler: Arc<VecScheduler>,
-        request_sender: Sender<WorkerRequestWithTime>,
-        cache_manager: CacheManagerRef,
-        engine_config: Arc<MitoConfig>,
-    }
-
-    async fn build_memory_scheduler(
-        limit_bytes: u64,
-        policy: OnExhaustedPolicy,
-    ) -> (CompactionScheduler, MemorySchedulerEnv) {
-        let job_scheduler = Arc::new(VecScheduler::default());
-        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
-        let (request_sender, _request_receiver) = mpsc::channel(4);
-        let cache_manager = Arc::new(CacheManager::default());
-        let engine_config = Arc::new(MitoConfig::default());
-        let scheduler = CompactionScheduler::new(
-            job_scheduler.clone(),
-            request_sender.clone(),
-            cache_manager.clone(),
-            engine_config.clone(),
-            WorkerListener::default(),
-            Plugins::new(),
-            Arc::new(CompactionMemoryManager::new(limit_bytes)),
-            policy,
-        );
-        (
-            scheduler,
-            MemorySchedulerEnv {
-                env,
-                job_scheduler,
-                request_sender,
-                cache_manager,
-                engine_config,
-            },
-        )
-    }
-
-    async fn build_version_resources(
-        env: &MemorySchedulerEnv,
-    ) -> (RegionId, VersionControlRef, ManifestContextRef) {
-        let builder = VersionControlBuilder::new();
-        let region_id = builder.region_id();
-        let version_control = Arc::new(builder.build());
-        let manifest_ctx = env
-            .env
-            .mock_manifest_context(version_control.current().version.metadata.clone())
-            .await;
-        (region_id, version_control, manifest_ctx)
-    }
-
-    fn new_waiter() -> (
-        OutputTx,
-        oneshot::Receiver<crate::error::Result<AffectedRows>>,
-    ) {
-        let (tx, rx) = oneshot::channel::<crate::error::Result<AffectedRows>>();
-        (OutputTx::new(tx), rx)
-    }
-
-    fn build_mock_task(
-        env: &MemorySchedulerEnv,
-        version_control: &VersionControlRef,
-        manifest_ctx: &ManifestContextRef,
-        waiter: Option<OutputTx>,
-    ) -> Box<CompactionTaskImpl> {
-        let region_id = version_control.current().version.metadata.region_id;
-        let current_version = CompactionVersion::from(version_control.current().version.clone());
-        let mut waiters = Vec::new();
-        if let Some(waiter) = waiter {
-            waiters.push(waiter);
-        }
-        Box::new(CompactionTaskImpl {
-            compaction_region: CompactionRegion {
-                region_id,
-                region_options: current_version.options.clone(),
-                engine_config: env.engine_config.clone(),
-                region_metadata: current_version.metadata.clone(),
-                cache_manager: env.cache_manager.clone(),
-                access_layer: env.env.access_layer.clone(),
-                manifest_ctx: manifest_ctx.clone(),
-                current_version,
-                file_purger: None,
-                ttl: None,
-                max_parallelism: 1,
-            },
-            request_sender: env.request_sender.clone(),
-            waiters,
-            start_time: Instant::now(),
-            listener: WorkerListener::default(),
-            compactor: Arc::new(DefaultCompactor {}),
-            picker_output: PickerOutput {
-                outputs: Vec::new(),
-                expired_ssts: Vec::new(),
-                time_window_size: 0,
-                max_file_size: None,
-            },
-            memory_guard: None,
-        })
-    }
-
-    fn insert_region_status(
-        scheduler: &mut CompactionScheduler,
-        region_id: RegionId,
-        version_control: &VersionControlRef,
-        access_layer: &AccessLayerRef,
-    ) {
-        scheduler.region_status.insert(
-            region_id,
-            CompactionStatus::new(region_id, version_control.clone(), access_layer.clone()),
-        );
-    }
-
-    /// Typical compaction memory request size for testing (2MB).
-    const TEST_REQUEST_BYTES: u64 = 2 * 1024 * 1024;
-    /// Small memory limit for testing exhaustion scenarios (1MB, less than TEST_REQUEST_BYTES).
-    const SMALL_LIMIT_BYTES: u64 = 1024 * 1024;
-    /// Large memory limit for testing normal operation (8MB, much larger than TEST_REQUEST_BYTES).
-    const LARGE_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
-
-    #[tokio::test]
-    async fn test_try_submit_with_memory_schedules_job() {
-        let (mut scheduler, env) =
-            build_memory_scheduler(LARGE_LIMIT_BYTES, OnExhaustedPolicy::Wait).await;
-        let (region_id, version_control, manifest_ctx) = build_version_resources(&env).await;
-        insert_region_status(
-            &mut scheduler,
-            region_id,
-            &version_control,
-            &env.env.access_layer,
-        );
-        let task = build_mock_task(&env, &version_control, &manifest_ctx, None);
-
-        scheduler
-            .try_submit_with_memory(task, region_id, TEST_REQUEST_BYTES)
-            .unwrap();
-
-        assert_eq!(1, env.job_scheduler.num_jobs());
-        assert!(scheduler.region_status.contains_key(&region_id));
-    }
-
-    #[tokio::test]
-    async fn test_try_submit_with_memory_skip_notifies_waiter() {
-        let (mut scheduler, env) =
-            build_memory_scheduler(SMALL_LIMIT_BYTES, OnExhaustedPolicy::Skip).await;
-        let (region_id, version_control, manifest_ctx) = build_version_resources(&env).await;
-        insert_region_status(
-            &mut scheduler,
-            region_id,
-            &version_control,
-            &env.env.access_layer,
-        );
-        let (wait_sender, wait_receiver) = new_waiter();
-        let task = build_mock_task(&env, &version_control, &manifest_ctx, Some(wait_sender));
-
-        scheduler
-            .try_submit_with_memory(task, region_id, TEST_REQUEST_BYTES)
-            .unwrap();
-
-        let result = wait_receiver.await.unwrap();
-        assert!(result.is_err());
-        assert!(!scheduler.region_status.contains_key(&region_id));
-    }
-
-    #[tokio::test]
-    async fn test_try_submit_with_memory_wait_exceed_limit_fails() {
-        let (mut scheduler, env) =
-            build_memory_scheduler(SMALL_LIMIT_BYTES, OnExhaustedPolicy::Wait).await;
-        let (region_id, version_control, manifest_ctx) = build_version_resources(&env).await;
-        insert_region_status(
-            &mut scheduler,
-            region_id,
-            &version_control,
-            &env.env.access_layer,
-        );
-        let (wait_sender, wait_receiver) = new_waiter();
-        let task = build_mock_task(&env, &version_control, &manifest_ctx, Some(wait_sender));
-
-        let err = scheduler
-            .try_submit_with_memory(task, region_id, TEST_REQUEST_BYTES)
-            .unwrap_err();
-        assert!(
-            matches!(
-                &err,
-                Error::CompactionMemoryExhausted {
-                    region_id: r,
-                    policy,
-                    required_bytes,
-                    limit_bytes,
-                    ..
-                } if *r == region_id
-                    && policy.as_str() == "fail"
-                    && *required_bytes == TEST_REQUEST_BYTES
-                    && *limit_bytes == SMALL_LIMIT_BYTES
-            ),
-            "Expected CompactionMemoryExhausted error, got: {:?}",
-            err
-        );
-        let result = wait_receiver.await.unwrap();
-        assert!(result.is_err());
-        assert!(!scheduler.region_status.contains_key(&region_id));
-    }
-
-    #[tokio::test]
-    async fn test_try_submit_with_memory_fail_policy() {
-        let (mut scheduler, env) =
-            build_memory_scheduler(SMALL_LIMIT_BYTES, OnExhaustedPolicy::Fail).await;
-        let (region_id, version_control, manifest_ctx) = build_version_resources(&env).await;
-        insert_region_status(
-            &mut scheduler,
-            region_id,
-            &version_control,
-            &env.env.access_layer,
-        );
-        let (wait_sender, wait_receiver) = new_waiter();
-        let task = build_mock_task(&env, &version_control, &manifest_ctx, Some(wait_sender));
-
-        let err = scheduler
-            .try_submit_with_memory(task, region_id, TEST_REQUEST_BYTES)
-            .unwrap_err();
-        assert!(
-            matches!(
-                &err,
-                Error::CompactionMemoryExhausted {
-                    region_id: r,
-                    policy,
-                    required_bytes,
-                    limit_bytes,
-                    ..
-                } if *r == region_id
-                    && policy.as_str() == "fail"
-                    && *required_bytes == TEST_REQUEST_BYTES
-                    && *limit_bytes == SMALL_LIMIT_BYTES
-            ),
-            "Expected CompactionMemoryExhausted with policy=fail, got: {:?}",
-            err
-        );
-        let result = wait_receiver.await.unwrap();
-        assert!(result.is_err());
-        assert!(!scheduler.region_status.contains_key(&region_id));
-    }
-
-    #[tokio::test]
-    async fn test_try_submit_with_memory_wait_eventually_succeeds() {
-        use tokio::time::{Duration, sleep};
-
-        let (mut scheduler, env) =
-            build_memory_scheduler(LARGE_LIMIT_BYTES, OnExhaustedPolicy::Wait).await;
-        let (region_id, version_control, manifest_ctx) = build_version_resources(&env).await;
-        insert_region_status(
-            &mut scheduler,
-            region_id,
-            &version_control,
-            &env.env.access_layer,
-        );
-
-        // Occupy most of the memory budget (8MB - 1MB = 7MB occupied, only 1MB left)
-        let guard = scheduler
-            .memory_manager
-            .try_acquire(LARGE_LIMIT_BYTES - SMALL_LIMIT_BYTES)
-            .unwrap();
-
-        // Try to submit a task requesting 2MB - should enter waiting state (only 1MB available)
-        let task = build_mock_task(&env, &version_control, &manifest_ctx, None);
-        scheduler
-            .try_submit_with_memory(task, region_id, TEST_REQUEST_BYTES)
-            .unwrap();
-
-        // Task should not be scheduled yet (waiting for memory)
-        assert_eq!(0, env.job_scheduler.num_jobs());
-
-        // Verify the task is in pending state
-        let status = scheduler.region_status.get(&region_id).unwrap();
-        assert!(status.memory_pending.is_some());
-
-        // Release memory
-        drop(guard);
-
-        // Give background waiter time to wake up and retry, then simulate worker retry
-        sleep(Duration::from_millis(50)).await;
-        scheduler.retry_memory_pending(region_id).await;
-
-        // The retry should have scheduled the job and consumed memory again.
-        assert_eq!(1, env.job_scheduler.num_jobs());
-        assert_eq!(TEST_REQUEST_BYTES, scheduler.memory_manager.used_bytes());
-        let status = scheduler.region_status.get(&region_id).unwrap();
-        assert!(status.memory_pending.is_none());
     }
 
     #[tokio::test]

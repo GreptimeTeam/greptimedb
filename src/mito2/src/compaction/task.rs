@@ -22,11 +22,13 @@ use snafu::ResultExt;
 use tokio::sync::mpsc;
 
 use crate::compaction::compactor::{CompactionRegion, Compactor};
-use crate::compaction::memory_manager::CompactionMemoryGuard;
+use crate::compaction::memory_manager::{
+    CompactionMemoryGuard, CompactionMemoryManager, OnExhaustedPolicy,
+};
 use crate::compaction::picker::{CompactionTask, PickerOutput};
-use crate::error::CompactRegionSnafu;
+use crate::error::{CompactRegionSnafu, CompactionMemoryExhaustedSnafu};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
+use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_MEMORY_WAIT, COMPACTION_STAGE_ELAPSED};
 use crate::region::RegionRoleState;
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, RegionEditResult,
@@ -53,8 +55,12 @@ pub(crate) struct CompactionTaskImpl {
     pub(crate) compactor: Arc<dyn Compactor>,
     /// Output of the picker.
     pub(crate) picker_output: PickerOutput,
-    /// Guard to release memory budget after compaction finishes.
-    pub(crate) memory_guard: Option<CompactionMemoryGuard>,
+    /// Memory manager to acquire memory budget.
+    pub(crate) memory_manager: Arc<CompactionMemoryManager>,
+    /// Policy when memory is exhausted.
+    pub(crate) memory_policy: OnExhaustedPolicy,
+    /// Estimated memory bytes needed for this compaction.
+    pub(crate) estimated_memory_bytes: u64,
 }
 
 impl Debug for CompactionTaskImpl {
@@ -82,6 +88,82 @@ impl CompactionTaskImpl {
             .outputs
             .iter()
             .for_each(|o| o.inputs.iter().for_each(|f| f.set_compacting(compacting)));
+    }
+
+    /// Acquires memory budget based on the configured policy.
+    ///
+    /// Returns an error if memory cannot be acquired according to the policy.
+    async fn acquire_memory_with_policy(&self) -> error::Result<CompactionMemoryGuard> {
+        let region_id = self.compaction_region.region_id;
+        let requested_bytes = self.estimated_memory_bytes;
+        let limit_bytes = self.memory_manager.limit_bytes();
+
+        if limit_bytes > 0 && requested_bytes > limit_bytes {
+            warn!(
+                "Compaction for region {} requires {} bytes but limit is {} bytes; cannot satisfy request",
+                region_id, requested_bytes, limit_bytes
+            );
+            return Err(CompactionMemoryExhaustedSnafu {
+                region_id,
+                required_bytes: requested_bytes,
+                limit_bytes,
+                policy: "exceed_limit".to_string(),
+            }
+            .build());
+        }
+
+        match self.memory_policy {
+            OnExhaustedPolicy::Wait {
+                timeout: wait_timeout,
+            } => {
+                let timer = COMPACTION_MEMORY_WAIT.start_timer();
+
+                match tokio::time::timeout(
+                    wait_timeout,
+                    self.memory_manager.acquire(requested_bytes),
+                )
+                .await
+                {
+                    Ok(guard) => {
+                        timer.observe_duration();
+                        Ok(guard)
+                    }
+                    Err(_) => {
+                        timer.observe_duration();
+                        warn!(
+                            "Compaction for region {} waited {:?} for {} bytes but timed out",
+                            region_id, wait_timeout, requested_bytes
+                        );
+                        Err(CompactionMemoryExhaustedSnafu {
+                            region_id,
+                            required_bytes: requested_bytes,
+                            limit_bytes,
+                            policy: format!("wait_timeout({}ms)", wait_timeout.as_millis()),
+                        }
+                        .build())
+                    }
+                }
+            }
+            OnExhaustedPolicy::Skip => {
+                // Try to acquire, skip if not immediately available
+                self.memory_manager
+                    .try_acquire(requested_bytes)
+                    .ok_or_else(|| {
+                        warn!(
+                            "Skipping compaction for region {} due to memory limit \
+                             (need {} bytes, limit {} bytes)",
+                            region_id, requested_bytes, limit_bytes
+                        );
+                        CompactionMemoryExhaustedSnafu {
+                            region_id,
+                            required_bytes: requested_bytes,
+                            limit_bytes,
+                            policy: "skip".to_string(),
+                        }
+                        .build()
+                    })
+            }
+        }
     }
 
     /// Remove expired ssts files, update manifest immediately
@@ -252,6 +334,26 @@ impl CompactionTaskImpl {
 #[async_trait::async_trait]
 impl CompactionTask for CompactionTaskImpl {
     async fn run(&mut self) {
+        // Acquire memory budget before starting compaction
+        let _memory_guard = match self.acquire_memory_with_policy().await {
+            Ok(guard) => guard,
+            Err(e) => {
+                error!(e; "Failed to acquire memory for compaction, region id: {}", self.compaction_region.region_id);
+                let err = Arc::new(e);
+                self.on_failure(err.clone());
+                let notify = BackgroundNotify::CompactionFailed(CompactionFailed {
+                    region_id: self.compaction_region.region_id,
+                    err,
+                });
+                self.send_to_worker(WorkerRequest::Background {
+                    region_id: self.compaction_region.region_id,
+                    notify,
+                })
+                .await;
+                return;
+            }
+        };
+
         let notify = match self.handle_expiration_and_compaction().await {
             Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
                 region_id: self.compaction_region.region_id,

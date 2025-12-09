@@ -102,7 +102,7 @@ impl SchedulerEnv {
             WorkerListener::default(),
             Plugins::new(),
             Arc::new(CompactionMemoryManager::new(0)),
-            OnExhaustedPolicy::Wait,
+            OnExhaustedPolicy::default(),
         )
     }
 

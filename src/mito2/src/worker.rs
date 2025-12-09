@@ -1132,7 +1132,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_compaction_finished(region_id, req).await
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
-            BackgroundNotify::CompactionRetry => self.handle_compaction_retry(region_id).await,
             BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
             BackgroundNotify::RegionChange(req) => {
                 self.handle_manifest_region_change_result(req).await
