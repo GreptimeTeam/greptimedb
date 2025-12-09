@@ -50,6 +50,12 @@ fn mask_secrets(mut sql: String, secrets: &[&str]) -> String {
     sql
 }
 
+/// Helper function to format storage URI.
+fn format_uri(scheme: &str, bucket: &str, root: &str, path: &str) -> String {
+    let root = format_root_path(root);
+    format!("{}://{}{}/{}", scheme, bucket, root, path)
+}
+
 /// Trait for storage backends that can be used for data export.
 #[async_trait]
 pub trait StorageExport: Send + Sync {
@@ -58,7 +64,7 @@ pub trait StorageExport: Send + Sync {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String);
 
     /// Format the output path for logging purposes.
-    fn format_output_path(&self, catalog: &str, file_path: &str) -> String;
+    fn format_output_path(&self, file_path: &str) -> String;
 
     /// Mask sensitive information in SQL commands for safe logging.
     fn mask_sensitive_info(&self, sql: &str) -> String;
@@ -75,47 +81,6 @@ macro_rules! define_backend {
             pub fn new(config: $config) -> Result<Self, BoxedError> {
                 config.validate()?;
                 Ok(Self { config })
-            }
-        }
-    };
-}
-
-macro_rules! define_storage_type {
-    (
-        pub enum $enum_name:ident {
-            $($variant:ident($backend:ty)),* $(,)?
-        }
-    ) => {
-        #[derive(Clone)]
-        pub enum $enum_name {
-            $($variant($backend)),*
-        }
-
-        #[async_trait]
-        impl StorageExport for $enum_name {
-            fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
-                match self {
-                    $(Self::$variant(backend) => backend.get_storage_path(catalog, schema)),*
-                }
-            }
-
-            fn format_output_path(&self, catalog: &str, file_path: &str) -> String {
-                match self {
-                    $(Self::$variant(backend) => backend.format_output_path(catalog, file_path)),*
-                }
-            }
-
-            fn mask_sensitive_info(&self, sql: &str) -> String {
-                match self {
-                    $(Self::$variant(backend) => backend.mask_sensitive_info(sql)),*
-                }
-            }
-        }
-
-        impl $enum_name {
-            /// Returns true if the storage backend is remote (not local filesystem).
-            pub fn is_remote_storage(&self) -> bool {
-                !matches!(self, Self::Fs(_))
             }
         }
     };
@@ -147,7 +112,7 @@ impl StorageExport for FsBackend {
         (path, String::new())
     }
 
-    fn format_output_path(&self, _catalog: &str, file_path: &str) -> String {
+    fn format_output_path(&self, file_path: &str) -> String {
         format!("{}/{}", self.output_dir, file_path)
     }
 
@@ -161,10 +126,12 @@ define_backend!(S3Backend, PrefixedS3Connection);
 #[async_trait]
 impl StorageExport for S3Backend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
-        let bucket = &self.config.s3_bucket;
-        let root = format_root_path(&self.config.s3_root);
-
-        let s3_path = format!("s3://{}{}/{}/{}/", bucket, root, catalog, schema);
+        let s3_path = format_uri(
+            "s3",
+            &self.config.s3_bucket,
+            &self.config.s3_root,
+            &format!("{}/{}/", catalog, schema),
+        );
 
         let mut connection_options = vec![
             format!(
@@ -189,10 +156,13 @@ impl StorageExport for S3Backend {
         (s3_path, connection_str)
     }
 
-    fn format_output_path(&self, _catalog: &str, file_path: &str) -> String {
-        let bucket = &self.config.s3_bucket;
-        let root = format_root_path(&self.config.s3_root);
-        format!("s3://{}{}/{}", bucket, root, file_path)
+    fn format_output_path(&self, file_path: &str) -> String {
+        format_uri(
+            "s3",
+            &self.config.s3_bucket,
+            &self.config.s3_root,
+            file_path,
+        )
     }
 
     fn mask_sensitive_info(&self, sql: &str) -> String {
@@ -205,13 +175,18 @@ impl StorageExport for S3Backend {
         )
     }
 }
+
 define_backend!(OssBackend, PrefixedOssConnection);
 
 #[async_trait]
 impl StorageExport for OssBackend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
-        let bucket = &self.config.oss_bucket;
-        let oss_path = format!("oss://{}/{}/{}/", bucket, catalog, schema);
+        let oss_path = format_uri(
+            "oss",
+            &self.config.oss_bucket,
+            &self.config.oss_root,
+            &format!("{}/{}/", catalog, schema),
+        );
 
         let connection_options = [
             format!(
@@ -228,9 +203,13 @@ impl StorageExport for OssBackend {
         (oss_path, connection_str)
     }
 
-    fn format_output_path(&self, catalog: &str, file_path: &str) -> String {
-        let bucket = &self.config.oss_bucket;
-        format!("oss://{}/{}/{}", bucket, catalog, file_path)
+    fn format_output_path(&self, file_path: &str) -> String {
+        format_uri(
+            "oss",
+            &self.config.oss_bucket,
+            &self.config.oss_root,
+            file_path,
+        )
     }
 
     fn mask_sensitive_info(&self, sql: &str) -> String {
@@ -249,10 +228,12 @@ define_backend!(GcsBackend, PrefixedGcsConnection);
 #[async_trait]
 impl StorageExport for GcsBackend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
-        let bucket = &self.config.gcs_bucket;
-        let root = format_root_path(&self.config.gcs_root);
-
-        let gcs_path = format!("gcs://{}{}/{}/{}/", bucket, root, catalog, schema);
+        let gcs_path = format_uri(
+            "gcs",
+            &self.config.gcs_bucket,
+            &self.config.gcs_root,
+            &format!("{}/{}/", catalog, schema),
+        );
 
         let mut connection_options = Vec::new();
 
@@ -279,10 +260,13 @@ impl StorageExport for GcsBackend {
         (gcs_path, connection_str)
     }
 
-    fn format_output_path(&self, _catalog: &str, file_path: &str) -> String {
-        let bucket = &self.config.gcs_bucket;
-        let root = format_root_path(&self.config.gcs_root);
-        format!("gcs://{}{}/{}", bucket, root, file_path)
+    fn format_output_path(&self, file_path: &str) -> String {
+        format_uri(
+            "gcs",
+            &self.config.gcs_bucket,
+            &self.config.gcs_root,
+            file_path,
+        )
     }
 
     fn mask_sensitive_info(&self, sql: &str) -> String {
@@ -301,10 +285,12 @@ define_backend!(AzblobBackend, PrefixedAzblobConnection);
 #[async_trait]
 impl StorageExport for AzblobBackend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
-        let container = &self.config.azblob_container;
-        let root = format_root_path(&self.config.azblob_root);
-
-        let azblob_path = format!("azblob://{}{}/{}/{}/", container, root, catalog, schema);
+        let azblob_path = format_uri(
+            "azblob",
+            &self.config.azblob_container,
+            &self.config.azblob_root,
+            &format!("{}/{}/", catalog, schema),
+        );
 
         let mut connection_options = vec![
             format!(
@@ -325,10 +311,13 @@ impl StorageExport for AzblobBackend {
         (azblob_path, connection_str)
     }
 
-    fn format_output_path(&self, _catalog: &str, file_path: &str) -> String {
-        let container = &self.config.azblob_container;
-        let root = format_root_path(&self.config.azblob_root);
-        format!("azblob://{}{}/{}", container, root, file_path)
+    fn format_output_path(&self, file_path: &str) -> String {
+        format_uri(
+            "azblob",
+            &self.config.azblob_container,
+            &self.config.azblob_root,
+            file_path,
+        )
     }
 
     fn mask_sensitive_info(&self, sql: &str) -> String {
@@ -342,12 +331,51 @@ impl StorageExport for AzblobBackend {
     }
 }
 
-define_storage_type!(
-    pub enum StorageType {
-        Fs(FsBackend),
-        S3(S3Backend),
-        Oss(OssBackend),
-        Gcs(GcsBackend),
-        Azblob(AzblobBackend),
+#[derive(Clone)]
+pub enum StorageType {
+    Fs(FsBackend),
+    S3(S3Backend),
+    Oss(OssBackend),
+    Gcs(GcsBackend),
+    Azblob(AzblobBackend),
+}
+
+#[async_trait]
+impl StorageExport for StorageType {
+    fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
+        match self {
+            StorageType::Fs(backend) => backend.get_storage_path(catalog, schema),
+            StorageType::S3(backend) => backend.get_storage_path(catalog, schema),
+            StorageType::Oss(backend) => backend.get_storage_path(catalog, schema),
+            StorageType::Gcs(backend) => backend.get_storage_path(catalog, schema),
+            StorageType::Azblob(backend) => backend.get_storage_path(catalog, schema),
+        }
     }
-);
+
+    fn format_output_path(&self, file_path: &str) -> String {
+        match self {
+            StorageType::Fs(backend) => backend.format_output_path(file_path),
+            StorageType::S3(backend) => backend.format_output_path(file_path),
+            StorageType::Oss(backend) => backend.format_output_path(file_path),
+            StorageType::Gcs(backend) => backend.format_output_path(file_path),
+            StorageType::Azblob(backend) => backend.format_output_path(file_path),
+        }
+    }
+
+    fn mask_sensitive_info(&self, sql: &str) -> String {
+        match self {
+            StorageType::Fs(backend) => backend.mask_sensitive_info(sql),
+            StorageType::S3(backend) => backend.mask_sensitive_info(sql),
+            StorageType::Oss(backend) => backend.mask_sensitive_info(sql),
+            StorageType::Gcs(backend) => backend.mask_sensitive_info(sql),
+            StorageType::Azblob(backend) => backend.mask_sensitive_info(sql),
+        }
+    }
+}
+
+impl StorageType {
+    /// Returns true if the storage backend is remote (not local filesystem).
+    pub fn is_remote_storage(&self) -> bool {
+        !matches!(self, StorageType::Fs(_))
+    }
+}

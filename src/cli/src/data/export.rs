@@ -376,8 +376,7 @@ impl Export {
                 "Exported {}.{} database creation SQL to {}",
                 self.catalog,
                 schema,
-                self.storage_type
-                    .format_output_path(&self.catalog, &file_path)
+                self.storage_type.format_output_path(&file_path)
             );
         }
 
@@ -435,9 +434,7 @@ impl Export {
                     "Finished exporting {}.{schema} with {} table schemas to path: {}",
                     export_self.catalog,
                     metric_physical_tables.len() + remaining_tables.len() + views.len(),
-                    export_self
-                        .storage_type
-                        .format_output_path(&export_self.catalog, &file_path)
+                    export_self.storage_type.format_output_path(&file_path)
                 );
 
                 Ok::<(), Error>(())
@@ -550,9 +547,7 @@ impl Export {
                     "Finished exporting {}.{} copy_from.sql to {}",
                     export_self.catalog,
                     schema,
-                    export_self
-                        .storage_type
-                        .format_output_path(&export_self.catalog, &copy_from_path)
+                    export_self.storage_type.format_output_path(&copy_from_path)
                 );
 
                 Ok::<(), Error>(())
@@ -1168,8 +1163,7 @@ mod tests {
         assert!(result.is_err());
         if let Err(err) = result {
             assert!(
-                err.to_string()
-                    .contains("Azure Blob account name must be set"),
+                err.to_string().contains("AzBlob account name must be set"),
                 "Actual error: {}",
                 err
             );
@@ -1198,9 +1192,8 @@ mod tests {
         assert!(result.is_err());
         if let Err(err) = result {
             assert!(
-                err.to_string().contains(
-                    "Azure Blob account key (when sas_token is not provided) must be set"
-                ),
+                err.to_string()
+                    .contains("AzBlob account key (when sas_token is not provided) must be set"),
                 "Actual error: {}",
                 err
             );
@@ -1314,7 +1307,7 @@ mod tests {
         ]);
 
         let result = cmd.build().await;
-        assert!(result.is_ok(), "Minimal Azure Blob config should succeed");
+        assert!(result.is_ok(), "Minimal AzBlob config should succeed");
     }
 
     #[tokio::test]
@@ -1373,7 +1366,7 @@ mod tests {
         let result = cmd.build().await;
         assert!(
             result.is_ok(),
-            "Azure Blob with only sas_token should succeed: {:?}",
+            "AzBlob with only sas_token should succeed: {:?}",
             result.err()
         );
     }
@@ -1403,7 +1396,7 @@ mod tests {
         let result = cmd.build().await;
         assert!(
             result.is_ok(),
-            "Azure Blob with empty account_key but sas_token should succeed: {:?}",
+            "AzBlob with empty account_key but sas_token should succeed: {:?}",
             result.err()
         );
     }
