@@ -251,15 +251,18 @@ impl SeqScan {
         let reader = builder.build().await?;
 
         let dedup = !stream_ctx.input.append_mode;
+        let dedup_metrics_reporter = part_metrics.map(|m| m.dedup_metrics_reporter());
         let reader = if dedup {
             match stream_ctx.input.merge_mode {
                 MergeMode::LastRow => Box::new(DedupReader::new(
                     reader,
                     LastRow::new(stream_ctx.input.filter_deleted),
+                    dedup_metrics_reporter,
                 )) as _,
                 MergeMode::LastNonNull => Box::new(DedupReader::new(
                     reader,
                     LastNonNull::new(stream_ctx.input.filter_deleted),
+                    dedup_metrics_reporter,
                 )) as _,
             }
         } else {
@@ -301,12 +304,14 @@ impl SeqScan {
                 .await?;
 
         let dedup = !stream_ctx.input.append_mode;
+        let dedup_metrics_reporter = part_metrics.map(|m| m.dedup_metrics_reporter());
         let reader = if dedup {
             match stream_ctx.input.merge_mode {
                 MergeMode::LastRow => Box::pin(
                     FlatDedupReader::new(
                         reader.into_stream().boxed(),
                         FlatLastRow::new(stream_ctx.input.filter_deleted),
+                        dedup_metrics_reporter,
                     )
                     .into_stream(),
                 ) as _,
@@ -317,6 +322,7 @@ impl SeqScan {
                             mapper.field_column_start(),
                             stream_ctx.input.filter_deleted,
                         ),
+                        dedup_metrics_reporter,
                     )
                     .into_stream(),
                 ) as _,

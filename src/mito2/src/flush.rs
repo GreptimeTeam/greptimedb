@@ -730,11 +730,13 @@ async fn memtable_source(mem_ranges: MemtableRanges, options: &RegionOptions) ->
             // dedup according to merge mode
             match options.merge_mode.unwrap_or(MergeMode::LastRow) {
                 MergeMode::LastRow => {
-                    Box::new(DedupReader::new(merge_reader, LastRow::new(false))) as _
+                    Box::new(DedupReader::new(merge_reader, LastRow::new(false), None)) as _
                 }
-                MergeMode::LastNonNull => {
-                    Box::new(DedupReader::new(merge_reader, LastNonNull::new(false))) as _
-                }
+                MergeMode::LastNonNull => Box::new(DedupReader::new(
+                    merge_reader,
+                    LastNonNull::new(false),
+                    None,
+                )) as _,
             }
         };
         Source::Reader(maybe_dedup)
