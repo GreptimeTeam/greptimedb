@@ -14,6 +14,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::meta::cluster_server::ClusterServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
@@ -81,6 +82,11 @@ use crate::selector::SelectorType;
 use crate::service::admin;
 use crate::service::admin::admin_axum_router;
 use crate::{error, Result};
+
+/// The default keep-alive interval for gRPC.
+const DEFAULT_GRPC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
+/// The default keep-alive timeout for gRPC.
+const DEFAULT_GRPC_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct MetasrvInstance {
     metasrv: Arc<Metasrv>,
@@ -271,7 +277,12 @@ macro_rules! add_compressed_service {
 }
 
 pub fn router(metasrv: Arc<Metasrv>) -> Router {
-    let mut router = tonic::transport::Server::builder().accept_http1(true); // for admin services
+    let mut router = tonic::transport::Server::builder()
+        // for admin services
+        .accept_http1(true)
+        // For quick network failures detection.
+        .http2_keepalive_interval(Some(DEFAULT_GRPC_KEEP_ALIVE_INTERVAL))
+        .http2_keepalive_timeout(Some(DEFAULT_GRPC_KEEP_ALIVE_TIMEOUT));
     let router = add_compressed_service!(router, HeartbeatServer::from_arc(metasrv.clone()));
     let router = add_compressed_service!(router, StoreServer::from_arc(metasrv.clone()));
     let router = add_compressed_service!(router, ClusterServer::from_arc(metasrv.clone()));

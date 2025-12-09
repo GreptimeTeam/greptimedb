@@ -388,6 +388,7 @@ pub struct MetaStateHandler {
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
     leadership_change_notifier: LeadershipChangeNotifier,
+    mailbox: MailboxRef,
     state: StateRef,
 }
 
@@ -411,6 +412,9 @@ impl MetaStateHandler {
     pub async fn on_leader_stop(&self) {
         self.state.write().unwrap().next_state(become_follower());
 
+        // Enforces the mailbox to clear all pushers.
+        // The remaining heartbeat connections will be closed by the remote peer or keep-alive detection.
+        self.mailbox.reset().await;
         self.leadership_change_notifier
             .notify_on_leader_stop()
             .await;
@@ -528,6 +532,7 @@ impl Metasrv {
                 state: self.state.clone(),
                 leader_cached_kv_backend: leader_cached_kv_backend.clone(),
                 leadership_change_notifier,
+                mailbox: self.mailbox.clone(),
             };
             let _handle = common_runtime::spawn_global(async move {
                 loop {
