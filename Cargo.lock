@@ -10849,7 +10849,7 @@ dependencies = [
 [[package]]
 name = "rskafka"
 version = "0.6.0"
-source = "git+https://github.com/WenyXu/rskafka.git?rev=1ff3e10c4dd467faae0474ccdfac75f9aeabf059#1ff3e10c4dd467faae0474ccdfac75f9aeabf059"
+source = "git+https://github.com/WenyXu/rskafka.git?rev=40150bad95fddd39a772dc132ee9e92f8f91fe38#40150bad95fddd39a772dc132ee9e92f8f91fe38"
 dependencies = [
  "bytes",
  "chrono",

@@ -189,7 +189,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "multipart",
 ] }
 # Branch: feat/keepalive-port
-rskafka = { git = "https://github.com/WenyXu/rskafka.git", rev = "1ff3e10c4dd467faae0474ccdfac75f9aeabf059", features = [
+rskafka = { git = "https://github.com/WenyXu/rskafka.git", rev = "40150bad95fddd39a772dc132ee9e92f8f91fe38", features = [
     "transport-tls",
 ] }
 rstest = "0.25"
