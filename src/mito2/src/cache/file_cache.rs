@@ -621,7 +621,7 @@ pub enum FileType {
     Puffin(u64),
 }
 
-impl std::fmt::Display for FileType {
+impl fmt::Display for FileType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FileType::Parquet => write!(f, "parquet"),
