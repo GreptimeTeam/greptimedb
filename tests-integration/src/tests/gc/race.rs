@@ -30,7 +30,6 @@ use tokio::time::sleep;
 use crate::cluster::GreptimeDbClusterBuilder;
 use crate::test_util::{StorageType, TestGuard};
 use crate::tests::gc::delay_layer::create_test_object_store_manager_with_delays;
-use crate::tests::gc::delay_query::DelayedQueryExecutor;
 use crate::tests::gc::{
     get_table_route, list_sst_files_from_manifest, list_sst_files_from_storage, sst_equal_check,
 };
