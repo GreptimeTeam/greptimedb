@@ -382,8 +382,12 @@ impl BloomFilterIndexApplier {
 
         // Trigger background download if file cache and file size are available
         if let (Some(file_cache), Some(file_size)) = (&self.file_cache, file_size_hint) {
-            let index_key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Puffin);
-            let remote_path = path_factory.build_index_file_path(file_id);
+            let index_key = IndexKey::new(
+                file_id.region_id(),
+                file_id.file_id(),
+                FileType::Puffin(file_id.version),
+            );
+            let remote_path = path_factory.build_index_file_path(file_id.file_id);
             file_cache.maybe_download_background(
                 index_key,
                 remote_path,
