@@ -81,7 +81,6 @@ impl BatchReader for MergeReader {
 
         if let Some(batch) = self.output_batch.take() {
             self.metrics.scan_cost += start.elapsed();
-            self.metrics.num_output_rows += batch.num_rows();
             self.metrics.maybe_report(&self.metrics_reporter);
             Ok(Some(batch))
         } else {
@@ -326,8 +325,6 @@ pub struct MergeMetrics {
     pub(crate) num_fetch_by_batches: usize,
     /// Number of times to fetch rows.
     pub(crate) num_fetch_by_rows: usize,
-    /// Number of output rows.
-    pub(crate) num_output_rows: usize,
     /// Cost to fetch batches from sources.
     pub(crate) fetch_cost: Duration,
 }
@@ -350,9 +347,6 @@ impl fmt::Debug for MergeMetrics {
         }
         if self.num_fetch_by_rows > 0 {
             write!(f, r#", "num_fetch_by_rows":{}"#, self.num_fetch_by_rows)?;
-        }
-        if self.num_output_rows > 0 {
-            write!(f, r#", "num_output_rows":{}"#, self.num_output_rows)?;
         }
         if !self.fetch_cost.is_zero() {
             write!(f, r#", "fetch_cost":"{:?}""#, self.fetch_cost)?;
@@ -615,8 +609,6 @@ mod tests {
             ],
         )
         .await;
-
-        assert_eq!(8, reader.metrics.num_output_rows);
     }
 
     #[tokio::test]
@@ -733,8 +725,6 @@ mod tests {
             ],
         )
         .await;
-
-        assert_eq!(11, reader.metrics.num_output_rows);
     }
 
     #[tokio::test]

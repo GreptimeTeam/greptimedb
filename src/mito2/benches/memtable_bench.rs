@@ -484,8 +484,7 @@ fn flat_merge_iterator_bench(c: &mut Criterion) {
                     }
 
                     // Create and consume FlatMergeIterator
-                    let merge_iter =
-                        FlatMergeIterator::new(schema.clone(), iters, 1024).unwrap();
+                    let merge_iter = FlatMergeIterator::new(schema.clone(), iters, 1024).unwrap();
                     for batch_result in merge_iter {
                         let _batch = batch_result.unwrap();
                     }

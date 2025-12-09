@@ -557,7 +557,6 @@ impl MergeMetricsReport for PartitionMetricsInner {
         scan_metrics.merge_metrics.scan_cost += metrics.scan_cost;
         scan_metrics.merge_metrics.num_fetch_by_batches += metrics.num_fetch_by_batches;
         scan_metrics.merge_metrics.num_fetch_by_rows += metrics.num_fetch_by_rows;
-        scan_metrics.merge_metrics.num_output_rows += metrics.num_output_rows;
         scan_metrics.merge_metrics.fetch_cost += metrics.fetch_cost;
 
         // Reset the input metrics

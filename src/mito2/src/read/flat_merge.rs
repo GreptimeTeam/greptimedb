@@ -628,7 +628,6 @@ impl FlatMergeReader {
 
         if let Some(batch) = self.output_batch.take() {
             self.metrics.scan_cost += start.elapsed();
-            self.metrics.num_output_rows += batch.num_rows();
             self.metrics.maybe_report(&self.metrics_reporter);
             Ok(Some(batch))
         } else {
