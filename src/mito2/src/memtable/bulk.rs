@@ -1017,7 +1017,6 @@ impl MemtableCompactor {
             arrow_schema.clone(),
             iterators,
             DEFAULT_READ_BATCH_SIZE,
-            None,
         )?;
 
         let boxed_iter: BoxedRecordBatchIterator = if dedup {
