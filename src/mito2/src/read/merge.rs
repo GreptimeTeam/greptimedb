@@ -139,7 +139,9 @@ impl MergeReader {
         // Initializes the reader.
         reader.refill_hot();
 
-        reader.metrics.scan_cost += start.elapsed();
+        let elapsed = start.elapsed();
+        reader.metrics.init_cost += elapsed;
+        reader.metrics.scan_cost += elapsed;
         Ok(reader)
     }
 
@@ -319,6 +321,8 @@ impl MergeReaderBuilder {
 /// Metrics for the merge reader.
 #[derive(Default)]
 pub struct MergeMetrics {
+    /// Cost to initialize the reader.
+    pub(crate) init_cost: Duration,
     /// Total scan cost of the reader.
     pub(crate) scan_cost: Duration,
     /// Number of times to fetch batches.
@@ -338,6 +342,9 @@ impl fmt::Debug for MergeMetrics {
 
         write!(f, r#"{{"scan_cost":"{:?}""#, self.scan_cost)?;
 
+        if !self.init_cost.is_zero() {
+            write!(f, r#", "init_cost":"{:?}""#, self.init_cost)?;
+        }
         if self.num_fetch_by_batches > 0 {
             write!(
                 f,
@@ -359,10 +366,10 @@ impl fmt::Debug for MergeMetrics {
 impl MergeMetrics {
     /// Reports the metrics if scan_cost exceeds 10ms and resets them.
     pub(crate) fn maybe_report(&mut self, reporter: &Option<Arc<dyn MergeMetricsReport>>) {
-        if self.scan_cost.as_millis() > 10 {
-            if let Some(r) = reporter {
-                r.report(self);
-            }
+        if self.scan_cost.as_millis() > 10
+            && let Some(r) = reporter
+        {
+            r.report(self);
         }
     }
 }

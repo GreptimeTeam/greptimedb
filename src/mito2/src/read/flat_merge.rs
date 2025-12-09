@@ -604,7 +604,9 @@ impl FlatMergeReader {
             metrics,
             metrics_reporter,
         };
-        reader.metrics.scan_cost += start.elapsed();
+        let elapsed = start.elapsed();
+        reader.metrics.init_cost += elapsed;
+        reader.metrics.scan_cost += elapsed;
 
         Ok(reader)
     }
