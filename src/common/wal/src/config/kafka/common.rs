@@ -16,7 +16,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rskafka::client::{Credentials, SaslConfig};
+use rskafka::client::{Credentials, KeepaliveConfig, SaslConfig};
 use rskafka::BackoffConfig;
 use rustls::{ClientConfig, RootCertStore};
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,13 @@ pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
     // The deadline shouldn't be too long,
     // otherwise the client will block the worker loop for a long time.
     deadline: Some(Duration::from_secs(3)),
+};
+
+/// The default keep-alive config for kafka client.
+pub const DEFAULT_KEEP_ALIVE_CONFIG: KeepaliveConfig = KeepaliveConfig {
+    time: Some(Duration::from_secs(10)),
+    interval: Some(Duration::from_secs(7)),
+    retries: Some(3),
 };
 
 /// The default connect timeout for kafka client.

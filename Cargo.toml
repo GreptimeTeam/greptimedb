@@ -188,7 +188,8 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "multipart",
 ] }
-rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "8dbd01ed809f5a791833a594e85b144e36e45820", features = [
+# Branch: feat/keepalive-port
+rskafka = { git = "https://github.com/WenyXu/rskafka.git", rev = "1ff3e10c4dd467faae0474ccdfac75f9aeabf059", features = [
     "transport-tls",
 ] }
 rstest = "0.25"
