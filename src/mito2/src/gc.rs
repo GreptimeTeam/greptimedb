@@ -570,7 +570,7 @@ impl LocalGcWorker {
                         // if the file's expel time is unknown(because not appear in delta manifest), we keep it for a while
                         // using it's last modified time
                         // notice unknown files use a different lingering time
-                        // FIXME(discord9): might need to reaquire all files ref in manifest to determine whether new file is in use now?
+                        // FIXME(discord9): might need to require all files ref in manifest to determine whether new file is in use now?
                         debug!(
                             "File {:?} has unknown expel time, might have been created but not yet updated in manifest, checking last modified time for lingering",
                             file_id
