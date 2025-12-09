@@ -15,6 +15,7 @@
 //! Dedup implementation for flat format.
 
 use std::ops::Range;
+use std::time::Instant;
 
 use api::v1::OpType;
 use async_stream::try_stream;
@@ -214,6 +215,8 @@ impl RecordBatchDedupStrategy for FlatLastRow {
         batch: RecordBatch,
         metrics: &mut DedupMetrics,
     ) -> Result<Option<RecordBatch>> {
+        let start = Instant::now();
+
         if batch.num_rows() == 0 {
             return Ok(None);
         }
@@ -235,6 +238,7 @@ impl RecordBatchDedupStrategy for FlatLastRow {
             // The batch after dedup is empty.
             // We don't need to update `prev_batch` because they have the same
             // key and timestamp.
+            metrics.dedup_cost += start.elapsed();
             return Ok(None);
         };
 
@@ -246,7 +250,11 @@ impl RecordBatchDedupStrategy for FlatLastRow {
         self.prev_batch = Some(batch_last_row);
 
         // Filters deleted rows at last.
-        maybe_filter_deleted(batch, self.filter_deleted, metrics)
+        let result = maybe_filter_deleted(batch, self.filter_deleted, metrics);
+
+        metrics.dedup_cost += start.elapsed();
+
+        result
     }
 
     fn finish(&mut self, _metrics: &mut DedupMetrics) -> Result<Option<RecordBatch>> {
@@ -275,6 +283,8 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
         batch: RecordBatch,
         metrics: &mut DedupMetrics,
     ) -> Result<Option<RecordBatch>> {
+        let start = Instant::now();
+
         if batch.num_rows() == 0 {
             return Ok(None);
         }
@@ -290,6 +300,7 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
             self.buffer = BatchLastRow::try_new(record_batch);
             self.contains_delete = contains_delete;
 
+            metrics.dedup_cost += start.elapsed();
             return Ok(None);
         };
 
@@ -305,7 +316,9 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
             self.buffer = BatchLastRow::try_new(record_batch);
             self.contains_delete = contains_delete;
 
-            return maybe_filter_deleted(buffer.last_batch, self.filter_deleted, metrics);
+            let result = maybe_filter_deleted(buffer.last_batch, self.filter_deleted, metrics);
+            metrics.dedup_cost += start.elapsed();
+            return result;
         }
 
         // The next batch has duplicated rows.
@@ -332,15 +345,23 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
         self.buffer = BatchLastRow::try_new(record_batch);
         self.contains_delete = contains_delete;
 
+        metrics.dedup_cost += start.elapsed();
+
         Ok(output)
     }
 
     fn finish(&mut self, metrics: &mut DedupMetrics) -> Result<Option<RecordBatch>> {
+        let start = Instant::now();
+
         let Some(buffer) = self.buffer.take() else {
             return Ok(None);
         };
 
-        maybe_filter_deleted(buffer.last_batch, self.filter_deleted, metrics)
+        let result = maybe_filter_deleted(buffer.last_batch, self.filter_deleted, metrics);
+
+        metrics.dedup_cost += start.elapsed();
+
+        result
     }
 }
 

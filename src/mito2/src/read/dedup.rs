@@ -14,6 +14,8 @@
 
 //! Utilities to remove duplicate rows from a sorted batch.
 
+use std::time::{Duration, Instant};
+
 use api::v1::OpType;
 use async_trait::async_trait;
 use common_telemetry::debug;
@@ -138,6 +140,8 @@ impl DedupStrategy for LastRow {
         mut batch: Batch,
         metrics: &mut DedupMetrics,
     ) -> Result<Option<Batch>> {
+        let start = Instant::now();
+
         if batch.is_empty() {
             return Ok(None);
         }
@@ -160,6 +164,7 @@ impl DedupStrategy for LastRow {
             if batch.num_rows() == 1 {
                 // We don't need to update `prev_batch` because they have the same
                 // key and timestamp.
+                metrics.dedup_cost += start.elapsed();
                 return Ok(None);
             }
             // Skips the first row.
@@ -188,6 +193,8 @@ impl DedupStrategy for LastRow {
         if self.filter_deleted {
             filter_deleted_from_batch(&mut batch, metrics)?;
         }
+
+        metrics.dedup_cost += start.elapsed();
 
         // The batch can become empty if all rows are deleted.
         if batch.is_empty() {
@@ -221,6 +228,8 @@ pub struct DedupMetrics {
     pub(crate) num_unselected_rows: usize,
     /// Number of deleted rows.
     pub(crate) num_deleted_rows: usize,
+    /// Time spent on deduplication.
+    pub(crate) dedup_cost: Duration,
 }
 
 /// Buffer to store fields in the last row to merge.
@@ -427,6 +436,8 @@ impl LastNonNull {
 
 impl DedupStrategy for LastNonNull {
     fn push_batch(&mut self, batch: Batch, metrics: &mut DedupMetrics) -> Result<Option<Batch>> {
+        let start = Instant::now();
+
         if batch.is_empty() {
             return Ok(None);
         }
@@ -444,6 +455,7 @@ impl DedupStrategy for LastNonNull {
             // Next key is different.
             let buffer = std::mem::replace(buffer, batch);
             let merged = self.last_fields.merge_last_non_null(buffer, metrics)?;
+            metrics.dedup_cost += start.elapsed();
             return Ok(merged);
         }
 
@@ -451,6 +463,7 @@ impl DedupStrategy for LastNonNull {
             // The next batch has a different timestamp.
             let buffer = std::mem::replace(buffer, batch);
             let merged = self.last_fields.merge_last_non_null(buffer, metrics)?;
+            metrics.dedup_cost += start.elapsed();
             return Ok(merged);
         }
 
@@ -460,6 +473,7 @@ impl DedupStrategy for LastNonNull {
         // We assumes each batch doesn't contain duplicate rows so we only need to check the first row.
         if batch.num_rows() == 1 {
             self.last_fields.push_first_row(&batch);
+            metrics.dedup_cost += start.elapsed();
             return Ok(None);
         }
 
@@ -472,10 +486,14 @@ impl DedupStrategy for LastNonNull {
         let buffer = std::mem::replace(buffer, batch);
         let merged = self.last_fields.merge_last_non_null(buffer, metrics)?;
 
+        metrics.dedup_cost += start.elapsed();
+
         Ok(merged)
     }
 
     fn finish(&mut self, metrics: &mut DedupMetrics) -> Result<Option<Batch>> {
+        let start = Instant::now();
+
         let Some(buffer) = self.buffer.take() else {
             return Ok(None);
         };
@@ -484,6 +502,8 @@ impl DedupStrategy for LastNonNull {
         self.last_fields.maybe_init(&buffer);
 
         let merged = self.last_fields.merge_last_non_null(buffer, metrics)?;
+
+        metrics.dedup_cost += start.elapsed();
 
         Ok(merged)
     }
