@@ -64,15 +64,15 @@ impl DelayedQueryExecutor {
                 // Check if we need to extend the stream life to meet min_duration
                 // do it before processing each batch so if stream only have one batch we still extend its life
                 let now = std::time::Instant::now();
-                if now < deadline && !batches.is_empty() {
+                if now < deadline {
                     // If we have time remaining and have processed batches, add delay
                     let time_remaining = deadline - now;
                     if time_remaining > self.batch_delay {
                         info!(
-                            "Extending stream life, remaining time: {:?}",
+                            "Extending stream life, sleep first for remaining time: {:?}",
                             time_remaining
                         );
-                        tokio::time::sleep(self.batch_delay).await;
+                        tokio::time::sleep(time_remaining).await;
                     }
                 }
 
@@ -92,11 +92,10 @@ impl DelayedQueryExecutor {
                 let now = std::time::Instant::now();
                 if now < deadline {
                     let remaining = deadline - now;
-                    info!(
-                        "Stream ended early, waiting additional {:?} to ensure min_duration",
+                    panic!(
+                        "Stream ended early, should have wait additional {:?} to ensure min_duration",
                         remaining
                     );
-                    tokio::time::sleep(remaining).await;
                 }
 
                 // Convert collected batches to RecordBatches for pretty printing

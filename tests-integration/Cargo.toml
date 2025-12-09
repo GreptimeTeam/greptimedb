@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+default = ["testing"]
 dashboard = []
+testing = ["mito2/test"]
 
 [lints]
 workspace = true
