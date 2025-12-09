@@ -179,7 +179,7 @@ macro_rules! validate_backend {
                             "{} {} must be set when --{} is enabled.",
                             $backend_name,
                             missing.join(", "),
-                            $backend_name.to_lowercase().replace(" ", "")
+                            $backend_name.to_lowercase()
                         ),
                     }
                     .build(),
@@ -216,7 +216,7 @@ impl PrefixedAzblobConnection {
     pub fn validate(&self) -> Result<(), BoxedError> {
         validate_backend!(
             enable: true,
-            name: "Azure Blob",
+            name: "AzBlob",
             required: [
                 (&self.azblob_container, "container"),
                 (&self.azblob_root, "root"),
