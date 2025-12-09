@@ -25,8 +25,7 @@ use snafu::ResultExt;
 
 use crate::error::{
     BuildKafkaClientSnafu, BuildKafkaCtrlClientSnafu, CreateKafkaWalTopicSnafu,
-    KafkaGetOffsetSnafu, KafkaPartitionClientSnafu, ProduceRecordSnafu, ResolveKafkaEndpointSnafu,
-    Result, TlsConfigSnafu,
+    KafkaGetOffsetSnafu, KafkaPartitionClientSnafu, ProduceRecordSnafu, Result, TlsConfigSnafu,
 };
 
 // Each topic only has one partition for now.
@@ -209,10 +208,8 @@ impl KafkaTopicCreator {
 /// Builds a kafka [Client](rskafka::client::Client).
 pub async fn build_kafka_client(connection: &KafkaConnectionConfig) -> Result<Client> {
     // Builds an kafka controller client for creating topics.
-    let broker_endpoints = common_wal::resolve_to_ipv4(&connection.broker_endpoints)
-        .await
-        .context(ResolveKafkaEndpointSnafu)?;
-    let mut builder = ClientBuilder::new(broker_endpoints).backoff_config(DEFAULT_BACKOFF_CONFIG);
+    let mut builder = ClientBuilder::new(connection.broker_endpoints.clone())
+        .backoff_config(DEFAULT_BACKOFF_CONFIG);
     if let Some(sasl) = &connection.sasl {
         builder = builder.sasl_config(sasl.config.clone().into_sasl_config());
     };

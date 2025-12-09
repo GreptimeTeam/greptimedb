@@ -23,7 +23,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMessage};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
 use servers::addrs;
 use servers::heartbeat_options::HeartbeatOptions;
@@ -42,8 +42,8 @@ use crate::metrics::{HEARTBEAT_RECV_COUNT, HEARTBEAT_SENT_COUNT};
 pub struct HeartbeatTask {
     peer_addr: String,
     meta_client: Arc<MetaClient>,
-    report_interval: u64,
-    retry_interval: u64,
+    report_interval: Duration,
+    retry_interval: Duration,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     start_time_ms: u64,
 }
@@ -58,8 +58,8 @@ impl HeartbeatTask {
         HeartbeatTask {
             peer_addr: addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
             meta_client,
-            report_interval: heartbeat_opts.interval.as_millis() as u64,
-            retry_interval: heartbeat_opts.retry_interval.as_millis() as u64,
+            report_interval: heartbeat_opts.interval,
+            retry_interval: heartbeat_opts.retry_interval,
             resp_handler_executor,
             start_time_ms: common_time::util::current_time_millis() as u64,
         }
@@ -103,13 +103,15 @@ impl HeartbeatTask {
                             HEARTBEAT_RECV_COUNT.with_label_values(&["success"]).inc();
                         }
                     }
-                    Ok(None) => break,
+                    Ok(None) => {
+                        warn!("Heartbeat response stream closed");
+                        capture_self.start_with_retry(retry_interval).await;
+                        break;
+                    }
                     Err(e) => {
                         HEARTBEAT_RECV_COUNT.with_label_values(&["error"]).inc();
                         error!(e; "Occur error while reading heartbeat response");
-                        capture_self
-                            .start_with_retry(Duration::from_millis(retry_interval))
-                            .await;
+                        capture_self.start_with_retry(retry_interval).await;
 
                         break;
                     }
@@ -177,12 +179,13 @@ impl HeartbeatTask {
                         if let Some(message) = message {
                             Self::new_heartbeat_request(&heartbeat_request, Some(message))
                         } else {
+                            warn!("Sender has been dropped, exiting the heartbeat loop");
                             // Receives None that means Sender was dropped, we need to break the current loop
                             break
                         }
                     }
                     _ = &mut sleep => {
-                        sleep.as_mut().reset(Instant::now() + Duration::from_millis(report_interval));
+                        sleep.as_mut().reset(Instant::now() + report_interval);
                        Self::new_heartbeat_request(&heartbeat_request, None)
                     }
                 };
