@@ -15,8 +15,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_query::{Output, OutputData};
-use common_recordbatch::{RecordBatches, SendableRecordBatchStream, util};
+use common_query::OutputData;
+use common_recordbatch::RecordBatches;
 use common_telemetry::info;
 use frontend::instance::Instance;
 use futures::StreamExt;
@@ -64,7 +64,7 @@ impl DelayedQueryExecutor {
                 // Check if we need to extend the stream life to meet min_duration
                 // do it before processing each batch so if stream only have one batch we still extend its life
                 let now = std::time::Instant::now();
-                if now < deadline && batches.len() > 0 {
+                if now < deadline && !batches.is_empty() {
                     // If we have time remaining and have processed batches, add delay
                     let time_remaining = deadline - now;
                     if time_remaining > self.batch_delay {
@@ -141,15 +141,13 @@ impl DelayedQueryExecutor {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use meta_srv::gc::GcSchedulerOptions;
     use mito2::gc::GcConfig;
 
     use super::*;
     use crate::cluster::GreptimeDbClusterBuilder;
     use crate::test_util::{StorageType, TempDirGuard, get_test_store_config};
-    use crate::tests::test_util::{MockInstance, MockInstanceBuilder, TestContext};
+    use crate::tests::test_util::{MockInstanceBuilder, TestContext};
 
     /// Test helper function to create a mock instance for testing
     async fn create_test_instance() -> (TestContext, TempDirGuard) {

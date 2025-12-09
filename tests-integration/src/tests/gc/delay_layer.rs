@@ -18,16 +18,13 @@ use std::time::Duration;
 use common_telemetry::debug;
 use common_test_util::temp_dir::create_temp_dir;
 use datanode::store::new_object_store;
-use object_store::config::ObjectStoreConfig;
+use object_store::ObjectStore;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::raw::{Access, Layer, LayeredAccess, OpDelete, OpList, RpDelete, RpList, oio};
-use object_store::{ObjectStore, ObjectStoreBuilder};
 use tempfile::TempDir;
 use tokio::time::sleep;
 
-use crate::test_util::{
-    FileDirGuard, StorageGuard, StorageType, TempDirGuard, TestGuard, get_test_store_config,
-};
+use crate::test_util::{FileDirGuard, StorageGuard, StorageType, TempDirGuard, TestGuard};
 
 /// A layer that injects delays into storage operations for testing race conditions
 /// and timing-related issues in GC integration tests.
@@ -50,21 +47,6 @@ impl DelayLayer {
             delete_delay,
             list_per_file_delay,
         }
-    }
-
-    /// Create a DelayLayer that only delays list operations
-    pub fn with_list_delay(delay: Duration) -> Self {
-        Self::new(delay, Duration::ZERO, Duration::ZERO)
-    }
-
-    /// Create a DelayLayer that only delays delete operations
-    pub fn with_delete_delay(delay: Duration) -> Self {
-        Self::new(Duration::ZERO, delay, Duration::ZERO)
-    }
-
-    /// Create a DelayLayer that only delays per-file operations during listing
-    pub fn with_per_file_delay(delay: Duration) -> Self {
-        Self::new(Duration::ZERO, Duration::ZERO, delay)
     }
 }
 
@@ -234,7 +216,7 @@ pub async fn build_object_store_manager_with_delays(
     delay_layer: DelayLayer,
 ) -> Result<(ObjectStoreManagerRef, TempDirGuard), Box<dyn std::error::Error + Send + Sync>> {
     let (delayed_store, temp_dir) =
-        new_object_store_with_delays(&store_type, data_home, delay_layer).await?;
+        new_object_store_with_delays(store_type, data_home, delay_layer).await?;
 
     // Create an object store manager with the delayed store
     let manager = Arc::new(ObjectStoreManager::new("default", delayed_store));
@@ -255,7 +237,7 @@ pub async fn create_test_object_store_manager_with_delays(
     let data_home = data_home_dir.path().to_str().unwrap().to_string();
     let delay_layer = DelayLayer::new(list_delay, delete_delay, list_per_file_delay);
     let (mgr, dir_guard) =
-        build_object_store_manager_with_delays(&store_type, &data_home, delay_layer).await?;
+        build_object_store_manager_with_delays(store_type, &data_home, delay_layer).await?;
     Ok((
         mgr,
         TestGuard {
