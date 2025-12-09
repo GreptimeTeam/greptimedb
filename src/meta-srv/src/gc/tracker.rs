@@ -50,7 +50,7 @@ impl GcScheduler {
         let now = Instant::now();
 
         // Check if enough time has passed since last cleanup
-        if now.duration_since(last_cleanup) < self.config.tracker_cleanup_interval {
+        if now.saturating_duration_since(last_cleanup) < self.config.tracker_cleanup_interval {
             return Ok(());
         }
 
