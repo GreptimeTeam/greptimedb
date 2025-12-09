@@ -130,7 +130,7 @@ where
     FileWatcherBuilder::new()
         .watch_paths(&watch_paths)
         .context(FileWatchSnafu)?
-        .config(FileWatcherConfig::modify_and_create())
+        .config(FileWatcherConfig::new())
         .spawn(move || {
             if let Err(err) = tls_config_for_watcher.reload() {
                 error!("Failed to reload TLS config: {}", err);

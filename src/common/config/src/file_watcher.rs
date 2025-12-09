@@ -40,18 +40,18 @@ pub struct FileWatcherConfig {
 }
 
 impl FileWatcherConfig {
-    /// Create a config that watches for modify and create events only.
-    pub fn modify_and_create() -> Self {
-        Self {
-            include_remove_events: false,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Create a config that also watches for remove events.
-    pub fn with_remove_events() -> Self {
-        Self {
-            include_remove_events: true,
-        }
+    pub fn with_modify_and_create(mut self) -> Self {
+        self.include_remove_events = false;
+        self
+    }
+
+    pub fn with_remove_events(mut self) -> Self {
+        self.include_remove_events = true;
+        self
     }
 }
 
@@ -240,7 +240,7 @@ mod tests {
         FileWatcherBuilder::new()
             .watch_path(&file_path)
             .unwrap()
-            .config(FileWatcherConfig::modify_and_create())
+            .config(FileWatcherConfig::new())
             .spawn(move || {
                 counter_clone.fetch_add(1, Ordering::SeqCst);
             })
@@ -277,7 +277,7 @@ mod tests {
         FileWatcherBuilder::new()
             .watch_path(&file_path)
             .unwrap()
-            .config(FileWatcherConfig::modify_and_create())
+            .config(FileWatcherConfig::new())
             .spawn(move || {
                 counter_clone.fetch_add(1, Ordering::SeqCst);
             })
@@ -320,7 +320,7 @@ mod tests {
         FileWatcherBuilder::new()
             .watch_path(&watched_file)
             .unwrap()
-            .config(FileWatcherConfig::modify_and_create())
+            .config(FileWatcherConfig::new())
             .spawn(move || {
                 counter_clone.fetch_add(1, Ordering::SeqCst);
             })

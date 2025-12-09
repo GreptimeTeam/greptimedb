@@ -46,7 +46,7 @@ impl WatchFileUserProvider {
         FileWatcherBuilder::new()
             .watch_path(filepath)
             .context(FileWatchSnafu)?
-            .config(FileWatcherConfig::modify_and_create())
+            .config(FileWatcherConfig::new())
             .spawn(move || match load_credential_from_file(&filepath_owned) {
                 Ok(credential) => {
                     let mut users = users_clone.lock().expect("users credential must be valid");
