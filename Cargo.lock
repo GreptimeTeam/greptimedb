@@ -13083,6 +13083,7 @@ dependencies = [
  "prost 0.13.5",
  "query",
  "rand 0.9.1",
+ "regex",
  "rstest",
  "rstest_reuse",
  "sea-query",

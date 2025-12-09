@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -133,28 +133,24 @@ impl From<&ConcreteDataType> for JsonNativeType {
 
 impl Display for JsonNativeType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            JsonNativeType::Null => write!(f, "Null"),
-            JsonNativeType::Bool => write!(f, "Bool"),
-            JsonNativeType::Number(t) => {
-                write!(f, "Number({t:?})")
-            }
-            JsonNativeType::String => write!(f, "String"),
-            JsonNativeType::Array(item_type) => {
-                write!(f, "Array[{}]", item_type)
-            }
-            JsonNativeType::Object(object) => {
-                write!(
-                    f,
-                    "Object{{{}}}",
+        fn to_serde_value(t: &JsonNativeType) -> serde_json::Value {
+            match t {
+                JsonNativeType::Null => serde_json::Value::String("<Null>".to_string()),
+                JsonNativeType::Bool => serde_json::Value::String("<Bool>".to_string()),
+                JsonNativeType::Number(_) => serde_json::Value::String("<Number>".to_string()),
+                JsonNativeType::String => serde_json::Value::String("<String>".to_string()),
+                JsonNativeType::Array(item_type) => {
+                    serde_json::Value::Array(vec![to_serde_value(item_type)])
+                }
+                JsonNativeType::Object(object) => serde_json::Value::Object(
                     object
                         .iter()
-                        .map(|(k, v)| format!(r#""{k}": {v}"#))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
+                        .map(|(k, v)| (k.clone(), to_serde_value(v)))
+                        .collect(),
+                ),
             }
         }
+        write!(f, "{}", to_serde_value(self))
     }
 }
 
@@ -183,7 +179,11 @@ impl JsonType {
         }
     }
 
-    pub(crate) fn native_type(&self) -> &JsonNativeType {
+    pub fn is_native_type(&self) -> bool {
+        matches!(self.format, JsonFormat::Native(_))
+    }
+
+    pub fn native_type(&self) -> &JsonNativeType {
         match &self.format {
             JsonFormat::Jsonb => &JsonNativeType::String,
             JsonFormat::Native(x) => x.as_ref(),

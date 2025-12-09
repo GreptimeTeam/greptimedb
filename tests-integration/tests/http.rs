@@ -42,6 +42,7 @@ use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequ
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME;
 use prost::Message;
+use regex::Regex;
 use serde_json::{Value, json};
 use servers::http::GreptimeQueryOutput;
 use servers::http::handler::HealthResponse;
@@ -126,6 +127,7 @@ macro_rules! http_tests {
                 test_pipeline_skip_error,
                 test_pipeline_filter,
                 test_pipeline_create_table,
+                test_pipeline_ingest_jsonbench_data,
 
                 test_otlp_metrics_new,
                 test_otlp_traces_v0,
@@ -2697,6 +2699,95 @@ transform:
         "CREATE TABLE IF NOT EXISTS `logs1` (\n  `timestamp` TIMESTAMP(9) NOT NULL,\n  `ip_address` STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  `username` STRING NULL,\n  `http_method` STRING NULL INVERTED INDEX,\n  `request_line` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false', false_positive_rate = '0.01', granularity = '10240'),\n  `protocol` STRING NULL,\n  `status_code` INT NULL INVERTED INDEX,\n  `response_size` BIGINT NULL,\n  `message` STRING NULL,\n  TIME INDEX (`timestamp`),\n  PRIMARY KEY (`username`, `status_code`)\n)\nENGINE=mito\nWITH(\n  append_mode = 'true'\n)",
         sql
     );
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_ingest_jsonbench_data(store_type: StorageType) {
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_pipeline_ingest_jsonbench_data").await;
+
+    let client = TestClient::new(app).await;
+
+    // Create the pipeline for ingesting jsonbench data.
+    let pipeline = r#"
+version: 2
+
+processors:
+  - json_parse:
+      fields:
+        - message, log
+      ignore_missing: true
+  - simple_extract:
+      fields:
+        - log, time_us
+      key: "time_us"
+      ignore_missing: false
+  - epoch:
+      fields:
+        - time_us
+      resolution: microsecond
+  - select:
+      fields:
+        - time_us
+        - log
+
+transform:
+  - fields:
+      - time_us
+    type: epoch, us
+    index: timestamp
+"#;
+    let response = client
+        .post("/v1/pipelines/jsonbench")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline)
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let pattern =
+        r#"\{"pipelines":\[\{"name":"jsonbench","version":"[^"]*"}],"execution_time_ms":\d+}"#
+            .parse::<Regex>()
+            .unwrap();
+    assert!(pattern.is_match(&response.text().await));
+
+    // Create the table for storing jsonbench data.
+    let sql = r#"
+CREATE TABLE jsonbench(time_us TimestampMicrosecond TIME INDEX, `log` Json())
+"#;
+    let response = client
+        .post("/v1/sql")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("sql={sql}"))
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let pattern = r#"\{"output":\[\{"affectedrows":0}],"execution_time_ms":\d+}"#
+        .parse::<Regex>()
+        .unwrap();
+    assert!(pattern.is_match(&response.text().await));
+
+    // Start ingesting jsonbench data.
+    // The input file only contains head 100 lines of the whole jsonbench test dataset.
+    let path = common_test_util::find_workspace_path(
+        "/tests-integration/resources/jsonbench-head-100.ndjson",
+    );
+    // Jsonbench data do contain some malformed jsons that are meant to skip inserting.
+    let skip_error = true;
+    let response = client
+        .post(&format!(
+            "/v1/ingest?table=jsonbench&pipeline_name=jsonbench&skip_error={skip_error}"
+        ))
+        .header("Content-Type", "text/plain")
+        .body(std::fs::read(path).unwrap())
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    // Note that this patten also matches the inserted rows: "74".
+    let pattern = r#"\{"output":\[\{"affectedrows":74}],"execution_time_ms":\d+}"#
+        .parse::<Regex>()
+        .unwrap();
+    assert!(pattern.is_match(&response.text().await));
 
     guard.remove_all().await;
 }
