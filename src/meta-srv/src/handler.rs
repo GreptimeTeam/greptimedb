@@ -318,8 +318,6 @@ impl HeartbeatHandlerGroup {
     }
 
     /// Deregisters the heartbeat response [`Pusher`] with the given key from the group.
-    ///
-    /// Returns the [`Pusher`] if it exists.
     pub async fn deregister_push(&self, pusher_id: PusherId) {
         info!("Pusher unregister: {}", pusher_id);
         if self.pushers.remove(&pusher_id.string_key()).await.is_some() {
