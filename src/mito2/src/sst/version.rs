@@ -57,9 +57,15 @@ impl SstVersion {
     ) {
         for file in files_to_add {
             let level = file.level;
-            self.levels[level as usize]
+            let new_index_version = file.index_version;
+            if let Some(old_file_handle) = self.levels[level as usize]
                 .files
-                .insert(file.file_id, FileHandle::new(file, file_purger.clone()));
+                .insert(file.file_id, FileHandle::new(file, file_purger.clone()))
+                && old_file_handle.index_id().version < new_index_version
+            {
+                // now the old file handle's index is outdated
+                old_file_handle.set_index_outdated(true);
+            }
         }
     }
 

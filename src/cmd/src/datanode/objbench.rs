@@ -564,7 +564,7 @@ fn new_noop_file_purger() -> FilePurgerRef {
     #[derive(Debug)]
     struct Noop;
     impl FilePurger for Noop {
-        fn remove_file(&self, _file_meta: FileMeta, _is_delete: bool) {}
+        fn remove_file(&self, _file_meta: FileMeta, _is_delete: bool, _index_outdated: bool) {}
     }
     Arc::new(Noop)
 }
