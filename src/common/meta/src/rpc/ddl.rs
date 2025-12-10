@@ -23,19 +23,20 @@ use api::v1::alter_database_expr::Kind as PbAlterDatabaseKind;
 use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::{
     AlterDatabaseTask as PbAlterDatabaseTask, AlterTableTask as PbAlterTableTask,
-    AlterTableTasks as PbAlterTableTasks, CreateDatabaseTask as PbCreateDatabaseTask,
-    CreateFlowTask as PbCreateFlowTask, CreateTableTask as PbCreateTableTask,
-    CreateTableTasks as PbCreateTableTasks, CreateViewTask as PbCreateViewTask,
-    DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse,
-    DropDatabaseTask as PbDropDatabaseTask, DropFlowTask as PbDropFlowTask,
-    DropTableTask as PbDropTableTask, DropTableTasks as PbDropTableTasks,
-    DropViewTask as PbDropViewTask, Partition, ProcedureId,
+    AlterTableTasks as PbAlterTableTasks, CommentOnTask as PbCommentOnTask,
+    CreateDatabaseTask as PbCreateDatabaseTask, CreateFlowTask as PbCreateFlowTask,
+    CreateTableTask as PbCreateTableTask, CreateTableTasks as PbCreateTableTasks,
+    CreateViewTask as PbCreateViewTask, DdlTaskRequest as PbDdlTaskRequest,
+    DdlTaskResponse as PbDdlTaskResponse, DropDatabaseTask as PbDropDatabaseTask,
+    DropFlowTask as PbDropFlowTask, DropTableTask as PbDropTableTask,
+    DropTableTasks as PbDropTableTasks, DropViewTask as PbDropViewTask, Partition, ProcedureId,
     TruncateTableTask as PbTruncateTableTask,
 };
 use api::v1::{
-    AlterDatabaseExpr, AlterTableExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr,
-    CreateViewExpr, DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, EvalInterval,
-    ExpireAfter, Option as PbOption, QueryContext as PbQueryContext, TruncateTableExpr,
+    AlterDatabaseExpr, AlterTableExpr, CommentObjectType as PbCommentObjectType, CommentOnExpr,
+    CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropDatabaseExpr,
+    DropFlowExpr, DropTableExpr, DropViewExpr, EvalInterval, ExpireAfter, Option as PbOption,
+    QueryContext as PbQueryContext, TruncateTableExpr,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose;
@@ -78,6 +79,7 @@ pub enum DdlTask {
     DropView(DropViewTask),
     #[cfg(feature = "enterprise")]
     CreateTrigger(trigger::CreateTriggerTask),
+    CommentOn(CommentOnTask),
 }
 
 impl DdlTask {
@@ -200,6 +202,11 @@ impl DdlTask {
             view_info,
         })
     }
+
+    /// Creates a [`DdlTask`] to comment on a table, column, or flow.
+    pub fn new_comment_on(task: CommentOnTask) -> Self {
+        DdlTask::CommentOn(task)
+    }
 }
 
 impl TryFrom<Task> for DdlTask {
@@ -278,6 +285,7 @@ impl TryFrom<Task> for DdlTask {
                     .fail()
                 }
             }
+            Task::CommentOnTask(comment_on) => Ok(DdlTask::CommentOn(comment_on.try_into()?)),
         }
     }
 }
@@ -332,6 +340,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             DdlTask::CreateTrigger(task) => Task::CreateTriggerTask(task.try_into()?),
             #[cfg(feature = "enterprise")]
             DdlTask::DropTrigger(task) => Task::DropTriggerTask(task.into()),
+            DdlTask::CommentOn(task) => Task::CommentOnTask(task.into()),
         };
 
         Ok(Self {
@@ -1272,6 +1281,119 @@ impl From<DropFlowTask> for PbDropFlowTask {
                 flow_name,
                 flow_id: Some(api::v1::FlowId { id: flow_id }),
                 drop_if_exists,
+            }),
+        }
+    }
+}
+
+/// Represents the ID of the object being commented on (Table or Flow).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum CommentObjectId {
+    Table(TableId),
+    Flow(FlowId),
+}
+
+/// Comment on table, column, or flow
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CommentOnTask {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub object_type: CommentObjectType,
+    pub object_name: String,
+    /// Column name (only for Column comments)
+    pub column_name: Option<String>,
+    /// Object ID (Table or Flow) for validation and cache invalidation
+    pub object_id: Option<CommentObjectId>,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum CommentObjectType {
+    Table,
+    Column,
+    Flow,
+}
+
+impl CommentOnTask {
+    pub fn table_ref(&self) -> TableReference<'_> {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.object_name,
+        }
+    }
+}
+
+// Proto conversions for CommentObjectType
+impl From<CommentObjectType> for PbCommentObjectType {
+    fn from(object_type: CommentObjectType) -> Self {
+        match object_type {
+            CommentObjectType::Table => PbCommentObjectType::Table,
+            CommentObjectType::Column => PbCommentObjectType::Column,
+            CommentObjectType::Flow => PbCommentObjectType::Flow,
+        }
+    }
+}
+
+impl TryFrom<i32> for CommentObjectType {
+    type Error = error::Error;
+
+    fn try_from(value: i32) -> Result<Self> {
+        match value {
+            0 => Ok(CommentObjectType::Table),
+            1 => Ok(CommentObjectType::Column),
+            2 => Ok(CommentObjectType::Flow),
+            _ => error::InvalidProtoMsgSnafu {
+                err_msg: format!(
+                    "Invalid CommentObjectType value: {}. Valid values are: 0 (Table), 1 (Column), 2 (Flow)",
+                    value
+                ),
+            }
+            .fail(),
+        }
+    }
+}
+
+// Proto conversions for CommentOnTask
+impl TryFrom<PbCommentOnTask> for CommentOnTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbCommentOnTask) -> Result<Self> {
+        let comment_on = pb.comment_on.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected comment_on",
+        })?;
+
+        Ok(CommentOnTask {
+            catalog_name: comment_on.catalog_name,
+            schema_name: comment_on.schema_name,
+            object_type: comment_on.object_type.try_into()?,
+            object_name: comment_on.object_name,
+            column_name: if comment_on.column_name.is_empty() {
+                None
+            } else {
+                Some(comment_on.column_name)
+            },
+            comment: if comment_on.comment.is_empty() {
+                None
+            } else {
+                Some(comment_on.comment)
+            },
+            object_id: None,
+        })
+    }
+}
+
+impl From<CommentOnTask> for PbCommentOnTask {
+    fn from(task: CommentOnTask) -> Self {
+        let pb_object_type: PbCommentObjectType = task.object_type.into();
+        PbCommentOnTask {
+            comment_on: Some(CommentOnExpr {
+                catalog_name: task.catalog_name,
+                schema_name: task.schema_name,
+                object_type: pb_object_type as i32,
+                object_name: task.object_name,
+                column_name: task.column_name.unwrap_or_default(),
+                comment: task.comment.unwrap_or_default(),
             }),
         }
     }

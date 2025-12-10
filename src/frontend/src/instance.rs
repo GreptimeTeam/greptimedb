@@ -84,6 +84,7 @@ use snafu::prelude::*;
 use sql::ast::ObjectNamePartExt;
 use sql::dialect::Dialect;
 use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::comment::CommentObject;
 use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
@@ -897,7 +898,7 @@ pub fn check_permission(
             validate_param(&stmt.table_name, query_ctx)?;
         }
         Statement::ShowCreateFlow(stmt) => {
-            validate_param(&stmt.flow_name, query_ctx)?;
+            validate_flow(&stmt.flow_name, query_ctx)?;
         }
         #[cfg(feature = "enterprise")]
         Statement::ShowCreateTrigger(stmt) => {
@@ -929,6 +930,12 @@ pub fn check_permission(
         Statement::SetVariables(_) | Statement::ShowVariables(_) => {}
         // show charset and show collation won't be checked
         Statement::ShowCharset(_) | Statement::ShowCollation(_) => {}
+
+        Statement::Comment(comment) => match &comment.object {
+            CommentObject::Table(table) => validate_param(table, query_ctx)?,
+            CommentObject::Column { table, .. } => validate_param(table, query_ctx)?,
+            CommentObject::Flow(flow) => validate_flow(flow, query_ctx)?,
+        },
 
         Statement::Insert(insert) => {
             let name = insert.table_name().context(ParseSqlSnafu)?;
@@ -1009,6 +1016,27 @@ fn validate_param(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> 
     let (catalog, schema, _) = table_idents_to_full_name(name, query_ctx)
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
+
+    validate_catalog_and_schema(&catalog, &schema, query_ctx)
+        .map_err(BoxedError::new)
+        .context(SqlExecInterceptedSnafu)
+}
+
+fn validate_flow(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> {
+    let catalog = match &name.0[..] {
+        [_flow] => query_ctx.current_catalog().to_string(),
+        [catalog, _flow] => catalog.to_string_unquoted(),
+        _ => {
+            return InvalidSqlSnafu {
+                err_msg: format!(
+                    "expect flow name to be <catalog>.<flow_name> or <flow_name>, actual: {name}",
+                ),
+            }
+            .fail();
+        }
+    };
+
+    let schema = query_ctx.current_schema();
 
     validate_catalog_and_schema(&catalog, &schema, query_ctx)
         .map_err(BoxedError::new)
@@ -1273,6 +1301,28 @@ mod tests {
 
         // test describe table
         let sql = "DESC TABLE {catalog}{schema}demo;";
-        replace_test(sql, plugins, &query_ctx);
+        replace_test(sql, plugins.clone(), &query_ctx);
+
+        let comment_flow_cases = [
+            ("COMMENT ON FLOW my_flow IS 'comment';", true),
+            ("COMMENT ON FLOW greptime.my_flow IS 'comment';", true),
+            ("COMMENT ON FLOW wrongcatalog.my_flow IS 'comment';", false),
+        ];
+        for (sql, is_ok) in comment_flow_cases {
+            let stmt = &parse_stmt(sql, &GreptimeDbDialect {}).unwrap()[0];
+            let result = check_permission(plugins.clone(), stmt, &query_ctx);
+            assert_eq!(result.is_ok(), is_ok);
+        }
+
+        let show_flow_cases = [
+            ("SHOW CREATE FLOW my_flow;", true),
+            ("SHOW CREATE FLOW greptime.my_flow;", true),
+            ("SHOW CREATE FLOW wrongcatalog.my_flow;", false),
+        ];
+        for (sql, is_ok) in show_flow_cases {
+            let stmt = &parse_stmt(sql, &GreptimeDbDialect {}).unwrap()[0];
+            let result = check_permission(plugins.clone(), stmt, &query_ctx);
+            assert_eq!(result.is_ok(), is_ok);
+        }
     }
 }

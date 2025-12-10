@@ -14,6 +14,7 @@
 
 pub(crate) mod admin_parser;
 mod alter_parser;
+pub(crate) mod comment_parser;
 pub(crate) mod copy_parser;
 pub(crate) mod create_parser;
 pub(crate) mod cursor_parser;
