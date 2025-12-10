@@ -83,7 +83,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_supported_in_s3() {
+    fn test_is_supported_in_gcs() {
         assert!(is_supported_in_gcs(ENDPOINT));
         assert!(is_supported_in_gcs(ROOT));
         assert!(is_supported_in_gcs(BUCKET));
