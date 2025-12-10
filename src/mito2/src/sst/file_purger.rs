@@ -465,8 +465,7 @@ mod tests {
         assert!(!object_store.exists(&index_path).await.unwrap());
     }
 
-    // Tests for Index Reference Counting Logic
-
+    /// Tests for Index Reference Counting Logic
     #[tokio::test]
     async fn test_add_index_reference() {
         let scheduler = Arc::new(LocalScheduler::new(3));
