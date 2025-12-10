@@ -12,15 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
+use std::{fmt, mem};
 
 use common_telemetry::debug;
 use humantime::{format_duration, parse_duration};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Semaphore, TryAcquireError};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 use crate::metrics::{
     COMPACTION_MEMORY_IN_USE, COMPACTION_MEMORY_LIMIT, COMPACTION_MEMORY_REJECTED,
@@ -32,7 +31,7 @@ const PERMIT_GRANULARITY_BYTES: u64 = 1 << 20; // 1 MB
 /// Default wait timeout for compaction memory.
 pub const DEFAULT_MEMORY_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Defines how the scheduler reacts when compaction cannot acquire enough memory.
+/// Defines how to react when compaction cannot acquire enough memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnExhaustedPolicy {
     /// Wait until enough memory is released, bounded by timeout.
@@ -101,7 +100,7 @@ pub struct CompactionMemoryManager {
 }
 
 struct Inner {
-    semaphore: Semaphore,
+    semaphore: Arc<Semaphore>,
     limit_permits: u32,
 }
 
@@ -120,7 +119,7 @@ impl CompactionMemoryManager {
 
         Self {
             inner: Some(Arc::new(Inner {
-                semaphore: Semaphore::new(limit_permits as usize),
+                semaphore: Arc::new(Semaphore::new(limit_permits as usize)),
                 limit_permits,
             })),
         }
@@ -160,10 +159,14 @@ impl CompactionMemoryManager {
                     return CompactionMemoryGuard::unlimited();
                 }
 
-                let permit = inner.semaphore.acquire_many(permits).await.unwrap();
-                permit.forget();
+                let permit = inner
+                    .semaphore
+                    .clone()
+                    .acquire_many_owned(permits)
+                    .await
+                    .unwrap();
                 inner.on_acquire();
-                CompactionMemoryGuard::limited(inner.clone(), permits)
+                CompactionMemoryGuard::limited(permit, inner.clone())
             }
         }
     }
@@ -178,11 +181,10 @@ impl CompactionMemoryManager {
                     return Some(CompactionMemoryGuard::unlimited());
                 }
 
-                match inner.semaphore.try_acquire_many(permits) {
+                match inner.semaphore.clone().try_acquire_many_owned(permits) {
                     Ok(permit) => {
-                        permit.forget();
                         inner.on_acquire();
-                        Some(CompactionMemoryGuard::limited(inner.clone(), permits))
+                        Some(CompactionMemoryGuard::limited(permit, inner.clone()))
                     }
                     Err(TryAcquireError::NoPermits) | Err(TryAcquireError::Closed) => {
                         COMPACTION_MEMORY_REJECTED
@@ -198,14 +200,6 @@ impl CompactionMemoryManager {
 
 impl Inner {
     fn on_acquire(&self) {
-        self.update_in_use_metric();
-    }
-
-    fn release(&self, permits: u32) {
-        if permits == 0 {
-            return;
-        }
-        self.semaphore.add_permits(permits as usize);
         self.update_in_use_metric();
     }
 
@@ -230,9 +224,7 @@ impl Inner {
 
 /// Guard representing a slice of reserved compaction memory.
 ///
-/// NOTE: `AdditionalMemoryGuard` must not outlive this guard. Dropping this guard
-/// will release both base and additional permits; any surviving additional guard
-/// would then observe zero permits and run without actually holding memory.
+/// Memory is automatically released when this guard is dropped.
 pub struct CompactionMemoryGuard {
     state: GuardState,
 }
@@ -240,11 +232,11 @@ pub struct CompactionMemoryGuard {
 enum GuardState {
     Unlimited,
     Limited {
+        /// Holds all permits owned by this guard (base plus any additional).
+        /// Additional requests merge into this permit and are released together on drop.
+        permit: OwnedSemaphorePermit,
+        /// Reference to inner for metrics updates.
         inner: Arc<Inner>,
-        /// Base quota allocated at task startup.
-        base_permits: u32,
-        /// Additional memory allocated during task execution.
-        additional_permits: Arc<AtomicI64>,
     },
 }
 
@@ -255,112 +247,59 @@ impl CompactionMemoryGuard {
         }
     }
 
-    fn limited(inner: Arc<Inner>, base_permits: u32) -> Self {
+    fn limited(permit: OwnedSemaphorePermit, inner: Arc<Inner>) -> Self {
         Self {
-            state: GuardState::Limited {
-                inner,
-                base_permits,
-                additional_permits: Arc::new(AtomicI64::new(0)),
-            },
+            state: GuardState::Limited { permit, inner },
         }
     }
 
-    /// Returns granted base quota in bytes.
+    /// Returns granted quota in bytes.
     pub fn granted_bytes(&self) -> u64 {
         match &self.state {
             GuardState::Unlimited => 0,
-            GuardState::Limited { base_permits, .. } => permits_to_bytes(*base_permits),
-        }
-    }
-
-    /// Returns total memory usage (base + additional) in bytes.
-    pub fn total_bytes(&self) -> u64 {
-        match &self.state {
-            GuardState::Unlimited => 0,
-            GuardState::Limited {
-                base_permits,
-                additional_permits,
-                ..
-            } => {
-                let additional = additional_permits.load(Ordering::Relaxed).max(0) as u64;
-                permits_to_bytes(*base_permits) + permits_to_bytes(additional as u32)
-            }
-        }
-    }
-
-    /// Returns additional memory usage in bytes.
-    pub fn additional_bytes(&self) -> u64 {
-        match &self.state {
-            GuardState::Unlimited => 0,
-            GuardState::Limited {
-                additional_permits, ..
-            } => {
-                let additional = additional_permits.load(Ordering::Relaxed).max(0) as u32;
-                permits_to_bytes(additional)
-            }
+            GuardState::Limited { permit, .. } => permits_to_bytes(permit.num_permits() as u32),
         }
     }
 
     /// Tries to allocate additional memory during task execution.
     ///
-    /// Returns `Some(guard)` on success, `None` if the allocation would exceed the global limit.
-    /// The returned guard will automatically release the memory when dropped.
+    /// On success, merges the new memory into this guard and returns true.
+    /// On failure, returns false and leaves this guard unchanged.
     ///
     /// # Behavior
-    /// - Running tasks can request additional memory beyond their base quota
-    /// - If total memory (all tasks) would exceed limit, returns `None` immediately
-    /// - The task should gracefully fail when this returns `None`
-    /// - Memory is automatically released when the returned guard is dropped
-    pub fn request_additional(&self, bytes: u64) -> Option<AdditionalMemoryGuard> {
-        match &self.state {
-            GuardState::Unlimited => Some(AdditionalMemoryGuard {
-                state: AdditionalGuardState::Unlimited,
-            }),
-            GuardState::Limited {
-                inner,
-                additional_permits,
-                ..
-            } => {
-                let permits = bytes_to_permits(bytes);
-                if permits == 0 {
-                    return Some(AdditionalMemoryGuard {
-                        state: AdditionalGuardState::Unlimited,
-                    });
+    /// - Running tasks can request additional memory on top of their initial allocation
+    /// - If total memory (all tasks) would exceed limit, returns false immediately
+    /// - The task should gracefully handle false by failing or adjusting its strategy
+    /// - The additional memory is merged into this guard and released together on drop
+    pub fn request_additional(&mut self, bytes: u64) -> bool {
+        match &mut self.state {
+            GuardState::Unlimited => true,
+            GuardState::Limited { permit, inner } => {
+                let additional_permits = bytes_to_permits(bytes);
+                if additional_permits == 0 {
+                    return true;
                 }
 
-                // Try to acquire from global semaphore
-                match inner.semaphore.try_acquire_many(permits) {
-                    Ok(permit) => {
-                        permit.forget();
-
-                        // Record in additional_permits
-                        additional_permits.fetch_add(permits as i64, Ordering::Relaxed);
-
-                        // Update metrics
+                // Try to acquire additional permits from global semaphore
+                match inner
+                    .semaphore
+                    .clone()
+                    .try_acquire_many_owned(additional_permits)
+                {
+                    Ok(additional_permit) => {
+                        // Merge into main permit
+                        permit.merge(additional_permit);
                         inner.update_in_use_metric();
 
-                        debug!(
-                            "Allocated additional {} bytes ({} permits), total additional: {}",
-                            bytes,
-                            permits,
-                            permits_to_bytes(
-                                additional_permits.load(Ordering::Relaxed).max(0) as u32
-                            )
-                        );
+                        debug!("Allocated additional {} bytes", bytes);
 
-                        Some(AdditionalMemoryGuard {
-                            state: AdditionalGuardState::Limited {
-                                inner: inner.clone(),
-                                permits,
-                                parent_additional: additional_permits.clone(),
-                            },
-                        })
+                        true
                     }
                     Err(TryAcquireError::NoPermits) | Err(TryAcquireError::Closed) => {
                         COMPACTION_MEMORY_REJECTED
                             .with_label_values(&["request_additional"])
                             .inc();
-                        None
+                        false
                     }
                 }
             }
@@ -370,102 +309,24 @@ impl CompactionMemoryGuard {
 
 impl Drop for CompactionMemoryGuard {
     fn drop(&mut self) {
-        if let GuardState::Limited {
-            inner,
-            base_permits,
-            additional_permits,
-        } = &self.state
+        if let GuardState::Limited { permit, inner } =
+            mem::replace(&mut self.state, GuardState::Unlimited)
         {
-            // Swap additional_permits to 0 and release base + whatever additional remains.
-            // If additional is negative (children dropped after swap), we only release base.
-            let additional = additional_permits.swap(0, Ordering::Relaxed).max(0) as u32;
-            let total_permits = base_permits + additional;
+            let bytes = permits_to_bytes(permit.num_permits() as u32);
 
-            if total_permits > 0 {
-                inner.release(total_permits);
-            }
+            // Release permits before updating metrics to reflect latest usage.
+            drop(permit);
+            inner.update_in_use_metric();
 
-            debug!(
-                "Released compaction memory: total={} bytes",
-                permits_to_bytes(total_permits)
-            );
+            debug!("Released compaction memory: {} bytes", bytes);
         }
-    }
-}
-
-/// RAII guard for additional memory allocated during task execution.
-///
-/// NOTE: Lifetime must not exceed the parent `CompactionMemoryGuard`. The parent
-/// releases base+additional permits on drop; if this guard outlives it, the
-/// remaining work would proceed without actually holding memory.
-/// Purpose: allows releasing portions of additional permits early while the
-/// parent task continues. The parent guard's drop still releases any remaining
-/// additional permits as a safety net.
-///
-/// When dropped, the memory is automatically released back to the global pool.
-pub struct AdditionalMemoryGuard {
-    state: AdditionalGuardState,
-}
-
-enum AdditionalGuardState {
-    Unlimited,
-    Limited {
-        inner: Arc<Inner>,
-        permits: u32,
-        parent_additional: Arc<AtomicI64>,
-    },
-}
-
-impl AdditionalMemoryGuard {
-    /// Returns the amount of memory held by this guard in bytes.
-    pub fn bytes(&self) -> u64 {
-        match &self.state {
-            AdditionalGuardState::Unlimited => 0,
-            AdditionalGuardState::Limited { permits, .. } => permits_to_bytes(*permits),
-        }
-    }
-}
-
-impl Drop for AdditionalMemoryGuard {
-    fn drop(&mut self) {
-        if let AdditionalGuardState::Limited {
-            inner,
-            permits,
-            parent_additional,
-        } = &self.state
-            && *permits > 0
-        {
-            // fetch_sub returns the previous value.
-            // If prev < permits (including negative), parent already released via swap(0).
-            let prev = parent_additional.fetch_sub(*permits as i64, Ordering::Relaxed);
-
-            if prev < *permits as i64 {
-                return;
-            }
-            inner.release(*permits);
-            debug!(
-                "Released additional {} bytes ({} permits)",
-                permits_to_bytes(*permits),
-                permits
-            );
-        }
-    }
-}
-
-impl fmt::Debug for AdditionalMemoryGuard {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AdditionalMemoryGuard")
-            .field("bytes", &self.bytes())
-            .finish()
     }
 }
 
 impl fmt::Debug for CompactionMemoryGuard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CompactionMemoryGuard")
-            .field("base_bytes", &self.granted_bytes())
-            .field("additional_bytes", &self.additional_bytes())
-            .field("total_bytes", &self.total_bytes())
+            .field("granted_bytes", &self.granted_bytes())
             .finish()
     }
 }
@@ -550,26 +411,14 @@ mod tests {
 
         // Acquire base quota (5MB)
         let base = 5 * PERMIT_GRANULARITY_BYTES;
-        let guard = manager.try_acquire(base).unwrap();
+        let mut guard = manager.try_acquire(base).unwrap();
         assert_eq!(guard.granted_bytes(), base);
-        assert_eq!(guard.additional_bytes(), 0);
-        assert_eq!(guard.total_bytes(), base);
         assert_eq!(manager.used_bytes(), base);
 
-        // Request additional memory (3MB) - should succeed
-        let additional1 = guard
-            .request_additional(3 * PERMIT_GRANULARITY_BYTES)
-            .unwrap();
-        assert_eq!(additional1.bytes(), 3 * PERMIT_GRANULARITY_BYTES);
-        assert_eq!(guard.additional_bytes(), 3 * PERMIT_GRANULARITY_BYTES);
-        assert_eq!(guard.total_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
+        // Request additional memory (3MB) - should succeed and merge
+        assert!(guard.request_additional(3 * PERMIT_GRANULARITY_BYTES));
+        assert_eq!(guard.granted_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
         assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
-
-        // Release additional1
-        drop(additional1);
-        assert_eq!(guard.additional_bytes(), 0);
-        assert_eq!(guard.total_bytes(), base);
-        assert_eq!(manager.used_bytes(), base);
     }
 
     #[test]
@@ -579,20 +428,19 @@ mod tests {
 
         // Acquire base quota (5MB)
         let base = 5 * PERMIT_GRANULARITY_BYTES;
-        let guard = manager.try_acquire(base).unwrap();
+        let mut guard = manager.try_acquire(base).unwrap();
 
         // Request additional memory (3MB) - should succeed
-        let _additional1 = guard
-            .request_additional(3 * PERMIT_GRANULARITY_BYTES)
-            .unwrap();
+        assert!(guard.request_additional(3 * PERMIT_GRANULARITY_BYTES));
         assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
 
         // Request more (3MB) - should fail (would exceed 10MB limit)
         let result = guard.request_additional(3 * PERMIT_GRANULARITY_BYTES);
-        assert!(result.is_none());
+        assert!(!result);
 
         // Still at 8MB
         assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
+        assert_eq!(guard.granted_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
     }
 
     #[test]
@@ -601,68 +449,51 @@ mod tests {
         let manager = CompactionMemoryManager::new(limit);
 
         {
-            let guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
+            let mut guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
 
-            // Request additional but don't explicitly drop the AdditionalMemoryGuard
-            let _additional = guard
-                .request_additional(3 * PERMIT_GRANULARITY_BYTES)
-                .unwrap();
+            // Request additional - memory is merged into guard
+            assert!(guard.request_additional(3 * PERMIT_GRANULARITY_BYTES));
             assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
 
-            // When guard drops, both base and additional should be released
+            // When guard drops, all memory (base + additional) is released together
         }
 
-        // All memory should be released
+        // After scope, all memory should be released
         assert_eq!(manager.used_bytes(), 0);
     }
 
     #[test]
     fn test_request_additional_unlimited() {
         let manager = CompactionMemoryManager::new(0); // Unlimited
-        let guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
+        let mut guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
 
         // Should always succeed with unlimited manager
-        let additional = guard
-            .request_additional(100 * PERMIT_GRANULARITY_BYTES)
-            .unwrap();
-        assert_eq!(additional.bytes(), 0); // Unlimited returns 0
-        assert_eq!(guard.additional_bytes(), 0);
+        assert!(guard.request_additional(100 * PERMIT_GRANULARITY_BYTES));
+        assert_eq!(guard.granted_bytes(), 0);
+        assert_eq!(manager.used_bytes(), 0);
     }
 
     #[test]
-    fn test_multiple_additional_guards() {
+    fn test_multiple_additional_requests() {
         let limit = 20 * PERMIT_GRANULARITY_BYTES;
         let manager = CompactionMemoryManager::new(limit);
 
-        let guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
+        let mut guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
         assert_eq!(manager.used_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
 
-        // Request multiple additional allocations
-        let add1 = guard
-            .request_additional(3 * PERMIT_GRANULARITY_BYTES)
-            .unwrap();
-        let add2 = guard
-            .request_additional(4 * PERMIT_GRANULARITY_BYTES)
-            .unwrap();
-        let add3 = guard
-            .request_additional(2 * PERMIT_GRANULARITY_BYTES)
-            .unwrap();
+        // Request multiple additional allocations - all merged into guard
+        assert!(guard.request_additional(3 * PERMIT_GRANULARITY_BYTES));
+        assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
 
-        assert_eq!(guard.additional_bytes(), 9 * PERMIT_GRANULARITY_BYTES);
+        assert!(guard.request_additional(4 * PERMIT_GRANULARITY_BYTES));
+        assert_eq!(manager.used_bytes(), 12 * PERMIT_GRANULARITY_BYTES);
+
+        assert!(guard.request_additional(2 * PERMIT_GRANULARITY_BYTES));
         assert_eq!(manager.used_bytes(), 14 * PERMIT_GRANULARITY_BYTES);
 
-        // Release in different order
-        drop(add2);
-        assert_eq!(guard.additional_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
-        assert_eq!(manager.used_bytes(), 10 * PERMIT_GRANULARITY_BYTES);
-
-        drop(add1);
-        assert_eq!(guard.additional_bytes(), 2 * PERMIT_GRANULARITY_BYTES);
-        assert_eq!(manager.used_bytes(), 7 * PERMIT_GRANULARITY_BYTES);
-
-        drop(add3);
-        assert_eq!(guard.additional_bytes(), 0);
-        assert_eq!(manager.used_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
+        // All memory released together when guard drops
+        drop(guard);
+        assert_eq!(manager.used_bytes(), 0);
     }
 
     #[test]
@@ -670,38 +501,30 @@ mod tests {
         let limit = 10 * PERMIT_GRANULARITY_BYTES;
         let manager = CompactionMemoryManager::new(limit);
 
-        let guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
+        let mut guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
 
         // Request 0 bytes should succeed without affecting anything
-        let additional = guard.request_additional(0).unwrap();
-        assert_eq!(additional.bytes(), 0);
-        assert_eq!(guard.additional_bytes(), 0);
+        assert!(guard.request_additional(0));
+        assert_eq!(guard.granted_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
         assert_eq!(manager.used_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
     }
 
     #[test]
-    fn test_guard_drop_before_additional_drop() {
-        // Test that dropping CompactionMemoryGuard before AdditionalMemoryGuard
-        // doesn't cause double-release
+    fn test_request_additional_incremental() {
+        // Test that additional memory is properly merged and released as one unit
         let limit = 10 * PERMIT_GRANULARITY_BYTES;
         let manager = CompactionMemoryManager::new(limit);
 
-        let additional = {
-            let guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
-            let additional = guard
-                .request_additional(3 * PERMIT_GRANULARITY_BYTES)
-                .unwrap();
-            assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
+        let mut guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
+        assert_eq!(guard.granted_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
 
-            // Move additional out, guard will be dropped here
-            additional
-        };
+        // Request additional - memory is merged
+        assert!(guard.request_additional(3 * PERMIT_GRANULARITY_BYTES));
+        assert_eq!(guard.granted_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
+        assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
 
-        // After guard drop, all memory should be released (including additional)
-        assert_eq!(manager.used_bytes(), 0);
-
-        // Now drop additional - should not cause any issues (no double-release)
-        drop(additional);
+        // Drop guard - all memory released together
+        drop(guard);
         assert_eq!(manager.used_bytes(), 0);
 
         // Verify we can still allocate the full limit
