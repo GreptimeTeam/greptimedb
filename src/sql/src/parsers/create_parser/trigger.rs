@@ -259,7 +259,10 @@ impl<'a> ParserContext<'a> {
         {
             self.parser.next_token();
         } else {
-            return self.expected("`FOR` keyword after `KEEP FIRING`", self.parser.peek_token());
+            return self.expected(
+                "`FOR` keyword after `KEEP FIRING`",
+                self.parser.peek_token(),
+            );
         }
 
         let (month_day_nano, raw_expr) = self.parse_interval_month_day_nano()?;
