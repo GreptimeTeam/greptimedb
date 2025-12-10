@@ -538,38 +538,89 @@ pub async fn delete_files(
     );
 
     for (file_id, index_version) in file_ids {
-        if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache()) {
-            // Removes index file from the cache.
-            if delete_index {
-                write_cache
-                    .remove(IndexKey::new(
-                        region_id,
-                        *file_id,
-                        FileType::Puffin(*index_version),
-                    ))
-                    .await;
-            }
+        purge_index_write_cache_stager(
+            region_id,
+            delete_index,
+            access_layer,
+            cache_manager,
+            file_id,
+            index_version,
+        )
+        .await;
+    }
+    Ok(())
+}
 
-            // Remove the SST file from the cache.
+/// Delete index file for a given SST file&index version.
+pub async fn delete_index(
+    region_id: RegionId,
+    file_id: FileId,
+    index_version: u64,
+    access_layer: &AccessLayerRef,
+    cache_manager: &Option<CacheManagerRef>,
+) -> crate::error::Result<()> {
+    if let Err(err) = access_layer
+        .delete_index(&RegionIndexId::new(
+            RegionFileId::new(region_id, file_id),
+            index_version,
+        ))
+        .await
+    {
+        error!(err; "Failed to delete index file for {}/{}.{}",
+            region_id, file_id, index_version);
+    }
+
+    purge_index_write_cache_stager(
+        region_id,
+        true,
+        access_layer,
+        cache_manager,
+        &file_id,
+        &index_version,
+    )
+    .await;
+
+    Ok(())
+}
+
+pub async fn purge_index_write_cache_stager(
+    region_id: RegionId,
+    delete_index: bool,
+    access_layer: &Arc<crate::access_layer::AccessLayer>,
+    cache_manager: &Option<Arc<crate::cache::CacheManager>>,
+    file_id: &FileId,
+    index_version: &u64,
+) {
+    if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache()) {
+        // Removes index file from the cache.
+        if delete_index {
             write_cache
-                .remove(IndexKey::new(region_id, *file_id, FileType::Parquet))
+                .remove(IndexKey::new(
+                    region_id,
+                    *file_id,
+                    FileType::Puffin(*index_version),
+                ))
                 .await;
         }
 
-        // Purges index content in the stager.
-        if let Err(e) = access_layer
-            .puffin_manager_factory()
-            .purge_stager(RegionIndexId::new(
-                RegionFileId::new(region_id, *file_id),
-                *index_version,
-            ))
-            .await
-        {
-            error!(e; "Failed to purge stager with index file, file_id: {}, index_version: {}, region: {}",
-                    file_id, index_version, region_id);
-        }
+        // Remove the SST file from the cache.
+        write_cache
+            .remove(IndexKey::new(region_id, *file_id, FileType::Parquet))
+            .await;
     }
-    Ok(())
+
+    // Purges index content in the stager.
+    if let Err(e) = access_layer
+        .puffin_manager_factory()
+        .purge_stager(RegionIndexId::new(
+            RegionFileId::new(region_id, *file_id),
+            *index_version,
+        ))
+        .await
+    {
+        error!(e; "Failed to purge stager with index file, file_id: {}, index_version: {}, region: {}",
+                file_id, index_version, region_id);
+    }
 }
 
 #[cfg(test)]
