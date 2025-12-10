@@ -391,11 +391,9 @@ impl FileCache {
                 let file_path = cache_file_path(FILE_DIR, *key);
                 async move {
                     if let RemovalCause::Replaced = cause {
-                        // The cache is replaced by another file. This is unexpected, we don't remove the same
+                        // The cache is replaced by another file (maybe download again). We don't remove the same
                         // file but updates the metrics as the file is already replaced by users.
                         CACHE_BYTES.with_label_values(&[label]).sub(value.file_size.into());
-                        // TODO(yingwen): Don't log warn later.
-                        warn!("Replace existing cache {} for region {} unexpectedly", file_path, key.region_id);
                         return;
                     }
 
