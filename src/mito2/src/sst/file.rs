@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::PathType;
-use store_api::storage::{ColumnId, FileId, RegionId};
+use store_api::storage::{ColumnId, FileId, IndexVersion, RegionId};
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
@@ -82,8 +82,6 @@ pub type Level = u8;
 pub const MAX_LEVEL: Level = 2;
 /// Type to store index types for a column.
 pub type IndexTypes = SmallVec<[IndexType; 4]>;
-/// Index version
-pub type IndexVersion = u64;
 
 /// Cross-region file id.
 ///
