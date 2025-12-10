@@ -264,6 +264,11 @@ impl FileCacheInner {
 
         Ok(())
     }
+
+    /// Checks if the key is in the file cache.
+    fn contains_key(&self, key: &IndexKey) -> bool {
+        self.memory_index(key.file_type).contains_key(key)
+    }
 }
 
 /// A file cache manages files on local store and evict files based
@@ -342,6 +347,15 @@ impl FileCache {
         tokio::spawn(async move {
             info!("Background download worker started");
             while let Some(task) = download_task_rx.recv().await {
+                // Check if the file is already in the cache
+                if inner.contains_key(&task.index_key) {
+                    debug!(
+                        "Skipping background download for region {}, file {} - already in cache",
+                        task.index_key.region_id, task.index_key.file_id
+                    );
+                    continue;
+                }
+
                 // Ignores background download errors.
                 let _ = inner
                     .download(
@@ -597,7 +611,7 @@ impl FileCache {
 
     /// Checks if the key is in the file cache.
     pub(crate) fn contains_key(&self, key: &IndexKey) -> bool {
-        self.inner.memory_index(key.file_type).contains_key(key)
+        self.inner.contains_key(key)
     }
 
     /// Returns the capacity of the puffin (index) cache in bytes.
