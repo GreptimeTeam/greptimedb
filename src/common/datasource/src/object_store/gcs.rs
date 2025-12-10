@@ -39,7 +39,7 @@ pub fn is_supported_in_gcs(key: &str) -> bool {
     .contains(&key)
 }
 
-/// Build an gcs backend using the provided bucket, root, and connection parameters.
+/// Build a gcs backend using the provided bucket, root, and connection parameters.
 pub fn build_gcs_backend(
     bucket: &str,
     root: &str,
