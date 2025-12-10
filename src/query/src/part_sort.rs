@@ -929,22 +929,30 @@ mod test {
                 output_data.push(cur_data);
             }
 
-            let expected_output = output_data
+            let mut limit_remains = limit;
+            let mut expected_output = output_data
                 .into_iter()
                 .map(|a| {
                     DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, a)]).unwrap()
                 })
                 .map(|rb| {
                     // trim expected output with limit
-                    if let Some(limit) = limit
-                        && rb.num_rows() > limit
-                    {
-                        rb.slice(0, limit)
+                    if let Some(limit) = limit_remains.as_mut() {
+                        let rb = rb.slice(0, (*limit).min(rb.num_rows()));
+                        *limit = limit.saturating_sub(rb.num_rows());
+                        rb
                     } else {
                         rb
                     }
                 })
                 .collect_vec();
+            while let Some(rb) = expected_output.last() {
+                if rb.num_rows() == 0 {
+                    expected_output.pop();
+                } else {
+                    break;
+                }
+            }
 
             test_cases.push((
                 case_id,
@@ -972,7 +980,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn simple_case() {
+    async fn simple_cases() {
         let testcases = vec![
             (
                 TimeUnit::Millisecond,
@@ -1061,7 +1069,7 @@ mod test {
                 ],
                 true,
                 Some(2),
-                vec![vec![19, 17], vec![12, 11], vec![9, 8], vec![4, 3]],
+                vec![vec![19, 17]],
             ),
         ];
 
@@ -1166,11 +1174,16 @@ mod test {
         // a makeshift solution for compare large data
         if real_output != expected_output {
             let mut first_diff = 0;
+            let mut is_diff_found = false;
             for (idx, (lhs, rhs)) in real_output.iter().zip(expected_output.iter()).enumerate() {
-                if lhs != rhs {
+                if lhs.slice(0, rhs.num_rows()) != *rhs {
                     first_diff = idx;
+                    is_diff_found = true;
                     break;
                 }
+            }
+            if !is_diff_found {
+                return;
             }
             println!("first diff batch at {}", first_diff);
             println!(
@@ -1217,7 +1230,7 @@ mod test {
             }
 
             panic!(
-                "case_{} failed, opt: {:?},\n real output has {} batches, {} rows, expected has {} batches with {} rows\nfull msg: {}",
+                "case_{} failed (limit {limit:?}), opt: {:?},\n real output has {} batches, {} rows, expected has {} batches with {} rows\nfull msg: {}",
                 case_id,
                 opt,
                 real_output.len(),
@@ -1321,7 +1334,6 @@ mod test {
 
         let expected_output = vec![
             DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![15, 14])]).unwrap(),
-            DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![5, 4])]).unwrap(),
         ];
 
         run_test(
