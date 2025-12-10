@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
+use std::sync::Arc;
 
 use index::inverted_index::search::index_apply::ApplyOutput;
 use itertools::Itertools;
@@ -31,14 +32,25 @@ pub struct RowGroupSelection {
 }
 
 /// A row selection with its count.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct RowSelectionWithCount {
-    /// Row selection.
-    selection: RowSelection,
+    /// Row selection wrapped in Arc to enable cheap cloning when merging index results.
+    /// This reduces memory allocations when concatenating cached results with new results.
+    selection: Arc<RowSelection>,
     /// Number of rows in the selection.
     row_count: usize,
     /// Length of the selectors.
     selector_len: usize,
+}
+
+impl Default for RowSelectionWithCount {
+    fn default() -> Self {
+        Self {
+            selection: Arc::new(RowSelection::from(vec![])),
+            row_count: 0,
+            selector_len: 0,
+        }
+    }
 }
 
 impl RowGroupSelection {
@@ -63,7 +75,7 @@ impl RowGroupSelection {
             selection_in_rg.insert(
                 rg_id,
                 RowSelectionWithCount {
-                    selection,
+                    selection: Arc::new(selection),
                     row_count: row_group_size,
                     selector_len: 1,
                 },
@@ -81,7 +93,9 @@ impl RowGroupSelection {
     ///
     /// `None` indicates not selected.
     pub fn get(&self, rg_id: usize) -> Option<&RowSelection> {
-        self.selection_in_rg.get(&rg_id).map(|x| &x.selection)
+        self.selection_in_rg
+            .get(&rg_id)
+            .map(|x| x.selection.as_ref())
     }
 
     /// Creates a new `RowGroupSelection` from the output of inverted index application.
@@ -136,7 +150,7 @@ impl RowGroupSelection {
                 (
                     row_group_id,
                     RowSelectionWithCount {
-                        selection,
+                        selection: Arc::new(selection),
                         row_count,
                         selector_len,
                     },
@@ -188,7 +202,7 @@ impl RowGroupSelection {
                 (
                     row_group_id,
                     RowSelectionWithCount {
-                        selection,
+                        selection: Arc::new(selection),
                         row_count,
                         selector_len,
                     },
@@ -234,7 +248,7 @@ impl RowGroupSelection {
                 (
                     row_group_id,
                     RowSelectionWithCount {
-                        selection,
+                        selection: Arc::new(selection),
                         row_count,
                         selector_len,
                     },
@@ -303,7 +317,7 @@ impl RowGroupSelection {
                 res.insert(
                     *rg_id,
                     RowSelectionWithCount {
-                        selection,
+                        selection: Arc::new(selection),
                         row_count,
                         selector_len,
                     },
@@ -344,6 +358,8 @@ impl RowGroupSelection {
             if row_count > 0 {
                 self.row_count -= row_count;
                 self.selector_len -= selector_len;
+                // Try to unwrap Arc; if there are other references, clone the inner value
+                let selection = Arc::unwrap_or_clone(selection);
                 return Some((row_group_id, selection));
             }
         }
@@ -387,7 +403,7 @@ impl RowGroupSelection {
     pub fn iter(&self) -> impl Iterator<Item = (&usize, &RowSelection)> {
         self.selection_in_rg
             .iter()
-            .map(|(row_group_id, x)| (row_group_id, &x.selection))
+            .map(|(row_group_id, x)| (row_group_id, x.selection.as_ref()))
     }
 
     /// Returns the memory usage of the selection.
