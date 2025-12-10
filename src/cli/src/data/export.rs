@@ -195,7 +195,7 @@ pub struct ExportCommand {
     #[clap(long)]
     gcs_bucket: Option<String>,
 
-    // The gcs root path
+    /// The gcs root path
     /// if gcs is set, this is required
     #[clap(long)]
     gcs_root: Option<String>,
