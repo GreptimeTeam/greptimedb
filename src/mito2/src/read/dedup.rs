@@ -90,17 +90,17 @@ impl<R, S> Drop for DedupReader<R, S> {
     fn drop(&mut self) {
         debug!("Dedup reader finished, metrics: {:?}", self.metrics);
 
-        // Report any remaining metrics.
-        if let Some(reporter) = &self.metrics_reporter {
-            reporter.report(&mut self.metrics);
-        }
-
         MERGE_FILTER_ROWS_TOTAL
             .with_label_values(&["dedup"])
             .inc_by(self.metrics.num_unselected_rows as u64);
         MERGE_FILTER_ROWS_TOTAL
             .with_label_values(&["delete"])
             .inc_by(self.metrics.num_unselected_rows as u64);
+
+        // Report any remaining metrics.
+        if let Some(reporter) = &self.metrics_reporter {
+            reporter.report(&mut self.metrics);
+        }
     }
 }
 

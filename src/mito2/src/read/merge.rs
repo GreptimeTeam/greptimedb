@@ -96,17 +96,17 @@ impl Drop for MergeReader {
     fn drop(&mut self) {
         debug!("Merge reader finished, metrics: {:?}", self.metrics);
 
-        // Report any remaining metrics.
-        if let Some(reporter) = &self.metrics_reporter {
-            reporter.report(&mut self.metrics);
-        }
-
         READ_STAGE_ELAPSED
             .with_label_values(&["merge"])
             .observe(self.metrics.scan_cost.as_secs_f64());
         READ_STAGE_ELAPSED
             .with_label_values(&["merge_fetch"])
             .observe(self.metrics.fetch_cost.as_secs_f64());
+
+        // Report any remaining metrics.
+        if let Some(reporter) = &self.metrics_reporter {
+            reporter.report(&mut self.metrics);
+        }
     }
 }
 

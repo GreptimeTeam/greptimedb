@@ -143,17 +143,17 @@ impl<I, S> Drop for FlatDedupReader<I, S> {
     fn drop(&mut self) {
         debug!("Flat dedup reader finished, metrics: {:?}", self.metrics);
 
-        // Report any remaining metrics.
-        if let Some(reporter) = &self.metrics_reporter {
-            reporter.report(&mut self.metrics);
-        }
-
         MERGE_FILTER_ROWS_TOTAL
             .with_label_values(&["dedup"])
             .inc_by(self.metrics.num_unselected_rows as u64);
         MERGE_FILTER_ROWS_TOTAL
             .with_label_values(&["delete"])
             .inc_by(self.metrics.num_deleted_rows as u64);
+
+        // Report any remaining metrics.
+        if let Some(reporter) = &self.metrics_reporter {
+            reporter.report(&mut self.metrics);
+        }
     }
 }
 
@@ -382,11 +382,11 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
     }
 
     fn finish(&mut self, metrics: &mut DedupMetrics) -> Result<Option<RecordBatch>> {
-        let start = Instant::now();
-
         let Some(buffer) = self.buffer.take() else {
             return Ok(None);
         };
+
+        let start = Instant::now();
 
         let result = maybe_filter_deleted(buffer.last_batch, self.filter_deleted, metrics);
 

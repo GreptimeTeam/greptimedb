@@ -707,17 +707,17 @@ impl Drop for FlatMergeReader {
     fn drop(&mut self) {
         debug!("Flat merge reader finished, metrics: {:?}", self.metrics);
 
-        // Report any remaining metrics.
-        if let Some(reporter) = &self.metrics_reporter {
-            reporter.report(&mut self.metrics);
-        }
-
         READ_STAGE_ELAPSED
             .with_label_values(&["flat_merge"])
             .observe(self.metrics.scan_cost.as_secs_f64());
         READ_STAGE_ELAPSED
             .with_label_values(&["flat_merge_fetch"])
             .observe(self.metrics.fetch_cost.as_secs_f64());
+
+        // Report any remaining metrics.
+        if let Some(reporter) = &self.metrics_reporter {
+            reporter.report(&mut self.metrics);
+        }
     }
 }
 
