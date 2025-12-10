@@ -284,7 +284,6 @@ struct PartSortStream {
     buffer: PartSortBuffer,
     expression: PhysicalSortExpr,
     limit: Option<usize>,
-    produced: usize,
     input: DfSendableRecordBatchStream,
     input_complete: bool,
     schema: SchemaRef,
@@ -340,7 +339,6 @@ impl PartSortStream {
             buffer,
             expression: sort.expression.clone(),
             limit,
-            produced: 0,
             input,
             input_complete: false,
             schema: sort.input.schema(),
@@ -565,7 +563,6 @@ impl PartSortStream {
             )
         })?;
 
-        self.produced += sorted.num_rows();
         drop(full_input);
         // here remove both buffer and full_input memory
         self.reservation.shrink(2 * total_mem);
@@ -624,7 +621,6 @@ impl PartSortStream {
             )
         })?;
 
-        self.produced += concat_batch.num_rows();
         Ok(concat_batch)
     }
 
@@ -670,6 +666,10 @@ impl PartSortStream {
 
         // If we've processed all partitions, discard remaining data
         if self.cur_part_idx >= self.partition_ranges.len() {
+            // assert there is no data beyond the last partition range (remaining is empty).
+            // it would be acceptable even if it happens, because `remaining_range` will be discarded anyway.
+            debug_assert!(remaining_range.num_rows() == 0);
+
             return sorted_batch.map(|x| if x.num_rows() == 0 { None } else { Some(x) });
         }
 
