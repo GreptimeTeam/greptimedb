@@ -92,7 +92,7 @@ impl GcScheduler {
 
         if let Some(gc_info) = gc_tracker.get(&region_id) {
             if let Some(last_full_listing) = gc_info.last_full_listing_time {
-                let elapsed = now.duration_since(last_full_listing);
+                let elapsed = now.saturating_duration_since(last_full_listing);
                 elapsed >= self.config.full_file_listing_interval
             } else {
                 // Never did full listing for this region, do it now

@@ -464,7 +464,7 @@ impl UnorderedPart {
 }
 
 /// More accurate estimation of the size of a record batch.
-pub(crate) fn record_batch_estimated_size(batch: &RecordBatch) -> usize {
+pub fn record_batch_estimated_size(batch: &RecordBatch) -> usize {
     batch
         .columns()
         .iter()
@@ -715,7 +715,7 @@ fn new_primary_key_column_builders(
 }
 
 /// Sorts the record batch with primary key format.
-fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
+pub fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
     let total_columns = batch.num_columns();
     let sort_columns = vec![
         // Primary key column (ascending)
