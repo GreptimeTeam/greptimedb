@@ -17,6 +17,7 @@ arc-swap = "1.0"
 async-stream.workspace = true
 async-trait.workspace = true
 auth.workspace = true
+axum.workspace = true
 bytes.workspace = true
 cache.workspace = true
 catalog.workspace = true
@@ -85,6 +86,9 @@ common-test-util.workspace = true
 datanode.workspace = true
 datatypes.workspace = true
 futures.workspace = true
+hyper-util = { workspace = true, features = ["tokio"] }
+meta-srv.workspace = true
+reqwest.workspace = true
 serde_json.workspace = true
 strfmt = "0.2"
 tower.workspace = true

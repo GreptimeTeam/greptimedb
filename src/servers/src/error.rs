@@ -651,6 +651,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Service suspended"))]
+    Suspended {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -777,6 +783,8 @@ impl ErrorExt for Error {
             HandleOtelArrowRequest { .. } => StatusCode::Internal,
 
             Cancelled { .. } => StatusCode::Cancelled,
+
+            Suspended { .. } => StatusCode::Suspended,
         }
     }
 
@@ -857,7 +865,8 @@ pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
         | StatusCode::TableUnavailable
         | StatusCode::RegionBusy
         | StatusCode::StorageUnavailable
-        | StatusCode::External => HttpStatusCode::SERVICE_UNAVAILABLE,
+        | StatusCode::External
+        | StatusCode::Suspended => HttpStatusCode::SERVICE_UNAVAILABLE,
 
         StatusCode::Internal
         | StatusCode::Unexpected

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
@@ -85,6 +86,33 @@ impl FrontendBuilder {
             procedure_executor,
             process_manager,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_test(
+        options: &FrontendOptions,
+        meta_client: meta_client::MetaClientRef,
+    ) -> Self {
+        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+
+        let layered_cache_registry = Arc::new(
+            common_meta::cache::LayeredCacheRegistryBuilder::default()
+                .add_cache_registry(cache::build_fundamental_cache_registry(kv_backend.clone()))
+                .build(),
+        );
+
+        Self::new(
+            options.clone(),
+            kv_backend,
+            layered_cache_registry,
+            catalog::memory::MemoryCatalogManager::with_default_setup(),
+            Arc::new(client::client_manager::NodeClients::default()),
+            meta_client,
+            Arc::new(catalog::process_manager::ProcessManager::new(
+                "".to_string(),
+                None,
+            )),
+        )
     }
 
     pub fn with_local_cache_invalidator(self, cache_invalidator: CacheInvalidatorRef) -> Self {
@@ -242,6 +270,7 @@ impl FrontendBuilder {
             process_manager,
             otlp_metrics_table_legacy_cache: DashMap::new(),
             slow_query_options: self.options.slow_query.clone(),
+            suspend: Arc::new(AtomicBool::new(false)),
         })
     }
 }

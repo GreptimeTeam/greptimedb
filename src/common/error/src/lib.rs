@@ -21,6 +21,8 @@ pub mod status_code;
 use http::{HeaderMap, HeaderValue};
 pub use snafu;
 
+use crate::status_code::StatusCode;
+
 // HACK - these headers are here for shared in gRPC services. For common HTTP headers,
 // please define in `src/servers/src/http/header.rs`.
 pub const GREPTIME_DB_HEADER_ERROR_CODE: &str = "x-greptime-err-code";
@@ -44,6 +46,29 @@ pub fn from_err_code_msg_to_header(code: u32, msg: &str) -> HeaderMap {
     header.insert(GREPTIME_DB_HEADER_ERROR_CODE, code.into());
     header.insert(GREPTIME_DB_HEADER_ERROR_MSG, msg);
     header
+}
+
+/// Extract [StatusCode] and error message from [HeaderMap], if any.
+///
+/// Note that if the [StatusCode] is illegal, for example, a random number that is not pre-defined
+/// as a [StatusCode], the result is still `None`.
+pub fn from_header_to_err_code_msg(headers: &HeaderMap) -> Option<(StatusCode, &str)> {
+    let code = headers
+        .get(GREPTIME_DB_HEADER_ERROR_CODE)
+        .and_then(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|x| x.parse::<u32>().ok())
+                .and_then(StatusCode::from_u32)
+        });
+    let msg = headers
+        .get(GREPTIME_DB_HEADER_ERROR_MSG)
+        .and_then(|x| x.to_str().ok());
+    match (code, msg) {
+        (Some(code), Some(msg)) => Some((code, msg)),
+        _ => None,
+    }
 }
 
 /// Returns the external root cause of the source error (exclude the current error).

@@ -2847,6 +2847,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "convert_case"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4185,21 +4194,23 @@ dependencies = [
 
 [[package]]
 name = "derive_more"
-version = "1.0.0"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a9b99b9cbbe49445b21764dc0625032a89b145a2642e67603e1c936f5458d05"
+checksum = "10b768e943bed7bf2cab53df09f4bc34bfd217cdb57d971e769874c9a6710618"
 dependencies = [
  "derive_more-impl",
 ]
 
 [[package]]
 name = "derive_more-impl"
-version = "1.0.0"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb7330aeadfbe296029522e6c40f315320aba36fc43a5b3632f3795348f3bd22"
+checksum = "6d286bfdaf75e988b4a78e013ecd79c581e06399ab53fbacd2d916c2f904f30b"
 dependencies = [
+ "convert_case 0.10.0",
  "proc-macro2",
  "quote",
+ "rustc_version",
  "syn 2.0.106",
  "unicode-xid",
 ]
@@ -4916,6 +4927,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "auth",
+ "axum 0.8.4",
  "bytes",
  "cache",
  "catalog",
@@ -4950,9 +4962,11 @@ dependencies = [
  "hostname 0.4.1",
  "humantime",
  "humantime-serde",
+ "hyper-util",
  "lazy_static",
  "log-query",
  "meta-client",
+ "meta-srv",
  "num_cpus",
  "opentelemetry-proto",
  "operator",
@@ -4964,6 +4978,7 @@ dependencies = [
  "prost 0.13.5",
  "query",
  "rand 0.9.1",
+ "reqwest",
  "serde",
  "serde_json",
  "servers",
