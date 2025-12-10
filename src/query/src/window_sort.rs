@@ -1490,6 +1490,7 @@ mod test {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn run_compute_working_ranges_test(
         testcases: Vec<(
             BTreeMap<(Timestamp, Timestamp), Vec<usize>>,
