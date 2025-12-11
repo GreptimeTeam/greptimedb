@@ -27,6 +27,7 @@ use arrow::array::ArrayRef;
 use arrow::compute::{concat, concat_batches, take_record_batch};
 use arrow_schema::SchemaRef;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
+use common_time::Timestamp;
 use datafusion::common::arrow::compute::sort_to_indices;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::execution::{RecordBatchStream, TaskContext};
@@ -51,6 +52,47 @@ use store_api::region_engine::PartitionRange;
 use crate::error::Result;
 use crate::window_sort::check_partition_range_monotonicity;
 use crate::{array_iter_helper, downcast_ts_array};
+
+/// Get the primary end of a `PartitionRange` based on sort direction.
+///
+/// - Descending: primary end is `end` (we process highest values first)
+/// - Ascending: primary end is `start` (we process lowest values first)
+fn get_primary_end(range: &PartitionRange, descending: bool) -> Timestamp {
+    if descending { range.end } else { range.start }
+}
+
+/// Group consecutive ranges by their primary end value.
+///
+/// Returns a vector of (primary_end, start_idx_inclusive, end_idx_exclusive) tuples.
+/// Ranges with the same primary end MUST be processed together because they may
+/// overlap and contain values that belong to the same "top-k" result.
+fn group_ranges_by_primary_end(
+    ranges: &[PartitionRange],
+    descending: bool,
+) -> Vec<(Timestamp, usize, usize)> {
+    if ranges.is_empty() {
+        return vec![];
+    }
+
+    let mut groups = Vec::new();
+    let mut group_start = 0;
+    let mut current_primary_end = get_primary_end(&ranges[0], descending);
+
+    for (idx, range) in ranges.iter().enumerate().skip(1) {
+        let primary_end = get_primary_end(range, descending);
+        if primary_end != current_primary_end {
+            // End current group
+            groups.push((current_primary_end, group_start, idx));
+            // Start new group
+            group_start = idx;
+            current_primary_end = primary_end;
+        }
+    }
+    // Push the last group
+    groups.push((current_primary_end, group_start, ranges.len()));
+
+    groups
+}
 
 /// Sort input within given PartitionRange
 ///
@@ -300,6 +342,11 @@ struct PartSortStream {
     metrics: BaselineMetrics,
     context: Arc<TaskContext>,
     root_metrics: ExecutionPlanMetricsSet,
+    /// Groups of ranges by primary end: (primary_end, start_idx_inclusive, end_idx_exclusive).
+    /// Ranges in the same group must be processed together before outputting results.
+    range_groups: Vec<(Timestamp, usize, usize)>,
+    /// Current group being processed (index into range_groups).
+    cur_group_idx: usize,
 }
 
 impl PartSortStream {
@@ -338,6 +385,10 @@ impl PartSortStream {
             PartSortBuffer::All(Vec::new())
         };
 
+        // Compute range groups by primary end
+        let descending = sort.expression.options.descending;
+        let range_groups = group_ranges_by_primary_end(&partition_ranges, descending);
+
         Ok(Self {
             reservation: MemoryConsumer::new("PartSortStream".to_string())
                 .register(&context.runtime_env().memory_pool),
@@ -354,6 +405,8 @@ impl PartSortStream {
             metrics: BaselineMetrics::new(&sort.metrics, partition),
             context,
             root_metrics: sort.metrics.clone(),
+            range_groups,
+            cur_group_idx: 0,
         })
     }
 }
@@ -397,21 +450,22 @@ macro_rules! array_check_helper {
 }
 
 impl PartSortStream {
-    /// check whether the sort column's min/max value is within the partition range
+    /// check whether the sort column's min/max value is within the current group's effective range.
+    /// For group-based processing, data from multiple ranges with the same primary end
+    /// is accumulated together, so we check against the union of all ranges in the group.
     fn check_in_range(
         &self,
         sort_column: &ArrayRef,
         min_max_idx: (usize, usize),
     ) -> datafusion_common::Result<()> {
-        if self.cur_part_idx >= self.partition_ranges.len() {
+        // Use the group's effective range instead of the current partition range
+        let Some(cur_range) = self.get_current_group_effective_range() else {
             internal_err!(
-                "Partition index out of range: {} >= {} at {}",
-                self.cur_part_idx,
-                self.partition_ranges.len(),
+                "No effective range for current group {} at {}",
+                self.cur_group_idx,
                 snafu::location!()
-            )?;
-        }
-        let cur_range = self.partition_ranges[self.cur_part_idx];
+            )?
+        };
 
         downcast_ts_array!(
             sort_column.data_type() => (array_check_helper, sort_column, cur_range, min_max_idx),
@@ -477,6 +531,59 @@ impl PartSortStream {
         }
 
         Ok(())
+    }
+
+    /// Check if the given partition index is within the current group.
+    fn is_in_current_group(&self, part_idx: usize) -> bool {
+        if self.cur_group_idx >= self.range_groups.len() {
+            return false;
+        }
+        let (_, start, end) = self.range_groups[self.cur_group_idx];
+        part_idx >= start && part_idx < end
+    }
+
+    /// Advance to the next group. Returns true if there is a next group.
+    fn advance_to_next_group(&mut self) -> bool {
+        self.cur_group_idx += 1;
+        self.cur_group_idx < self.range_groups.len()
+    }
+
+    /// Get the effective range for the current group.
+    /// For a group of ranges with the same primary end, the effective range is
+    /// the union of all ranges in the group.
+    fn get_current_group_effective_range(&self) -> Option<PartitionRange> {
+        if self.cur_group_idx >= self.range_groups.len() {
+            return None;
+        }
+        let (_, start_idx, end_idx) = self.range_groups[self.cur_group_idx];
+        if start_idx >= end_idx || start_idx >= self.partition_ranges.len() {
+            return None;
+        }
+
+        let ranges_in_group =
+            &self.partition_ranges[start_idx..end_idx.min(self.partition_ranges.len())];
+        if ranges_in_group.is_empty() {
+            return None;
+        }
+
+        // Compute union of all ranges in the group
+        let mut min_start = ranges_in_group[0].start;
+        let mut max_end = ranges_in_group[0].end;
+        for range in ranges_in_group.iter().skip(1) {
+            if range.start < min_start {
+                min_start = range.start;
+            }
+            if range.end > max_end {
+                max_end = range.end;
+            }
+        }
+
+        Some(PartitionRange {
+            start: min_start,
+            end: max_end,
+            num_rows: 0,   // Not used for validation
+            identifier: 0, // Not used for validation
+        })
     }
 
     /// Sort and clear the buffer and return the sorted record batch
@@ -636,8 +743,13 @@ impl PartSortStream {
     /// range will be merged and sorted with previous buffer, and the second part will be registered
     /// to `evaluating_batch` for next polling.
     ///
-    /// Returns `None` if the input batch is empty or fully within the current partition range, and
-    /// `Some(batch)` otherwise.
+    /// **Group-based processing**: Ranges with the same primary end are grouped together.
+    /// We only sort and output when transitioning to a NEW group, not when moving between
+    /// ranges within the same group.
+    ///
+    /// Returns `None` if the input batch is empty or fully within the current partition range
+    /// (or we're still collecting data within the same group), and `Some(batch)` when we've
+    /// completed a group and have sorted output.
     fn split_batch(
         &mut self,
         batch: DfRecordBatch,
@@ -664,19 +776,40 @@ impl PartSortStream {
         if this_range.num_rows() != 0 {
             self.push_buffer(this_range)?;
         }
-        // mark end of current PartitionRange
-        let sorted_batch = self.sort_buffer();
-        // step to next proper PartitionRange
+
+        // Step to next proper PartitionRange
         self.cur_part_idx += 1;
 
-        // If we've processed all partitions, discard remaining data
+        // If we've processed all partitions, sort and output
         if self.cur_part_idx >= self.partition_ranges.len() {
             // assert there is no data beyond the last partition range (remaining is empty).
-            // it would be acceptable even if it happens, because `remaining_range` will be discarded anyway.
             debug_assert!(remaining_range.num_rows() == 0);
 
+            // Sort and output the final group
+            let sorted_batch = self.sort_buffer();
             return sorted_batch.map(|x| if x.num_rows() == 0 { None } else { Some(x) });
         }
+
+        // Check if we're still in the same group
+        if self.is_in_current_group(self.cur_part_idx) {
+            // Same group - don't sort yet, keep collecting
+            let next_sort_column = sort_column.slice(idx, batch.num_rows() - idx);
+            if self.try_find_next_range(&next_sort_column)?.is_some() {
+                // remaining batch still contains data that exceeds the current partition range
+                self.evaluating_batch = Some(remaining_range);
+            } else {
+                // remaining batch is within the current partition range
+                if remaining_range.num_rows() != 0 {
+                    self.push_buffer(remaining_range)?;
+                }
+            }
+            // Return None to continue collecting within the same group
+            return Ok(None);
+        }
+
+        // Transitioning to a new group - sort current group and output
+        let sorted_batch = self.sort_buffer();
+        self.advance_to_next_group();
 
         let next_sort_column = sort_column.slice(idx, batch.num_rows() - idx);
         if self.try_find_next_range(&next_sort_column)?.is_some() {
@@ -999,6 +1132,8 @@ mod test {
                 None,
                 vec![vec![1, 2, 3, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9]],
             ),
+            // Case 1: Descending sort with overlapping ranges that have the same primary end (end=10).
+            // Ranges [5,10) and [0,10) are grouped together, so their data is merged before sorting.
             (
                 TimeUnit::Millisecond,
                 vec![
@@ -1007,7 +1142,7 @@ mod test {
                 ],
                 true,
                 None,
-                vec![vec![9, 8, 7, 6, 5], vec![8, 7, 6, 5, 4, 3, 2, 1]],
+                vec![vec![9, 8, 8, 7, 7, 6, 6, 5, 5, 4, 3, 2, 1]],
             ),
             (
                 TimeUnit::Millisecond,
@@ -1043,6 +1178,10 @@ mod test {
                 None,
                 vec![],
             ),
+            // Case 5: Data from one batch spans multiple ranges. Ranges with same end are grouped.
+            // Ranges: [15,20) end=20, [10,15) end=15, [5,10) end=10, [0,10) end=10
+            // Groups: {[15,20)}, {[10,15)}, {[5,10), [0,10)}
+            // The last two ranges are merged because they share end=10.
             (
                 TimeUnit::Millisecond,
                 vec![
@@ -1059,8 +1198,7 @@ mod test {
                 vec![
                     vec![19, 17, 15],
                     vec![12, 11, 10],
-                    vec![9, 8, 7, 6, 5],
-                    vec![4, 3, 2, 1],
+                    vec![9, 8, 7, 6, 5, 4, 3, 2, 1],
                 ],
             ),
             (
@@ -1493,6 +1631,175 @@ mod test {
             Some(2),
             expected_output,
             Some(10),
+        )
+        .await;
+    }
+
+    /// Example:
+    /// - Range [70, 100) has data [80, 90, 95]
+    /// - Range [50, 100) has data [55, 65, 75, 85, 95]
+    #[tokio::test]
+    async fn test_primary_end_grouping_with_limit() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            false,
+        )]));
+
+        // Two ranges with the same end (100) - they should be grouped together
+        // For descending, ranges are ordered by (end DESC, start DESC)
+        // So [70, 100) comes before [50, 100) (70 > 50)
+        let input_ranged_data = vec![
+            (
+                PartitionRange {
+                    start: Timestamp::new(70, unit.into()),
+                    end: Timestamp::new(100, unit.into()),
+                    num_rows: 3,
+                    identifier: 0,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![80, 90, 95])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+            (
+                PartitionRange {
+                    start: Timestamp::new(50, unit.into()),
+                    end: Timestamp::new(100, unit.into()),
+                    num_rows: 5,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![55, 65, 75, 85, 95])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+        ];
+
+        // With limit=4, descending: top 4 values from combined data
+        // Combined: [80, 90, 95, 55, 65, 75, 85, 95] -> sorted desc: [95, 95, 90, 85, 80, 75, 65, 55]
+        // Top 4: [95, 95, 90, 85]
+        let expected_output = vec![
+            DfRecordBatch::try_new(
+                schema.clone(),
+                vec![new_ts_array(unit, vec![95, 95, 90, 85])],
+            )
+            .unwrap(),
+        ];
+
+        run_test(
+            2000,
+            input_ranged_data,
+            schema.clone(),
+            SortOptions {
+                descending: true,
+                ..Default::default()
+            },
+            Some(4),
+            expected_output,
+            None,
+        )
+        .await;
+    }
+
+    /// Test case with three ranges demonstrating the "keep pulling" behavior.
+    /// After processing ranges with end=100, the smallest value in top-k might still
+    /// be reachable by the next group.
+    ///
+    /// Ranges: [70, 100), [50, 100), [40, 95)
+    /// With descending sort and limit=4:
+    /// - Group 1 (end=100): [70, 100) and [50, 100) merged
+    /// - Group 2 (end=95): [40, 95)
+    /// After group 1, smallest in top-4 is 85. Range [40, 95) could have values >= 85,
+    /// so we continue to group 2.
+    #[tokio::test]
+    async fn test_three_ranges_keep_pulling() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            false,
+        )]));
+
+        // Three ranges, two with same end (100), one with different end (95)
+        let input_ranged_data = vec![
+            (
+                PartitionRange {
+                    start: Timestamp::new(70, unit.into()),
+                    end: Timestamp::new(100, unit.into()),
+                    num_rows: 3,
+                    identifier: 0,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![80, 90, 95])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+            (
+                PartitionRange {
+                    start: Timestamp::new(50, unit.into()),
+                    end: Timestamp::new(100, unit.into()),
+                    num_rows: 3,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![55, 75, 85])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+            (
+                PartitionRange {
+                    start: Timestamp::new(40, unit.into()),
+                    end: Timestamp::new(95, unit.into()),
+                    num_rows: 3,
+                    identifier: 2,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![45, 65, 94])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+        ];
+
+        // Group 1 (end=100): [80, 90, 95, 55, 75, 85] -> sorted desc: [95, 90, 85, 80, 75, 55]
+        // Group 2 (end=95): [45, 65, 94] -> sorted desc: [94, 65, 45]
+        // Combined output: first group outputs [95, 90, 85, 80, 75, 55], then group 2 [94, 65, 45]
+        // With limit=4: [95, 90, 85, 80] from group 1 (limit exhausted)
+        let expected_output = vec![
+            DfRecordBatch::try_new(
+                schema.clone(),
+                vec![new_ts_array(unit, vec![95, 90, 85, 80])],
+            )
+            .unwrap(),
+        ];
+
+        run_test(
+            2001,
+            input_ranged_data,
+            schema.clone(),
+            SortOptions {
+                descending: true,
+                ..Default::default()
+            },
+            Some(4),
+            expected_output,
+            None,
         )
         .await;
     }
