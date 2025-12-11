@@ -46,16 +46,6 @@ tql eval (1500, 1500, '1s') calculate_rate_offset_total;
 -- SQLNESS SORT_RESULT 3 1
 tql eval (1500, 1500, '1s') calculate_rate_offset_total offset 10m;
 
-+---------------------+-------+---+
-| ts                  | val   | x |
-+---------------------+-------+---+
-| 1970-01-01T00:25:00 | 140.0 | b |
-| 1970-01-01T00:25:00 | 70.0  | a |
-+---------------------+-------+---+
-
--- SQLNESS SORT_RESULT 3 1
-tql eval (1500, 1500, '1s') calculate_rate_offset_total offset -10m;
-
 +---------------------+------+---+
 | ts                  | val  | x |
 +---------------------+------+---+
@@ -64,7 +54,22 @@ tql eval (1500, 1500, '1s') calculate_rate_offset_total offset -10m;
 +---------------------+------+---+
 
 -- SQLNESS SORT_RESULT 3 1
+tql eval (1500, 1500, '1s') calculate_rate_offset_total offset -10m;
+
++---------------------+-------+---+
+| ts                  | val   | x |
++---------------------+-------+---+
+| 1970-01-01T00:25:00 | 140.0 | b |
+| 1970-01-01T00:25:00 | 70.0  | a |
++---------------------+-------+---+
+
+-- SQLNESS SORT_RESULT 3 1
 tql eval (0, 0, '1s') calculate_rate_offset_total offset 10m;
+
+++
+++
+
+tql eval (0, 0, '1s') calculate_rate_offset_total offset -10m;
 
 +---------------------+------+---+
 | ts                  | val  | x |
@@ -73,25 +78,20 @@ tql eval (0, 0, '1s') calculate_rate_offset_total offset 10m;
 | 1970-01-01T00:00:00 | 40.0 | b |
 +---------------------+------+---+
 
-tql eval (0, 0, '1s') calculate_rate_offset_total offset -10m;
-
-++
-++
-
 tql eval (3000, 3000, '1s') calculate_rate_offset_total offset 10m;
-
-++
-++
-
--- SQLNESS SORT_RESULT 3 1
-tql eval (3000, 3000, '1s') calculate_rate_offset_total offset -10m;
 
 +---------------------+-------+---+
 | ts                  | val   | x |
 +---------------------+-------+---+
-| 1970-01-01T00:50:00 | 160.0 | b |
 | 1970-01-01T00:50:00 | 80.0  | a |
+| 1970-01-01T00:50:00 | 160.0 | b |
 +---------------------+-------+---+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') calculate_rate_offset_total offset -10m;
+
+++
+++
 
 tql eval (3000, 3000, '1s') rate(calculate_rate_window_total[10m]);
 
