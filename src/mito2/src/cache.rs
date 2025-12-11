@@ -265,8 +265,7 @@ impl CacheStrategy {
         }
     }
 
-    /// Calls [WriteCacheRef::file_cache()::maybe_download_background()].
-    /// It only triggers download if the strategy is [CacheStrategy::EnableAll] and write cache is available.
+    /// Triggers download if the strategy is [CacheStrategy::EnableAll] and write cache is available.
     pub fn maybe_download_background(
         &self,
         index_key: IndexKey,

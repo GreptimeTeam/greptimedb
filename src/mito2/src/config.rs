@@ -126,6 +126,9 @@ pub struct MitoConfig {
     /// The remaining capacity is used for data (parquet) files.
     /// Must be between 0 and 100 (exclusive).
     pub index_cache_percent: u8,
+    /// Enable background download worker for write cache (default: true).
+    /// When disabled, files won't be downloaded in the background.
+    pub write_cache_enable_background_download: bool,
     /// Capacity for manifest cache (default: 256MB).
     pub manifest_cache_size: ReadableSize,
 
@@ -193,6 +196,7 @@ impl Default for MitoConfig {
             write_cache_ttl: None,
             preload_index_cache: true,
             index_cache_percent: DEFAULT_INDEX_CACHE_PERCENT,
+            write_cache_enable_background_download: true,
             manifest_cache_size: ReadableSize::mb(256),
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,

@@ -181,8 +181,8 @@ impl FileCacheInner {
         remote_path: &str,
         remote_store: &ObjectStore,
         file_size: u64,
+        concurrency: usize,
     ) -> Result<()> {
-        const DOWNLOAD_READER_CONCURRENCY: usize = 8;
         const DOWNLOAD_READER_CHUNK_SIZE: ReadableSize = ReadableSize::mb(8);
 
         let file_type = index_key.file_type;
@@ -195,7 +195,7 @@ impl FileCacheInner {
 
         let reader = remote_store
             .reader_with(remote_path)
-            .concurrent(DOWNLOAD_READER_CONCURRENCY)
+            .concurrent(concurrency)
             .chunk(DOWNLOAD_READER_CHUNK_SIZE.as_bytes() as usize)
             .await
             .context(error::OpenDalSnafu)?
@@ -249,9 +249,10 @@ impl FileCacheInner {
         remote_path: &str,
         remote_store: &ObjectStore,
         file_size: u64,
+        concurrency: usize,
     ) -> Result<()> {
         if let Err(e) = self
-            .download_without_cleaning(index_key, remote_path, remote_store, file_size)
+            .download_without_cleaning(index_key, remote_path, remote_store, file_size, concurrency)
             .await
         {
             error!(e; "Failed to download file '{}' for region {}", remote_path, index_key.region_id);
@@ -279,8 +280,8 @@ pub(crate) struct FileCache {
     inner: Arc<FileCacheInner>,
     /// Capacity of the puffin (index) cache in bytes.
     puffin_capacity: u64,
-    /// Sender for background download tasks.
-    download_task_tx: Sender<DownloadTask>,
+    /// Channel for background download tasks. None if background worker is disabled.
+    download_task_tx: Option<Sender<DownloadTask>>,
 }
 
 pub(crate) type FileCacheRef = Arc<FileCache>;
@@ -292,6 +293,7 @@ impl FileCache {
         capacity: ReadableSize,
         ttl: Option<Duration>,
         index_cache_percent: Option<u8>,
+        enable_background_worker: bool,
     ) -> FileCache {
         // Validate and use the provided percent or default
         let index_percent = index_cache_percent
@@ -319,9 +321,6 @@ impl FileCache {
         let parquet_index = Self::build_cache(local_store.clone(), parquet_capacity, ttl, "file");
         let puffin_index = Self::build_cache(local_store.clone(), puffin_capacity, ttl, "index");
 
-        let (download_task_tx, download_task_rx) =
-            tokio::sync::mpsc::channel(DOWNLOAD_TASK_CHANNEL_SIZE);
-
         // Create inner cache shared with background worker
         let inner = Arc::new(FileCacheInner {
             local_store,
@@ -329,8 +328,14 @@ impl FileCache {
             puffin_index,
         });
 
-        // Spawn background task to process download tasks
-        Self::spawn_download_worker(inner.clone(), download_task_rx);
+        // Only create channel and spawn worker if background download is enabled
+        let download_task_tx = if enable_background_worker {
+            let (tx, rx) = tokio::sync::mpsc::channel(DOWNLOAD_TASK_CHANNEL_SIZE);
+            Self::spawn_download_worker(inner.clone(), rx);
+            Some(tx)
+        } else {
+            None
+        };
 
         FileCache {
             inner,
@@ -363,6 +368,7 @@ impl FileCache {
                         &task.remote_path,
                         &task.remote_store,
                         task.file_size,
+                        1, // Background downloads use concurrency=1
                     )
                     .await;
             }
@@ -632,7 +638,7 @@ impl FileCache {
         file_size: u64,
     ) -> Result<()> {
         self.inner
-            .download(index_key, remote_path, remote_store, file_size)
+            .download(index_key, remote_path, remote_store, file_size, 8) // Foreground uses concurrency=8
             .await
     }
 
@@ -648,6 +654,11 @@ impl FileCache {
         remote_store: ObjectStore,
         file_size: u64,
     ) {
+        // Do nothing if background worker is disabled (channel is None)
+        let Some(tx) = &self.download_task_tx else {
+            return;
+        };
+
         let task = DownloadTask {
             index_key,
             remote_path,
@@ -656,7 +667,7 @@ impl FileCache {
         };
 
         // Try to send the task; if the channel is full, just drop it
-        if let Err(e) = self.download_task_tx.try_send(task) {
+        if let Err(e) = tx.try_send(task) {
             debug!(
                 "Failed to queue background download task for region {}, file {}: {:?}",
                 index_key.region_id, index_key.file_id, e
@@ -792,6 +803,7 @@ mod tests {
             ReadableSize::mb(10),
             Some(Duration::from_millis(10)),
             None,
+            true, // enable_background_worker
         );
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
@@ -828,7 +840,13 @@ mod tests {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
 
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None, None);
+        let cache = FileCache::new(
+            local_store.clone(),
+            ReadableSize::mb(10),
+            None,
+            None,
+            true, // enable_background_worker
+        );
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);
@@ -876,7 +894,13 @@ mod tests {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
 
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None, None);
+        let cache = FileCache::new(
+            local_store.clone(),
+            ReadableSize::mb(10),
+            None,
+            None,
+            true, // enable_background_worker
+        );
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);
@@ -908,7 +932,13 @@ mod tests {
     async fn test_file_cache_recover() {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None, None);
+        let cache = FileCache::new(
+            local_store.clone(),
+            ReadableSize::mb(10),
+            None,
+            None,
+            true, // enable_background_worker
+        );
 
         let region_id = RegionId::new(2000, 0);
         let file_type = FileType::Parquet;
@@ -934,7 +964,13 @@ mod tests {
         }
 
         // Recover the cache.
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None, None);
+        let cache = FileCache::new(
+            local_store.clone(),
+            ReadableSize::mb(10),
+            None,
+            None,
+            true, // enable_background_worker
+        );
         // No entry before recovery.
         assert!(
             cache
@@ -963,7 +999,13 @@ mod tests {
     async fn test_file_cache_read_ranges() {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
-        let file_cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None, None);
+        let file_cache = FileCache::new(
+            local_store.clone(),
+            ReadableSize::mb(10),
+            None,
+            None,
+            true, // enable_background_worker
+        );
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);
