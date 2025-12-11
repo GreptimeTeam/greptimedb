@@ -536,6 +536,14 @@ impl PartSortStream {
         Ok(())
     }
 
+    /// Returns true when the TopK buffer has reached or exceeded the configured limit.
+    fn topk_buffer_fulfilled(&self) -> bool {
+        match (&self.limit, &self.buffer) {
+            (Some(limit), PartSortBuffer::Top(_, cnt)) => *cnt >= *limit,
+            _ => false,
+        }
+    }
+
     /// Check if the given partition index is within the current group.
     fn is_in_current_group(&self, part_idx: usize) -> bool {
         if self.cur_group_idx >= self.range_groups.len() {
@@ -855,8 +863,90 @@ impl PartSortStream {
     ///
     /// Returns `None` if the input batch is empty or fully within the current partition range
     /// (or we're still collecting data within the same group), and `Some(batch)` when we've
-    /// completed a group and have sorted output.
+    /// completed a group and have sorted output. When operating in TopK (limit) mode, this
+    /// function will not emit intermediate batches; it only prepares state for a single final
+    /// output.
     fn split_batch(
+        &mut self,
+        batch: DfRecordBatch,
+    ) -> datafusion_common::Result<Option<DfRecordBatch>> {
+        if matches!(self.buffer, PartSortBuffer::Top(_, _)) {
+            self.split_batch_topk(batch)?;
+            return Ok(None);
+        }
+
+        self.split_batch_all(batch)
+    }
+
+    /// Specialized splitting logic for TopK (limit) mode.
+    ///
+    /// We only emit once when the TopK buffer is fulfilled or when input is fully consumed.
+    /// When the buffer is fulfilled and we are about to enter a new group, we stop consuming
+    /// further ranges.
+    fn split_batch_topk(&mut self, batch: DfRecordBatch) -> datafusion_common::Result<()> {
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+
+        let sort_column = self
+            .expression
+            .expr
+            .evaluate(&batch)?
+            .into_array(batch.num_rows())?;
+
+        let next_range_idx = self.try_find_next_range(&sort_column)?;
+        let Some(idx) = next_range_idx else {
+            self.push_buffer(batch)?;
+            // keep polling input for next batch
+            return Ok(());
+        };
+
+        let this_range = batch.slice(0, idx);
+        let remaining_range = batch.slice(idx, batch.num_rows() - idx);
+        if this_range.num_rows() != 0 {
+            self.push_buffer(this_range)?;
+        }
+
+        // Step to next proper PartitionRange
+        self.cur_part_idx += 1;
+
+        // If we've processed all partitions, mark completion.
+        if self.cur_part_idx >= self.partition_ranges.len() {
+            debug_assert!(remaining_range.num_rows() == 0);
+            self.input_complete = true;
+            return Ok(());
+        }
+
+        // Check if we're still in the same group
+        let in_same_group = self.is_in_current_group(self.cur_part_idx);
+
+        // When TopK is fulfilled and we are switching to a new group, stop consuming further ranges.
+        if !in_same_group && self.topk_buffer_fulfilled() {
+            self.input_complete = true;
+            self.evaluating_batch = None;
+            return Ok(());
+        }
+
+        // Transition to a new group if needed
+        if !in_same_group {
+            self.advance_to_next_group();
+        }
+
+        let next_sort_column = sort_column.slice(idx, batch.num_rows() - idx);
+        if self.try_find_next_range(&next_sort_column)?.is_some() {
+            // remaining batch still contains data that exceeds the current partition range
+            // register the remaining batch for next polling
+            self.evaluating_batch = Some(remaining_range);
+        } else if remaining_range.num_rows() != 0 {
+            // remaining batch is within the current partition range
+            // push to the buffer and continue polling
+            self.push_buffer(remaining_range)?;
+        }
+
+        Ok(())
+    }
+
+    fn split_batch_all(
         &mut self,
         batch: DfRecordBatch,
     ) -> datafusion_common::Result<Option<DfRecordBatch>> {
@@ -1193,30 +1283,48 @@ mod test {
                 output_data.push(cur_data);
             }
 
-            let mut limit_remains = limit;
-            let mut expected_output = output_data
-                .into_iter()
-                .map(|a| {
-                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, a)]).unwrap()
-                })
-                .map(|rb| {
-                    // trim expected output with limit
-                    if let Some(limit) = limit_remains.as_mut() {
-                        let rb = rb.slice(0, (*limit).min(rb.num_rows()));
-                        *limit = limit.saturating_sub(rb.num_rows());
-                        rb
-                    } else {
-                        rb
+            let expected_output = if let Some(limit) = limit {
+                let mut accumulated = Vec::new();
+                let mut seen = 0usize;
+                for mut range_values in output_data {
+                    seen += range_values.len();
+                    accumulated.append(&mut range_values);
+                    if seen >= limit {
+                        break;
                     }
-                })
-                .collect_vec();
-            while let Some(rb) = expected_output.last() {
-                if rb.num_rows() == 0 {
-                    expected_output.pop();
-                } else {
-                    break;
                 }
-            }
+
+                if accumulated.is_empty() {
+                    None
+                } else {
+                    if descending {
+                        accumulated.sort_by(|a, b| b.cmp(a));
+                    } else {
+                        accumulated.sort();
+                    }
+                    accumulated.truncate(limit.min(accumulated.len()));
+
+                    Some(
+                        DfRecordBatch::try_new(
+                            schema.clone(),
+                            vec![new_ts_array(unit, accumulated)],
+                        )
+                        .unwrap(),
+                    )
+                }
+            } else {
+                let batches = output_data
+                    .into_iter()
+                    .map(|a| {
+                        DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, a)]).unwrap()
+                    })
+                    .collect_vec();
+                if batches.is_empty() {
+                    None
+                } else {
+                    Some(concat_batches(&schema, &batches).unwrap())
+                }
+            };
 
             test_cases.push((
                 case_id,
@@ -1383,6 +1491,11 @@ mod test {
                     DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, a)]).unwrap()
                 })
                 .collect_vec();
+            let expected_output = if expected_output.is_empty() {
+                None
+            } else {
+                Some(concat_batches(&schema, &expected_output).unwrap())
+            };
 
             run_test(
                 identifier,
@@ -1404,18 +1517,16 @@ mod test {
         schema: SchemaRef,
         opt: SortOptions,
         limit: Option<usize>,
-        expected_output: Vec<DfRecordBatch>,
+        expected_output: Option<DfRecordBatch>,
         expected_polled_rows: Option<usize>,
     ) {
-        for rb in &expected_output {
-            if let Some(limit) = limit {
-                assert!(
-                    rb.num_rows() <= limit,
-                    "Expect row count in expected output's batch({}) <= limit({})",
-                    rb.num_rows(),
-                    limit
-                );
-            }
+        if let (Some(limit), Some(rb)) = (limit, &expected_output) {
+            assert!(
+                rb.num_rows() <= limit,
+                "Expect row count in expected output({}) <= limit({})",
+                rb.num_rows(),
+                limit
+            );
         }
 
         let mut data_partition = Vec::with_capacity(input_ranged_data.len());
@@ -1441,74 +1552,60 @@ mod test {
         let exec_stream = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
 
         let real_output = exec_stream.map(|r| r.unwrap()).collect::<Vec<_>>().await;
-        // a makeshift solution for compare large data
-        if real_output != expected_output {
-            let mut first_diff = 0;
-            let mut is_diff_found = false;
-            for (idx, (lhs, rhs)) in real_output.iter().zip(expected_output.iter()).enumerate() {
-                if lhs.slice(0, rhs.num_rows()) != *rhs {
-                    first_diff = idx;
-                    is_diff_found = true;
-                    break;
-                }
-            }
-            if !is_diff_found {
-                return;
-            }
-            println!("first diff batch at {}", first_diff);
-            println!(
-                "ranges: {:?}",
-                ranges
-                    .into_iter()
-                    .map(|r| (r.start.to_chrono_datetime(), r.end.to_chrono_datetime()))
-                    .enumerate()
-                    .collect::<Vec<_>>()
+        if limit.is_some() {
+            assert!(
+                real_output.len() <= 1,
+                "case_{case_id} expects a single output batch when limit is set, got {}",
+                real_output.len()
             );
+        }
 
-            let mut full_msg = String::new();
-            {
-                let mut buf = Vec::with_capacity(10 * real_output.len());
-                for batch in real_output.iter().skip(first_diff) {
-                    let mut rb_json: Vec<u8> = Vec::new();
-                    let mut writer = ArrayWriter::new(&mut rb_json);
-                    writer.write(batch).unwrap();
+        let actual_output = if real_output.is_empty() {
+            None
+        } else {
+            Some(concat_batches(&schema, &real_output).unwrap())
+        };
+
+        if let Some(expected_polled_rows) = expected_polled_rows {
+            let input_pulled_rows = mock_input.metrics().unwrap().output_rows().unwrap();
+            assert_eq!(input_pulled_rows, expected_polled_rows);
+        }
+
+        match (actual_output, expected_output) {
+            (None, None) => {}
+            (Some(actual), Some(expected)) => {
+                if actual != expected {
+                    let mut actual_json: Vec<u8> = Vec::new();
+                    let mut writer = ArrayWriter::new(&mut actual_json);
+                    writer.write(&actual).unwrap();
                     writer.finish().unwrap();
-                    buf.append(&mut rb_json);
-                    buf.push(b',');
-                }
-                // TODO(discord9): better ways to print buf
-                let buf = String::from_utf8_lossy(&buf);
-                full_msg += &format!("\ncase_id:{case_id}, real_output \n{buf}\n");
-            }
-            {
-                let mut buf = Vec::with_capacity(10 * real_output.len());
-                for batch in expected_output.iter().skip(first_diff) {
-                    let mut rb_json: Vec<u8> = Vec::new();
-                    let mut writer = ArrayWriter::new(&mut rb_json);
-                    writer.write(batch).unwrap();
+
+                    let mut expected_json: Vec<u8> = Vec::new();
+                    let mut writer = ArrayWriter::new(&mut expected_json);
+                    writer.write(&expected).unwrap();
                     writer.finish().unwrap();
-                    buf.append(&mut rb_json);
-                    buf.push(b',');
+
+                    panic!(
+                        "case_{} failed (limit {limit:?}), opt: {:?},\nreal_output: {}\nexpected: {}",
+                        case_id,
+                        opt,
+                        String::from_utf8_lossy(&actual_json),
+                        String::from_utf8_lossy(&expected_json),
+                    );
                 }
-                let buf = String::from_utf8_lossy(&buf);
-                full_msg += &format!("case_id:{case_id}, expected_output \n{buf}");
             }
-
-            if let Some(expected_polled_rows) = expected_polled_rows {
-                let input_pulled_rows = mock_input.metrics().unwrap().output_rows().unwrap();
-                assert_eq!(input_pulled_rows, expected_polled_rows);
-            }
-
-            panic!(
-                "case_{} failed (limit {limit:?}), opt: {:?},\n real output has {} batches, {} rows, expected has {} batches with {} rows\nfull msg: {}",
+            (None, Some(expected)) => panic!(
+                "case_{} failed (limit {limit:?}), opt: {:?},\nreal output is empty, expected {} rows",
                 case_id,
                 opt,
-                real_output.len(),
-                real_output.iter().map(|x| x.num_rows()).sum::<usize>(),
-                expected_output.len(),
-                expected_output.iter().map(|x| x.num_rows()).sum::<usize>(),
-                full_msg
-            );
+                expected.num_rows()
+            ),
+            (Some(actual), None) => panic!(
+                "case_{} failed (limit {limit:?}), opt: {:?},\nreal output has {} rows, expected empty",
+                case_id,
+                opt,
+                actual.num_rows()
+            ),
         }
     }
 
@@ -1543,10 +1640,10 @@ mod test {
             ],
         )];
 
-        let expected_output = vec![
+        let expected_output = Some(
             DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![9, 8, 7])])
                 .unwrap(),
-        ];
+        );
 
         run_test(
             1000,
@@ -1602,9 +1699,9 @@ mod test {
             ),
         ];
 
-        let expected_output = vec![
+        let expected_output = Some(
             DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![15, 14])]).unwrap(),
-        ];
+        );
 
         run_test(
             1001,
@@ -1639,9 +1736,9 @@ mod test {
             ],
         )];
 
-        let expected_output = vec![
+        let expected_output = Some(
             DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![1, 2])]).unwrap(),
-        ];
+        );
 
         run_test(
             1002,
@@ -1740,9 +1837,9 @@ mod test {
         // PartSort won't reorder `PartitionRange` (it assumes it's already ordered), so it will not read other partitions.
         // This case is just to verify that early termination works as expected.
         // First partition [20, 30) produces top 2 values: 29, 28
-        let expected_output = vec![
+        let expected_output = Some(
             DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![29, 28])]).unwrap(),
-        ];
+        );
 
         run_test(
             1003,
@@ -1810,13 +1907,13 @@ mod test {
         // With limit=4, descending: top 4 values from combined data
         // Combined: [80, 90, 95, 55, 65, 75, 85, 95] -> sorted desc: [95, 95, 90, 85, 80, 75, 65, 55]
         // Top 4: [95, 95, 90, 85]
-        let expected_output = vec![
+        let expected_output = Some(
             DfRecordBatch::try_new(
                 schema.clone(),
                 vec![new_ts_array(unit, vec![95, 95, 90, 85])],
             )
             .unwrap(),
-        ];
+        );
 
         run_test(
             2000,
@@ -1905,13 +2002,13 @@ mod test {
         // Group 2 (end=95): [45, 65, 94] -> sorted desc: [94, 65, 45]
         // Combined output: first group outputs [95, 90, 85, 80, 75, 55], then group 2 [94, 65, 45]
         // With limit=4: [95, 90, 85, 80] from group 1 (limit exhausted)
-        let expected_output = vec![
+        let expected_output = Some(
             DfRecordBatch::try_new(
                 schema.clone(),
                 vec![new_ts_array(unit, vec![95, 90, 85, 80])],
             )
             .unwrap(),
-        ];
+        );
 
         run_test(
             2001,
@@ -1979,13 +2076,13 @@ mod test {
         // With limit=4, descending: top 4 from group 1 are [99, 98, 97, 96]
         // Threshold is 96, next group's primary_end is 90
         // Since 96 >= 90, we stop after group 1
-        let expected_output = vec![
+        let expected_output = Some(
             DfRecordBatch::try_new(
                 schema.clone(),
                 vec![new_ts_array(unit, vec![99, 98, 97, 96])],
             )
             .unwrap(),
-        ];
+        );
 
         run_test(
             2002,
@@ -1997,7 +2094,7 @@ mod test {
             },
             Some(4),
             expected_output,
-            Some(6), // Only pull 6 rows from group 1, not the 3 from group 2
+            Some(9), // Pull both batches since all rows fall within the first range
         )
         .await;
     }
@@ -2056,13 +2153,13 @@ mod test {
         // Threshold is 96, next group's primary_end is 98
         // 96 < 98, so threshold check says "could continue"
         // But limit is exhausted (0), so we stop anyway
-        let expected_output = vec![
+        let expected_output = Some(
             DfRecordBatch::try_new(
                 schema.clone(),
                 vec![new_ts_array(unit, vec![99, 98, 97, 96])],
             )
             .unwrap(),
-        ];
+        );
 
         // Note: We pull 9 rows (both batches) because we need to read batch 2
         // to detect the group boundary, even though we stop after outputting group 1.
@@ -2131,13 +2228,13 @@ mod test {
         // With limit=4, ascending: top 4 (smallest) from group 1 are [10, 11, 12, 13]
         // Threshold is 13 (largest in top-k), next group's primary_end is 20
         // Since 13 < 20, we stop after group 1 (no value in group 2 can be < 13)
-        let expected_output = vec![
+        let expected_output = Some(
             DfRecordBatch::try_new(
                 schema.clone(),
                 vec![new_ts_array(unit, vec![10, 11, 12, 13])],
             )
             .unwrap(),
-        ];
+        );
 
         run_test(
             2004,
@@ -2149,7 +2246,7 @@ mod test {
             },
             Some(4),
             expected_output,
-            Some(6), // Only pull from group 1
+            Some(9), // Pull both batches to detect boundary
         )
         .await;
     }
