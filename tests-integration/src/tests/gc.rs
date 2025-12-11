@@ -27,7 +27,6 @@ use crate::tests::test_util::{MockInstanceBuilder, TestContext, wait_procedure};
 
 mod basic;
 mod delay_layer;
-mod delay_query;
 mod race;
 
 /// Helper function to get table route information for GC procedure

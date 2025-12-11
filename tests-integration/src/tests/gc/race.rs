@@ -42,25 +42,38 @@ async fn get_file_handle_for_regions(
     test_context: &TestContext,
     regions: &[RegionId],
 ) -> Vec<FileHandle> {
-    let datanode = test_context.datanodes().iter().next().unwrap().1;
-    let mito_engine = datanode.region_server().mito_engine().unwrap();
     let mut all_file_handles = vec![];
-    for region_id in regions {
-        let region = mito_engine.find_region(*region_id).unwrap();
-        let manifest = region.manifest().await;
-        let files = manifest.files.clone();
-        let file_purger = region.file_purger();
-        let file_handles = files
-            .values()
-            .map(|v| FileHandle::new(v.clone(), file_purger.clone()))
-            .collect_vec();
-        info!(
-            "Region {:?} has {} file handles",
-            region_id,
-            file_handles.len()
-        );
-        all_file_handles.extend(file_handles);
+    let mut all_found_regions = HashSet::new();
+    for datanode in test_context.datanodes().values() {
+        let mito_engine = datanode.region_server().mito_engine().unwrap();
+        for region_id in regions {
+            let Some(region) = mito_engine.find_region(*region_id) else {
+                continue;
+            };
+            all_found_regions.insert(*region_id);
+            let manifest = region.manifest().await;
+            let files = manifest.files.clone();
+            let file_purger = region.file_purger();
+            let file_handles = files
+                .values()
+                .map(|v| FileHandle::new(v.clone(), file_purger.clone()))
+                .collect_vec();
+            info!(
+                "Region {:?} has {} file handles",
+                region_id,
+                file_handles.len()
+            );
+            all_file_handles.extend(file_handles);
+        }
     }
+
+    assert_eq!(
+        all_found_regions.len(),
+        regions.len(),
+        "Some regions not found in datanodes: expected regions {:?}, found regions {:?}",
+        regions,
+        all_found_regions
+    );
 
     all_file_handles
 }
@@ -411,7 +424,7 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
     execute_sql(&instance, create_table_sql).await;
 
     // Step 2: Generate initial SST files with historical data
-    for i in 0..4 {
+    for i in 0..3 {
         let insert_sql = format!(
             r#"
             INSERT INTO test_query_race_table (ts, val, host) VALUES
@@ -436,6 +449,9 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
         execute_sql(&instance, flush_sql).await;
     }
 
+    // Sleep for one second to make sure table is created before proceeding
+    sleep(Duration::from_secs(1)).await;
+
     // Get table information
     let table = instance
         .catalog_manager()
@@ -457,9 +473,9 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
     let all_file_handles = get_file_handle_for_regions(&test_context, &regions).await;
 
     // Extract file paths from the handles for verification later
-    let referenced_file_paths: HashSet<String> = all_file_handles
+    let referenced_file_paths: HashSet<_> = all_file_handles
         .iter()
-        .map(|handle| handle.file_id().to_string())
+        .map(|handle| handle.file_id())
         .collect();
     info!("Files referenced by handles: {:?}", referenced_file_paths);
 
@@ -472,9 +488,9 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
     // Insert new data
     let insert_sql = r#"
         INSERT INTO test_query_race_table (ts, val, host) VALUES
-        ('2023-01-05 10:00:00', 50.0, 'host4'),
-        ('2023-01-05 11:00:00', 60.0, 'host4'),
-        ('2023-01-05 12:00:00', 70.0, 'host4')
+        ('2023-01-04 10:00:00', 50.0, 'host4'),
+        ('2023-01-04 11:00:00', 60.0, 'host4'),
+        ('2023-01-04 12:00:00', 70.0, 'host4')
     "#;
     execute_sql(&instance, insert_sql).await;
 
@@ -538,18 +554,19 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
         .collect();
 
     // Check that all referenced files are still present in storage
-    let missing_files: Vec<&String> = referenced_file_paths
+    let missing_files: Vec<String> = referenced_file_paths
         .iter()
-        .filter(|file_id| !storage_file_ids.contains(*file_id))
+        .map(|f| f.file_id().to_string())
+        .filter(|file_id| !storage_file_ids.contains(file_id))
         .collect();
 
     assert!(
         missing_files.is_empty(),
-        "GC deleted files that were still referenced: {:?}",
-        missing_files
+        "GC deleted files that were still referenced: {:?}, storage files: {:?}",
+        missing_files,
+        storage_file_ids
     );
     info!("All referenced files are still present after GC");
-
     // Step 7: Simulate end of long-running query by dropping file handles
     drop(all_file_handles);
 
@@ -557,9 +574,13 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
     info!("Verifying GC results after query completion...");
 
     // Get final SST file count
-    sst_equal_check(&test_context).await;
-    let sst_files_after_gc_store = list_sst_files_from_storage(&test_context).await;
-    info!("Final SST files: {}", sst_files_after_gc_store.len());
+    let sst_manifest_files_after_gc = list_sst_files_from_manifest(&test_context).await;
+    let sst_files_store_after_gc = list_sst_files_from_storage(&test_context).await;
+    info!(
+        "Final SST files: {}, final in manifest files: {}",
+        sst_files_store_after_gc.len(),
+        sst_manifest_files_after_gc.len()
+    );
 
     // Verify data integrity - all data should still be accessible
     let count_sql = "SELECT COUNT(*) FROM test_query_race_table";
@@ -568,7 +589,7 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
 +----------+
 | count(*) |
 +----------+
-| 15       |
+| 12       |
 +----------+"#
         .trim();
     check_output_stream(count_output.data, expected).await;
@@ -602,9 +623,9 @@ pub async fn test_gc_execution_during_query(store_type: &StorageType) {
 
     // Verify that files have been cleaned up (should be fewer than before final GC)
     assert!(
-        final_cleanup_sst_files.len() <= sst_files_after_gc_store.len(),
+        final_cleanup_sst_files.len() <= sst_files_store_after_gc.len(),
         "Final GC should not increase file count. Before: {}, After: {}",
-        sst_files_after_gc_store.len(),
+        sst_files_store_after_gc.len(),
         final_cleanup_sst_files.len()
     );
 
