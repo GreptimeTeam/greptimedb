@@ -589,6 +589,10 @@ preload_index_cache = true
 ## 1GiB is reserved for index files and 4GiB for data files.
 index_cache_percent = 20
 
+## Enable refilling cache on read operations (default: true).
+## When disabled, cache refilling on read won't happen.
+enable_refill_cache_on_read = true
+
 ## Capacity for manifest cache (default: 256MB).
 manifest_cache_size = "256MB"
 

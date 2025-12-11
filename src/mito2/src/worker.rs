@@ -453,7 +453,7 @@ pub async fn write_cache_from_config(
         config.write_cache_size,
         config.write_cache_ttl,
         Some(config.index_cache_percent),
-        config.write_cache_enable_background_download,
+        config.enable_refill_cache_on_read,
         puffin_manager_factory,
         intermediate_manager,
         config.manifest_cache_size,
