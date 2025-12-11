@@ -647,8 +647,8 @@ impl IndexBuildTask {
         // TODO(SNC123): optimize index batch
         loop {
             match parquet_reader.next_batch().await {
-                Ok(Some(batch)) => {
-                    indexer.update(&mut batch.clone()).await;
+                Ok(Some(mut batch)) => {
+                    indexer.update(&mut batch).await;
                 }
                 Ok(None) => break,
                 Err(e) => {
