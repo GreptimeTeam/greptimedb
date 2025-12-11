@@ -25,7 +25,8 @@ pub const NOTIFY: &str = "NOTIFY";
 pub const WEBHOOK: &str = "WEBHOOK";
 pub const URL: &str = "URL";
 pub const FOR: &str = "FOR";
-pub const KEEP_FIRING_FOR: &str = "KEEP_FIRING_FOR";
+pub const KEEP: &str = "KEEP";
+pub const FIRING: &str = "FIRING";
 
 const TIMEOUT: &str = "timeout";
 
@@ -42,7 +43,7 @@ impl<'a> ParserContext<'a> {
     ///     ON (<query_expression>)
     ///         EVERY <interval_expression>
     ///     [FOR <interval_expression>]
-    ///     [KEEP_FIRING_FOR <interval_expression>]
+    ///     [KEEP FIRING FOR <interval_expression>]
     ///     [LABELS (<label_name>=<label_val>, ...)]
     ///     [ANNOTATIONS (<annotation_name>=<annotation_val>, ...)]
     ///     NOTIFY(
@@ -90,14 +91,14 @@ impl<'a> ParserContext<'a> {
                     self.parser.next_token();
                     r#for.replace(self.parse_trigger_for(true)?);
                 }
-                Token::Word(w) if w.value.eq_ignore_ascii_case(KEEP_FIRING_FOR) => {
+                Token::Word(w) if w.value.eq_ignore_ascii_case(KEEP) => {
                     self.parser.next_token();
                     keep_firing_for.replace(self.parse_trigger_keep_firing_for(true)?);
                 }
                 Token::EOF => break,
                 _ => {
                     return self.expected(
-                        "`ON` or `LABELS` or `ANNOTATIONS` or `NOTIFY` keyword or `FOR` or `KEEP_FIRING_FOR`",
+                        "`ON` or `LABELS` or `ANNOTATIONS` or `NOTIFY` keyword or `FOR` or `KEEP FIRING FOR`",
                         next_token,
                     );
                 }
@@ -237,12 +238,31 @@ impl<'a> ParserContext<'a> {
     ) -> Result<DurationExpr> {
         if !is_first_keyword_matched {
             if let Token::Word(w) = self.parser.peek_token().token
-                && w.value.eq_ignore_ascii_case(KEEP_FIRING_FOR)
+                && w.value.eq_ignore_ascii_case(KEEP)
             {
                 self.parser.next_token();
             } else {
-                return self.expected("`KEEP_FIRING_FOR` keyword", self.parser.peek_token());
+                return self.expected("`KEEP` keyword", self.parser.peek_token());
             }
+        }
+
+        if let Token::Word(w) = self.parser.peek_token().token
+            && w.value.eq_ignore_ascii_case(FIRING)
+        {
+            self.parser.next_token();
+        } else {
+            return self.expected("`FIRING` keyword", self.parser.peek_token());
+        }
+
+        if let Token::Word(w) = self.parser.peek_token().token
+            && w.value.eq_ignore_ascii_case(FOR)
+        {
+            self.parser.next_token();
+        } else {
+            return self.expected(
+                "`FOR` keyword after `KEEP FIRING`",
+                self.parser.peek_token(),
+            );
         }
 
         let (month_day_nano, raw_expr) = self.parse_interval_month_day_nano()?;
@@ -252,7 +272,7 @@ impl<'a> ParserContext<'a> {
         ensure!(
             month_day_nano.months == 0,
             error::InvalidIntervalSnafu {
-                reason: "year and month is not supported in trigger KEEP_FIRING_FOR duration"
+                reason: "year and month is not supported in trigger KEEP FIRING FOR duration"
                     .to_string()
             }
         );
@@ -529,7 +549,7 @@ IF NOT EXISTS cpu_monitor
                 EVERY '5 minute'::INTERVAL
         LABELS (label_name=label_val)
         FOR '1ms'::INTERVAL
-        KEEP_FIRING_FOR '10 minute'::INTERVAL
+        KEEP FIRING FOR '10 minute'::INTERVAL
         ANNOTATIONS (annotation_name=annotation_val)
         NOTIFY(
                 WEBHOOK alert_manager_1 URL 'http://127.0.0.1:9093' WITH (timeout='1m'),
@@ -546,7 +566,7 @@ IF NOT EXISTS cpu_monitor
             )
         LABELS (label_name=label_val)
         ANNOTATIONS (annotation_name=annotation_val)
-        KEEP_FIRING_FOR '10 minute'::INTERVAL
+        KEEP FIRING FOR '10 minute'::INTERVAL
         FOR '1ms'::INTERVAL
         ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 1)
                 EVERY '5 minute'::INTERVAL
@@ -875,29 +895,29 @@ IF NOT EXISTS cpu_monitor
     #[test]
     fn test_parse_trigger_keep_firing_for() {
         // Normal.
-        let sql = "KEEP_FIRING_FOR '10 minute'::INTERVAL";
+        let sql = "KEEP FIRING FOR '10 minute'::INTERVAL";
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
         let expr = ctx.parse_trigger_keep_firing_for(false).unwrap();
         assert_eq!(expr.duration, Duration::from_secs(600));
         assert_eq!(expr.raw_expr, "'10 minute'::INTERVAL");
 
-        // Invalid, missing KEEP_FIRING_FOR keyword.
+        // Invalid, missing KEEP FIRING FOR keywords.
         let sql = "'10 minute'::INTERVAL";
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
         assert!(ctx.parse_trigger_keep_firing_for(false).is_err());
 
         // Invalid, year not allowed.
-        let sql = "KEEP_FIRING_FOR '1 year'::INTERVAL";
+        let sql = "KEEP FIRING FOR '1 year'::INTERVAL";
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
         assert!(ctx.parse_trigger_keep_firing_for(false).is_err());
 
         // Invalid, month not allowed.
-        let sql = "KEEP_FIRING_FOR '1 month'::INTERVAL";
+        let sql = "KEEP FIRING FOR '1 month'::INTERVAL";
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
         assert!(ctx.parse_trigger_keep_firing_for(false).is_err());
 
         // Valid, interval less than 1 second is clamped.
-        let sql = "KEEP_FIRING_FOR '1ms'::INTERVAL";
+        let sql = "KEEP FIRING FOR '1ms'::INTERVAL";
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
         let expr = ctx.parse_trigger_keep_firing_for(false).unwrap();
         assert_eq!(expr.duration, Duration::from_secs(1));
