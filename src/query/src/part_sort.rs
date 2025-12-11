@@ -347,6 +347,8 @@ struct PartSortStream {
     range_groups: Vec<(Timestamp, usize, usize)>,
     /// Current group being processed (index into range_groups).
     cur_group_idx: usize,
+    /// Total rows emitted so far (used for early termination check).
+    total_emitted: usize,
 }
 
 impl PartSortStream {
@@ -407,6 +409,7 @@ impl PartSortStream {
             root_metrics: sort.metrics.clone(),
             range_groups,
             cur_group_idx: 0,
+            total_emitted: 0,
         })
     }
 }
@@ -584,6 +587,109 @@ impl PartSortStream {
             num_rows: 0,   // Not used for validation
             identifier: 0, // Not used for validation
         })
+    }
+
+    /// Get the primary end of the next group, if any.
+    fn get_next_group_primary_end(&self) -> Option<Timestamp> {
+        let next_group_idx = self.cur_group_idx + 1;
+        if next_group_idx >= self.range_groups.len() {
+            return None;
+        }
+        Some(self.range_groups[next_group_idx].0)
+    }
+
+    /// Check if we can stop early after outputting a group's sorted data.
+    ///
+    /// We can stop early if:
+    /// 1. We have a limit and have already output `limit` rows (handled separately)
+    /// 2. OR: We have a limit, have output some rows, AND the threshold value
+    ///    (smallest for descending, largest for ascending) cannot be improved
+    ///    by the next group.
+    ///
+    /// For descending: threshold is the smallest value in our current top-k.
+    ///   If threshold >= next_group.primary_end, next group cannot have larger values.
+    /// For ascending: threshold is the largest value in our current top-k.
+    ///   If threshold <= next_group.primary_end, next group cannot have smaller values.
+    ///
+    /// Parameters:
+    /// - `sorted_batch`: the sorted output batch from the current group
+    /// - `total_emitted`: total rows emitted so far (including this batch)
+    ///
+    /// Returns true if we can stop early.
+    fn can_stop_early_after_group(
+        &self,
+        sorted_batch: &DfRecordBatch,
+        total_emitted: usize,
+    ) -> datafusion_common::Result<bool> {
+        // Only applies when we have a limit
+        let Some(limit) = self.limit else {
+            return Ok(false);
+        };
+
+        // Must have emitted at least `limit` rows to consider stopping
+        if total_emitted < limit {
+            return Ok(false);
+        }
+
+        // Get the next group's primary end
+        let Some(next_primary_end) = self.get_next_group_primary_end() else {
+            // No next group, will stop naturally
+            return Ok(false);
+        };
+
+        // Get the threshold value from the sorted batch
+        // For descending: last value (smallest in top-k)
+        // For ascending: last value (largest in top-k)
+        if sorted_batch.num_rows() == 0 {
+            return Ok(false);
+        }
+
+        let sort_column = self
+            .expression
+            .expr
+            .evaluate(sorted_batch)?
+            .into_array(sorted_batch.num_rows())?;
+
+        let descending = self.expression.options.descending;
+
+        // Get the threshold value (last value in sorted batch)
+        let threshold_idx = sorted_batch.num_rows() - 1;
+        let threshold_value = self.get_timestamp_value(&sort_column, threshold_idx)?;
+
+        // Check if threshold is beyond next group's primary end
+        if descending {
+            // For descending: threshold is smallest in top-k
+            // Next group has values < next_primary_end (since end is exclusive)
+            // If threshold >= next_primary_end, no value in next group can be >= threshold
+            Ok(threshold_value >= next_primary_end.value())
+        } else {
+            // For ascending: threshold is largest in top-k
+            // Next group has values >= next_primary_end (since start is inclusive)
+            // If threshold < next_primary_end, no value in next group can be < threshold
+            Ok(threshold_value < next_primary_end.value())
+        }
+    }
+
+    /// Helper to extract timestamp value at a given index from an array.
+    fn get_timestamp_value(&self, array: &ArrayRef, idx: usize) -> datafusion_common::Result<i64> {
+        macro_rules! extract_ts_value_helper {
+            ($t:ty, $unit:expr, $arr:expr, $idx:expr) => {{
+                let arr = $arr
+                    .as_any()
+                    .downcast_ref::<arrow::array::PrimitiveArray<$t>>()
+                    .unwrap();
+                arr.value($idx)
+            }};
+        }
+
+        let value = downcast_ts_array!(
+            array.data_type() => (extract_ts_value_helper, array, idx),
+            _ => internal_err!(
+                "Unsupported data type for sort column: {:?}",
+                array.data_type()
+            )?,
+        );
+        Ok(value)
     }
 
     /// Sort and clear the buffer and return the sorted record batch
@@ -827,6 +933,32 @@ impl PartSortStream {
         sorted_batch.map(|x| if x.num_rows() == 0 { None } else { Some(x) })
     }
 
+    /// Helper to handle outputting a sorted batch:
+    /// - Updates total_emitted
+    /// - Updates limit
+    /// - Checks for early termination based on threshold comparison with next group
+    fn handle_sorted_output(
+        &mut self,
+        sorted_batch: DfRecordBatch,
+    ) -> datafusion_common::Result<DfRecordBatch> {
+        let batch_rows = sorted_batch.num_rows();
+        self.total_emitted += batch_rows;
+
+        // Update limit
+        self.limit = self.limit.map(|l| l.saturating_sub(batch_rows));
+
+        // Check for early termination based on threshold vs next group's primary end
+        // This only applies when we have a limit
+        if self.limit.is_some()
+            && self.can_stop_early_after_group(&sorted_batch, self.total_emitted)?
+        {
+            // Set limit to 0 to trigger early termination on next poll
+            self.limit = Some(0);
+        }
+
+        Ok(sorted_batch)
+    }
+
     pub fn poll_next_inner(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -843,7 +975,8 @@ impl PartSortStream {
                 if self.buffer.is_empty() {
                     return Poll::Ready(None);
                 } else {
-                    return Poll::Ready(Some(self.sort_buffer()));
+                    let sorted_batch = self.sort_buffer()?;
+                    return Poll::Ready(Some(self.handle_sorted_output(sorted_batch)));
                 }
             }
 
@@ -859,18 +992,12 @@ impl PartSortStream {
                         return Poll::Ready(None);
                     } else {
                         let sorted_batch = self.sort_buffer()?;
-                        self.limit = self
-                            .limit
-                            .map(|l| l.saturating_sub(sorted_batch.num_rows()));
-                        return Poll::Ready(Some(Ok(sorted_batch)));
+                        return Poll::Ready(Some(self.handle_sorted_output(sorted_batch)));
                     }
                 }
 
                 if let Some(sorted_batch) = self.split_batch(evaluating_batch)? {
-                    self.limit = self
-                        .limit
-                        .map(|l| l.saturating_sub(sorted_batch.num_rows()));
-                    return Poll::Ready(Some(Ok(sorted_batch)));
+                    return Poll::Ready(Some(self.handle_sorted_output(sorted_batch)));
                 } else {
                     continue;
                 }
@@ -881,10 +1008,7 @@ impl PartSortStream {
             match res {
                 Poll::Ready(Some(Ok(batch))) => {
                     if let Some(sorted_batch) = self.split_batch(batch)? {
-                        self.limit = self
-                            .limit
-                            .map(|l| l.saturating_sub(sorted_batch.num_rows()));
-                        return Poll::Ready(Some(Ok(sorted_batch)));
+                        return Poll::Ready(Some(self.handle_sorted_output(sorted_batch)));
                     } else {
                         continue;
                     }
@@ -1800,6 +1924,232 @@ mod test {
             Some(4),
             expected_output,
             None,
+        )
+        .await;
+    }
+
+    /// Test early termination based on threshold comparison with next group.
+    /// When the threshold (smallest value for descending) is >= next group's primary end,
+    /// we can stop early because the next group cannot have better values.
+    #[tokio::test]
+    async fn test_threshold_based_early_termination() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            false,
+        )]));
+
+        // Group 1 (end=100) has 6 rows, TopK will keep top 4
+        // Group 2 (end=90) has 3 rows - should NOT be processed because
+        // threshold (96) >= next_primary_end (90)
+        let input_ranged_data = vec![
+            (
+                PartitionRange {
+                    start: Timestamp::new(70, unit.into()),
+                    end: Timestamp::new(100, unit.into()),
+                    num_rows: 6,
+                    identifier: 0,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![94, 95, 96, 97, 98, 99])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+            (
+                PartitionRange {
+                    start: Timestamp::new(50, unit.into()),
+                    end: Timestamp::new(90, unit.into()),
+                    num_rows: 3,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![85, 86, 87])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+        ];
+
+        // With limit=4, descending: top 4 from group 1 are [99, 98, 97, 96]
+        // Threshold is 96, next group's primary_end is 90
+        // Since 96 >= 90, we stop after group 1
+        let expected_output = vec![
+            DfRecordBatch::try_new(
+                schema.clone(),
+                vec![new_ts_array(unit, vec![99, 98, 97, 96])],
+            )
+            .unwrap(),
+        ];
+
+        run_test(
+            2002,
+            input_ranged_data,
+            schema.clone(),
+            SortOptions {
+                descending: true,
+                ..Default::default()
+            },
+            Some(4),
+            expected_output,
+            Some(6), // Only pull 6 rows from group 1, not the 3 from group 2
+        )
+        .await;
+    }
+
+    /// Test that we continue to next group when threshold is within next group's range.
+    /// Even after fulfilling limit, if threshold < next_primary_end (descending),
+    /// we would need to continue... but limit exhaustion stops us first.
+    #[tokio::test]
+    async fn test_continue_when_threshold_in_next_group_range() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            false,
+        )]));
+
+        // Group 1 (end=100) has 6 rows, TopK will keep top 4
+        // Group 2 (end=98) has 3 rows - threshold (96) < 98, so next group
+        // could theoretically have better values. But limit exhaustion stops us.
+        // Note: Data values must not overlap between ranges to avoid ambiguity.
+        let input_ranged_data = vec![
+            (
+                PartitionRange {
+                    start: Timestamp::new(70, unit.into()),
+                    end: Timestamp::new(100, unit.into()),
+                    num_rows: 6,
+                    identifier: 0,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![94, 95, 96, 97, 98, 99])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+            (
+                PartitionRange {
+                    start: Timestamp::new(50, unit.into()),
+                    end: Timestamp::new(98, unit.into()),
+                    num_rows: 3,
+                    identifier: 1,
+                },
+                vec![
+                    // Values must be < 70 (outside group 1's range) to avoid ambiguity
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![55, 60, 65])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+        ];
+
+        // With limit=4, we get [99, 98, 97, 96] from group 1
+        // Threshold is 96, next group's primary_end is 98
+        // 96 < 98, so threshold check says "could continue"
+        // But limit is exhausted (0), so we stop anyway
+        let expected_output = vec![
+            DfRecordBatch::try_new(
+                schema.clone(),
+                vec![new_ts_array(unit, vec![99, 98, 97, 96])],
+            )
+            .unwrap(),
+        ];
+
+        // Note: We pull 9 rows (both batches) because we need to read batch 2
+        // to detect the group boundary, even though we stop after outputting group 1.
+        run_test(
+            2003,
+            input_ranged_data,
+            schema.clone(),
+            SortOptions {
+                descending: true,
+                ..Default::default()
+            },
+            Some(4),
+            expected_output,
+            Some(9), // Pull both batches to detect boundary
+        )
+        .await;
+    }
+
+    /// Test ascending sort with threshold-based early termination.
+    #[tokio::test]
+    async fn test_ascending_threshold_early_termination() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            false,
+        )]));
+
+        // For ascending: primary_end is start, ranges sorted by (start ASC, end ASC)
+        // Group 1 (start=10) has 6 rows
+        // Group 2 (start=20) has 3 rows - should NOT be processed because
+        // threshold (13) < next_primary_end (20)
+        let input_ranged_data = vec![
+            (
+                PartitionRange {
+                    start: Timestamp::new(10, unit.into()),
+                    end: Timestamp::new(50, unit.into()),
+                    num_rows: 6,
+                    identifier: 0,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![10, 11, 12, 13, 14, 15])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+            (
+                PartitionRange {
+                    start: Timestamp::new(20, unit.into()),
+                    end: Timestamp::new(60, unit.into()),
+                    num_rows: 3,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![25, 30, 35])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+        ];
+
+        // With limit=4, ascending: top 4 (smallest) from group 1 are [10, 11, 12, 13]
+        // Threshold is 13 (largest in top-k), next group's primary_end is 20
+        // Since 13 < 20, we stop after group 1 (no value in group 2 can be < 13)
+        let expected_output = vec![
+            DfRecordBatch::try_new(
+                schema.clone(),
+                vec![new_ts_array(unit, vec![10, 11, 12, 13])],
+            )
+            .unwrap(),
+        ];
+
+        run_test(
+            2004,
+            input_ranged_data,
+            schema.clone(),
+            SortOptions {
+                descending: false,
+                ..Default::default()
+            },
+            Some(4),
+            expected_output,
+            Some(6), // Only pull from group 1
         )
         .await;
     }
