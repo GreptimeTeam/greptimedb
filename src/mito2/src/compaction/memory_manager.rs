@@ -96,11 +96,14 @@ impl<'de> Deserialize<'de> for OnExhaustedPolicy {
 /// Global memory manager for compaction tasks.
 #[derive(Clone)]
 pub struct CompactionMemoryManager {
-    inner: Option<Arc<Inner>>,
+    quota: Option<MemoryQuota>,
 }
 
-struct Inner {
+/// Shared memory quota state across all compaction guards.
+#[derive(Clone)]
+struct MemoryQuota {
     semaphore: Arc<Semaphore>,
+    // Maximum permits (aligned to PERMIT_GRANULARITY_BYTES).
     limit_permits: u32,
 }
 
@@ -110,7 +113,7 @@ impl CompactionMemoryManager {
     pub fn new(limit_bytes: u64) -> Self {
         if limit_bytes == 0 {
             COMPACTION_MEMORY_LIMIT.set(0);
-            return Self { inner: None };
+            return Self { quota: None };
         }
 
         let limit_permits = bytes_to_permits(limit_bytes);
@@ -118,73 +121,73 @@ impl CompactionMemoryManager {
         COMPACTION_MEMORY_LIMIT.set(limit_aligned_bytes as i64);
 
         Self {
-            inner: Some(Arc::new(Inner {
+            quota: Some(MemoryQuota {
                 semaphore: Arc::new(Semaphore::new(limit_permits as usize)),
                 limit_permits,
-            })),
+            }),
         }
     }
 
     /// Returns the configured limit in bytes (0 if unlimited).
     pub fn limit_bytes(&self) -> u64 {
-        self.inner
+        self.quota
             .as_ref()
-            .map(|inner| permits_to_bytes(inner.limit_permits))
+            .map(|quota| permits_to_bytes(quota.limit_permits))
             .unwrap_or(0)
     }
 
     /// Returns currently used bytes.
     pub fn used_bytes(&self) -> u64 {
-        self.inner
+        self.quota
             .as_ref()
-            .map(|inner| permits_to_bytes(inner.used_permits()))
+            .map(|quota| permits_to_bytes(quota.used_permits()))
             .unwrap_or(0)
     }
 
     /// Returns available bytes.
     pub fn available_bytes(&self) -> u64 {
-        self.inner
+        self.quota
             .as_ref()
-            .map(|inner| permits_to_bytes(inner.available_permits_clamped()))
+            .map(|quota| permits_to_bytes(quota.available_permits_clamped()))
             .unwrap_or(0)
     }
 
     /// Acquires memory, waiting if necessary until enough is available.
     pub async fn acquire(&self, bytes: u64) -> CompactionMemoryGuard {
-        match &self.inner {
+        match &self.quota {
             None => CompactionMemoryGuard::unlimited(),
-            Some(inner) => {
+            Some(quota) => {
                 let permits = bytes_to_permits(bytes);
                 if permits == 0 {
                     return CompactionMemoryGuard::unlimited();
                 }
 
-                let permit = inner
+                let permit = quota
                     .semaphore
                     .clone()
                     .acquire_many_owned(permits)
                     .await
                     .unwrap();
-                inner.on_acquire();
-                CompactionMemoryGuard::limited(permit, inner.clone())
+                quota.update_in_use_metric();
+                CompactionMemoryGuard::limited(permit, quota.clone())
             }
         }
     }
 
     /// Tries to acquire memory. Returns Some(guard) on success, None if insufficient.
     pub fn try_acquire(&self, bytes: u64) -> Option<CompactionMemoryGuard> {
-        match &self.inner {
+        match &self.quota {
             None => Some(CompactionMemoryGuard::unlimited()),
-            Some(inner) => {
+            Some(quota) => {
                 let permits = bytes_to_permits(bytes);
                 if permits == 0 {
                     return Some(CompactionMemoryGuard::unlimited());
                 }
 
-                match inner.semaphore.clone().try_acquire_many_owned(permits) {
+                match quota.semaphore.clone().try_acquire_many_owned(permits) {
                     Ok(permit) => {
-                        inner.on_acquire();
-                        Some(CompactionMemoryGuard::limited(permit, inner.clone()))
+                        quota.update_in_use_metric();
+                        Some(CompactionMemoryGuard::limited(permit, quota.clone()))
                     }
                     Err(TryAcquireError::NoPermits) | Err(TryAcquireError::Closed) => {
                         COMPACTION_MEMORY_REJECTED
@@ -198,11 +201,7 @@ impl CompactionMemoryManager {
     }
 }
 
-impl Inner {
-    fn on_acquire(&self) {
-        self.update_in_use_metric();
-    }
-
+impl MemoryQuota {
     fn used_permits(&self) -> u32 {
         self.limit_permits
             .saturating_sub(self.available_permits_clamped())
@@ -232,11 +231,11 @@ pub struct CompactionMemoryGuard {
 enum GuardState {
     Unlimited,
     Limited {
-        /// Holds all permits owned by this guard (base plus any additional).
-        /// Additional requests merge into this permit and are released together on drop.
+        // Holds all permits owned by this guard (base plus any additional).
+        // Additional requests merge into this permit and are released together on drop.
         permit: OwnedSemaphorePermit,
-        /// Reference to inner for metrics updates.
-        inner: Arc<Inner>,
+        // Memory quota for requesting additional permits and updating metrics.
+        quota: MemoryQuota,
     },
 }
 
@@ -247,9 +246,9 @@ impl CompactionMemoryGuard {
         }
     }
 
-    fn limited(permit: OwnedSemaphorePermit, inner: Arc<Inner>) -> Self {
+    fn limited(permit: OwnedSemaphorePermit, quota: MemoryQuota) -> Self {
         Self {
-            state: GuardState::Limited { permit, inner },
+            state: GuardState::Limited { permit, quota },
         }
     }
 
@@ -274,14 +273,14 @@ impl CompactionMemoryGuard {
     pub fn request_additional(&mut self, bytes: u64) -> bool {
         match &mut self.state {
             GuardState::Unlimited => true,
-            GuardState::Limited { permit, inner } => {
+            GuardState::Limited { permit, quota } => {
                 let additional_permits = bytes_to_permits(bytes);
                 if additional_permits == 0 {
                     return true;
                 }
 
-                // Try to acquire additional permits from global semaphore
-                match inner
+                // Try to acquire additional permits from the quota
+                match quota
                     .semaphore
                     .clone()
                     .try_acquire_many_owned(additional_permits)
@@ -289,7 +288,7 @@ impl CompactionMemoryGuard {
                     Ok(additional_permit) => {
                         // Merge into main permit
                         permit.merge(additional_permit);
-                        inner.update_in_use_metric();
+                        quota.update_in_use_metric();
 
                         debug!("Allocated additional {} bytes", bytes);
 
@@ -305,18 +304,58 @@ impl CompactionMemoryGuard {
             }
         }
     }
+
+    /// Releases a portion of granted memory back to the pool early,
+    /// before the guard is dropped.
+    ///
+    /// This is useful when a task's memory requirement decreases during execution
+    /// (e.g., after completing a memory-intensive phase). The guard remains valid
+    /// with reduced quota, and the task can continue running.
+    pub fn early_release_partial(&mut self, bytes: u64) -> bool {
+        match &mut self.state {
+            GuardState::Unlimited => true,
+            GuardState::Limited { permit, quota } => {
+                let release_permits = bytes_to_permits(bytes);
+                if release_permits == 0 {
+                    return true;
+                }
+
+                // Split out the permits we want to release
+                match permit.split(release_permits as usize) {
+                    Some(released_permit) => {
+                        let released_bytes = permits_to_bytes(released_permit.num_permits() as u32);
+
+                        // Drop the split permit to return it to the quota
+                        drop(released_permit);
+                        quota.update_in_use_metric();
+
+                        debug!(
+                            "Early released {} bytes from compaction memory guard",
+                            released_bytes
+                        );
+
+                        true
+                    }
+                    None => {
+                        // Requested release exceeds granted amount
+                        false
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Drop for CompactionMemoryGuard {
     fn drop(&mut self) {
-        if let GuardState::Limited { permit, inner } =
+        if let GuardState::Limited { permit, quota } =
             mem::replace(&mut self.state, GuardState::Unlimited)
         {
             let bytes = permits_to_bytes(permit.num_permits() as u32);
 
             // Release permits before updating metrics to reflect latest usage.
             drop(permit);
-            inner.update_in_use_metric();
+            quota.update_in_use_metric();
 
             debug!("Released compaction memory: {} bytes", bytes);
         }
@@ -474,29 +513,6 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_additional_requests() {
-        let limit = 20 * PERMIT_GRANULARITY_BYTES;
-        let manager = CompactionMemoryManager::new(limit);
-
-        let mut guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
-        assert_eq!(manager.used_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
-
-        // Request multiple additional allocations - all merged into guard
-        assert!(guard.request_additional(3 * PERMIT_GRANULARITY_BYTES));
-        assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
-
-        assert!(guard.request_additional(4 * PERMIT_GRANULARITY_BYTES));
-        assert_eq!(manager.used_bytes(), 12 * PERMIT_GRANULARITY_BYTES);
-
-        assert!(guard.request_additional(2 * PERMIT_GRANULARITY_BYTES));
-        assert_eq!(manager.used_bytes(), 14 * PERMIT_GRANULARITY_BYTES);
-
-        // All memory released together when guard drops
-        drop(guard);
-        assert_eq!(manager.used_bytes(), 0);
-    }
-
-    #[test]
     fn test_request_additional_zero_bytes() {
         let limit = 10 * PERMIT_GRANULARITY_BYTES;
         let manager = CompactionMemoryManager::new(limit);
@@ -510,25 +526,72 @@ mod tests {
     }
 
     #[test]
-    fn test_request_additional_incremental() {
-        // Test that additional memory is properly merged and released as one unit
+    fn test_early_release_partial_success() {
         let limit = 10 * PERMIT_GRANULARITY_BYTES;
         let manager = CompactionMemoryManager::new(limit);
 
-        let mut guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
-        assert_eq!(guard.granted_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
-
-        // Request additional - memory is merged
-        assert!(guard.request_additional(3 * PERMIT_GRANULARITY_BYTES));
-        assert_eq!(guard.granted_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
+        let mut guard = manager.try_acquire(8 * PERMIT_GRANULARITY_BYTES).unwrap();
         assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
 
-        // Drop guard - all memory released together
+        // Release half
+        assert!(guard.early_release_partial(4 * PERMIT_GRANULARITY_BYTES));
+        assert_eq!(guard.granted_bytes(), 4 * PERMIT_GRANULARITY_BYTES);
+        assert_eq!(manager.used_bytes(), 4 * PERMIT_GRANULARITY_BYTES);
+
+        // Released memory should be available to others
+        let _guard2 = manager.try_acquire(4 * PERMIT_GRANULARITY_BYTES).unwrap();
+        assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
+    }
+
+    #[test]
+    fn test_early_release_partial_exceeds_granted() {
+        let manager = CompactionMemoryManager::new(10 * PERMIT_GRANULARITY_BYTES);
+        let mut guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
+
+        // Try to release more than granted - should fail
+        assert!(!guard.early_release_partial(10 * PERMIT_GRANULARITY_BYTES));
+        assert_eq!(guard.granted_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
+        assert_eq!(manager.used_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
+    }
+
+    #[test]
+    fn test_early_release_partial_unlimited() {
+        let manager = CompactionMemoryManager::new(0);
+        let mut guard = manager.try_acquire(100 * PERMIT_GRANULARITY_BYTES).unwrap();
+
+        // Unlimited guard - release should succeed (no-op)
+        assert!(guard.early_release_partial(50 * PERMIT_GRANULARITY_BYTES));
+        assert_eq!(guard.granted_bytes(), 0);
+    }
+
+    #[test]
+    fn test_request_and_early_release_symmetry() {
+        let limit = 20 * PERMIT_GRANULARITY_BYTES;
+        let manager = CompactionMemoryManager::new(limit);
+
+        let mut guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
+
+        // Request additional
+        assert!(guard.request_additional(5 * PERMIT_GRANULARITY_BYTES));
+        assert_eq!(guard.granted_bytes(), 10 * PERMIT_GRANULARITY_BYTES);
+        assert_eq!(manager.used_bytes(), 10 * PERMIT_GRANULARITY_BYTES);
+
+        // Early release some
+        assert!(guard.early_release_partial(3 * PERMIT_GRANULARITY_BYTES));
+        assert_eq!(guard.granted_bytes(), 7 * PERMIT_GRANULARITY_BYTES);
+        assert_eq!(manager.used_bytes(), 7 * PERMIT_GRANULARITY_BYTES);
+
+        // Request again
+        assert!(guard.request_additional(2 * PERMIT_GRANULARITY_BYTES));
+        assert_eq!(guard.granted_bytes(), 9 * PERMIT_GRANULARITY_BYTES);
+        assert_eq!(manager.used_bytes(), 9 * PERMIT_GRANULARITY_BYTES);
+
+        // Early release again
+        assert!(guard.early_release_partial(4 * PERMIT_GRANULARITY_BYTES));
+        assert_eq!(guard.granted_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
+        assert_eq!(manager.used_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
+
         drop(guard);
         assert_eq!(manager.used_bytes(), 0);
-
-        // Verify we can still allocate the full limit
-        let new_guard = manager.try_acquire(10 * PERMIT_GRANULARITY_BYTES).unwrap();
-        assert_eq!(new_guard.granted_bytes(), 10 * PERMIT_GRANULARITY_BYTES);
     }
 }
