@@ -428,7 +428,7 @@ pub trait InformationExtension {
 }
 
 /// The request to inspect the datanode.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DatanodeInspectRequest {
     /// Kind to fetch from datanode.
     pub kind: DatanodeInspectKind,
