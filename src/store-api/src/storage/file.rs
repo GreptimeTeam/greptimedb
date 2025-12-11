@@ -24,6 +24,9 @@ use uuid::Uuid;
 use crate::ManifestVersion;
 use crate::storage::RegionId;
 
+/// Index version
+pub type IndexVersion = u64;
+
 #[derive(Debug, Snafu, PartialEq)]
 pub struct ParseIdError {
     source: uuid::Error,

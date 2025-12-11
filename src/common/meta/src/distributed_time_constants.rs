@@ -47,21 +47,16 @@ pub const META_KEEP_ALIVE_INTERVAL_SECS: u64 = META_LEASE_SECS / 2;
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1);
 
 /// The keep-alive interval of the heartbeat channel.
-pub const HEARTBEAT_CHANNEL_KEEP_ALIVE_INTERVAL_SECS: Duration =
-    Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1);
+pub const HEARTBEAT_CHANNEL_KEEP_ALIVE_INTERVAL_SECS: Duration = Duration::from_secs(15);
 
 /// The keep-alive timeout of the heartbeat channel.
-pub const HEARTBEAT_CHANNEL_KEEP_ALIVE_TIMEOUT_SECS: Duration =
-    Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1);
+pub const HEARTBEAT_CHANNEL_KEEP_ALIVE_TIMEOUT_SECS: Duration = Duration::from_secs(5);
 
 /// The default options for the etcd client.
 pub fn default_etcd_client_options() -> ConnectOptions {
     ConnectOptions::new()
         .with_keep_alive_while_idle(true)
-        .with_keep_alive(
-            Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1),
-            Duration::from_secs(10),
-        )
+        .with_keep_alive(Duration::from_secs(15), Duration::from_secs(5))
         .with_connect_timeout(Duration::from_secs(10))
 }
 
