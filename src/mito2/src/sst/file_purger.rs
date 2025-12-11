@@ -21,7 +21,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::{FileMeta, delete_files};
+use crate::sst::file::{FileMeta, delete_files, delete_index};
 use crate::sst::file_ref::FileReferenceManagerRef;
 
 /// A worker to delete files in background.
@@ -29,7 +29,8 @@ pub trait FilePurger: Send + Sync + fmt::Debug {
     /// Send a request to remove the file.
     /// If `is_delete` is true, the file will be deleted from the storage.
     /// Otherwise, only the reference will be removed.
-    fn remove_file(&self, file_meta: FileMeta, is_delete: bool);
+    /// If `index_outdated` is true, the index file will be deleted regardless of `is_delete`.
+    fn remove_file(&self, file_meta: FileMeta, is_delete: bool, index_outdated: bool);
 
     /// Notify the purger of a new file created.
     /// This is useful for object store based storage, where we need to track the file references
@@ -46,7 +47,7 @@ pub type FilePurgerRef = Arc<dyn FilePurger>;
 pub struct NoopFilePurger;
 
 impl FilePurger for NoopFilePurger {
-    fn remove_file(&self, _file_meta: FileMeta, _is_delete: bool) {
+    fn remove_file(&self, _file_meta: FileMeta, _is_delete: bool, _index_outdated: bool) {
         // noop
     }
 }
@@ -142,12 +143,27 @@ impl LocalFilePurger {
             error!(e; "Failed to schedule the file purge request");
         }
     }
+
+    fn delete_index(&self, file_meta: FileMeta) {
+        let sst_layer = self.sst_layer.clone();
+        let cache_manager = self.cache_manager.clone();
+        if let Err(e) = self.scheduler.schedule(Box::pin(async move {
+            let index_id = file_meta.index_id();
+            if let Err(e) = delete_index(index_id, &sst_layer, &cache_manager).await {
+                error!(e; "Failed to delete index for file {:?} from storage", file_meta);
+            }
+        })) {
+            error!(e; "Failed to schedule the index purge request");
+        }
+    }
 }
 
 impl FilePurger for LocalFilePurger {
-    fn remove_file(&self, file_meta: FileMeta, is_delete: bool) {
+    fn remove_file(&self, file_meta: FileMeta, is_delete: bool, index_outdated: bool) {
         if is_delete {
             self.delete_file(file_meta);
+        } else if index_outdated {
+            self.delete_index(file_meta);
         }
     }
 }
@@ -158,7 +174,7 @@ pub struct ObjectStoreFilePurger {
 }
 
 impl FilePurger for ObjectStoreFilePurger {
-    fn remove_file(&self, file_meta: FileMeta, _is_delete: bool) {
+    fn remove_file(&self, file_meta: FileMeta, _is_delete: bool, _index_outdated: bool) {
         // if not on local file system, instead inform the global file purger to remove the file reference.
         // notice that no matter whether the file is deleted or not, we need to remove the reference
         // because the file is no longer in use nonetheless.

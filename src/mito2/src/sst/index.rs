@@ -503,6 +503,8 @@ pub type ResultMpscSender = Sender<Result<IndexBuildOutcome>>;
 
 #[derive(Clone)]
 pub struct IndexBuildTask {
+    /// The SST file handle to build index for.
+    pub file: FileHandle,
     /// The file meta to build index for.
     pub file_meta: FileMeta,
     pub reason: IndexBuildType,
@@ -651,10 +653,7 @@ impl IndexBuildTask {
 
         let mut parquet_reader = self
             .access_layer
-            .read_sst(FileHandle::new(
-                self.file_meta.clone(),
-                self.file_purger.clone(),
-            ))
+            .read_sst(self.file.clone()) // use the latest file handle instead of creating a new one
             .build()
             .await?;
 
@@ -1498,14 +1497,19 @@ mod tests {
         let region_id = metadata.region_id;
         let indexer_builder = mock_indexer_builder(metadata, &env).await;
 
+        let file_meta = FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            file_size: 100,
+            ..Default::default()
+        };
+
+        let file = FileHandle::new(file_meta.clone(), file_purger.clone());
+
         // Create mock task.
         let task = IndexBuildTask {
-            file_meta: FileMeta {
-                region_id,
-                file_id: FileId::random(),
-                file_size: 100,
-                ..Default::default()
-            },
+            file,
+            file_meta,
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
             listener: WorkerListener::default(),
@@ -1555,10 +1559,13 @@ mod tests {
             mock_version_control(metadata.clone(), file_purger.clone(), files).await;
         let indexer_builder = mock_indexer_builder(metadata.clone(), &env).await;
 
+        let file = FileHandle::new(file_meta.clone(), file_purger.clone());
+
         // Create mock task.
         let (tx, mut rx) = mpsc::channel(4);
         let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
+            file,
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
@@ -1626,10 +1633,13 @@ mod tests {
             mock_version_control(metadata.clone(), file_purger.clone(), files).await;
         let indexer_builder = mock_indexer_builder(metadata.clone(), &env).await;
 
+        let file = FileHandle::new(file_meta.clone(), file_purger.clone());
+
         // Create mock task.
         let (tx, _rx) = mpsc::channel(4);
         let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
+            file,
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
@@ -1726,10 +1736,13 @@ mod tests {
             mock_version_control(metadata.clone(), file_purger.clone(), files).await;
         let indexer_builder = mock_indexer_builder(metadata.clone(), &env).await;
 
+        let file = FileHandle::new(file_meta.clone(), file_purger.clone());
+
         // Create mock task.
         let (tx, mut rx) = mpsc::channel(4);
         let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
+            file,
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
@@ -1813,10 +1826,13 @@ mod tests {
         let version_control =
             mock_version_control(metadata.clone(), file_purger.clone(), files).await;
 
+        let file = FileHandle::new(file_meta.clone(), file_purger.clone());
+
         // Create mock task.
         let (tx, mut _rx) = mpsc::channel(4);
         let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
+            file,
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
@@ -1864,13 +1880,18 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let (result_tx, _result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
 
+        let file_meta = FileMeta {
+            region_id,
+            file_id,
+            file_size: 100,
+            ..Default::default()
+        };
+
+        let file = FileHandle::new(file_meta.clone(), file_purger.clone());
+
         IndexBuildTask {
-            file_meta: FileMeta {
-                region_id,
-                file_id,
-                file_size: 100,
-                ..Default::default()
-            },
+            file,
+            file_meta,
             reason,
             access_layer: env.access_layer.clone(),
             listener: WorkerListener::default(),
