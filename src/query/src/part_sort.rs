@@ -48,6 +48,8 @@ use parking_lot::RwLock;
 use snafu::location;
 use store_api::region_engine::PartitionRange;
 
+use crate::error::Result;
+use crate::window_sort::check_partition_range_monotonicity;
 use crate::{array_iter_helper, downcast_ts_array};
 
 /// Sort input within given PartitionRange
@@ -72,12 +74,14 @@ pub struct PartSortExec {
 }
 
 impl PartSortExec {
-    pub fn new(
+    pub fn try_new(
         expression: PhysicalSortExpr,
         limit: Option<usize>,
         partition_ranges: Vec<Vec<PartitionRange>>,
         input: Arc<dyn ExecutionPlan>,
-    ) -> Self {
+    ) -> Result<Self> {
+        check_partition_range_monotonicity(&partition_ranges, expression.options.descending)?;
+
         let metrics = ExecutionPlanMetricsSet::new();
         let properties = input.properties();
         let properties = PlanProperties::new(
@@ -91,7 +95,7 @@ impl PartSortExec {
             .is_some()
             .then(|| Self::create_filter(expression.expr.clone()));
 
-        Self {
+        Ok(Self {
             expression,
             limit,
             input,
@@ -99,7 +103,7 @@ impl PartSortExec {
             partition_ranges,
             properties,
             filter,
-        }
+        })
     }
 
     /// Add or reset `self.filter` to a new `TopKDynamicFilters`.
@@ -185,12 +189,13 @@ impl ExecutionPlan for PartSortExec {
         } else {
             internal_err!("No children found")?
         };
-        Ok(Arc::new(Self::new(
+        let new = Self::try_new(
             self.expression.clone(),
             self.limit,
             self.partition_ranges.clone(),
             new_input.clone(),
-        )))
+        )?;
+        Ok(Arc::new(new))
     }
 
     fn execute(
@@ -846,10 +851,11 @@ mod test {
             for part_id in 0..rng.usize(0..part_cnt_bound) {
                 // generate each `PartitionRange`'s timestamp range
                 let (start, end) = if descending {
+                    // Use 1..=range_offset_bound to ensure strictly decreasing end values
                     let end = bound_val
                         .map(
                             |i| i
-                            .checked_sub(rng.i64(0..range_offset_bound))
+                            .checked_sub(rng.i64(1..=range_offset_bound))
                             .expect("Bad luck, fuzzy test generate data that will overflow, change seed and try again")
                         )
                         .unwrap_or_else(|| rng.i64(-100000000..100000000));
@@ -859,8 +865,9 @@ mod test {
                     let end = Timestamp::new(end, unit.into());
                     (start, end)
                 } else {
+                    // Use 1..=range_offset_bound to ensure strictly increasing start values
                     let start = bound_val
-                        .map(|i| i + rng.i64(0..range_offset_bound))
+                        .map(|i| i + rng.i64(1..=range_offset_bound))
                         .unwrap_or_else(|| rng.i64(..));
                     bound_val = Some(start);
                     let end = start + rng.i64(1..range_size_bound);
@@ -1158,7 +1165,7 @@ mod test {
 
         let mock_input = Arc::new(MockInputExec::new(data_partition, schema.clone()));
 
-        let exec = PartSortExec::new(
+        let exec = PartSortExec::try_new(
             PhysicalSortExpr {
                 expr: Arc::new(Column::new("ts", 0)),
                 options: opt,
@@ -1166,7 +1173,8 @@ mod test {
             limit,
             vec![ranges.clone()],
             mock_input.clone(),
-        );
+        )
+        .unwrap();
 
         let exec_stream = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
 
@@ -1403,23 +1411,24 @@ mod test {
         // Create 3 partitions, each with more data than the limit
         // limit=2 per partition, so total expected output = 6 rows
         // After producing 6 rows, early termination should kick in
+        // For descending sort, ranges must be ordered by (end DESC, start DESC)
         let input_ranged_data = vec![
             (
                 PartitionRange {
-                    start: Timestamp::new(0, unit.into()),
-                    end: Timestamp::new(10, unit.into()),
+                    start: Timestamp::new(20, unit.into()),
+                    end: Timestamp::new(30, unit.into()),
                     num_rows: 10,
-                    identifier: 0,
+                    identifier: 2,
                 },
                 vec![
                     DfRecordBatch::try_new(
                         schema.clone(),
-                        vec![new_ts_array(unit, vec![1, 2, 3, 4, 5])],
+                        vec![new_ts_array(unit, vec![21, 22, 23, 24, 25])],
                     )
                     .unwrap(),
                     DfRecordBatch::try_new(
                         schema.clone(),
-                        vec![new_ts_array(unit, vec![6, 7, 8, 9, 10])],
+                        vec![new_ts_array(unit, vec![26, 27, 28, 29, 30])],
                     )
                     .unwrap(),
                 ],
@@ -1446,20 +1455,20 @@ mod test {
             ),
             (
                 PartitionRange {
-                    start: Timestamp::new(20, unit.into()),
-                    end: Timestamp::new(30, unit.into()),
+                    start: Timestamp::new(0, unit.into()),
+                    end: Timestamp::new(10, unit.into()),
                     num_rows: 10,
-                    identifier: 2,
+                    identifier: 0,
                 },
                 vec![
                     DfRecordBatch::try_new(
                         schema.clone(),
-                        vec![new_ts_array(unit, vec![21, 22, 23, 24, 25])],
+                        vec![new_ts_array(unit, vec![1, 2, 3, 4, 5])],
                     )
                     .unwrap(),
                     DfRecordBatch::try_new(
                         schema.clone(),
-                        vec![new_ts_array(unit, vec![26, 27, 28, 29, 30])],
+                        vec![new_ts_array(unit, vec![6, 7, 8, 9, 10])],
                     )
                     .unwrap(),
                 ],
@@ -1468,8 +1477,9 @@ mod test {
 
         // PartSort won't reorder `PartitionRange` (it assumes it's already ordered), so it will not read other partitions.
         // This case is just to verify that early termination works as expected.
+        // First partition [20, 30) produces top 2 values: 29, 28
         let expected_output = vec![
-            DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![9, 8])]).unwrap(),
+            DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![29, 28])]).unwrap(),
         ];
 
         run_test(

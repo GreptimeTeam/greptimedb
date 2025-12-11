@@ -84,23 +84,31 @@ pub struct WindowedSortExec {
     properties: PlanProperties,
 }
 
-fn check_partition_range_monotonicity(
+/// Checks that partition ranges are sorted correctly for the given sort direction.
+/// - Descending: sorted by (end DESC, start DESC) - shorter ranges first when ends are equal
+/// - Ascending: sorted by (start ASC, end ASC) - shorter ranges first when starts are equal
+pub fn check_partition_range_monotonicity(
     ranges: &[Vec<PartitionRange>],
     descending: bool,
 ) -> Result<()> {
     let is_valid = ranges.iter().all(|r| {
         if descending {
-            r.windows(2).all(|w| w[0].end >= w[1].end)
+            // Primary: end descending, Secondary: start descending (shorter range first)
+            r.windows(2)
+                .all(|w| w[0].end > w[1].end || (w[0].end == w[1].end && w[0].start >= w[1].start))
         } else {
-            r.windows(2).all(|w| w[0].start <= w[1].start)
+            // Primary: start ascending, Secondary: end ascending (shorter range first)
+            r.windows(2).all(|w| {
+                w[0].start < w[1].start || (w[0].start == w[1].start && w[0].end <= w[1].end)
+            })
         }
     });
 
     if !is_valid {
         let msg = if descending {
-            "Input `PartitionRange`s's upper bound is not monotonic non-increase"
+            "Input `PartitionRange`s are not sorted by (end DESC, start DESC)"
         } else {
-            "Input `PartitionRange`s's lower bound is not monotonic non-decrease"
+            "Input `PartitionRange`s are not sorted by (start ASC, end ASC)"
         };
         let plain_error = PlainError::new(msg.to_string(), StatusCode::Unexpected);
         Err(BoxedError::new(plain_error)).context(QueryExecutionSnafu {})
@@ -2829,8 +2837,9 @@ mod test {
             // generate input data
             for part_id in 0..rng.usize(0..part_cnt_bound) {
                 let (start, end) = if descending {
+                    // Use 1..=range_offset_bound to ensure strictly decreasing end values
                     let end = bound_val
-                        .map(|i| i - rng.i64(0..range_offset_bound))
+                        .map(|i| i - rng.i64(1..=range_offset_bound))
                         .unwrap_or_else(|| rng.i64(..));
                     bound_val = Some(end);
                     let start = end - rng.i64(1..range_size_bound);
@@ -2838,8 +2847,9 @@ mod test {
                     let end = Timestamp::new(end, unit.into());
                     (start, end)
                 } else {
+                    // Use 1..=range_offset_bound to ensure strictly increasing start values
                     let start = bound_val
-                        .map(|i| i + rng.i64(0..range_offset_bound))
+                        .map(|i| i + rng.i64(1..=range_offset_bound))
                         .unwrap_or_else(|| rng.i64(..));
                     bound_val = Some(start);
                     let end = start + rng.i64(1..range_size_bound);
