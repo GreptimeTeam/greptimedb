@@ -25,7 +25,6 @@ use crate::tests::test_util::TestContext;
 
 mod basic;
 mod delay_layer;
-mod delay_query;
 mod race;
 
 /// Helper function to get table route information for GC procedure
