@@ -158,9 +158,6 @@ impl CompactionMemoryManager {
             None => CompactionMemoryGuard::unlimited(),
             Some(quota) => {
                 let permits = bytes_to_permits(bytes);
-                if permits == 0 {
-                    return CompactionMemoryGuard::unlimited();
-                }
 
                 let permit = quota
                     .semaphore
@@ -180,9 +177,6 @@ impl CompactionMemoryManager {
             None => Some(CompactionMemoryGuard::unlimited()),
             Some(quota) => {
                 let permits = bytes_to_permits(bytes);
-                if permits == 0 {
-                    return Some(CompactionMemoryGuard::unlimited());
-                }
 
                 match quota.semaphore.clone().try_acquire_many_owned(permits) {
                     Ok(permit) => {
@@ -274,10 +268,12 @@ impl CompactionMemoryGuard {
         match &mut self.state {
             GuardState::Unlimited => true,
             GuardState::Limited { permit, quota } => {
-                let additional_permits = bytes_to_permits(bytes);
-                if additional_permits == 0 {
+                // Early return for zero-byte requests (no-op)
+                if bytes == 0 {
                     return true;
                 }
+
+                let additional_permits = bytes_to_permits(bytes);
 
                 // Try to acquire additional permits from the quota
                 match quota
@@ -315,10 +311,12 @@ impl CompactionMemoryGuard {
         match &mut self.state {
             GuardState::Unlimited => true,
             GuardState::Limited { permit, quota } => {
-                let release_permits = bytes_to_permits(bytes);
-                if release_permits == 0 {
+                // Early return for zero-byte requests (no-op)
+                if bytes == 0 {
                     return true;
                 }
+
+                let release_permits = bytes_to_permits(bytes);
 
                 // Split out the permits we want to release
                 match permit.split(release_permits as usize) {
@@ -371,9 +369,9 @@ impl fmt::Debug for CompactionMemoryGuard {
 }
 
 fn bytes_to_permits(bytes: u64) -> u32 {
-    if bytes == 0 {
-        return 0;
-    }
+    // Round up to the nearest permit.
+    // Returns 0 for bytes=0, which allows lazy allocation via request_additional().
+    // Non-zero bytes always round up to at least 1 permit due to the math.
     bytes
         .saturating_add(PERMIT_GRANULARITY_BYTES - 1)
         .saturating_div(PERMIT_GRANULARITY_BYTES)
@@ -593,5 +591,31 @@ mod tests {
 
         drop(guard);
         assert_eq!(manager.used_bytes(), 0);
+    }
+
+    #[test]
+    fn test_small_allocation_rounds_up() {
+        // Test that allocations smaller than PERMIT_GRANULARITY_BYTES
+        // round up to 1 permit and can use request_additional()
+        let limit = 10 * PERMIT_GRANULARITY_BYTES;
+        let manager = CompactionMemoryManager::new(limit);
+
+        let mut guard = manager.try_acquire(512 * 1024).unwrap(); // 512KB
+        assert_eq!(guard.granted_bytes(), PERMIT_GRANULARITY_BYTES); // Rounds up to 1MB
+        assert!(guard.request_additional(2 * PERMIT_GRANULARITY_BYTES)); // Can request more
+        assert_eq!(guard.granted_bytes(), 3 * PERMIT_GRANULARITY_BYTES);
+    }
+
+    #[test]
+    fn test_acquire_zero_bytes_lazy_allocation() {
+        // Test that acquire(0) returns 0 permits but can request_additional() later
+        let manager = CompactionMemoryManager::new(10 * PERMIT_GRANULARITY_BYTES);
+
+        let mut guard = manager.try_acquire(0).unwrap();
+        assert_eq!(guard.granted_bytes(), 0); // No permits consumed
+        assert_eq!(manager.used_bytes(), 0);
+
+        assert!(guard.request_additional(3 * PERMIT_GRANULARITY_BYTES)); // Lazy allocation
+        assert_eq!(guard.granted_bytes(), 3 * PERMIT_GRANULARITY_BYTES);
     }
 }
