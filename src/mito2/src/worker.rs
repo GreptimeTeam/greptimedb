@@ -19,6 +19,7 @@ mod handle_bulk_insert;
 mod handle_catchup;
 mod handle_close;
 mod handle_compaction;
+mod handle_copy_region;
 mod handle_create;
 mod handle_drop;
 mod handle_enter_staging;
@@ -1010,6 +1011,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::RemapManifests(req) => {
                     self.handle_remap_manifests_request(req);
                 }
+                WorkerRequest::CopyRegionFrom(req) => {
+                    self.handle_copy_region_from_request(req);
+                }
             }
         }
 
@@ -1125,6 +1129,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::EnterStaging(req) => self.handle_enter_staging_result(req).await,
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
+            BackgroundNotify::CopyRegionFromFinished(req) => {
+                self.handle_copy_region_from_finished(req)
+            }
         }
     }
 

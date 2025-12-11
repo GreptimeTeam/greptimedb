@@ -17,6 +17,7 @@
 pub mod catchup;
 pub mod opener;
 pub mod options;
+pub mod utils;
 pub(crate) mod version;
 
 use std::collections::hash_map::Entry;
@@ -34,9 +35,11 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
 };
+use store_api::region_request::PathType;
 use store_api::sst_entry::ManifestSstEntry;
-use store_api::storage::{RegionId, SequenceNumber};
+use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::RwLockWriteGuard;
+pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
@@ -49,6 +52,7 @@ use crate::manifest::action::{
 use crate::manifest::manager::RegionManifestManager;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
+use crate::sst::file::FileMeta;
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location::{index_file_path, sst_file_path};
 use crate::time_provider::TimeProviderRef;
@@ -213,6 +217,11 @@ impl MitoRegion {
     /// Returns the table dir.
     pub(crate) fn table_dir(&self) -> &str {
         self.access_layer.table_dir()
+    }
+
+    /// Returns the path type of the region.
+    pub(crate) fn path_type(&self) -> PathType {
+        self.access_layer.path_type()
     }
 
     /// Returns whether the region is writable.
@@ -655,6 +664,16 @@ impl MitoRegion {
                 }
             })
             .collect()
+    }
+
+    /// Returns the file metas of the region by file ids.
+    pub async fn file_metas(&self, file_ids: &[FileId]) -> Vec<Option<FileMeta>> {
+        let manifest_files = self.manifest_ctx.manifest().await.files.clone();
+
+        file_ids
+            .iter()
+            .map(|file_id| manifest_files.get(file_id).cloned())
+            .collect::<Vec<_>>()
     }
 
     /// Exit staging mode successfully by merging all staged manifests and making them visible.

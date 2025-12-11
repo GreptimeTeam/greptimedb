@@ -1162,6 +1162,18 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Invalid source and target region, source: {}, target: {}",
+        source_region_id,
+        target_region_id
+    ))]
+    InvalidSourceAndTargetRegion {
+        source_region_id: RegionId,
+        target_region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1230,7 +1242,8 @@ impl ErrorExt for Error {
             | MissingManifest { .. }
             | NoOldManifests { .. }
             | MissingPartitionExpr { .. }
-            | SerializePartitionExpr { .. } => StatusCode::InvalidArguments,
+            | SerializePartitionExpr { .. }
+            | InvalidSourceAndTargetRegion { .. } => StatusCode::InvalidArguments,
 
             RegionMetadataNotFound { .. }
             | Join { .. }

@@ -28,9 +28,9 @@ use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
 use store_api::region_engine::{
-    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
-    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
-    SettableRegionRoleState, SyncManifestResponse,
+    CopyRegionFromRequest, CopyRegionFromResponse, RegionEngine, RegionManifestInfo, RegionRole,
+    RegionScannerRef, RegionStatistic, RemapManifestsRequest, RemapManifestsResponse,
+    SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
 };
 use store_api::region_request::RegionRequest;
 use store_api::storage::{ConcreteDataType, RegionId, ScanRequest, SequenceNumber};
@@ -122,6 +122,14 @@ impl RegionEngine for MetaRegionEngine {
         &self,
         _request: RemapManifestsRequest,
     ) -> Result<RemapManifestsResponse, BoxedError> {
+        unimplemented!()
+    }
+
+    async fn copy_region_from(
+        &self,
+        _region_id: RegionId,
+        _request: CopyRegionFromRequest,
+    ) -> Result<CopyRegionFromResponse, BoxedError> {
         unimplemented!()
     }
 
