@@ -63,10 +63,18 @@ impl SstVersion {
                 .files
                 .entry(file.file_id)
                 .and_modify(|f| {
-                    if f.index_id().version < new_index_version {
-                        *f = FileHandle::new(file.clone(), file_purger.clone());
-                    } else {
+                    if f.meta_ref().exists_index() && f.index_id().version >= new_index_version {
                         // current file handle's index is up-to-date, skip adding
+                        if f.index_id().version > new_index_version {
+                            common_telemetry::warn!(
+                                "Adding file with older index version, existing: {:?}, new: {:?}, ignoring new file",
+                                f.meta_ref(),
+                                file
+                            );
+                        }
+                    } else {
+                        // include case like old file have no index or index is outdated
+                        *f = FileHandle::new(file.clone(), file_purger.clone());
                     }
                 })
                 .or_insert_with(|| FileHandle::new(file.clone(), file_purger.clone()));
