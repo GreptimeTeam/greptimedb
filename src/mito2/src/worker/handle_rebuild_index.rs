@@ -72,6 +72,7 @@ impl<S> RegionWorkerLoop<S> {
         });
 
         IndexBuildTask {
+            file: file.clone(),
             file_meta: file.meta_ref().clone(),
             reason: build_type,
             access_layer: access_layer.clone(),

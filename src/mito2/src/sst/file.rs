@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::PathType;
-use store_api::storage::{ColumnId, FileId, RegionId};
+use store_api::storage::{ColumnId, FileId, IndexVersion, RegionId};
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
@@ -82,8 +82,6 @@ pub type Level = u8;
 pub const MAX_LEVEL: Level = 2;
 /// Type to store index types for a column.
 pub type IndexTypes = SmallVec<[IndexType; 4]>;
-/// Index version
-pub type IndexVersion = u64;
 
 /// Cross-region file id.
 ///
@@ -308,6 +306,11 @@ impl FileMeta {
         !self.available_indexes.is_empty()
     }
 
+    /// Whether the index file is up-to-date comparing to another file meta.    
+    pub fn is_index_up_to_date(&self, other: &FileMeta) -> bool {
+        self.exists_index() && other.exists_index() && self.index_version >= other.index_version
+    }
+
     /// Returns true if the file has an inverted index
     pub fn inverted_index_available(&self) -> bool {
         self.available_indexes.contains(&IndexType::InvertedIndex)
@@ -434,6 +437,16 @@ impl FileHandle {
         self.inner.compacting.store(compacting, Ordering::Relaxed);
     }
 
+    pub fn index_outdated(&self) -> bool {
+        self.inner.index_outdated.load(Ordering::Relaxed)
+    }
+
+    pub fn set_index_outdated(&self, index_outdated: bool) {
+        self.inner
+            .index_outdated
+            .store(index_outdated, Ordering::Relaxed);
+    }
+
     /// Returns a reference to the [FileMeta].
     pub fn meta_ref(&self) -> &FileMeta {
         &self.inner.meta
@@ -471,23 +484,29 @@ struct FileHandleInner {
     meta: FileMeta,
     compacting: AtomicBool,
     deleted: AtomicBool,
+    index_outdated: AtomicBool,
     file_purger: FilePurgerRef,
 }
 
 impl Drop for FileHandleInner {
     fn drop(&mut self) {
-        self.file_purger
-            .remove_file(self.meta.clone(), self.deleted.load(Ordering::Relaxed));
+        self.file_purger.remove_file(
+            self.meta.clone(),
+            self.deleted.load(Ordering::Acquire),
+            self.index_outdated.load(Ordering::Acquire),
+        );
     }
 }
 
 impl FileHandleInner {
+    /// There should only be one `FileHandleInner` for each file on a datanode
     fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandleInner {
         file_purger.new_file(&meta);
         FileHandleInner {
             meta,
             compacting: AtomicBool::new(false),
             deleted: AtomicBool::new(false),
+            index_outdated: AtomicBool::new(false),
             file_purger,
         }
     }
@@ -540,38 +559,77 @@ pub async fn delete_files(
     );
 
     for (file_id, index_version) in file_ids {
-        if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache()) {
-            // Removes index file from the cache.
-            if delete_index {
-                write_cache
-                    .remove(IndexKey::new(
-                        region_id,
-                        *file_id,
-                        FileType::Puffin(*index_version),
-                    ))
-                    .await;
-            }
+        purge_index_cache_stager(
+            region_id,
+            delete_index,
+            access_layer,
+            cache_manager,
+            *file_id,
+            *index_version,
+        )
+        .await;
+    }
+    Ok(())
+}
 
-            // Remove the SST file from the cache.
+pub async fn delete_index(
+    region_index_id: RegionIndexId,
+    access_layer: &AccessLayerRef,
+    cache_manager: &Option<CacheManagerRef>,
+) -> crate::error::Result<()> {
+    access_layer.delete_index(region_index_id).await?;
+
+    purge_index_cache_stager(
+        region_index_id.region_id(),
+        true,
+        access_layer,
+        cache_manager,
+        region_index_id.file_id(),
+        region_index_id.version,
+    )
+    .await;
+
+    Ok(())
+}
+
+async fn purge_index_cache_stager(
+    region_id: RegionId,
+    delete_index: bool,
+    access_layer: &AccessLayerRef,
+    cache_manager: &Option<CacheManagerRef>,
+    file_id: FileId,
+    index_version: u64,
+) {
+    if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache()) {
+        // Removes index file from the cache.
+        if delete_index {
             write_cache
-                .remove(IndexKey::new(region_id, *file_id, FileType::Parquet))
+                .remove(IndexKey::new(
+                    region_id,
+                    file_id,
+                    FileType::Puffin(index_version),
+                ))
                 .await;
         }
 
-        // Purges index content in the stager.
-        if let Err(e) = access_layer
-            .puffin_manager_factory()
-            .purge_stager(RegionIndexId::new(
-                RegionFileId::new(region_id, *file_id),
-                *index_version,
-            ))
-            .await
-        {
-            error!(e; "Failed to purge stager with index file, file_id: {}, index_version: {}, region: {}",
-                    file_id, index_version, region_id);
-        }
+        // Remove the SST file from the cache.
+        write_cache
+            .remove(IndexKey::new(region_id, file_id, FileType::Parquet))
+            .await;
     }
-    Ok(())
+
+    // Purges index content in the stager.
+    if let Err(e) = access_layer
+        .puffin_manager_factory()
+        .purge_stager(RegionIndexId::new(
+            RegionFileId::new(region_id, file_id),
+            index_version,
+        ))
+        .await
+    {
+        error!(e; "Failed to purge stager with index file, file_id: {}, index_version: {}, region: {}",
+                file_id, index_version, region_id);
+    }
 }
 
 #[cfg(test)]
