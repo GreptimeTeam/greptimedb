@@ -117,8 +117,8 @@ pub async fn new_oss_object_store(oss_config: &OssConfig) -> Result<ObjectStore>
 pub async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectStore> {
     let root = util::normalize_dir(&s3_config.connection.root);
     info!(
-        "The s3 storage bucket is: {}, root is: {}",
-        s3_config.connection.bucket, &root
+        "The s3 storage bucket is: {}, root is: {}, endpoint: {:?}",
+        s3_config.connection.bucket, &root, s3_config.connection.endpoint
     );
 
     let client = build_http_client(&s3_config.http_client)?;
