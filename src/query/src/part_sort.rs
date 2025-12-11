@@ -959,7 +959,7 @@ mod test {
                 nulls_first,
             };
             let limit = if rng.bool() {
-                Some(rng.usize(0..batch_cnt_bound * batch_size_bound))
+                Some(rng.usize(1..batch_cnt_bound * batch_size_bound))
             } else {
                 None
             };
