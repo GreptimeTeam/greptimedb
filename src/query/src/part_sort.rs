@@ -347,8 +347,6 @@ struct PartSortStream {
     range_groups: Vec<(Timestamp, usize, usize)>,
     /// Current group being processed (index into range_groups).
     cur_group_idx: usize,
-    /// Total rows emitted so far (used for early termination check).
-    total_emitted: usize,
 }
 
 impl PartSortStream {
@@ -409,7 +407,6 @@ impl PartSortStream {
             root_metrics: sort.metrics.clone(),
             range_groups,
             cur_group_idx: 0,
-            total_emitted: 0,
         })
     }
 }
@@ -490,7 +487,7 @@ impl PartSortStream {
         sort_column: &ArrayRef,
     ) -> datafusion_common::Result<Option<usize>> {
         if sort_column.is_empty() {
-            return Ok(Some(0));
+            return Ok(None);
         }
 
         // check if the current partition index is out of range
@@ -595,109 +592,6 @@ impl PartSortStream {
             num_rows: 0,   // Not used for validation
             identifier: 0, // Not used for validation
         })
-    }
-
-    /// Get the primary end of the next group, if any.
-    fn get_next_group_primary_end(&self) -> Option<Timestamp> {
-        let next_group_idx = self.cur_group_idx + 1;
-        if next_group_idx >= self.range_groups.len() {
-            return None;
-        }
-        Some(self.range_groups[next_group_idx].0)
-    }
-
-    /// Check if we can stop early after outputting a group's sorted data.
-    ///
-    /// We can stop early if:
-    /// 1. We have a limit and have already output `limit` rows (handled separately)
-    /// 2. OR: We have a limit, have output some rows, AND the threshold value
-    ///    (smallest for descending, largest for ascending) cannot be improved
-    ///    by the next group.
-    ///
-    /// For descending: threshold is the smallest value in our current top-k.
-    ///   If threshold >= next_group.primary_end, next group cannot have larger values.
-    /// For ascending: threshold is the largest value in our current top-k.
-    ///   If threshold <= next_group.primary_end, next group cannot have smaller values.
-    ///
-    /// Parameters:
-    /// - `sorted_batch`: the sorted output batch from the current group
-    /// - `total_emitted`: total rows emitted so far (including this batch)
-    ///
-    /// Returns true if we can stop early.
-    fn can_stop_early_after_group(
-        &self,
-        sorted_batch: &DfRecordBatch,
-        total_emitted: usize,
-    ) -> datafusion_common::Result<bool> {
-        // Only applies when we have a limit
-        let Some(limit) = self.limit else {
-            return Ok(false);
-        };
-
-        // Must have emitted at least `limit` rows to consider stopping
-        if total_emitted < limit {
-            return Ok(false);
-        }
-
-        // Get the next group's primary end
-        let Some(next_primary_end) = self.get_next_group_primary_end() else {
-            // No next group, will stop naturally
-            return Ok(false);
-        };
-
-        // Get the threshold value from the sorted batch
-        // For descending: last value (smallest in top-k)
-        // For ascending: last value (largest in top-k)
-        if sorted_batch.num_rows() == 0 {
-            return Ok(false);
-        }
-
-        let sort_column = self
-            .expression
-            .expr
-            .evaluate(sorted_batch)?
-            .into_array(sorted_batch.num_rows())?;
-
-        let descending = self.expression.options.descending;
-
-        // Get the threshold value (last value in sorted batch)
-        let threshold_idx = sorted_batch.num_rows() - 1;
-        let threshold_value = self.get_timestamp_value(&sort_column, threshold_idx)?;
-
-        // Check if threshold is beyond next group's primary end
-        if descending {
-            // For descending: threshold is smallest in top-k
-            // Next group has values < next_primary_end (since end is exclusive)
-            // If threshold >= next_primary_end, no value in next group can be >= threshold
-            Ok(threshold_value >= next_primary_end.value())
-        } else {
-            // For ascending: threshold is largest in top-k
-            // Next group has values >= next_primary_end (since start is inclusive)
-            // If threshold < next_primary_end, no value in next group can be < threshold
-            Ok(threshold_value < next_primary_end.value())
-        }
-    }
-
-    /// Helper to extract timestamp value at a given index from an array.
-    fn get_timestamp_value(&self, array: &ArrayRef, idx: usize) -> datafusion_common::Result<i64> {
-        macro_rules! extract_ts_value_helper {
-            ($t:ty, $unit:expr, $arr:expr, $idx:expr) => {{
-                let arr = $arr
-                    .as_any()
-                    .downcast_ref::<arrow::array::PrimitiveArray<$t>>()
-                    .unwrap();
-                arr.value($idx)
-            }};
-        }
-
-        let value = downcast_ts_array!(
-            array.data_type() => (extract_ts_value_helper, array, idx),
-            _ => internal_err!(
-                "Unsupported data type for sort column: {:?}",
-                array.data_type()
-            )?,
-        );
-        Ok(value)
     }
 
     /// Sort and clear the buffer and return the sorted record batch
@@ -850,6 +744,20 @@ impl PartSortStream {
         Ok(concat_batch)
     }
 
+    /// Sorts current buffer and returns `None` when there is nothing to emit.
+    fn sorted_buffer_if_non_empty(&mut self) -> datafusion_common::Result<Option<DfRecordBatch>> {
+        if self.buffer.is_empty() {
+            return Ok(None);
+        }
+
+        let sorted = self.sort_buffer()?;
+        if sorted.num_rows() == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(sorted))
+        }
+    }
+
     /// Try to split the input batch if it contains data that exceeds the current partition range.
     ///
     /// When the input batch contains data that exceeds the current partition range, this function
@@ -982,8 +890,7 @@ impl PartSortStream {
             debug_assert!(remaining_range.num_rows() == 0);
 
             // Sort and output the final group
-            let sorted_batch = self.sort_buffer();
-            return sorted_batch.map(|x| if x.num_rows() == 0 { None } else { Some(x) });
+            return self.sorted_buffer_if_non_empty();
         }
 
         // Check if we're still in the same group
@@ -1004,7 +911,7 @@ impl PartSortStream {
         }
 
         // Transitioning to a new group - sort current group and output
-        let sorted_batch = self.sort_buffer();
+        let sorted_batch = self.sorted_buffer_if_non_empty()?;
         self.advance_to_next_group();
 
         let next_sort_column = sort_column.slice(idx, batch.num_rows() - idx);
@@ -1020,32 +927,6 @@ impl PartSortStream {
             }
         }
 
-        sorted_batch.map(|x| if x.num_rows() == 0 { None } else { Some(x) })
-    }
-
-    /// Helper to handle outputting a sorted batch:
-    /// - Updates total_emitted
-    /// - Updates limit
-    /// - Checks for early termination based on threshold comparison with next group
-    fn handle_sorted_output(
-        &mut self,
-        sorted_batch: DfRecordBatch,
-    ) -> datafusion_common::Result<DfRecordBatch> {
-        let batch_rows = sorted_batch.num_rows();
-        self.total_emitted += batch_rows;
-
-        // Update limit
-        self.limit = self.limit.map(|l| l.saturating_sub(batch_rows));
-
-        // Check for early termination based on threshold vs next group's primary end
-        // This only applies when we have a limit
-        if self.limit.is_some()
-            && self.can_stop_early_after_group(&sorted_batch, self.total_emitted)?
-        {
-            // Set limit to 0 to trigger early termination on next poll
-            self.limit = Some(0);
-        }
-
         Ok(sorted_batch)
     }
 
@@ -1054,20 +935,11 @@ impl PartSortStream {
         cx: &mut Context<'_>,
     ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
         loop {
-            // Early termination: if we've already produced enough rows,
-            // don't poll more input - just return
-            if matches!(self.limit, Some(0)) {
-                return Poll::Ready(None);
-            }
-
-            // no more input, sort the buffer and return
             if self.input_complete {
-                if self.buffer.is_empty() {
-                    return Poll::Ready(None);
-                } else {
-                    let sorted_batch = self.sort_buffer()?;
-                    return Poll::Ready(Some(self.handle_sorted_output(sorted_batch)));
+                if let Some(sorted_batch) = self.sorted_buffer_if_non_empty()? {
+                    return Poll::Ready(Some(Ok(sorted_batch)));
                 }
+                return Poll::Ready(None);
             }
 
             // if there is a remaining batch being evaluated from last run,
@@ -1078,19 +950,16 @@ impl PartSortStream {
                 // Check if we've already processed all partitions
                 if self.cur_part_idx >= self.partition_ranges.len() {
                     // All partitions processed, discard remaining data
-                    if self.buffer.is_empty() {
-                        return Poll::Ready(None);
-                    } else {
-                        let sorted_batch = self.sort_buffer()?;
-                        return Poll::Ready(Some(self.handle_sorted_output(sorted_batch)));
+                    if let Some(sorted_batch) = self.sorted_buffer_if_non_empty()? {
+                        return Poll::Ready(Some(Ok(sorted_batch)));
                     }
+                    return Poll::Ready(None);
                 }
 
                 if let Some(sorted_batch) = self.split_batch(evaluating_batch)? {
-                    return Poll::Ready(Some(self.handle_sorted_output(sorted_batch)));
-                } else {
-                    continue;
+                    return Poll::Ready(Some(Ok(sorted_batch)));
                 }
+                continue;
             }
 
             // fetch next batch from input
@@ -1098,15 +967,12 @@ impl PartSortStream {
             match res {
                 Poll::Ready(Some(Ok(batch))) => {
                     if let Some(sorted_batch) = self.split_batch(batch)? {
-                        return Poll::Ready(Some(self.handle_sorted_output(sorted_batch)));
-                    } else {
-                        continue;
+                        return Poll::Ready(Some(Ok(sorted_batch)));
                     }
                 }
                 // input stream end, mark and continue
                 Poll::Ready(None) => {
                     self.input_complete = true;
-                    continue;
                 }
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
                 Poll::Pending => return Poll::Pending,
