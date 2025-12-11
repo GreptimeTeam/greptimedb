@@ -1500,6 +1500,7 @@ write_cache_path = ""
 write_cache_size = "5GiB"
 preload_index_cache = true
 index_cache_percent = 20
+enable_refill_cache_on_read = true
 manifest_cache_size = "256MiB"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
