@@ -36,8 +36,8 @@ use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::expressions::{CastExpr as PhyCast, Column as PhyColumn};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PhysicalExpr,
-    PlanProperties, RecordBatchStream, SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, ExecutionPlanProperties,
+    Partitioning, PhysicalExpr, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datafusion::prelude::{Column, Expr};
 use datatypes::prelude::{ConcreteDataType, DataType as GtDataType};
@@ -180,10 +180,33 @@ impl HistogramFold {
             .index_of_column_by_name(None, &self.ts_column)
             .unwrap();
 
+        let tag_columns = exec_input
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, field)| {
+                if idx == le_column_index || idx == field_column_index || idx == ts_column_index {
+                    None
+                } else {
+                    Some(Arc::new(PhyColumn::new(field.name(), idx)) as _)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut partition_exprs = tag_columns.clone();
+        partition_exprs.push(Arc::new(PhyColumn::new(
+            self.input.schema().field(ts_column_index).name(),
+            ts_column_index,
+        )) as _);
+
         let output_schema: SchemaRef = self.output_schema.inner().clone();
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(1),
+            Partitioning::Hash(
+                partition_exprs.clone(),
+                exec_input.output_partitioning().partition_count(),
+            ),
             EmissionType::Incremental,
             Boundedness::Bounded,
         );
@@ -192,6 +215,8 @@ impl HistogramFold {
             field_column_index,
             ts_column_index,
             input: exec_input,
+            tag_columns,
+            partition_exprs,
             quantile: self.quantile.into(),
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
@@ -253,6 +278,9 @@ pub struct HistogramFoldExec {
     /// Index for field column in the schema of input.
     field_column_index: usize,
     ts_column_index: usize,
+    /// Tag columns are all columns except `le`, `field` and `ts` columns.
+    tag_columns: Vec<Arc<dyn PhysicalExpr>>,
+    partition_exprs: Vec<Arc<dyn PhysicalExpr>>,
     quantile: f64,
     metric: ExecutionPlanMetricsSet,
     properties: PlanProperties,
@@ -269,10 +297,10 @@ impl ExecutionPlan for HistogramFoldExec {
 
     fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
         let mut cols = self
-            .tag_col_exprs()
-            .into_iter()
+            .tag_columns
+            .iter()
             .map(|expr| PhysicalSortRequirement {
-                expr,
+                expr: expr.clone(),
                 options: None,
             })
             .collect::<Vec<PhysicalSortRequirement>>();
@@ -307,7 +335,7 @@ impl ExecutionPlan for HistogramFoldExec {
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
-        self.input.required_input_distribution()
+        vec![Distribution::HashPartitioned(self.partition_exprs.clone())]
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
@@ -324,15 +352,27 @@ impl ExecutionPlan for HistogramFoldExec {
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         assert!(!children.is_empty());
+        let new_input = children[0].clone();
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(self.output_schema.clone()),
+            Partitioning::Hash(
+                self.partition_exprs.clone(),
+                new_input.output_partitioning().partition_count(),
+            ),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
         Ok(Arc::new(Self {
-            input: children[0].clone(),
+            input: new_input,
             metric: self.metric.clone(),
             le_column_index: self.le_column_index,
             ts_column_index: self.ts_column_index,
+            tag_columns: self.tag_columns.clone(),
+            partition_exprs: self.partition_exprs.clone(),
             quantile: self.quantile,
             output_schema: self.output_schema.clone(),
             field_column_index: self.field_column_index,
-            properties: self.properties.clone(),
+            properties,
         }))
     }
 
@@ -391,30 +431,6 @@ impl ExecutionPlan for HistogramFoldExec {
 
     fn name(&self) -> &str {
         "HistogramFoldExec"
-    }
-}
-
-impl HistogramFoldExec {
-    /// Return all the [PhysicalExpr] of tag columns in order.
-    ///
-    /// Tag columns are all columns except `le`, `field` and `ts` columns.
-    pub fn tag_col_exprs(&self) -> Vec<Arc<dyn PhysicalExpr>> {
-        self.input
-            .schema()
-            .fields()
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, field)| {
-                if idx == self.le_column_index
-                    || idx == self.field_column_index
-                    || idx == self.ts_column_index
-                {
-                    None
-                } else {
-                    Some(Arc::new(PhyColumn::new(field.name(), idx)) as _)
-                }
-            })
-            .collect()
     }
 }
 
