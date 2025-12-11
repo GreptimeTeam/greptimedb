@@ -1067,40 +1067,83 @@ mod test {
         quantile: f64,
         ts_column_index: usize,
     ) -> Arc<HistogramFoldExec> {
-        let memory_exec = Arc::new(DataSourceExec::new(Arc::new(
+        let input: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
             MemorySourceConfig::try_new(&[batches], schema.clone(), None).unwrap(),
         )));
         let output_schema: SchemaRef = Arc::new(
-            HistogramFold::convert_schema(
-                &Arc::new(memory_exec.schema().to_dfschema().unwrap()),
-                "le",
-            )
-            .unwrap()
-            .as_arrow()
-            .clone(),
+            HistogramFold::convert_schema(&Arc::new(input.schema().to_dfschema().unwrap()), "le")
+                .unwrap()
+                .as_arrow()
+                .clone(),
         );
-        let properties = PlanProperties::new(
-            EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        );
+
+        let (tag_columns, partition_exprs, properties) =
+            build_test_plan_properties(&input, output_schema.clone(), ts_column_index);
 
         Arc::new(HistogramFoldExec {
             le_column_index: 1,
             field_column_index: 2,
             quantile,
             ts_column_index,
-            input: memory_exec,
+            input,
             output_schema,
+            tag_columns,
+            partition_exprs,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
         })
     }
 
+    type PlanPropsResult = (
+        Vec<Arc<dyn PhysicalExpr>>,
+        Vec<Arc<dyn PhysicalExpr>>,
+        PlanProperties,
+    );
+
+    fn build_test_plan_properties(
+        input: &Arc<dyn ExecutionPlan>,
+        output_schema: SchemaRef,
+        ts_column_index: usize,
+    ) -> PlanPropsResult {
+        let tag_columns = input
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, field)| {
+                if idx == 1 || idx == 2 || idx == ts_column_index {
+                    None
+                } else {
+                    Some(Arc::new(PhyColumn::new(field.name(), idx)) as _)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let partition_exprs = if tag_columns.is_empty() {
+            vec![Arc::new(PhyColumn::new(
+                input.schema().field(ts_column_index).name(),
+                ts_column_index,
+            )) as _]
+        } else {
+            tag_columns.clone()
+        };
+
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(output_schema.clone()),
+            Partitioning::Hash(
+                partition_exprs.clone(),
+                input.output_partitioning().partition_count(),
+            ),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
+
+        (tag_columns, partition_exprs, properties)
+    }
+
     #[tokio::test]
     async fn fold_overall() {
-        let memory_exec = Arc::new(prepare_test_data());
+        let memory_exec: Arc<dyn ExecutionPlan> = Arc::new(prepare_test_data());
         let output_schema: SchemaRef = Arc::new(
             HistogramFold::convert_schema(
                 &Arc::new(memory_exec.schema().to_dfschema().unwrap()),
@@ -1110,19 +1153,17 @@ mod test {
             .as_arrow()
             .clone(),
         );
-        let properties = PlanProperties::new(
-            EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        );
+        let (tag_columns, partition_exprs, properties) =
+            build_test_plan_properties(&memory_exec, output_schema.clone(), 0);
         let fold_exec = Arc::new(HistogramFoldExec {
             le_column_index: 1,
             field_column_index: 2,
             quantile: 0.4,
-            ts_column_index: 9999, // not exist but doesn't matter
+            ts_column_index: 0,
             input: memory_exec,
             output_schema,
+            tag_columns,
+            partition_exprs,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
         });
