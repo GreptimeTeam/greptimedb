@@ -306,6 +306,11 @@ impl FileMeta {
         !self.available_indexes.is_empty()
     }
 
+    /// Whether the index file is up-to-date comparing to another file meta.    
+    pub fn is_index_up_to_date(&self, other: &FileMeta) -> bool {
+        self.exists_index() && other.exists_index() && self.index_version >= other.index_version
+    }
+
     /// Returns true if the file has an inverted index
     pub fn inverted_index_available(&self) -> bool {
         self.available_indexes.contains(&IndexType::InvertedIndex)
