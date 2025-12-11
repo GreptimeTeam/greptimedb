@@ -63,9 +63,12 @@ impl SstVersion {
                 .files
                 .entry(file.file_id)
                 .and_modify(|f| {
-                    if f.meta_ref().exists_index() && f.index_id().version >= new_index_version {
+                    let is_same = *f.meta_ref() == file;
+                    let is_index_up_to_date = f.meta_ref().exists_index() && file.exists_index() && f.index_id().version >= new_index_version;
+                    if is_same || is_index_up_to_date {
                         // current file handle's index is up-to-date, skip adding
                         if f.index_id().version > new_index_version {
+                            // what does it mean for us to see older index version?
                             common_telemetry::warn!(
                                 "Adding file with older index version, existing: {:?}, new: {:?}, ignoring new file",
                                 f.meta_ref(),
