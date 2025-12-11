@@ -14,7 +14,7 @@
 
 mod basic;
 mod candidate_select;
-mod con;
+mod concurrent;
 mod config;
 mod err_handle;
 mod full_list;

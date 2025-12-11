@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use chrono_tz::Tz;
-use snafu::OptionExt;
+use snafu::{OptionExt, ensure};
 use vrl::compiler::runtime::Runtime;
 use vrl::compiler::{Program, TargetValue, compile};
 use vrl::diagnostic::Formatter;
@@ -53,9 +53,15 @@ impl VrlProcessor {
         // check if the return value is have regex
         let result_def = program.final_type_info().result;
         let kind = result_def.kind();
-        if !kind.is_object() {
-            return VrlReturnValueSnafu.fail();
-        }
+        // Check if the return type could possibly be an object or array.
+        // We use contains_* methods since VRL type inference may return
+        // a Kind that represents multiple possible types.
+        ensure!(
+            kind.contains_object() || kind.contains_array(),
+            VrlReturnValueSnafu {
+                result_kind: kind.clone(),
+            }
+        );
         check_regex_output(kind)?;
 
         Ok(Self { source, program })
@@ -111,13 +117,7 @@ impl crate::etl::processor::Processor for VrlProcessor {
     }
 
     fn exec_mut(&self, val: VrlValue) -> Result<VrlValue> {
-        let val = self.resolve(val)?;
-
-        if let VrlValue::Object(_) = val {
-            Ok(val)
-        } else {
-            VrlRegexValueSnafu.fail()
-        }
+        self.resolve(val)
     }
 }
 

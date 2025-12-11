@@ -295,6 +295,10 @@ pub enum PgErrorCode {
     /// operator_intervention
     #[snafu(display("operator_intervention"))]
     Ec57000 = 3600,
+
+    /// cannot_connect_now
+    #[snafu(display("cannot_connect_now"))]
+    Ec57P03 = 3601,
     // === End of Class 57 — Operator Intervention =====
 
     // === Begin of Class 58 — System Error (errors external to PostgreSQL itself) ===
@@ -374,6 +378,7 @@ impl From<StatusCode> for PgErrorCode {
             StatusCode::Unsupported => PgErrorCode::Ec0A000,
             StatusCode::InvalidArguments => PgErrorCode::Ec22023,
             StatusCode::Cancelled => PgErrorCode::Ec57000,
+            StatusCode::Suspended => PgErrorCode::Ec57P03,
             StatusCode::DeadlineExceeded => PgErrorCode::Ec57000,
             StatusCode::External => PgErrorCode::Ec58000,
 

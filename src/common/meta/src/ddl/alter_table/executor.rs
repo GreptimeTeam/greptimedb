@@ -301,8 +301,8 @@ fn build_new_table_info(
         | AlterKind::UnsetTableOptions { .. }
         | AlterKind::SetIndexes { .. }
         | AlterKind::UnsetIndexes { .. }
-        | AlterKind::DropDefaults { .. } => {}
-        AlterKind::SetDefaults { .. } => {}
+        | AlterKind::DropDefaults { .. }
+        | AlterKind::SetDefaults { .. } => {}
     }
 
     info!(

@@ -135,7 +135,7 @@ use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
-use crate::sst::file::{FileMeta, RegionFileId};
+use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::wal::entry_distributor::{
     DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE, build_wal_entry_distributor_and_receivers,
@@ -541,22 +541,23 @@ impl MitoEngine {
                         return Vec::new();
                     };
 
-                    let Some(index_file_id) = entry.index_file_id.as_ref() else {
-                        return Vec::new();
-                    };
-                    let file_id = match FileId::parse_str(index_file_id) {
+                    let index_version = entry.index_version;
+                    let file_id = match FileId::parse_str(&entry.file_id) {
                         Ok(file_id) => file_id,
                         Err(err) => {
                             warn!(
                                 err;
                                 "Failed to parse puffin index file id, table_dir: {}, file_id: {}",
                                 entry.table_dir,
-                                index_file_id
+                                entry.file_id
                             );
                             return Vec::new();
                         }
                     };
-                    let region_file_id = RegionFileId::new(entry.region_id, file_id);
+                    let region_index_id = RegionIndexId::new(
+                        RegionFileId::new(entry.region_id, file_id),
+                        index_version,
+                    );
                     let context = IndexEntryContext {
                         table_dir: &entry.table_dir,
                         index_file_path: index_file_path.as_str(),
@@ -565,7 +566,7 @@ impl MitoEngine {
                         region_number: entry.region_number,
                         region_group: entry.region_group,
                         region_sequence: entry.region_sequence,
-                        file_id: index_file_id,
+                        file_id: &entry.file_id,
                         index_file_size: entry.index_file_size,
                         node_id,
                     };
@@ -576,7 +577,7 @@ impl MitoEngine {
 
                     collect_index_entries_from_puffin(
                         manager,
-                        region_file_id,
+                        region_index_id,
                         context,
                         bloom_filter_cache,
                         inverted_index_cache,

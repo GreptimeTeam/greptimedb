@@ -15,8 +15,10 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_stream::try_stream;
+use common_telemetry::debug;
 use datatypes::arrow::array::{Int64Array, UInt64Array};
 use datatypes::arrow::compute::interleave;
 use datatypes::arrow::datatypes::SchemaRef;
@@ -29,7 +31,9 @@ use store_api::storage::SequenceNumber;
 
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::memtable::BoxedRecordBatchIterator;
+use crate::metrics::READ_STAGE_ELAPSED;
 use crate::read::BoxedRecordBatchStream;
+use crate::read::merge::{MergeMetrics, MergeMetricsReport};
 use crate::sst::parquet::flat_format::{
     primary_key_column_index, sequence_column_index, time_index_column_index,
 };
@@ -462,12 +466,14 @@ impl FlatMergeIterator {
 
         let algo = MergeAlgo::new(nodes);
 
-        Ok(Self {
+        let iter = Self {
             algo,
             in_progress,
             output_batch: None,
             batch_size,
-        })
+        };
+
+        Ok(iter)
     }
 
     /// Fetches next sorted batch.
@@ -484,12 +490,7 @@ impl FlatMergeIterator {
             }
         }
 
-        if let Some(batch) = self.output_batch.take() {
-            Ok(Some(batch))
-        } else {
-            // No more batches.
-            Ok(None)
-        }
+        Ok(self.output_batch.take())
     }
 
     /// Fetches a batch from the hottest node.
@@ -562,6 +563,10 @@ pub struct FlatMergeReader {
     /// This is not a hard limit, the iterator may return smaller batches to avoid concatenating
     /// rows.
     batch_size: usize,
+    /// Local metrics.
+    metrics: MergeMetrics,
+    /// Optional metrics reporter.
+    metrics_reporter: Option<Arc<dyn MergeMetricsReport>>,
 }
 
 impl FlatMergeReader {
@@ -570,7 +575,10 @@ impl FlatMergeReader {
         schema: SchemaRef,
         iters: Vec<BoxedRecordBatchStream>,
         batch_size: usize,
+        metrics_reporter: Option<Arc<dyn MergeMetricsReport>>,
     ) -> Result<Self> {
+        let start = Instant::now();
+        let metrics = MergeMetrics::default();
         let mut in_progress = BatchBuilder::new(schema, iters.len(), batch_size);
         let mut nodes = Vec::with_capacity(iters.len());
         // Initialize nodes and the buffer.
@@ -588,16 +596,24 @@ impl FlatMergeReader {
 
         let algo = MergeAlgo::new(nodes);
 
-        Ok(Self {
+        let mut reader = Self {
             algo,
             in_progress,
             output_batch: None,
             batch_size,
-        })
+            metrics,
+            metrics_reporter,
+        };
+        let elapsed = start.elapsed();
+        reader.metrics.init_cost += elapsed;
+        reader.metrics.scan_cost += elapsed;
+
+        Ok(reader)
     }
 
     /// Fetches next sorted batch.
     pub async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        let start = Instant::now();
         while self.algo.has_rows() && self.output_batch.is_none() {
             if self.algo.can_fetch_batch() && !self.in_progress.is_empty() {
                 // Only one batch in the hot heap, but we have pending rows, output the pending rows first.
@@ -605,15 +621,21 @@ impl FlatMergeReader {
                 debug_assert!(self.output_batch.is_some());
             } else if self.algo.can_fetch_batch() {
                 self.fetch_batch_from_hottest().await?;
+                self.metrics.num_fetch_by_batches += 1;
             } else {
                 self.fetch_row_from_hottest().await?;
+                self.metrics.num_fetch_by_rows += 1;
             }
         }
 
         if let Some(batch) = self.output_batch.take() {
+            self.metrics.scan_cost += start.elapsed();
+            self.metrics.maybe_report(&self.metrics_reporter);
             Ok(Some(batch))
         } else {
             // No more batches.
+            self.metrics.scan_cost += start.elapsed();
+            self.metrics.maybe_report(&self.metrics_reporter);
             Ok(None)
         }
     }
@@ -634,7 +656,9 @@ impl FlatMergeReader {
         // Safety: next_batch() ensures the heap is not empty.
         let mut hottest = self.algo.pop_hot().unwrap();
         debug_assert!(!hottest.current_cursor().is_finished());
+        let start = Instant::now();
         let next = hottest.advance_batch().await?;
+        self.metrics.fetch_cost += start.elapsed();
         // The node is the heap is not empty, so it must have existing rows in the builder.
         let batch = self
             .in_progress
@@ -658,8 +682,12 @@ impl FlatMergeReader {
             }
         }
 
+        let start = Instant::now();
         if let Some(next) = hottest.advance_row().await? {
+            self.metrics.fetch_cost += start.elapsed();
             self.in_progress.push_batch(hottest.node_index, next);
+        } else {
+            self.metrics.fetch_cost += start.elapsed();
         }
 
         self.algo.reheap(hottest);
@@ -671,6 +699,24 @@ impl FlatMergeReader {
         debug_assert!(output_batch.is_none());
         if batch.num_rows() > 0 {
             *output_batch = Some(batch);
+        }
+    }
+}
+
+impl Drop for FlatMergeReader {
+    fn drop(&mut self) {
+        debug!("Flat merge reader finished, metrics: {:?}", self.metrics);
+
+        READ_STAGE_ELAPSED
+            .with_label_values(&["flat_merge"])
+            .observe(self.metrics.scan_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["flat_merge_fetch"])
+            .observe(self.metrics.fetch_cost.as_secs_f64());
+
+        // Report any remaining metrics.
+        if let Some(reporter) = &self.metrics_reporter {
+            reporter.report(&mut self.metrics);
         }
     }
 }

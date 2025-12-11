@@ -539,6 +539,8 @@ pub enum Instruction {
     GetFileRefs(GetFileRefs),
     /// Triggers garbage collection for a region.
     GcRegions(GcRegions),
+    /// Temporary suspend serving reads or writes
+    Suspend,
 }
 
 impl Instruction {

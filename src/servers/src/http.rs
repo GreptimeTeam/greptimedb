@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt::Display;
 use std::net::SocketAddr;
 use std::sync::Mutex as StdMutex;
@@ -20,9 +21,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use auth::UserProviderRef;
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::routing::Route;
 use axum::serve::ListenerExt;
 use axum::{Router, middleware, routing};
 use common_base::Plugins;
@@ -42,7 +44,8 @@ use serde_json::Value;
 use snafu::{ResultExt, ensure};
 use tokio::sync::Mutex;
 use tokio::sync::oneshot::{self, Sender};
-use tower::ServiceBuilder;
+use tonic::codegen::Service;
+use tower::{Layer, ServiceBuilder};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::decompression::RequestDecompressionLayer;
@@ -728,6 +731,20 @@ impl HttpServerBuilder {
     pub fn with_extra_router(self, router: Router) -> Self {
         Self {
             router: self.router.merge(router),
+            ..self
+        }
+    }
+
+    pub fn add_layer<L>(self, layer: L) -> Self
+    where
+        L: Layer<Route> + Clone + Send + Sync + 'static,
+        L::Service: Service<Request> + Clone + Send + Sync + 'static,
+        <L::Service as Service<Request>>::Response: IntoResponse + 'static,
+        <L::Service as Service<Request>>::Error: Into<Infallible> + 'static,
+        <L::Service as Service<Request>>::Future: Send + 'static,
+    {
+        Self {
+            router: self.router.layer(layer),
             ..self
         }
     }

@@ -129,7 +129,7 @@ impl LocalFilePurger {
         if let Err(e) = self.scheduler.schedule(Box::pin(async move {
             if let Err(e) = delete_files(
                 file_meta.region_id,
-                &[(file_meta.file_id, file_meta.index_file_id().file_id())],
+                &[(file_meta.file_id, file_meta.index_id().version)],
                 file_meta.exists_index(),
                 &sst_layer,
                 &cache_manager,
@@ -187,6 +187,7 @@ mod tests {
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
     use crate::sst::file::{
         ColumnIndexMetadata, FileHandle, FileMeta, FileTimeRange, IndexType, RegionFileId,
+        RegionIndexId,
     };
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -237,7 +238,7 @@ mod tests {
                     available_indexes: Default::default(),
                     indexes: Default::default(),
                     index_file_size: 0,
-                    index_file_id: None,
+                    index_version: 0,
                     num_rows: 0,
                     num_row_groups: 0,
                     sequence: None,
@@ -263,6 +264,7 @@ mod tests {
         let dir_path = dir.path().display().to_string();
         let builder = Fs::default().root(&dir_path);
         let sst_file_id = RegionFileId::new(RegionId::new(0, 0), FileId::random());
+        let index_file_id = RegionIndexId::new(sst_file_id, 0);
         let sst_dir = "table1";
 
         let index_aux_path = dir.path().join("index_aux");
@@ -285,7 +287,7 @@ mod tests {
         let path = location::sst_file_path(sst_dir, sst_file_id, layer.path_type());
         object_store.write(&path, vec![0; 4096]).await.unwrap();
 
-        let index_path = location::index_file_path(sst_dir, sst_file_id, layer.path_type());
+        let index_path = location::index_file_path(sst_dir, index_file_id, layer.path_type());
         object_store
             .write(&index_path, vec![0; 4096])
             .await
@@ -309,7 +311,7 @@ mod tests {
                         created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
                     }],
                     index_file_size: 4096,
-                    index_file_id: None,
+                    index_version: 0,
                     num_rows: 1024,
                     num_row_groups: 1,
                     sequence: NonZeroU64::new(4096),
