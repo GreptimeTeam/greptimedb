@@ -3751,9 +3751,9 @@ dependencies = [
 
 [[package]]
 name = "datafusion-pg-catalog"
-version = "0.12.2"
+version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "755393864c0c2dd95575ceed4b25e348686028e1b83d06f8f39914209999f821"
+checksum = "09bfd1feed7ed335227af0b65955ed825e467cf67fad6ecd089123202024cfd1"
 dependencies = [
  "async-trait",
  "datafusion",
