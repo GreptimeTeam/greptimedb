@@ -546,14 +546,6 @@ impl PartSortStream {
         Ok(())
     }
 
-    /// Returns true when the TopK buffer has reached or exceeded the configured limit.
-    fn topk_buffer_fulfilled(&self) -> bool {
-        match (&self.limit, &self.buffer) {
-            (Some(limit), PartSortBuffer::Top(_, cnt)) => *cnt >= *limit,
-            _ => false,
-        }
-    }
-
     /// A temporary solution for stop read earlier when current group do not overlap with any of those next group
     /// If not overlap, we can stop read further input as current top k is final
     /// TODO(discord9): read from topk instead for exact data range
