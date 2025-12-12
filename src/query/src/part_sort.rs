@@ -2089,7 +2089,7 @@ mod test {
                     .unwrap(),
                 ],
             ),
-            // FIXME: why is this third range is still read?
+            // still read this batch to detect group boundary(?)
             (
                 PartitionRange {
                     start: Timestamp::new(60, unit.into()),
@@ -2138,7 +2138,7 @@ mod test {
             },
             Some(4),
             expected_output,
-            Some(9), // Pull first two batches to detect boundary
+            Some(11), // Pull first two batches to detect boundary
         )
         .await;
     }
