@@ -37,7 +37,7 @@ use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
     BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
 };
-use crate::storage::{RegionId, ScanRequest, SequenceNumber};
+use crate::storage::{FileId, RegionId, ScanRequest, SequenceNumber};
 
 /// The settable region role state.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -713,6 +713,52 @@ pub struct RemapManifestsResponse {
     pub new_manifests: HashMap<RegionId, String>,
 }
 
+/// Request to copy files from a source region to a target region.
+#[derive(Debug, Clone)]
+pub struct CopyRegionFromRequest {
+    /// The [`RegionId`] of the source region.
+    pub source_region_id: RegionId,
+    /// The parallelism of the copy operation.
+    pub parallelism: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct MitoCopyRegionFromResponse {
+    /// The file ids that were copied from the source region to the target region.
+    pub copied_file_ids: Vec<FileId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetricCopyRegionFromResponse {
+    /// The logical regions that were newly opened after the copy operation.
+    pub new_opened_logical_region_ids: Vec<RegionId>,
+}
+
+/// Response to copy region from a source region to a target region.
+#[derive(Debug, Clone)]
+pub enum CopyRegionFromResponse {
+    Mito(MitoCopyRegionFromResponse),
+    Metric(MetricCopyRegionFromResponse),
+}
+
+impl CopyRegionFromResponse {
+    /// Converts the response to a mito2 response.
+    pub fn into_mito(self) -> Option<MitoCopyRegionFromResponse> {
+        match self {
+            CopyRegionFromResponse::Mito(response) => Some(response),
+            CopyRegionFromResponse::Metric(_) => None,
+        }
+    }
+
+    /// Converts the response to a metric response.
+    pub fn into_metric(self) -> Option<MetricCopyRegionFromResponse> {
+        match self {
+            CopyRegionFromResponse::Metric(response) => Some(response),
+            CopyRegionFromResponse::Mito(_) => None,
+        }
+    }
+}
+
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
     /// Name of this engine
@@ -842,6 +888,13 @@ pub trait RegionEngine: Send + Sync {
         &self,
         request: RemapManifestsRequest,
     ) -> Result<RemapManifestsResponse, BoxedError>;
+
+    /// Copies region from a source region to a target region.
+    async fn copy_region_from(
+        &self,
+        region_id: RegionId,
+        request: CopyRegionFromRequest,
+    ) -> Result<CopyRegionFromResponse, BoxedError>;
 
     /// Sets region role state gracefully.
     ///

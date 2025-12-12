@@ -20,13 +20,11 @@ use common_telemetry::info;
 use futures::future::try_join_all;
 use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt};
-use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 
 use crate::error::{FetchManifestsSnafu, InvalidRequestSnafu, MissingManifestSnafu, Result};
 use crate::manifest::action::RegionManifest;
-use crate::region::MitoRegionRef;
-use crate::region::opener::RegionMetadataLoader;
+use crate::region::{MitoRegionRef, RegionMetadataLoader};
 use crate::remap_manifest::RemapManifest;
 use crate::request::RemapManifestsRequest;
 use crate::sst::location::region_dir_from_table_dir;
@@ -87,10 +85,10 @@ impl<S> RegionWorkerLoop<S> {
         let mut tasks = Vec::with_capacity(input_regions.len());
         let region_options = region.version().options.clone();
         let table_dir = region.table_dir();
-
+        let path_type = region.path_type();
         let now = Instant::now();
         for input_region in &input_regions {
-            let region_dir = region_dir_from_table_dir(table_dir, *input_region, PathType::Bare);
+            let region_dir = region_dir_from_table_dir(table_dir, *input_region, path_type);
             let storage = region_options.storage.clone();
             let moved_region_metadata_loader = region_metadata_loader.clone();
             tasks.push(async move {

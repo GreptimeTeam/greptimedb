@@ -43,9 +43,10 @@ pub(crate) use state::MetricEngineState;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
-    BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
-    RegionStatistic, RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
-    SetRegionRoleStateSuccess, SettableRegionRoleState, SyncManifestResponse,
+    BatchResponses, CopyRegionFromRequest, CopyRegionFromResponse, RegionEngine,
+    RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
+    RemapManifestsResponse, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
+    SettableRegionRoleState, SyncManifestResponse,
 };
 use store_api::region_request::{
     BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
@@ -373,6 +374,14 @@ impl RegionEngine for MetricEngine {
                 UnsupportedRemapManifestsRequestSnafu { region_id }.build(),
             ))
         }
+    }
+
+    async fn copy_region_from(
+        &self,
+        _region_id: RegionId,
+        _request: CopyRegionFromRequest,
+    ) -> Result<CopyRegionFromResponse, BoxedError> {
+        todo!()
     }
 
     async fn set_region_role_state_gracefully(
