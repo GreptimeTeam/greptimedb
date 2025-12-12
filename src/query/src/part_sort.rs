@@ -411,6 +411,19 @@ impl PartSortStream {
     }
 }
 
+macro_rules! ts_to_timestamp {
+    ($t:ty, $unit:expr, $arr:expr) => {{
+        let arr = $arr
+            .as_any()
+            .downcast_ref::<arrow::array::PrimitiveArray<$t>>()
+            .unwrap();
+
+        arr.iter()
+            .map(|v| v.map(|v| Timestamp::new(v, common_time::timestamp::TimeUnit::from(&$unit))))
+            .collect_vec()
+    }};
+}
+
 macro_rules! array_check_helper {
     ($t:ty, $unit:expr, $arr:expr, $cur_range:expr, $min_max_idx:expr) => {{
             if $cur_range.start.unit().as_arrow_time_unit() != $unit
@@ -539,6 +552,51 @@ impl PartSortStream {
             (Some(limit), PartSortBuffer::Top(_, cnt)) => *cnt >= *limit,
             _ => false,
         }
+    }
+
+    /// A temporary solution for stop read earlier when current group do not overlap with any of those next group
+    /// If not overlap, we can stop read further input as current top k is final
+    /// TODO(discord9): read from topk instead for exact data range
+    fn can_stop_early(&mut self) -> datafusion_common::Result<bool> {
+        let topk_cnt = match &self.buffer {
+            PartSortBuffer::Top(_, cnt) => *cnt,
+            _ => return Ok(false),
+        };
+        // not fulfill topk yet
+        if Some(topk_cnt) < self.limit {
+            return Ok(false);
+        }
+        // else check if last value in topk is not in next group range
+        let topk_buffer = self.sort_top_buffer()?;
+        let min_batch = topk_buffer.slice(topk_buffer.num_rows() - 1, 1);
+        let min_sort_column = self.expression.evaluate_to_sort_column(&min_batch)?.values;
+        let last_val = downcast_ts_array!(
+            min_sort_column.data_type() => (ts_to_timestamp, min_sort_column),
+            _ => internal_err!(
+                "Unsupported data type for sort column: {:?}",
+                min_sort_column.data_type()
+            )?,
+        )[0];
+        let Some(last_val) = last_val else {
+            return Ok(false);
+        };
+        let next_group_primary_end = if self.cur_group_idx + 1 < self.range_groups.len() {
+            self.range_groups[self.cur_group_idx + 1].0
+        } else {
+            // no next group
+            return Ok(false);
+        };
+        let descending = self.expression.options.descending;
+        let not_in_next_group_range = if descending {
+            last_val >= next_group_primary_end
+        } else {
+            last_val < next_group_primary_end
+        };
+
+        // refill topk buffer count
+        self.push_buffer(topk_buffer)?;
+
+        Ok(not_in_next_group_range)
     }
 
     /// Check if the given partition index is within the current group.
@@ -829,7 +887,8 @@ impl PartSortStream {
         let in_same_group = self.is_in_current_group(self.cur_part_idx);
 
         // When TopK is fulfilled and we are switching to a new group, stop consuming further ranges.
-        if !in_same_group && self.topk_buffer_fulfilled() {
+        // TODO(discord9): read from topk heap and determine whether we can stop earlier.
+        if !in_same_group && self.can_stop_early()? {
             self.input_complete = true;
             self.evaluating_batch = None;
             return Ok(());
@@ -2174,8 +2233,20 @@ mod test {
             ),
             (
                 PartitionRange {
+                    start: Timestamp::new(4, unit.into()),
+                    end: Timestamp::new(25, unit.into()),
+                    num_rows: 1,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![21])])
+                        .unwrap(),
+                ],
+            ),
+            (
+                PartitionRange {
                     start: Timestamp::new(5, unit.into()),
-                    end: Timestamp::new(15, unit.into()),
+                    end: Timestamp::new(25, unit.into()),
                     num_rows: 4,
                     identifier: 1,
                 },
@@ -2233,7 +2304,7 @@ mod test {
             },
             Some(4),
             expected_output,
-            Some(10), // Pull both batches to detect boundary
+            Some(9), // Pull both batches to detect boundary
         )
         .await;
     }
