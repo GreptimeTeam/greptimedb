@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MEMORY_WAIT_TIMEOUT","PERMIT_GRANULARITY_BYTES"],"enum":["GuardState","OnExhaustedPolicy"],"fn":["bytes_to_permits","permits_to_bytes"],"struct":["CompactionMemoryGuard","CompactionMemoryManager","MemoryQuota"]};

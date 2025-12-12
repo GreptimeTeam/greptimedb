@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["OPT_PROF","PROF_ACTIVE","PROF_DUMP","PROF_GDUMP"],"fn":["activate_heap_profile","deactivate_heap_profile","dump_flamegraph","dump_pprof","dump_profile","dump_profile_to_stack_profile","is_gdump_active","is_heap_profile_active","is_prof_enabled","set_gdump_active"],"mod":["error"]};

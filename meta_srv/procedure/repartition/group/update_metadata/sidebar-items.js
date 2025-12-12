@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["UpdateMetadata"],"mod":["apply_staging_region","rollback_staging_region"]};

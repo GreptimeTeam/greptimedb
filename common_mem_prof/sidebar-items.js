@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["activate_heap_profile","deactivate_heap_profile","dump_flamegraph","dump_pprof","dump_profile","is_gdump_active","is_heap_profile_active","set_gdump_active"],"mod":["error","jemalloc"]};

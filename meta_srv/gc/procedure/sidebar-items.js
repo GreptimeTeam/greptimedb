@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["State"],"fn":["send_gc_regions","send_get_file_refs"],"struct":["BatchGcData","BatchGcProcedure","GcRegionData","GcRegionProcedure"]};

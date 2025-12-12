@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["filter","init_factory","invalidator","new_table_schema_cache"],"type":["TableSchemaCache","TableSchemaCacheRef"]};

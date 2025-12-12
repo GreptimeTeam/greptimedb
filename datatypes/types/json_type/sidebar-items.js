@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["JSON_PLAIN_FIELD_METADATA_KEY","JSON_PLAIN_FIELD_NAME","JSON_TYPE_NAME"],"enum":["JsonFormat","JsonNativeType","JsonNumberType"],"fn":["is_include","is_mergeable","jsonb_to_serde_json","jsonb_to_string","merge","parse_string_to_jsonb","plain_json_struct_type"],"struct":["JsonType"],"type":["JsonObjectType"]};
