@@ -19,8 +19,12 @@ use std::{fmt, mem};
 use common_telemetry::debug;
 use humantime::{format_duration, parse_duration};
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
+use crate::error::{
+    CompactionMemoryLimitExceededSnafu, CompactionMemorySemaphoreClosedSnafu, Result,
+};
 use crate::metrics::{
     COMPACTION_MEMORY_IN_USE, COMPACTION_MEMORY_LIMIT, COMPACTION_MEMORY_REJECTED,
 };
@@ -153,20 +157,33 @@ impl CompactionMemoryManager {
     }
 
     /// Acquires memory, waiting if necessary until enough is available.
-    pub async fn acquire(&self, bytes: u64) -> CompactionMemoryGuard {
+    ///
+    /// # Errors
+    /// - Returns error if requested bytes exceed the total limit
+    /// - Returns error if the semaphore is unexpectedly closed
+    pub async fn acquire(&self, bytes: u64) -> Result<CompactionMemoryGuard> {
         match &self.quota {
-            None => CompactionMemoryGuard::unlimited(),
+            None => Ok(CompactionMemoryGuard::unlimited()),
             Some(quota) => {
                 let permits = bytes_to_permits(bytes);
+
+                // Fail-fast: reject if request exceeds total limit.
+                ensure!(
+                    permits <= quota.limit_permits,
+                    CompactionMemoryLimitExceededSnafu {
+                        requested_bytes: bytes,
+                        limit_bytes: permits_to_bytes(quota.limit_permits),
+                    }
+                );
 
                 let permit = quota
                     .semaphore
                     .clone()
                     .acquire_many_owned(permits)
                     .await
-                    .unwrap();
+                    .map_err(|_| CompactionMemorySemaphoreClosedSnafu.build())?;
                 quota.update_in_use_metric();
-                CompactionMemoryGuard::limited(permit, quota.clone())
+                Ok(CompactionMemoryGuard::limited(permit, quota.clone()))
             }
         }
     }
@@ -429,7 +446,7 @@ mod tests {
             let manager = manager.clone();
             tokio::spawn(async move {
                 // This will block until memory is available
-                let _guard = manager.acquire(bytes).await;
+                let _guard = manager.acquire(bytes).await.unwrap();
             })
         };
 

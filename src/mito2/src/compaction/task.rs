@@ -124,9 +124,13 @@ impl CompactionTaskImpl {
                 )
                 .await
                 {
-                    Ok(guard) => {
+                    Ok(Ok(guard)) => {
                         timer.observe_duration();
                         Ok(guard)
+                    }
+                    Ok(Err(e)) => {
+                        timer.observe_duration();
+                        Err(e)
                     }
                     Err(_) => {
                         timer.observe_duration();
@@ -134,13 +138,13 @@ impl CompactionTaskImpl {
                             "Compaction for region {} waited {:?} for {} bytes but timed out",
                             region_id, wait_timeout, requested_bytes
                         );
-                        Err(CompactionMemoryExhaustedSnafu {
+                        CompactionMemoryExhaustedSnafu {
                             region_id,
                             required_bytes: requested_bytes,
                             limit_bytes,
                             policy: format!("wait_timeout({}ms)", wait_timeout.as_millis()),
                         }
-                        .build())
+                        .fail()
                     }
                 }
             }
