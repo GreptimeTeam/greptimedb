@@ -540,7 +540,7 @@ impl LocalGcWorker {
     fn filter_deletable_files(
         &self,
         entries: Vec<Entry>,
-        in_use_filenames: &HashSet<&FileId>,
+        in_use_filenames: &HashSet<FileId>,
         may_linger_filenames: &HashSet<&FileId>,
         eligible_for_removal: &HashSet<&FileId>,
         unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
@@ -641,9 +641,6 @@ impl LocalGcWorker {
             .flatten()
             .collect::<HashSet<_>>();
 
-        // in use filenames, include sst and index files
-        let in_use_filenames = in_used.iter().collect::<HashSet<_>>();
-
         // When full_file_listing is false, skip expensive list operations and only delete
         // files that are tracked in recently_removed_files
         if !self.full_file_listing {
@@ -653,7 +650,7 @@ impl LocalGcWorker {
             // 3. Have passed the lingering time
             let files_to_delete: Vec<FileId> = eligible_for_removal
                 .iter()
-                .filter(|file_id| !in_use_filenames.contains(*file_id))
+                .filter(|file_id| !in_used.contains(*file_id))
                 .map(|&f| *f)
                 .collect();
 
@@ -672,7 +669,7 @@ impl LocalGcWorker {
         let (all_unused_files_ready_for_delete, all_in_exist_linger_files) = self
             .filter_deletable_files(
                 all_entries,
-                &in_use_filenames,
+                in_used,
                 &may_linger_filenames,
                 &eligible_for_removal,
                 unknown_file_may_linger_until,
