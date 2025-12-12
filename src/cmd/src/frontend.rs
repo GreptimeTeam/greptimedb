@@ -52,7 +52,7 @@ use plugins::frontend::context::{
 };
 use servers::addrs;
 use servers::grpc::GrpcOptions;
-use servers::tls::{TlsMode, TlsOption};
+use servers::tls::{TlsMode, TlsOption, merge_tls_option};
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -256,7 +256,7 @@ impl StartCommand {
 
         if let Some(addr) = &self.rpc_bind_addr {
             opts.grpc.bind_addr.clone_from(addr);
-            opts.grpc.tls = tls_opts.clone();
+            opts.grpc.tls = merge_tls_option(&opts.grpc.tls, tls_opts.clone());
         }
 
         if let Some(addr) = &self.rpc_server_addr {
@@ -291,13 +291,13 @@ impl StartCommand {
         if let Some(addr) = &self.mysql_addr {
             opts.mysql.enable = true;
             opts.mysql.addr.clone_from(addr);
-            opts.mysql.tls = tls_opts.clone();
+            opts.mysql.tls = merge_tls_option(&opts.mysql.tls, tls_opts.clone());
         }
 
         if let Some(addr) = &self.postgres_addr {
             opts.postgres.enable = true;
             opts.postgres.addr.clone_from(addr);
-            opts.postgres.tls = tls_opts;
+            opts.postgres.tls = merge_tls_option(&opts.postgres.tls, tls_opts.clone());
         }
 
         if let Some(enable) = self.influxdb_enable {
@@ -340,7 +340,7 @@ impl StartCommand {
         let mut opts = opts.component;
         opts.grpc.detect_server_addr();
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &opts)
+        plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &mut opts)
             .await
             .context(error::StartFrontendSnafu)?;
 
@@ -591,7 +591,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let fe_opts = frontend::frontend::FrontendOptions {
+        let mut fe_opts = frontend::frontend::FrontendOptions {
             http: HttpOptions {
                 disable_dashboard: false,
                 ..Default::default()
@@ -601,7 +601,7 @@ mod tests {
         };
 
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, &[], &mut fe_opts)
             .await
             .unwrap();
 

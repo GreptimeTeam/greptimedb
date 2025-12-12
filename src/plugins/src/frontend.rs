@@ -24,7 +24,7 @@ use crate::options::PluginOptions;
 pub async fn setup_frontend_plugins(
     plugins: &mut Plugins,
     _plugin_options: &[PluginOptions],
-    fe_opts: &FrontendOptions,
+    fe_opts: &mut FrontendOptions,
 ) -> Result<()> {
     if let Some(user_provider) = fe_opts.user_provider.as_ref() {
         let provider =

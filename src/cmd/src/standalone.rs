@@ -62,7 +62,7 @@ use plugins::frontend::context::{
     CatalogManagerConfigureContext, StandaloneCatalogManagerConfigureContext,
 };
 use plugins::standalone::context::DdlManagerConfigureContext;
-use servers::tls::{TlsMode, TlsOption};
+use servers::tls::{TlsMode, TlsOption, merge_tls_option};
 use snafu::ResultExt;
 use standalone::StandaloneInformationExtension;
 use standalone::options::StandaloneOptions;
@@ -294,19 +294,19 @@ impl StartCommand {
                 }.fail();
             }
             opts.grpc.bind_addr.clone_from(addr);
-            opts.grpc.tls = tls_opts.clone();
+            opts.grpc.tls = merge_tls_option(&opts.grpc.tls, tls_opts.clone());
         }
 
         if let Some(addr) = &self.mysql_addr {
             opts.mysql.enable = true;
             opts.mysql.addr.clone_from(addr);
-            opts.mysql.tls = tls_opts.clone();
+            opts.mysql.tls = merge_tls_option(&opts.mysql.tls, tls_opts.clone());
         }
 
         if let Some(addr) = &self.postgres_addr {
             opts.postgres.enable = true;
             opts.postgres.addr.clone_from(addr);
-            opts.postgres.tls = tls_opts;
+            opts.postgres.tls = merge_tls_option(&opts.postgres.tls, tls_opts.clone());
         }
 
         if self.influxdb_enable {
@@ -350,10 +350,10 @@ impl StartCommand {
             .context(error::BuildCliSnafu)?;
 
         opts.grpc.detect_server_addr();
-        let fe_opts = opts.frontend_options();
+        let mut fe_opts = opts.frontend_options();
         let dn_opts = opts.datanode_options();
 
-        plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &mut fe_opts)
             .await
             .context(error::StartFrontendSnafu)?;
 
@@ -625,13 +625,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let fe_opts = FrontendOptions {
+        let mut fe_opts = FrontendOptions {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             ..Default::default()
         };
 
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, &[], &mut fe_opts)
             .await
             .unwrap();
 
