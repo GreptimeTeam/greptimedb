@@ -170,7 +170,7 @@ impl RegionEngine for FileRegionEngine {
     ) -> Result<CopyRegionFromResponse, BoxedError> {
         Err(BoxedError::new(
             UnsupportedSnafu {
-                operation: "copy_metadata_region_from",
+                operation: "copy_region_from",
             }
             .build(),
         ))

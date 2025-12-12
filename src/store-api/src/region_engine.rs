@@ -734,7 +734,7 @@ pub struct MetricCopyRegionFromResponse {
     pub new_opened_logical_region_ids: Vec<RegionId>,
 }
 
-/// Response to copy metadata region from a source region to a target region.
+/// Response to copy region from a source region to a target region.
 #[derive(Debug, Clone)]
 pub enum CopyRegionFromResponse {
     Mito(MitoCopyRegionFromResponse),

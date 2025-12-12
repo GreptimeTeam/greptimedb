@@ -21,7 +21,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
-use store_api::storage::{FileId, RegionId};
+use store_api::storage::{FileId, IndexVersion, RegionId};
 use tokio::sync::Semaphore;
 
 use crate::access_layer::AccessLayerRef;
@@ -31,7 +31,7 @@ use crate::manifest::action::RegionManifest;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::region::opener::get_object_store;
 use crate::region::options::RegionOptions;
-use crate::sst::file::{IndexVersion, RegionFileId, RegionIndexId};
+use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::location;
 
 /// A loader for loading metadata from a region dir.
