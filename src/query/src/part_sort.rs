@@ -2089,6 +2089,32 @@ mod test {
                     .unwrap(),
                 ],
             ),
+            // FIXME: why is this third range is still read?
+            (
+                PartitionRange {
+                    start: Timestamp::new(60, unit.into()),
+                    end: Timestamp::new(70, unit.into()),
+                    num_rows: 2,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![60, 61])])
+                        .unwrap(),
+                ],
+            ),
+            // after boundary detected, this following one should not be read
+            (
+                PartitionRange {
+                    start: Timestamp::new(61, unit.into()),
+                    end: Timestamp::new(70, unit.into()),
+                    num_rows: 2,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![71, 72])])
+                        .unwrap(),
+                ],
+            ),
         ];
 
         // With limit=4, ascending: top 4 (smallest) from group 1 are [10, 11, 12, 13]
@@ -2112,7 +2138,102 @@ mod test {
             },
             Some(4),
             expected_output,
-            Some(9), // Pull both batches to detect boundary
+            Some(9), // Pull first two batches to detect boundary
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_ascending_threshold_early_termination_case_two() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            false,
+        )]));
+
+        // For ascending: primary_end is start, ranges sorted by (start ASC, end ASC)
+        // Group 1 (start=0) has 4 rows
+        // Group 2 (start=5) has 4 rows - should NOT be processed because
+        // threshold (12) > next_primary_end (5)
+        let input_ranged_data = vec![
+            (
+                PartitionRange {
+                    start: Timestamp::new(0, unit.into()),
+                    end: Timestamp::new(20, unit.into()),
+                    num_rows: 4,
+                    identifier: 0,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![9, 10, 11, 12])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+            (
+                PartitionRange {
+                    start: Timestamp::new(5, unit.into()),
+                    end: Timestamp::new(15, unit.into()),
+                    num_rows: 4,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![5, 6, 7, 8])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+            // This still will be read to detect boundary, but should not contribute to output
+            (
+                PartitionRange {
+                    start: Timestamp::new(42, unit.into()),
+                    end: Timestamp::new(52, unit.into()),
+                    num_rows: 2,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![42, 51])])
+                        .unwrap(),
+                ],
+            ),
+            // This following one should not be read after boundary detected
+            (
+                PartitionRange {
+                    start: Timestamp::new(48, unit.into()),
+                    end: Timestamp::new(53, unit.into()),
+                    num_rows: 2,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![48, 51])])
+                        .unwrap(),
+                ],
+            ),
+        ];
+
+        // With limit=4, ascending: top 4 (smallest) from group 1 are [9, 10, 11, 12]
+        // Threshold is 12 (largest in top-k), next group's primary_end is 20
+        // Since 12 > 5, we continue after group 1 (there maybe value in group 2 can be < 12)
+        let expected_output = Some(
+            DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![5, 6, 7, 8])])
+                .unwrap(),
+        );
+
+        run_test(
+            2005,
+            input_ranged_data,
+            schema.clone(),
+            SortOptions {
+                descending: false,
+                ..Default::default()
+            },
+            Some(4),
+            expected_output,
+            Some(10), // Pull both batches to detect boundary
         )
         .await;
     }
