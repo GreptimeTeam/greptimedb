@@ -76,6 +76,8 @@ pub struct SstInfo {
     pub time_range: FileTimeRange,
     /// File size in bytes.
     pub file_size: u64,
+    /// Maximum uncompressed row group size in bytes. 0 if unknown.
+    pub max_row_group_uncompressed_size: u64,
     /// Number of rows.
     pub num_rows: usize,
     /// Number of row groups
@@ -771,6 +773,7 @@ mod tests {
                 time_range: info.time_range,
                 level: 0,
                 file_size: info.file_size,
+                max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
                 available_indexes: info.index_metadata.build_available_indexes(),
                 indexes: info.index_metadata.build_indexes(),
                 index_file_size: info.index_metadata.file_size,

@@ -180,6 +180,8 @@ pub struct FileMeta {
     pub level: Level,
     /// Size of the file.
     pub file_size: u64,
+    /// Maximum uncompressed row group size of the file. 0 means unknown.
+    pub max_row_group_uncompressed_size: u64,
     /// Available indexes of the file.
     pub available_indexes: IndexTypes,
     /// Created indexes of the file for each column.
@@ -248,7 +250,11 @@ impl Debug for FileMeta {
                 )
             })
             .field("level", &self.level)
-            .field("file_size", &ReadableSize(self.file_size));
+            .field("file_size", &ReadableSize(self.file_size))
+            .field(
+                "max_row_group_uncompressed_size",
+                &ReadableSize(self.max_row_group_uncompressed_size),
+            );
         if !self.available_indexes.is_empty() {
             debug_struct
                 .field("available_indexes", &self.available_indexes)
@@ -652,6 +658,7 @@ mod tests {
             time_range: FileTimeRange::default(),
             level,
             file_size: 0,
+            max_row_group_uncompressed_size: 0,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
             indexes: vec![ColumnIndexMetadata {
                 column_id: 0,
@@ -703,6 +710,7 @@ mod tests {
             time_range: FileTimeRange::default(),
             level: 0,
             file_size: 0,
+            max_row_group_uncompressed_size: 0,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
             indexes: vec![ColumnIndexMetadata {
                 column_id: 0,

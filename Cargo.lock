@@ -7672,6 +7672,7 @@ dependencies = [
  "either",
  "futures",
  "greptime-proto",
+ "humantime",
  "humantime-serde",
  "index",
  "itertools 0.14.0",

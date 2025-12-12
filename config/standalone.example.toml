@@ -546,6 +546,15 @@ compress_manifest = false
 ## @toml2docs:none-default="Auto"
 #+ max_background_purges = 8
 
+## Memory budget for compaction tasks. Setting it to 0 or "unlimited" disables the limit.
+## @toml2docs:none-default="0"
+#+ experimental_compaction_memory_limit = "0"
+
+## Behavior when compaction cannot acquire memory from the budget.
+## Options: "wait" (default, 10s), "wait(<duration>)", "skip"
+## @toml2docs:none-default="wait"
+#+ experimental_compaction_on_exhausted = "wait"
+
 ## Interval to auto flush a region if it has not flushed yet.
 auto_flush_interval = "1h"
 

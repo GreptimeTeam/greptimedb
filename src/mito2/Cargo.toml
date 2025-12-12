@@ -48,6 +48,7 @@ dotenv.workspace = true
 either.workspace = true
 futures.workspace = true
 humantime-serde.workspace = true
+humantime.workspace = true
 index.workspace = true
 itertools.workspace = true
 greptime-proto.workspace = true

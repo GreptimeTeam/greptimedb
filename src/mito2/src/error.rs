@@ -1042,6 +1042,40 @@ pub enum Error {
     ManualCompactionOverride {},
 
     #[snafu(display(
+        "Compaction memory limit exceeded for region {}: required {} bytes, limit {} bytes (policy: {})",
+        region_id,
+        required_bytes,
+        limit_bytes,
+        policy
+    ))]
+    CompactionMemoryExhausted {
+        region_id: RegionId,
+        required_bytes: u64,
+        limit_bytes: u64,
+        policy: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Requested compaction memory ({} bytes) exceeds total limit ({} bytes)",
+        requested_bytes,
+        limit_bytes
+    ))]
+    CompactionMemoryLimitExceeded {
+        requested_bytes: u64,
+        limit_bytes: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Compaction memory semaphore unexpectedly closed"))]
+    CompactionMemorySemaphoreClosed {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "Incompatible WAL provider change. This is typically caused by changing WAL provider in database config file without completely cleaning existing files. Global provider: {}, region provider: {}",
         global,
         region
@@ -1322,6 +1356,12 @@ impl ErrorExt for Error {
             }
 
             ManualCompactionOverride {} => StatusCode::Cancelled,
+
+            CompactionMemoryExhausted { .. } => StatusCode::RuntimeResourcesExhausted,
+
+            CompactionMemoryLimitExceeded { .. } => StatusCode::RuntimeResourcesExhausted,
+
+            CompactionMemorySemaphoreClosed { .. } => StatusCode::Unexpected,
 
             IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
 
