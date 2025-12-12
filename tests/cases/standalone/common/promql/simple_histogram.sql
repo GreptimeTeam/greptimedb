@@ -184,10 +184,12 @@ insert into histogram4_bucket values
     -- INF here is missing
 ;
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (2900, 3000, '100s') histogram_quantile(0.9, histogram4_bucket);
 
 drop table histogram4_bucket;
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, fff) (rate(greptime_servers_postgres_query_elapsed_bucket{instance=~"xxx"}[1m])));
 
 -- test case where table exists but doesn't have 'le' column should raise error
@@ -233,7 +235,7 @@ insert into histogram5_bucket values
     (3015000, "5", "a", 30),
     (3015000, "+Inf", "a", 50);
 
-
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3015, '3s') histogram_quantile(0.5, histogram5_bucket);
 
 drop table histogram5_bucket;
