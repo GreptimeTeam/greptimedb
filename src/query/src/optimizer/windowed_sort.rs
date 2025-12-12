@@ -110,12 +110,12 @@ impl WindowedSortPhysicalRule {
                     {
                         sort_input
                     } else {
-                        Arc::new(PartSortExec::new(
+                        Arc::new(PartSortExec::try_new(
                             first_sort_expr.clone(),
                             sort_exec.fetch(),
                             scanner_info.partition_ranges.clone(),
                             sort_input,
-                        ))
+                        )?)
                     };
 
                     let windowed_sort_exec = WindowedSortExec::try_new(
