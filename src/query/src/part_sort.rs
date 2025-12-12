@@ -1915,14 +1915,13 @@ mod test {
             ),
         ];
 
-        // Group 1 (end=100): [80, 90, 95, 55, 75, 85] -> sorted desc: [95, 90, 85, 80, 75, 55]
-        // Group 2 (end=95): [45, 65, 94] -> sorted desc: [94, 65, 45]
-        // Combined output: first group outputs [95, 90, 85, 80, 75, 55], then group 2 [94, 65, 45]
-        // With limit=4: [95, 90, 85, 80] from group 1 (limit exhausted)
+        // All data: [80, 90, 95, 55, 75, 85, 45, 65, 94]
+        // Sorted descending: [95, 94, 90, 85, 80, 75, 65, 55, 45]
+        // With limit=4: should be top 4 largest values across all ranges: [95, 94, 90, 85]
         let expected_output = Some(
             DfRecordBatch::try_new(
                 schema.clone(),
-                vec![new_ts_array(unit, vec![95, 90, 85, 80])],
+                vec![new_ts_array(unit, vec![95, 94, 90, 85])],
             )
             .unwrap(),
         );
@@ -2204,9 +2203,11 @@ mod test {
         )]));
 
         // For ascending: primary_end is start, ranges sorted by (start ASC, end ASC)
-        // Group 1 (start=0) has 4 rows
-        // Group 2 (start=5) has 4 rows - should NOT be processed because
-        // threshold (12) > next_primary_end (5)
+        // Group 1 (start=0) has 4 rows, Group 2 (start=4) has 1 row, Group 3 (start=5) has 4 rows
+        // After reading all data: [9,10,11,12, 21, 5,6,7,8]
+        // Sorted ascending: [5,6,7,8, 9,10,11,12, 21]
+        // With limit=4, output should be smallest 4: [5,6,7,8]
+        // Algorithm continues reading until start=42 > threshold=8, confirming no smaller values exist
         let input_ranged_data = vec![
             (
                 PartitionRange {
@@ -2278,9 +2279,8 @@ mod test {
             ),
         ];
 
-        // With limit=4, ascending: top 4 (smallest) from group 1 are [9, 10, 11, 12]
-        // Threshold is 12 (largest in top-k), next group's primary_end is 20
-        // Since 12 > 5, we continue after group 1 (there maybe value in group 2 can be < 12)
+        // With limit=4, ascending: after processing all ranges, smallest 4 are [5, 6, 7, 8]
+        // Threshold is 8 (4th smallest value), algorithm reads until start=42 > threshold=8
         let expected_output = Some(
             DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![5, 6, 7, 8])])
                 .unwrap(),
@@ -2296,7 +2296,7 @@ mod test {
             },
             Some(4),
             expected_output,
-            Some(9), // Pull both batches to detect boundary
+            Some(11), // Read first 4 ranges to confirm threshold boundary
         )
         .await;
     }
