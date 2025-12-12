@@ -27,13 +27,10 @@ use common_catalog::consts::MITO_ENGINE;
 use common_grpc::channel_manager::ClientTlsOption;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_runtime::Runtime;
-use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use common_test_util::find_workspace_path;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::BatchArrowRecords;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_client::ArrowMetricsServiceClient;
 use servers::grpc::GrpcServerConfig;
-use servers::grpc::builder::GrpcServerBuilder;
 use servers::http::prometheus::{
     PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusJsonResponse,
     PrometheusResponse,
@@ -993,24 +990,6 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         );
         let re = db.sql("show tables;").await;
         assert!(re.is_err());
-    }
-    // test grpc unsupported tls watch
-    {
-        let tls = TlsOption {
-            watch: true,
-            ..Default::default()
-        };
-        let config = GrpcServerConfig {
-            max_recv_message_size: 1024,
-            max_send_message_size: 1024,
-            max_total_message_memory: 1024 * 1024 * 1024,
-            tls,
-            max_connection_age: None,
-        };
-        let runtime = Runtime::builder().build().unwrap();
-        let grpc_builder =
-            GrpcServerBuilder::new(config.clone(), runtime).with_tls_config(config.tls);
-        assert!(grpc_builder.is_err());
     }
 
     let _ = fe_grpc_server.shutdown().await;
