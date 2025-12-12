@@ -22,6 +22,7 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef};
+use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::datanode::TopicStatsReporter;
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
@@ -281,21 +282,11 @@ impl DatanodeBuilder {
             open_all_regions.await?;
         }
 
-        let mut resource_stat = ResourceStatImpl::default();
-        resource_stat.start_collect_cpu_usage();
-
         let heartbeat_task = if let Some(meta_client) = meta_client {
-            Some(
-                HeartbeatTask::try_new(
-                    &self.opts,
-                    region_server.clone(),
-                    meta_client,
-                    cache_registry,
-                    self.plugins.clone(),
-                    Arc::new(resource_stat),
-                )
-                .await?,
-            )
+            let task = self
+                .create_heartbeat_task(&region_server, meta_client, cache_registry)
+                .await?;
+            Some(task)
         } else {
             None
         };
@@ -322,6 +313,29 @@ impl DatanodeBuilder {
             leases_notifier,
             plugins: self.plugins.clone(),
         })
+    }
+
+    async fn create_heartbeat_task(
+        &self,
+        region_server: &RegionServer,
+        meta_client: MetaClientRef,
+        cache_invalidator: CacheInvalidatorRef,
+    ) -> Result<HeartbeatTask> {
+        let stat = {
+            let mut stat = ResourceStatImpl::default();
+            stat.start_collect_cpu_usage();
+            Arc::new(stat)
+        };
+
+        HeartbeatTask::try_new(
+            &self.opts,
+            region_server.clone(),
+            meta_client,
+            cache_invalidator,
+            self.plugins.clone(),
+            stat,
+        )
+        .await
     }
 
     /// Builds [ObjectStoreManager] from [StorageConfig].

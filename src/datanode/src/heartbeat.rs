@@ -25,6 +25,7 @@ use common_meta::datanode::REGION_STATISTIC_KEY;
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+use common_meta::heartbeat::handler::suspend::SuspendHandler;
 use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
 };
@@ -91,6 +92,7 @@ impl HeartbeatTask {
         let resp_handler_executor = Arc::new(HandlerGroupExecutor::new(vec![
             region_alive_keeper.clone(),
             Arc::new(ParseMailboxMessageHandler),
+            Arc::new(SuspendHandler::new(region_server.suspend_state())),
             Arc::new(
                 RegionHeartbeatResponseHandler::new(region_server.clone())
                     .with_open_region_parallelism(opts.init_regions_parallelism),

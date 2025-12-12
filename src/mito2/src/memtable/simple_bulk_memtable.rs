@@ -627,7 +627,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut reader = DedupReader::new(reader, read::dedup::LastRow::new(false));
+        let mut reader = DedupReader::new(reader, read::dedup::LastRow::new(false), None);
         let mut num_rows = 0;
         while let Some(b) = reader.next_batch().await.unwrap() {
             num_rows += b.num_rows();
@@ -659,7 +659,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut reader = DedupReader::new(reader, read::dedup::LastRow::new(false));
+        let mut reader = DedupReader::new(reader, read::dedup::LastRow::new(false), None);
         let mut num_rows = 0;
         while let Some(b) = reader.next_batch().await.unwrap() {
             num_rows += b.num_rows();

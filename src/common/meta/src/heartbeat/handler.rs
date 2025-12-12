@@ -23,6 +23,7 @@ use crate::heartbeat::mailbox::{IncomingMessage, MailboxRef};
 
 pub mod invalidate_table_cache;
 pub mod parse_mailbox_message;
+pub mod suspend;
 #[cfg(test)]
 mod tests;
 

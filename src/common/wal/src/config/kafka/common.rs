@@ -36,6 +36,9 @@ pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
     deadline: Some(Duration::from_secs(3)),
 };
 
+/// The default connect timeout for kafka client.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Default interval for auto WAL pruning.
 pub const DEFAULT_AUTO_PRUNE_INTERVAL: Duration = Duration::from_mins(30);
 /// Default limit for concurrent auto pruning tasks.

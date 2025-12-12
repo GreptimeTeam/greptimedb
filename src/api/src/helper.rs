@@ -708,6 +708,7 @@ fn ddl_request_type(request: &DdlRequest) -> &'static str {
         Some(Expr::CreateView(_)) => "ddl.create_view",
         Some(Expr::DropView(_)) => "ddl.drop_view",
         Some(Expr::AlterDatabase(_)) => "ddl.alter_database",
+        Some(Expr::CommentOn(_)) => "ddl.comment_on",
         None => "ddl.empty",
     }
 }

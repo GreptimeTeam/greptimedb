@@ -14,6 +14,7 @@
 
 pub mod admin;
 pub mod alter;
+pub mod comment;
 pub mod copy;
 pub mod create;
 pub mod cursor;

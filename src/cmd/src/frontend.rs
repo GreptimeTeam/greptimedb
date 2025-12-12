@@ -35,6 +35,7 @@ use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+use common_meta::heartbeat::handler::suspend::SuspendHandler;
 use common_query::prelude::set_default_prefix;
 use common_stat::ResourceStatImpl;
 use common_telemetry::info;
@@ -45,7 +46,7 @@ use frontend::frontend::Frontend;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
-use meta_client::{MetaClientOptions, MetaClientType};
+use meta_client::{MetaClientOptions, MetaClientRef, MetaClientType};
 use plugins::frontend::context::{
     CatalogManagerConfigureContext, DistributedCatalogManagerConfigureContext,
 };
@@ -440,30 +441,13 @@ impl StartCommand {
         };
         let catalog_manager = builder.build();
 
-        let executor = HandlerGroupExecutor::new(vec![
-            Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateCacheHandler::new(layered_cache_registry.clone())),
-        ]);
-
-        let mut resource_stat = ResourceStatImpl::default();
-        resource_stat.start_collect_cpu_usage();
-
-        let heartbeat_task = HeartbeatTask::new(
-            &opts,
-            meta_client.clone(),
-            opts.heartbeat.clone(),
-            Arc::new(executor),
-            Arc::new(resource_stat),
-        );
-        let heartbeat_task = Some(heartbeat_task);
-
         let instance = FrontendBuilder::new(
             opts.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             catalog_manager,
             client,
-            meta_client,
+            meta_client.clone(),
             process_manager,
         )
         .with_plugin(plugins.clone())
@@ -471,6 +455,9 @@ impl StartCommand {
         .try_build()
         .await
         .context(error::StartFrontendSnafu)?;
+
+        let heartbeat_task = Some(create_heartbeat_task(&opts, meta_client, &instance));
+
         let instance = Arc::new(instance);
 
         let servers = Services::new(opts, instance.clone(), plugins)
@@ -485,6 +472,28 @@ impl StartCommand {
 
         Ok(Instance::new(frontend, guard))
     }
+}
+
+pub fn create_heartbeat_task(
+    options: &frontend::frontend::FrontendOptions,
+    meta_client: MetaClientRef,
+    instance: &frontend::instance::Instance,
+) -> HeartbeatTask {
+    let executor = Arc::new(HandlerGroupExecutor::new(vec![
+        Arc::new(ParseMailboxMessageHandler),
+        Arc::new(SuspendHandler::new(instance.suspend_state())),
+        Arc::new(InvalidateCacheHandler::new(
+            instance.cache_invalidator().clone(),
+        )),
+    ]));
+
+    let stat = {
+        let mut stat = ResourceStatImpl::default();
+        stat.start_collect_cpu_usage();
+        Arc::new(stat)
+    };
+
+    HeartbeatTask::new(options, meta_client, executor, stat)
 }
 
 #[cfg(test)]

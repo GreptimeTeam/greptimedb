@@ -16,6 +16,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use auth::UserProviderRef;
+use axum::extract::{Request, State};
+use axum::middleware::Next;
+use axum::response::IntoResponse;
 use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::info;
@@ -27,6 +30,7 @@ use servers::grpc::frontend_grpc_handler::FrontendGrpcHandler;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{GrpcOptions, GrpcServer};
 use servers::http::event::LogValidatorRef;
+use servers::http::result::error_result::ErrorResponse;
 use servers::http::utils::router::RouterConfigurator;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::interceptor::LogIngestInterceptorRef;
@@ -39,6 +43,7 @@ use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
 use servers::server::{Server, ServerHandlers};
 use servers::tls::{ReloadableTlsServerConfig, maybe_watch_server_tls_config};
 use snafu::ResultExt;
+use tonic::Status;
 
 use crate::error::{self, Result, StartServerSnafu, TomlFormatSnafu};
 use crate::frontend::FrontendOptions;
@@ -125,7 +130,16 @@ where
             builder = builder.with_extra_router(configurator.router());
         }
 
-        builder
+        builder.add_layer(axum::middleware::from_fn_with_state(
+            self.instance.clone(),
+            async move |State(state): State<Arc<Instance>>, request: Request, next: Next| {
+                if state.is_suspended() {
+                    return ErrorResponse::from_error(servers::error::SuspendedSnafu.build())
+                        .into_response();
+                }
+                next.run(request).await
+            },
+        ))
     }
 
     pub fn with_grpc_server_builder(self, builder: GrpcServerBuilder) -> Self {
@@ -197,7 +211,17 @@ where
                 self.instance.clone(),
                 user_provider.clone(),
             ))
-            .flight_handler(flight_handler);
+            .flight_handler(flight_handler)
+            .add_layer(axum::middleware::from_fn_with_state(
+                self.instance.clone(),
+                async move |State(state): State<Arc<Instance>>, request: Request, next: Next| {
+                    if state.is_suspended() {
+                        let status = Status::from(servers::error::SuspendedSnafu.build());
+                        return status.into_http();
+                    }
+                    next.run(request).await
+                },
+            ));
 
         let grpc_server = if !external {
             let frontend_grpc_handler =

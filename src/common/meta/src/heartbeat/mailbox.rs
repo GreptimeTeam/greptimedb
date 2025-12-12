@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::error::SendError;
 
-use crate::error::{self, Result};
 use crate::instruction::{Instruction, InstructionReply};
 
 pub type IncomingMessage = (MessageMeta, Instruction);
@@ -51,13 +51,8 @@ impl HeartbeatMailbox {
         Self { sender }
     }
 
-    pub async fn send(&self, message: OutgoingMessage) -> Result<()> {
-        self.sender.send(message).await.map_err(|e| {
-            error::SendMessageSnafu {
-                err_msg: e.to_string(),
-            }
-            .build()
-        })
+    pub async fn send(&self, message: OutgoingMessage) -> Result<(), SendError<OutgoingMessage>> {
+        self.sender.send(message).await
     }
 }
 
