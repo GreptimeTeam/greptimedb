@@ -1,0 +1,89 @@
+-- Minimal repro for histogram quantile over multi-partition input.
+create table histogram_gap_bucket (
+    ts timestamp time index,
+    le string,
+    shard string,
+    val double,
+    primary key (shard, le)
+) partition on columns (shard) (
+    shard < 'n',
+    shard >= 'n'
+);
+
+Affected Rows: 0
+
+insert into histogram_gap_bucket values
+    (0, '0.5', 'a', 1),
+    (0, '1', 'a', 2),
+    (0, '+Inf', 'a', 2),
+    (0, '0.5', 'z', 2),
+    (0, '1', 'z', 4),
+    (0, '+Inf', 'z', 4),
+    (10000, '0.5', 'a', 1),
+    (10000, '1', 'a', 2),
+    (10000, '+Inf', 'a', 2),
+    (10000, '0.5', 'z', 1),
+    (10000, '1', 'z', 3),
+    (10000, '+Inf', 'z', 3);
+
+Affected Rows: 12
+
+-- Ensure the physical plan keeps the required repartition/order before folding buckets.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+tql analyze (0, 10, '10s') histogram_quantile(0.5, sum by (le) (histogram_gap_bucket));
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_HistogramFoldExec: le=@0, field=@2, quantile=0.5 REDACTED
+|_|_|_SortExec: expr=[ts@1 ASC NULLS LAST, CAST(le@0 AS Float64) ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([ts@1], 32), input_partitions=32 REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[le@0 as le, ts@1 as ts], aggr=[sum(histogram_gap_bucket.val)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([le@0, ts@1], 32), input_partitions=32 REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[le@0 as le, ts@1 as ts], aggr=[sum(histogram_gap_bucket.val)] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[le@0 as le, ts@1 as ts], aggr=[__sum_state(histogram_gap_bucket.val)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([le@0, ts@1], 32), input_partitions=32 REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[le@1 as le, ts@0 as ts], aggr=[__sum_state(histogram_gap_bucket.val)] REDACTED
+|_|_|_ProjectionExec: expr=[ts@0 as ts, le@1 as le, val@3 as val] REDACTED
+|_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[10000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["shard", "le"] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[le@0 as le, ts@1 as ts], aggr=[__sum_state(histogram_gap_bucket.val)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([le@0, ts@1], 32), input_partitions=32 REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[le@1 as le, ts@0 as ts], aggr=[__sum_state(histogram_gap_bucket.val)] REDACTED
+|_|_|_ProjectionExec: expr=[ts@0 as ts, le@1 as le, val@3 as val] REDACTED
+|_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[10000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["shard", "le"] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
+-- SQLNESS SORT_RESULT 2 1
+tql eval (0, 10, '10s') histogram_quantile(0.5, sum by (le) (histogram_gap_bucket));
+
++---------------------+-------------------------------+
+| ts                  | sum(histogram_gap_bucket.val) |
++---------------------+-------------------------------+
+| 1970-01-01T00:00:00 | 0.5                           |
+| 1970-01-01T00:00:10 | 0.5833333333333334            |
++---------------------+-------------------------------+
+
+drop table histogram_gap_bucket;
+
+Affected Rows: 0
+
