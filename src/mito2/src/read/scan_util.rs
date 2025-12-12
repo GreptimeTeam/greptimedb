@@ -14,7 +14,7 @@
 
 //! Utilities for scanners.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fmt;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -206,6 +206,35 @@ pub(crate) struct ScanMetricsSet {
     per_file_metrics: Option<HashMap<RegionFileId, FileScanMetrics>>,
 }
 
+/// Wrapper for file metrics that compares by total cost in reverse order.
+/// This allows using BinaryHeap as a min-heap for efficient top-K selection.
+struct CompareCostReverse<'a> {
+    total_cost: Duration,
+    file_id: RegionFileId,
+    metrics: &'a FileScanMetrics,
+}
+
+impl Ord for CompareCostReverse<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse comparison: smaller costs are "greater"
+        other.total_cost.cmp(&self.total_cost)
+    }
+}
+
+impl PartialOrd for CompareCostReverse<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Eq for CompareCostReverse<'_> {}
+
+impl PartialEq for CompareCostReverse<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.total_cost == other.total_cost
+    }
+}
+
 impl fmt::Debug for ScanMetricsSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ScanMetricsSet {
@@ -380,12 +409,45 @@ impl fmt::Debug for ScanMetricsSet {
             write!(f, ", \"dedup_metrics\":{:?}", dedup_metrics)?;
         }
 
-        // Write per-file metrics if present and non-empty
+        // Write top file metrics if present and non-empty
         if let Some(file_metrics) = per_file_metrics
             && !file_metrics.is_empty()
         {
-            write!(f, ", \"per_file_metrics\": {{")?;
-            for (i, (file_id, metrics)) in file_metrics.iter().enumerate() {
+            // Use min-heap (BinaryHeap with reverse comparison) to keep only top 10
+            let mut heap = BinaryHeap::new();
+            for (file_id, metrics) in file_metrics.iter() {
+                let total_cost =
+                    metrics.build_part_cost + metrics.build_reader_cost + metrics.scan_cost;
+
+                if heap.len() < 10 {
+                    // Haven't reached 10 yet, just push
+                    heap.push(CompareCostReverse {
+                        total_cost,
+                        file_id: *file_id,
+                        metrics,
+                    });
+                } else if let Some(min_entry) = heap.peek() {
+                    // If current cost is higher than the minimum in our top-10, replace it
+                    if total_cost > min_entry.total_cost {
+                        heap.pop();
+                        heap.push(CompareCostReverse {
+                            total_cost,
+                            file_id: *file_id,
+                            metrics,
+                        });
+                    }
+                }
+            }
+
+            // Pop all items and collect (they come out in ascending order)
+            let top_files: Vec<_> = heap
+                .into_iter()
+                .map(|entry| (entry.file_id, entry.metrics))
+                .collect();
+
+            // Write top files in descending order (highest cost first)
+            write!(f, ", \"top_file_metrics\": {{")?;
+            for (i, (file_id, metrics)) in top_files.iter().rev().enumerate() {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
