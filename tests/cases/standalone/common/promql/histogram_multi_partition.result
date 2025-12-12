@@ -34,6 +34,8 @@ Affected Rows: 12
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE Hash\(\[ts@1\],.* Hash([ts@1],REDACTED
+-- SQLNESS REPLACE Hash\(\[le@0,\sts@1\],.* Hash([le@0, ts@1],REDACTED
 tql analyze (0, 10, '10s') histogram_quantile(0.5, sum by (le) (histogram_gap_bucket));
 
 +-+-+-+
@@ -42,17 +44,17 @@ tql analyze (0, 10, '10s') histogram_quantile(0.5, sum by (le) (histogram_gap_bu
 | 0_| 0_|_HistogramFoldExec: le=@0, field=@2, quantile=0.5 REDACTED
 |_|_|_SortExec: expr=[ts@1 ASC NULLS LAST, CAST(le@0 AS Float64) ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([ts@1], 32), input_partitions=32 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([ts@1],REDACTED
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[le@0 as le, ts@1 as ts], aggr=[sum(histogram_gap_bucket.val)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([le@0, ts@1], 32), input_partitions=32 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([le@0, ts@1],REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[le@0 as le, ts@1 as ts], aggr=[sum(histogram_gap_bucket.val)] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[le@0 as le, ts@1 as ts], aggr=[__sum_state(histogram_gap_bucket.val)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([le@0, ts@1], 32), input_partitions=32 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([le@0, ts@1],REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[le@1 as le, ts@0 as ts], aggr=[__sum_state(histogram_gap_bucket.val)] REDACTED
 |_|_|_ProjectionExec: expr=[ts@0 as ts, le@1 as le, val@3 as val] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[10000], time index=[ts] REDACTED
@@ -62,7 +64,7 @@ tql analyze (0, 10, '10s') histogram_quantile(0.5, sum by (le) (histogram_gap_bu
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[le@0 as le, ts@1 as ts], aggr=[__sum_state(histogram_gap_bucket.val)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([le@0, ts@1], 32), input_partitions=32 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([le@0, ts@1],REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[le@1 as le, ts@0 as ts], aggr=[__sum_state(histogram_gap_bucket.val)] REDACTED
 |_|_|_ProjectionExec: expr=[ts@0 as ts, le@1 as le, val@3 as val] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[10000], time index=[ts] REDACTED
