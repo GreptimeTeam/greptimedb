@@ -340,7 +340,7 @@ impl StartCommand {
         let mut opts = opts.component;
         opts.grpc.detect_server_addr();
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &mut opts)
+        plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &opts)
             .await
             .context(error::StartFrontendSnafu)?;
 
@@ -591,7 +591,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let mut fe_opts = frontend::frontend::FrontendOptions {
+        let fe_opts = frontend::frontend::FrontendOptions {
             http: HttpOptions {
                 disable_dashboard: false,
                 ..Default::default()
@@ -601,7 +601,7 @@ mod tests {
         };
 
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &[], &mut fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
             .await
             .unwrap();
 

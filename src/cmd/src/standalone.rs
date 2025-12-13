@@ -350,10 +350,10 @@ impl StartCommand {
             .context(error::BuildCliSnafu)?;
 
         opts.grpc.detect_server_addr();
-        let mut fe_opts = opts.frontend_options();
+        let fe_opts = opts.frontend_options();
         let dn_opts = opts.datanode_options();
 
-        plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &mut fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &fe_opts)
             .await
             .context(error::StartFrontendSnafu)?;
 
@@ -625,13 +625,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let mut fe_opts = FrontendOptions {
+        let fe_opts = FrontendOptions {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             ..Default::default()
         };
 
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &[], &mut fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
             .await
             .unwrap();
 
