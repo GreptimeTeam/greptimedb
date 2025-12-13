@@ -91,6 +91,47 @@ impl TlsOption {
         tls_option
     }
 
+    /// Validates the TLS configuration.
+    ///
+    /// Returns an error if:
+    /// - TLS mode is enabled (not `Disable`) but `cert_path` or `key_path` is empty
+    /// - TLS mode is `VerifyCa` or `VerifyFull` but `ca_cert_path` is empty
+    pub fn validate(&self) -> Result<()> {
+        if self.mode == TlsMode::Disable {
+            return Ok(());
+        }
+
+        // When TLS is enabled, cert_path and key_path are required
+        if self.cert_path.is_empty() {
+            return Err(crate::error::Error::Internal {
+                err_msg: format!(
+                    "TLS mode is {:?} but cert_path is not configured",
+                    self.mode
+                ),
+            });
+        }
+
+        if self.key_path.is_empty() {
+            return Err(crate::error::Error::Internal {
+                err_msg: format!("TLS mode is {:?} but key_path is not configured", self.mode),
+            });
+        }
+
+        // For VerifyCa and VerifyFull modes, ca_cert_path is required for client verification
+        if matches!(self.mode, TlsMode::VerifyCa | TlsMode::VerifyFull)
+            && self.ca_cert_path.is_empty()
+        {
+            return Err(crate::error::Error::Internal {
+                err_msg: format!(
+                    "TLS mode is {:?} but ca_cert_path is not configured",
+                    self.mode
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
     pub fn setup(&self) -> Result<Option<ServerConfig>> {
         if let TlsMode::Disable = self.mode {
             return Ok(None);
@@ -147,6 +188,13 @@ impl TlsOption {
     }
 }
 
+pub fn merge_tls_option(main: &TlsOption, other: TlsOption) -> TlsOption {
+    if other.mode != TlsMode::Disable && other.validate().is_ok() {
+        return other;
+    }
+    main.clone()
+}
+
 impl TlsConfigLoader<Arc<ServerConfig>> for TlsOption {
     type Error = crate::error::Error;
 
@@ -182,6 +230,118 @@ mod tests {
     use super::*;
     use crate::install_ring_crypto_provider;
     use crate::tls::TlsMode::Disable;
+
+    #[test]
+    fn test_validate_disable_mode() {
+        let tls = TlsOption {
+            mode: TlsMode::Disable,
+            cert_path: String::new(),
+            key_path: String::new(),
+            ca_cert_path: String::new(),
+            watch: false,
+        };
+        assert!(tls.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_missing_cert_path() {
+        let tls = TlsOption {
+            mode: TlsMode::Require,
+            cert_path: String::new(),
+            key_path: "/path/to/key".to_string(),
+            ca_cert_path: String::new(),
+            watch: false,
+        };
+        let err = tls.validate().unwrap_err();
+        assert!(err.to_string().contains("cert_path"));
+    }
+
+    #[test]
+    fn test_validate_missing_key_path() {
+        let tls = TlsOption {
+            mode: TlsMode::Require,
+            cert_path: "/path/to/cert".to_string(),
+            key_path: String::new(),
+            ca_cert_path: String::new(),
+            watch: false,
+        };
+        let err = tls.validate().unwrap_err();
+        assert!(err.to_string().contains("key_path"));
+    }
+
+    #[test]
+    fn test_validate_require_mode_success() {
+        let tls = TlsOption {
+            mode: TlsMode::Require,
+            cert_path: "/path/to/cert".to_string(),
+            key_path: "/path/to/key".to_string(),
+            ca_cert_path: String::new(),
+            watch: false,
+        };
+        assert!(tls.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_verify_ca_missing_ca_cert() {
+        let tls = TlsOption {
+            mode: TlsMode::VerifyCa,
+            cert_path: "/path/to/cert".to_string(),
+            key_path: "/path/to/key".to_string(),
+            ca_cert_path: String::new(),
+            watch: false,
+        };
+        let err = tls.validate().unwrap_err();
+        assert!(err.to_string().contains("ca_cert_path"));
+    }
+
+    #[test]
+    fn test_validate_verify_full_missing_ca_cert() {
+        let tls = TlsOption {
+            mode: TlsMode::VerifyFull,
+            cert_path: "/path/to/cert".to_string(),
+            key_path: "/path/to/key".to_string(),
+            ca_cert_path: String::new(),
+            watch: false,
+        };
+        let err = tls.validate().unwrap_err();
+        assert!(err.to_string().contains("ca_cert_path"));
+    }
+
+    #[test]
+    fn test_validate_verify_ca_success() {
+        let tls = TlsOption {
+            mode: TlsMode::VerifyCa,
+            cert_path: "/path/to/cert".to_string(),
+            key_path: "/path/to/key".to_string(),
+            ca_cert_path: "/path/to/ca".to_string(),
+            watch: false,
+        };
+        assert!(tls.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_verify_full_success() {
+        let tls = TlsOption {
+            mode: TlsMode::VerifyFull,
+            cert_path: "/path/to/cert".to_string(),
+            key_path: "/path/to/key".to_string(),
+            ca_cert_path: "/path/to/ca".to_string(),
+            watch: false,
+        };
+        assert!(tls.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_prefer_mode() {
+        let tls = TlsOption {
+            mode: TlsMode::Prefer,
+            cert_path: "/path/to/cert".to_string(),
+            key_path: "/path/to/key".to_string(),
+            ca_cert_path: String::new(),
+            watch: false,
+        };
+        assert!(tls.validate().is_ok());
+    }
 
     #[test]
     fn test_new_tls_option() {

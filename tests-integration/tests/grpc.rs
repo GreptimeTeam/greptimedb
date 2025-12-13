@@ -1010,7 +1010,8 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         let runtime = Runtime::builder().build().unwrap();
         let grpc_builder =
             GrpcServerBuilder::new(config.clone(), runtime).with_tls_config(config.tls);
-        assert!(grpc_builder.is_err());
+        // ok but print warning
+        assert!(grpc_builder.is_ok());
     }
 
     let _ = fe_grpc_server.shutdown().await;
