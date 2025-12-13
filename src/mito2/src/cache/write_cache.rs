@@ -63,11 +63,13 @@ pub type WriteCacheRef = Arc<WriteCache>;
 impl WriteCache {
     /// Create the cache with a `local_store` to cache files and a
     /// `object_store_manager` for all object stores.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         local_store: ObjectStore,
         cache_capacity: ReadableSize,
         ttl: Option<Duration>,
         index_cache_percent: Option<u8>,
+        enable_background_worker: bool,
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
         manifest_cache: Option<ManifestCache>,
@@ -79,6 +81,7 @@ impl WriteCache {
             cache_capacity,
             ttl,
             index_cache_percent,
+            enable_background_worker,
         ));
         file_cache.recover(false, Some(task_receiver)).await;
 
@@ -92,11 +95,13 @@ impl WriteCache {
     }
 
     /// Creates a write cache based on local fs.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new_fs(
         cache_dir: &str,
         cache_capacity: ReadableSize,
         ttl: Option<Duration>,
         index_cache_percent: Option<u8>,
+        enable_background_worker: bool,
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
         manifest_cache_capacity: ReadableSize,
@@ -117,6 +122,7 @@ impl WriteCache {
             cache_capacity,
             ttl,
             index_cache_percent,
+            enable_background_worker,
             puffin_manager_factory,
             intermediate_manager,
             manifest_cache,

@@ -655,6 +655,7 @@ impl TestEnv {
             capacity,
             None,
             None,
+            true, // enable_background_worker
             self.puffin_manager.clone(),
             self.intermediate_manager.clone(),
             None, // manifest_cache
@@ -676,6 +677,7 @@ impl TestEnv {
             capacity,
             None,
             None,
+            true, // enable_background_worker
             self.puffin_manager.clone(),
             self.intermediate_manager.clone(),
             ReadableSize::mb(0), // manifest_cache_capacity

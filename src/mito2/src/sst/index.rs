@@ -1794,6 +1794,7 @@ mod tests {
                 ReadableSize::mb(10),
                 None,
                 None,
+                true, // enable_background_worker
                 factory,
                 intm_manager,
                 ReadableSize::mb(10),

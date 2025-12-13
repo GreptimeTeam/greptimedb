@@ -34,6 +34,7 @@ use index::bloom_filter_index::{BloomFilterIndexCache, BloomFilterIndexCacheRef}
 use index::result_cache::IndexResultCache;
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
+use object_store::ObjectStore;
 use parquet::file::metadata::ParquetMetaData;
 use puffin::puffin_manager::cache::{PuffinMetadataCache, PuffinMetadataCacheRef};
 use store_api::storage::{ConcreteDataType, FileId, RegionId, TimeSeriesRowSelector};
@@ -261,6 +262,26 @@ impl CacheStrategy {
         match self {
             CacheStrategy::EnableAll(cache_manager) => cache_manager.index_result_cache(),
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
+        }
+    }
+
+    /// Triggers download if the strategy is [CacheStrategy::EnableAll] and write cache is available.
+    pub fn maybe_download_background(
+        &self,
+        index_key: IndexKey,
+        remote_path: String,
+        remote_store: ObjectStore,
+        file_size: u64,
+    ) {
+        if let CacheStrategy::EnableAll(cache_manager) = self
+            && let Some(write_cache) = cache_manager.write_cache()
+        {
+            write_cache.file_cache().maybe_download_background(
+                index_key,
+                remote_path,
+                remote_store,
+                file_size,
+            );
         }
     }
 }
