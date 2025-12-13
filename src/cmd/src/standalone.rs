@@ -766,7 +766,6 @@ mod tests {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             mysql_addr: Some("127.0.0.1:4002".to_string()),
             postgres_addr: Some("127.0.0.1:4003".to_string()),
-            tls_watch: true,
             ..Default::default()
         };
 
@@ -783,8 +782,6 @@ mod tests {
 
         assert_eq!("./greptimedb_data/test/logs", opts.logging.dir);
         assert_eq!("debug", opts.logging.level.unwrap());
-        assert!(opts.mysql.tls.watch);
-        assert!(opts.postgres.tls.watch);
     }
 
     #[test]
