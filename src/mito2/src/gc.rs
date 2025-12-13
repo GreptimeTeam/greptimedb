@@ -209,15 +209,7 @@ impl LocalGcWorker {
 
     /// Get tmp ref files for all current regions
     pub async fn read_tmp_ref_files(&self) -> Result<HashMap<RegionId, HashSet<FileId>>> {
-        let mut tmp_ref_files = HashMap::new();
-        for (region_id, file_refs) in &self.file_ref_manifest.file_refs {
-            tmp_ref_files
-                .entry(*region_id)
-                .or_insert_with(HashSet::new)
-                .extend(file_refs.clone());
-        }
-
-        Ok(tmp_ref_files)
+        Ok(self.file_ref_manifest.file_refs.clone())
     }
 
     /// Run the GC worker in serial mode,
@@ -570,6 +562,11 @@ impl LocalGcWorker {
                         // if the file's expel time is unknown(because not appear in delta manifest), we keep it for a while
                         // using it's last modified time
                         // notice unknown files use a different lingering time
+                        // FIXME(discord9): might need to require all files ref in manifest to determine whether new file is in use now?
+                        debug!(
+                            "File {:?} has unknown expel time, might have been created but not yet updated in manifest, checking last modified time for lingering",
+                            file_id
+                        );
                         entry
                             .metadata()
                             .last_modified()

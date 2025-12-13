@@ -89,6 +89,10 @@ wrap_with_clap_prefix! {
         region: Option<String>,
         #[doc = "Enable virtual host style for the object store."]
         enable_virtual_host_style: bool = Default::default(),
+        #[doc = "Allow anonymous access (disable credential signing) for testing."]
+        allow_anonymous: bool = Default::default(),
+        #[doc = "Disable config load from environment and files for testing."]
+        disable_config_load: bool = Default::default(),
     }
 }
 

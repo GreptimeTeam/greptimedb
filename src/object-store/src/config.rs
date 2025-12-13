@@ -117,6 +117,10 @@ pub struct S3Connection {
     /// By default, opendal will send API to https://s3.us-east-1.amazonaws.com/bucket_name
     /// Enabled, opendal will send API to https://bucket_name.s3.us-east-1.amazonaws.com
     pub enable_virtual_host_style: bool,
+    /// Allow anonymous access (disable credential signing) - useful for local testing
+    pub allow_anonymous: bool,
+    /// Disable config load from environment and files - useful for local testing
+    pub disable_config_load: bool,
 }
 
 impl From<&S3Connection> for S3 {
@@ -137,6 +141,14 @@ impl From<&S3Connection> for S3 {
         }
         if connection.enable_virtual_host_style {
             builder = builder.enable_virtual_host_style();
+        }
+
+        if connection.allow_anonymous {
+            builder = builder.allow_anonymous();
+        }
+
+        if connection.disable_config_load {
+            builder = builder.disable_config_load();
         }
 
         builder
