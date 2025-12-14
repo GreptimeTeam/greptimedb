@@ -42,7 +42,7 @@ pub struct RegionMetadataLoader {
 }
 
 impl RegionMetadataLoader {
-    /// Creates a new `RegionOpenerBuilder`.
+    /// Creates a new `RegionMetadataLoader`.
     pub fn new(config: Arc<MitoConfig>, object_store_manager: ObjectStoreManagerRef) -> Self {
         Self {
             config,
@@ -225,6 +225,8 @@ impl RegionFileCopier {
                         |e| error!(e; "Failed to copy file {} to {}", source_path, target_path),
                     )
                     .context(error::OpenDalSnafu)?;
+                // We use the loop index to track file copy progress,
+                // as Tokio's fair semaphore ensures permits are granted in request order.
                 info!(
                     "Copied file {} to {}, elapsed: {:?}, progress: {}/{}",
                     source_path,

@@ -127,11 +127,9 @@ impl<S> RegionWorkerLoop<S> {
             .map(|file_meta| file_meta.file_id)
             .collect();
 
-        region.version_control.apply_edit(
-            Some(request.edit.clone()),
-            &[],
-            region.file_purger.clone(),
-        );
+        region
+            .version_control
+            .apply_edit(Some(request.edit), &[], region.file_purger.clone());
 
         let _ = sender.send(Ok(MitoCopyRegionFromResponse { copied_file_ids }));
     }
