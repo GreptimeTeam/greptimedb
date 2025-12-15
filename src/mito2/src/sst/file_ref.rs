@@ -109,7 +109,7 @@ impl FileReferenceManager {
             for meta in manifest.files.values() {
                 if queries.contains(&meta.region_id) {
                     // since gc couldn't happen together with repartition
-                    // (both thie queires and realted_region acquire region read lock), no need to worry about
+                    // (both the queries and related_region acquire region read lock), no need to worry about
                     // staging manifest in repartition here.
                     ref_files
                         .entry(meta.region_id)
