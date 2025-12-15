@@ -231,6 +231,7 @@ impl LocalGcWorker {
         let now = std::time::Instant::now();
 
         let mut deleted_files = HashMap::new();
+        let mut deleted_indexes = HashMap::new();
         let tmp_ref_files = self.read_tmp_ref_files().await?;
         for (region_id, region) in &self.regions {
             let per_region_time = std::time::Instant::now();
@@ -247,13 +248,10 @@ impl LocalGcWorker {
                 .get(region_id)
                 .cloned()
                 .unwrap_or_else(HashSet::new);
-            let files = self
-                .do_region_gc(region.clone(), &tmp_ref_files)
-                .await?
-                .into_iter()
-                .map(|f| f.file_id())
-                .collect();
-            deleted_files.insert(*region_id, files);
+            let files = self.do_region_gc(region.clone(), &tmp_ref_files).await?;
+            let index_files = files.iter().filter_map(|f| f.index_version()).collect_vec();
+            deleted_files.insert(*region_id, files.into_iter().map(|f| f.file_id()).collect());
+            deleted_indexes.insert(*region_id, index_files);
             debug!(
                 "GC for region {} took {} secs.",
                 region_id,
@@ -266,6 +264,7 @@ impl LocalGcWorker {
         );
         let report = GcReport {
             deleted_files,
+            deleted_indexes,
             need_retry_regions: HashSet::new(),
         };
         Ok(report)

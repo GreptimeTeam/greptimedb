@@ -104,6 +104,7 @@ pub struct GcReport {
     /// deleted files per region
     /// TODO(discord9): change to `RemovedFile`?
     pub deleted_files: HashMap<RegionId, Vec<FileId>>,
+    pub deleted_indexes: HashMap<RegionId, Vec<(FileId, IndexVersion)>>,
     /// Regions that need retry in next gc round, usually because their tmp ref files are outdated
     pub need_retry_regions: HashSet<RegionId>,
 }
@@ -111,10 +112,12 @@ pub struct GcReport {
 impl GcReport {
     pub fn new(
         deleted_files: HashMap<RegionId, Vec<FileId>>,
+        deleted_indexes: HashMap<RegionId, Vec<(FileId, IndexVersion)>>,
         need_retry_regions: HashSet<RegionId>,
     ) -> Self {
         Self {
             deleted_files,
+            deleted_indexes,
             need_retry_regions,
         }
     }

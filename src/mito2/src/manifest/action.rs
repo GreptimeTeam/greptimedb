@@ -358,6 +358,13 @@ impl RemovedFile {
             RemovedFile::Index(file_id, _) => *file_id,
         }
     }
+
+    pub fn index_version(&self) -> Option<IndexVersion> {
+        match self {
+            RemovedFile::File(_, index_version) => *index_version,
+            RemovedFile::Index(_, index_version) => Some(*index_version),
+        }
+    }
 }
 
 impl RemovedFilesRecord {
