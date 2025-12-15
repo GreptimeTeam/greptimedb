@@ -439,11 +439,9 @@ impl fmt::Debug for ScanMetricsSet {
                 }
             }
 
-            // Pop all items and collect (they come out in ascending order)
             let top_files = heap.into_sorted_vec();
-            // Write top files in descending order (highest cost first)
             write!(f, ", \"top_file_metrics\": {{")?;
-            for (i, item) in top_files.iter().rev().enumerate() {
+            for (i, item) in top_files.iter().enumerate() {
                 let CompareCostReverse {
                     total_cost: _,
                     file_id,
