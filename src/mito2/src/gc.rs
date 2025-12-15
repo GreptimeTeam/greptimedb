@@ -249,7 +249,10 @@ impl LocalGcWorker {
                 .cloned()
                 .unwrap_or_else(HashSet::new);
             let files = self.do_region_gc(region.clone(), &tmp_ref_files).await?;
-            let index_files = files.iter().filter_map(|f| f.index_version()).collect_vec();
+            let index_files = files
+                .iter()
+                .filter_map(|f| f.index_version().map(|v| (f.file_id(), v)))
+                .collect_vec();
             deleted_files.insert(*region_id, files.into_iter().map(|f| f.file_id()).collect());
             deleted_indexes.insert(*region_id, index_files);
             debug!(
