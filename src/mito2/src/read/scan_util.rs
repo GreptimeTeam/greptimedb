@@ -22,7 +22,6 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
-use common_telemetry::debug;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, Time};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::timestamp::timestamp_array_to_primitive;
@@ -1181,7 +1180,6 @@ pub fn build_file_range_scan_stream(
             ..Default::default()
         };
         for range in ranges {
-            debug!("Scanning file range: {:?}", range.file_handle().file_id());
             let build_reader_start = Instant::now();
             let Some(reader) = range.reader(stream_ctx.input.series_row_selector, fetch_metrics.as_deref()).await? else {
                 continue;
@@ -1214,7 +1212,6 @@ pub fn build_file_range_scan_stream(
 
                 reader_metrics.merge_from(&prune_metrics);
             }
-            debug!("Finished scanning file range: {:?}", range.file_handle().file_id());
         }
 
         // Reports metrics.
