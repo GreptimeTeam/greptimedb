@@ -102,6 +102,7 @@ pub struct FileRefsManifest {
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcReport {
     /// deleted files per region
+    /// TODO(discord9): change to `RemovedFile`?
     pub deleted_files: HashMap<RegionId, Vec<FileId>>,
     /// Regions that need retry in next gc round, usually because their tmp ref files are outdated
     pub need_retry_regions: HashSet<RegionId>,

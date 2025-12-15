@@ -351,6 +351,15 @@ pub enum RemovedFile {
     Index(FileId, IndexVersion),
 }
 
+impl RemovedFile {
+    pub fn file_id(&self) -> FileId {
+        match self {
+            RemovedFile::File(file_id, _) => *file_id,
+            RemovedFile::Index(file_id, _) => *file_id,
+        }
+    }
+}
+
 impl RemovedFilesRecord {
     /// Add a record of removed files with the current timestamp.
     pub fn add_removed_files(&mut self, removed: Vec<RemovedFile>, at: i64) {

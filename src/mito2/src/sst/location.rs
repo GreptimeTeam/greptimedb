@@ -21,7 +21,6 @@ use store_api::storage::{FileId, RegionId};
 
 use crate::cache::file_cache::FileType;
 use crate::error::UnexpectedSnafu;
-use crate::memtable::bulk::part;
 use crate::sst::file::{RegionFileId, RegionIndexId};
 
 /// Generate region dir from table_dir, region_id and path_type
