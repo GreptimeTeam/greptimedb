@@ -32,9 +32,11 @@ tql eval (3000, 3000, '1s') histogram_quantile(1.01, histogram_bucket);
 tql eval (3000, 3000, '1s') histogram_quantile(NaN, histogram_bucket);
 
 -- Quantile value in lowest bucket, which is positive.
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') histogram_quantile(0, histogram_bucket{s="positive"});
 
 -- Quantile value in lowest bucket, which is negative.
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') histogram_quantile(0, histogram_bucket{s="negative"});
 
 -- Quantile value in highest bucket.
@@ -57,6 +59,7 @@ tql eval (3000, 3000, '1s') label_replace(histogram_quantile(0.8, histogram_buck
 -- More realistic with rates.
 -- This case doesn't contains value because other point are not inserted.
 -- quantile with rate is covered in other cases
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') histogram_quantile(0.2, rate(histogram_bucket[5m]));
 
 drop table histogram_bucket;
@@ -122,16 +125,22 @@ insert into histogram2_bucket values
     (2700000, "+Inf", 30);
 
 -- Want results exactly in the middle of the bucket.
+-- SQLNESS SORT_RESULT 3 1
 tql eval (420, 420, '1s') histogram_quantile(0.166, histogram2_bucket);
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (420, 420, '1s') histogram_quantile(0.5, histogram2_bucket);
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (420, 420, '1s') histogram_quantile(0.833, histogram2_bucket);
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (2820, 2820, '1s') histogram_quantile(0.166, rate(histogram2_bucket[15m]));
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (2820, 2820, '1s') histogram_quantile(0.5, rate(histogram2_bucket[15m]));
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (2820, 2820, '1s') histogram_quantile(0.833, rate(histogram2_bucket[15m]));
 
 drop table histogram2_bucket;
@@ -160,6 +169,7 @@ insert into histogram3_bucket values
     (3005000, "5", "a", 20),
     (3005000, "+Inf", "a", 30);
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3005, '3s') histogram_quantile(0.5, sum by(le, s) (rate(histogram3_bucket[5m])));
 
 drop table histogram3_bucket;
@@ -201,8 +211,11 @@ CREATE TABLE greptime_servers_postgres_query_elapsed_no_le (
     PRIMARY KEY (pod, instance)
 );
 
--- should return empty result instead of error when 'le' column is missing
+-- should return empty result instead of error when 'le' column is missin
+-- SQLNESS SORT_RESULT 3 1
 tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, le) (rate(greptime_servers_postgres_query_elapsed_no_le{instance=~"xxx"}[1m])));
+
+-- SQLNESS SORT_RESULT 3 1
 tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, fbf) (rate(greptime_servers_postgres_query_elapsed_no_le{instance=~"xxx"}[1m])));
 
 drop table greptime_servers_postgres_query_elapsed_no_le;

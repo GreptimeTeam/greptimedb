@@ -1137,6 +1137,12 @@ impl ScanInput {
         self.files.len()
     }
 
+    /// Gets the file handle from a row group index.
+    pub(crate) fn file_from_index(&self, index: RowGroupIndex) -> &FileHandle {
+        let file_index = index.index - self.num_memtables();
+        &self.files[file_index]
+    }
+
     pub fn region_metadata(&self) -> &RegionMetadataRef {
         self.mapper.metadata()
     }

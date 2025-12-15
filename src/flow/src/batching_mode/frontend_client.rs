@@ -110,6 +110,26 @@ impl FrontendClient {
         )
     }
 
+    /// Check if the frontend client is initialized.
+    ///
+    /// In distributed mode, it is always initialized.
+    /// In standalone mode, it checks if the database client is set.
+    pub fn is_initialized(&self) -> bool {
+        match self {
+            FrontendClient::Distributed { .. } => true,
+            FrontendClient::Standalone {
+                database_client, ..
+            } => {
+                let guard = database_client.lock();
+                if let Ok(guard) = guard {
+                    guard.is_some()
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     pub fn from_meta_client(
         meta_client: Arc<MetaClient>,
         auth: Option<FlowAuthHeader>,
