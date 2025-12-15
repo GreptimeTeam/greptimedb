@@ -23,8 +23,9 @@ use auth::UserProviderRef;
 use axum::extract::Request;
 use axum::response::IntoResponse;
 use axum::routing::Route;
-use common_grpc::error::{Error, InvalidConfigFilePathSnafu, Result};
+use common_grpc::error::{InvalidConfigFilePathSnafu, Result};
 use common_runtime::Runtime;
+use common_telemetry::warn;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsServiceServer;
 use snafu::ResultExt;
 use tokio::sync::Mutex;
@@ -195,10 +196,7 @@ impl GrpcServerBuilder {
         // tonic does not support watching for tls config changes
         // so we don't support it either for now
         if tls_option.watch {
-            return Err(Error::NotSupported {
-                feat: "Certificates watch and reloading for gRPC is not supported at the moment"
-                    .to_string(),
-            });
+            warn!("Certificates watch and reloading for gRPC is NOT supported at the moment");
         }
         self.tls_config = if tls_option.should_force_tls() {
             let cert = std::fs::read_to_string(tls_option.cert_path)
