@@ -21,7 +21,6 @@ use futures::TryStreamExt;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::FileId;
 use store_api::{MAX_VERSION, MIN_VERSION, ManifestVersion};
 
 use crate::cache::manifest_cache::ManifestCache;

@@ -196,13 +196,12 @@ impl RegionManifestBuilder {
 
         let mut removed_files = vec![];
         for file in edit.files_to_add {
-            if let Some(old_file) = self.files.insert(file.file_id, file.clone()) {
-                if let Some(old_index) = old_file.index_version()
-                    && !old_file.is_index_up_to_date(&file)
-                {
-                    // The old file has an index that is now outdated.
-                    removed_files.push(RemovedFile::Index(old_file.file_id, old_index));
-                }
+            if let Some(old_file) = self.files.insert(file.file_id, file.clone())
+                && let Some(old_index) = old_file.index_version()
+                && !old_file.is_index_up_to_date(&file)
+            {
+                // The old file has an index that is now outdated.
+                removed_files.push(RemovedFile::Index(old_file.file_id, old_index));
             }
         }
         removed_files.extend(

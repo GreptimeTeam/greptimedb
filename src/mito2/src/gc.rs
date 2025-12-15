@@ -788,8 +788,8 @@ impl LocalGcWorker {
         // Step 3: Filter files to determine which ones can be deleted
         let all_unused_files_ready_for_delete = self.filter_deletable_files(
             all_entries,
-            &in_manifest,
-            &in_tmp_ref,
+            in_manifest,
+            in_tmp_ref,
             &all_may_linger_files,
             &eligible_for_removal,
             unknown_file_may_linger_until,
