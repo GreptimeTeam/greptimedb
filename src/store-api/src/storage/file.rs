@@ -77,11 +77,16 @@ impl FromStr for FileId {
 pub struct FileRef {
     pub region_id: RegionId,
     pub file_id: FileId,
+    pub index_version: Option<IndexVersion>,
 }
 
 impl FileRef {
-    pub fn new(region_id: RegionId, file_id: FileId) -> Self {
-        Self { region_id, file_id }
+    pub fn new(region_id: RegionId, file_id: FileId, index_version: Option<IndexVersion>) -> Self {
+        Self {
+            region_id,
+            file_id,
+            index_version,
+        }
     }
 }
 
@@ -170,5 +175,68 @@ mod tests {
         let json = serde_json::to_string(&manifest).unwrap();
         let parsed: FileRefsManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(manifest, parsed);
+    }
+
+    #[test]
+    fn test_file_ref_new() {
+        let region_id = RegionId::new(1024, 1);
+        let file_id = FileId::random();
+
+        // Test with Some(index_version)
+        let index_version: IndexVersion = 42;
+        let file_ref = FileRef::new(region_id, file_id, Some(index_version));
+        assert_eq!(file_ref.region_id, region_id);
+        assert_eq!(file_ref.file_id, file_id);
+        assert_eq!(file_ref.index_version, Some(index_version));
+
+        // Test with None
+        let file_ref_none = FileRef::new(region_id, file_id, None);
+        assert_eq!(file_ref_none.region_id, region_id);
+        assert_eq!(file_ref_none.file_id, file_id);
+        assert_eq!(file_ref_none.index_version, None);
+    }
+
+    #[test]
+    fn test_file_ref_equality() {
+        let region_id = RegionId::new(1024, 1);
+        let file_id = FileId::random();
+
+        let file_ref1 = FileRef::new(region_id, file_id, Some(10));
+        let file_ref2 = FileRef::new(region_id, file_id, Some(10));
+        let file_ref3 = FileRef::new(region_id, file_id, Some(20));
+        let file_ref4 = FileRef::new(region_id, file_id, None);
+
+        assert_eq!(file_ref1, file_ref2);
+        assert_ne!(file_ref1, file_ref3);
+        assert_ne!(file_ref1, file_ref4);
+        assert_ne!(file_ref3, file_ref4);
+
+        // Test equality with Some(0) vs None
+        let file_ref_zero = FileRef::new(region_id, file_id, Some(0));
+        assert_ne!(file_ref_zero, file_ref4);
+    }
+
+    #[test]
+    fn test_file_ref_serialization() {
+        let region_id = RegionId::new(1024, 1);
+        let file_id = FileId::random();
+
+        // Test with Some(index_version)
+        let index_version: IndexVersion = 12345;
+        let file_ref = FileRef::new(region_id, file_id, Some(index_version));
+
+        let json = serde_json::to_string(&file_ref).unwrap();
+        let parsed: FileRef = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(file_ref, parsed);
+        assert_eq!(parsed.index_version, Some(index_version));
+
+        // Test with None
+        let file_ref_none = FileRef::new(region_id, file_id, None);
+        let json_none = serde_json::to_string(&file_ref_none).unwrap();
+        let parsed_none: FileRef = serde_json::from_str(&json_none).unwrap();
+
+        assert_eq!(file_ref_none, parsed_none);
+        assert_eq!(parsed_none.index_version, None);
     }
 }

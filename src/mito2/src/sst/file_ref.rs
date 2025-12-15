@@ -132,7 +132,15 @@ impl FileReferenceManager {
         let region_id = file_meta.region_id;
         let mut is_new = false;
         {
-            let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
+            let file_ref = FileRef::new(
+                file_meta.region_id,
+                file_meta.file_id,
+                if file_meta.exists_index() {
+                    Some(file_meta.index_version)
+                } else {
+                    None
+                },
+            );
             self.files_per_region
                 .entry(region_id)
                 .and_modify(|refs| {
@@ -157,7 +165,15 @@ impl FileReferenceManager {
     /// If the reference count reaches zero, the file reference will be removed from the manager.
     pub fn remove_file(&self, file_meta: &FileMeta) {
         let region_id = file_meta.region_id;
-        let file_ref = FileRef::new(region_id, file_meta.file_id);
+        let file_ref = FileRef::new(
+            region_id,
+            file_meta.file_id,
+            if file_meta.exists_index() {
+                Some(file_meta.index_version)
+            } else {
+                None
+            },
+        );
 
         let mut remove_table_entry = false;
         let mut remove_file_ref = false;
@@ -247,13 +263,31 @@ mod tests {
                 .get(&file_meta.region_id)
                 .unwrap()
                 .files,
-            HashMap::from_iter([(FileRef::new(file_meta.region_id, file_meta.file_id), 1)])
+            HashMap::from_iter([(
+                FileRef::new(
+                    file_meta.region_id,
+                    file_meta.file_id,
+                    if file_meta.exists_index() {
+                        Some(file_meta.index_version)
+                    } else {
+                        None
+                    }
+                ),
+                1
+            )])
         );
 
         file_ref_mgr.add_file(&file_meta);
 
-        let expected_region_ref_manifest =
-            HashSet::from_iter([FileRef::new(file_meta.region_id, file_meta.file_id)]);
+        let expected_region_ref_manifest = HashSet::from_iter([FileRef::new(
+            file_meta.region_id,
+            file_meta.file_id,
+            if file_meta.exists_index() {
+                Some(file_meta.index_version)
+            } else {
+                None
+            },
+        )]);
 
         assert_eq!(
             file_ref_mgr.ref_file_set(file_meta.region_id).unwrap(),
@@ -266,7 +300,18 @@ mod tests {
                 .get(&file_meta.region_id)
                 .unwrap()
                 .files,
-            HashMap::from_iter([(FileRef::new(file_meta.region_id, file_meta.file_id), 2)])
+            HashMap::from_iter([(
+                FileRef::new(
+                    file_meta.region_id,
+                    file_meta.file_id,
+                    if file_meta.exists_index() {
+                        Some(file_meta.index_version)
+                    } else {
+                        None
+                    }
+                ),
+                2
+            )])
         );
 
         assert_eq!(
@@ -282,7 +327,18 @@ mod tests {
                 .get(&file_meta.region_id)
                 .unwrap()
                 .files,
-            HashMap::from_iter([(FileRef::new(file_meta.region_id, file_meta.file_id), 1)])
+            HashMap::from_iter([(
+                FileRef::new(
+                    file_meta.region_id,
+                    file_meta.file_id,
+                    if file_meta.exists_index() {
+                        Some(file_meta.index_version)
+                    } else {
+                        None
+                    }
+                ),
+                1
+            )])
         );
 
         assert_eq!(
