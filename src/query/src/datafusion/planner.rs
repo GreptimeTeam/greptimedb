@@ -35,45 +35,13 @@ use datafusion_expr::planner::{ExprPlanner, TypePlanner};
 use datafusion_expr::var_provider::is_system_variables;
 use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::parser::Statement as DfStatement;
-use once_cell::sync::Lazy;
 use session::context::QueryContextRef;
 use snafu::{Location, ResultExt};
 
 use crate::error::{CatalogSnafu, Result};
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 
-static SCALAR_FUNCTION_ALIAS: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
-    HashMap::from([
-        // SQL compat aliases.
-        ("ucase", "upper"),
-        ("lcase", "lower"),
-        ("ceiling", "ceil"),
-        ("mid", "substr"),
-        // MySQL's RAND([seed]) accepts an optional seed argument, while DataFusion's `random()`
-        // does not. We alias the name for `rand()` compatibility, and `rand(seed)` will error
-        // due to mismatched arity.
-        ("rand", "random"),
-    ])
-});
-
-static AGGREGATE_FUNCTION_ALIAS: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
-    HashMap::from([
-        // MySQL compat aliases that don't override existing DataFusion aggregate names.
-        //
-        ("std", "stddev_pop"),
-        ("variance", "var_pop"),
-    ])
-});
-
-fn resolve_scalar_function_alias(name: &str) -> Option<&'static str> {
-    let name = name.to_ascii_lowercase();
-    SCALAR_FUNCTION_ALIAS.get(name.as_str()).copied()
-}
-
-fn resolve_aggregate_function_alias(name: &str) -> Option<&'static str> {
-    let name = name.to_ascii_lowercase();
-    AGGREGATE_FUNCTION_ALIAS.get(name.as_str()).copied()
-}
+mod function_alias;
 
 pub struct DfContextProviderAdapter {
     engine_state: Arc<QueryEngineState>,
@@ -187,7 +155,7 @@ impl ContextProvider for DfContextProviderAdapter {
                     .get(name)
                     .cloned()
                     .or_else(|| {
-                        resolve_scalar_function_alias(name).and_then(|name| {
+                        function_alias::resolve_scalar(name).and_then(|name| {
                             self.session_state.scalar_functions().get(name).cloned()
                         })
                     })
@@ -209,7 +177,7 @@ impl ContextProvider for DfContextProviderAdapter {
                     .get(name)
                     .cloned()
                     .or_else(|| {
-                        resolve_aggregate_function_alias(name).and_then(|name| {
+                        function_alias::resolve_aggregate(name).and_then(|name| {
                             self.session_state.aggregate_functions().get(name).cloned()
                         })
                     })
@@ -247,18 +215,14 @@ impl ContextProvider for DfContextProviderAdapter {
     fn udf_names(&self) -> Vec<String> {
         let mut names = self.engine_state.scalar_names();
         names.extend(self.session_state.scalar_functions().keys().cloned());
-        names.extend(SCALAR_FUNCTION_ALIAS.keys().map(|name| (*name).to_string()));
+        names.extend(function_alias::scalar_alias_names().map(|name| name.to_string()));
         names
     }
 
     fn udaf_names(&self) -> Vec<String> {
         let mut names = self.engine_state.aggr_names();
         names.extend(self.session_state.aggregate_functions().keys().cloned());
-        names.extend(
-            AGGREGATE_FUNCTION_ALIAS
-                .keys()
-                .map(|name| (*name).to_string()),
-        );
+        names.extend(function_alias::aggregate_alias_names().map(|name| name.to_string()));
         names
     }
 
@@ -294,7 +258,7 @@ impl ContextProvider for DfContextProviderAdapter {
                 .get(name)
                 .cloned()
                 .or_else(|| {
-                    resolve_scalar_function_alias(name)
+                    function_alias::resolve_scalar(name)
                         .and_then(|alias| self.session_state.table_functions().get(alias).cloned())
                 });
 
@@ -322,33 +286,5 @@ impl ContextProvider for DfContextProviderAdapter {
 
     fn get_type_planner(&self) -> Option<Arc<dyn TypePlanner>> {
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{resolve_aggregate_function_alias, resolve_scalar_function_alias};
-
-    #[test]
-    fn resolves_function_aliases_case_insensitive() {
-        assert_eq!(resolve_scalar_function_alias("ucase"), Some("upper"));
-        assert_eq!(resolve_scalar_function_alias("UCASE"), Some("upper"));
-        assert_eq!(resolve_scalar_function_alias("lcase"), Some("lower"));
-        assert_eq!(resolve_scalar_function_alias("ceiling"), Some("ceil"));
-        assert_eq!(resolve_scalar_function_alias("MID"), Some("substr"));
-        assert_eq!(resolve_scalar_function_alias("RAND"), Some("random"));
-
-        assert_eq!(resolve_aggregate_function_alias("std"), Some("stddev_pop"));
-        assert_eq!(
-            resolve_aggregate_function_alias("STDDEV"),
-            None,
-            "`stddev` alias is intentionally not supported"
-        );
-        assert_eq!(
-            resolve_aggregate_function_alias("variance"),
-            Some("var_pop")
-        );
-
-        assert_eq!(resolve_scalar_function_alias("not_a_real_alias"), None);
     }
 }
