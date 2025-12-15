@@ -31,7 +31,7 @@ use common_time::Timestamp;
 use object_store::{Entry, Lister};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
-use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
+use store_api::storage::{FileId, FileRef, FileRefsManifest, GcReport, RegionId};
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 use tokio_stream::StreamExt;
 
@@ -208,7 +208,7 @@ impl LocalGcWorker {
     }
 
     /// Get tmp ref files for all current regions
-    pub async fn read_tmp_ref_files(&self) -> Result<HashMap<RegionId, HashSet<FileId>>> {
+    pub async fn read_tmp_ref_files(&self) -> Result<HashMap<RegionId, HashSet<FileRef>>> {
         let mut tmp_ref_files = HashMap::new();
         for (region_id, file_refs) in &self.file_ref_manifest.file_refs {
             tmp_ref_files

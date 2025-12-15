@@ -94,7 +94,7 @@ impl FileRef {
 /// Also record the manifest version when these tmp files are read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRefsManifest {
-    pub file_refs: HashMap<RegionId, HashSet<FileId>>,
+    pub file_refs: HashMap<RegionId, HashSet<FileRef>>,
     /// Manifest version when this manifest is read for it's files
     pub manifest_version: HashMap<RegionId, ManifestVersion>,
 }
@@ -167,8 +167,12 @@ mod tests {
         let mut manifest = FileRefsManifest::default();
         let r0 = RegionId::new(1024, 1);
         let r1 = RegionId::new(1024, 2);
-        manifest.file_refs.insert(r0, [FileId::random()].into());
-        manifest.file_refs.insert(r1, [FileId::random()].into());
+        manifest
+            .file_refs
+            .insert(r0, [FileRef::new(r0, FileId::random(), None)].into());
+        manifest
+            .file_refs
+            .insert(r1, [FileRef::new(r1, FileId::random(), None)].into());
         manifest.manifest_version.insert(r0, 10);
         manifest.manifest_version.insert(r1, 20);
 

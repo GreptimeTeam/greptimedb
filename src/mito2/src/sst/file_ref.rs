@@ -91,7 +91,7 @@ impl FileReferenceManager {
         // get from in memory file handles
         for region_id in query_regions.iter().map(|r| r.region_id()) {
             if let Some(files) = self.ref_file_set(region_id) {
-                ref_files.insert(region_id, files.into_iter().map(|f| f.file_id).collect());
+                ref_files.insert(region_id, files);
             }
         }
 
@@ -108,10 +108,17 @@ impl FileReferenceManager {
             let manifest = related_region.manifest_ctx.manifest().await;
             for meta in manifest.files.values() {
                 if queries.contains(&meta.region_id) {
+                    // since gc couldn't happen together with repartition
+                    // (both thie queires and realted_region acquire region read lock), no need to worry about
+                    // staging manifest in repartition here.
                     ref_files
                         .entry(meta.region_id)
                         .or_insert_with(HashSet::new)
-                        .insert(meta.file_id);
+                        .insert(FileRef::new(
+                            meta.region_id,
+                            meta.file_id,
+                            meta.index_version(),
+                        ));
                 }
             }
             // not sure if related region's manifest version is needed, but record it for now.
@@ -165,15 +172,7 @@ impl FileReferenceManager {
     /// If the reference count reaches zero, the file reference will be removed from the manager.
     pub fn remove_file(&self, file_meta: &FileMeta) {
         let region_id = file_meta.region_id;
-        let file_ref = FileRef::new(
-            region_id,
-            file_meta.file_id,
-            if file_meta.exists_index() {
-                Some(file_meta.index_version)
-            } else {
-                None
-            },
-        );
+        let file_ref = FileRef::new(region_id, file_meta.file_id, file_meta.index_version());
 
         let mut remove_table_entry = false;
         let mut remove_file_ref = false;
@@ -267,11 +266,7 @@ mod tests {
                 FileRef::new(
                     file_meta.region_id,
                     file_meta.file_id,
-                    if file_meta.exists_index() {
-                        Some(file_meta.index_version)
-                    } else {
-                        None
-                    }
+                    file_meta.index_version()
                 ),
                 1
             )])
@@ -282,11 +277,7 @@ mod tests {
         let expected_region_ref_manifest = HashSet::from_iter([FileRef::new(
             file_meta.region_id,
             file_meta.file_id,
-            if file_meta.exists_index() {
-                Some(file_meta.index_version)
-            } else {
-                None
-            },
+            file_meta.index_version(),
         )]);
 
         assert_eq!(
@@ -304,11 +295,7 @@ mod tests {
                 FileRef::new(
                     file_meta.region_id,
                     file_meta.file_id,
-                    if file_meta.exists_index() {
-                        Some(file_meta.index_version)
-                    } else {
-                        None
-                    }
+                    file_meta.index_version()
                 ),
                 2
             )])
@@ -331,11 +318,7 @@ mod tests {
                 FileRef::new(
                     file_meta.region_id,
                     file_meta.file_id,
-                    if file_meta.exists_index() {
-                        Some(file_meta.index_version)
-                    } else {
-                        None
-                    }
+                    file_meta.index_version()
                 ),
                 1
             )])
