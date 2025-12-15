@@ -204,45 +204,50 @@ impl RegionFileCopier {
             file_ids, source_region_id, target_region_id
         );
         let semaphore = Arc::new(Semaphore::new(parallelism));
-        let mut tasks = Vec::with_capacity(file_ids.len());
         let num_file = file_ids.len();
-        for (index, file_desc) in file_ids.iter().enumerate() {
-            let (source_path, target_path) = build_copy_file_paths(
-                source_region_id,
-                target_region_id,
-                *file_desc,
-                table_dir,
-                path_type,
-            );
-            let moved_semaphore = semaphore.clone();
-            tasks.push(async move {
-                let _permit = moved_semaphore.acquire().await.unwrap();
-                let now = Instant::now();
-                object_store
-                    .copy(&source_path, &target_path)
-                    .await
-                    .inspect_err(
-                        |e| error!(e; "Failed to copy file {} to {}", source_path, target_path),
-                    )
-                    .context(error::OpenDalSnafu)?;
-                // We use the loop index to track file copy progress,
-                // as Tokio's fair semaphore ensures permits are granted in request order.
-                info!(
-                    "Copied file {} to {}, elapsed: {:?}, progress: {}/{}",
-                    source_path,
-                    target_path,
-                    now.elapsed(),
-                    index + 1,
-                    num_file
-                );
-                Ok(())
-            });
+        for (chunk_idx, chunk) in file_ids.chunks(parallelism).enumerate() {
+            let mut tasks = Vec::with_capacity(chunk.len());
+            let chunk = chunk.to_vec();
+            let object_store = object_store.clone();
+            for (i, file_desc) in chunk.into_iter().enumerate() {
+                let moved_semaphore = semaphore.clone();
+                let object_store = object_store.clone();
+                tasks.push(async move {
+                    let _permit = moved_semaphore.acquire().await.unwrap();
+                    let (source_path, target_path) = build_copy_file_paths(
+                        source_region_id,
+                        target_region_id,
+                        file_desc,
+                        table_dir,
+                        path_type,
+                    );
+                    let now = Instant::now();
+                    object_store
+                        .copy(&source_path, &target_path)
+                        .await
+                        .inspect_err(
+                            |e| error!(e; "Failed to copy file {} to {}", source_path, target_path),
+                        )
+                        .context(error::OpenDalSnafu)?;
+                    info!(
+                        "Copied file {} to {}, elapsed: {:?}, progress: {}/{}",
+                        source_path,
+                        target_path,
+                        now.elapsed(),
+                        chunk_idx * parallelism + i + 1,
+                        num_file
+                    );
+                    Ok(())
+                })
+            }
+
+            if let Err(err) = try_join_all(tasks).await {
+                error!(err; "Failed to copy files from region {} to region {}", source_region_id, target_region_id);
+                self.clean_target_region(target_region_id, file_ids).await;
+                return Err(err);
+            }
         }
-        if let Err(err) = try_join_all(tasks).await {
-            error!(err; "Failed to copy files from region {} to region {}", source_region_id, target_region_id);
-            self.clean_target_region(target_region_id, file_ids).await;
-            return Err(err);
-        }
+
         Ok(())
     }
 

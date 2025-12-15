@@ -134,6 +134,9 @@ impl<S> RegionWorkerLoop<S> {
         let _ = sender.send(Ok(MitoCopyRegionFromResponse { copied_file_ids }));
     }
 
+    /// Returns the region edit and the file ids that were copied from the source region to the target region.
+    ///
+    /// If no need to copy files, returns (None, file_ids).
     async fn copy_region_from(
         region: &MitoRegionRef,
         region_metadata_loader: RegionMetadataLoader,

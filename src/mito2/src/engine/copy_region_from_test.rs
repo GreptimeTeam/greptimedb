@@ -110,15 +110,17 @@ async fn test_engine_copy_region_from_with_format(flat_format: bool, with_index:
     }
 
     let source_region_dir = format!("{}/data/test/1_0000000001", env.data_home().display());
-    assert_file_num_in_dir(&source_region_dir, 1);
-    if with_index {
-        assert_file_num_in_dir(&format!("{}/index", source_region_dir), 1);
-    }
-
+    let source_region_files = collect_filename_in_dir(&source_region_dir);
     let target_region_dir = format!("{}/data/test/1_0000000002", env.data_home().display());
-    assert_file_num_in_dir(&target_region_dir, 1);
+    let target_region_files = collect_filename_in_dir(&target_region_dir);
+    assert_eq!(source_region_files, target_region_files);
+
     if with_index {
-        assert_file_num_in_dir(&format!("{}/index", target_region_dir), 1);
+        let source_region_index_files =
+            collect_filename_in_dir(&format!("{}/index", source_region_dir));
+        let target_region_index_files =
+            collect_filename_in_dir(&format!("{}/index", target_region_dir));
+        assert_eq!(source_region_index_files, target_region_index_files);
     }
     common_telemetry::debug!("copy region from again");
     let resp2 = engine
@@ -192,6 +194,9 @@ async fn test_engine_copy_region_failure_with_format(flat_format: bool) {
     let source_region_dir = format!("{}/data/test/1_0000000001", env.data_home().display());
     assert_file_num_in_dir(&source_region_dir, 1);
     assert_file_num_in_dir(&format!("{}/index", source_region_dir), 1);
+    let source_region_files = collect_filename_in_dir(&source_region_dir);
+    let source_region_index_files =
+        collect_filename_in_dir(&format!("{}/index", source_region_dir));
 
     // Creates a target region and enters staging mode
     let target_region_id = RegionId::new(1, 2);
@@ -220,6 +225,15 @@ async fn test_engine_copy_region_failure_with_format(flat_format: bool) {
     let source_region_dir = format!("{}/data/test/1_0000000001", env.data_home().display());
     assert_file_num_in_dir(&source_region_dir, 1);
     assert_file_num_in_dir(&format!("{}/index", source_region_dir), 1);
+
+    assert_eq!(
+        source_region_files,
+        collect_filename_in_dir(&source_region_dir)
+    );
+    assert_eq!(
+        source_region_index_files,
+        collect_filename_in_dir(&format!("{}/index", source_region_dir))
+    );
 }
 
 fn assert_file_num_in_dir(dir: &str, expected_num: usize) {
@@ -237,6 +251,27 @@ fn assert_file_num_in_dir(dir: &str, expected_num: usize) {
         expected_num,
         files
     );
+}
+
+fn collect_filename_in_dir(dir: &str) -> Vec<String> {
+    let mut files = fs::read_dir(dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.metadata().unwrap().is_file())
+        .map(|f| {
+            f.path()
+                .to_string_lossy()
+                .rsplit("/")
+                .last()
+                .unwrap()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    files.sort_unstable();
+
+    files
 }
 
 #[tokio::test]
