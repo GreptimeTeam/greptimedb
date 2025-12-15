@@ -19,7 +19,9 @@ use store_api::path_utils::region_name;
 use store_api::region_request::PathType;
 use store_api::storage::{FileId, RegionId};
 
+use crate::cache::file_cache::FileType;
 use crate::error::UnexpectedSnafu;
+use crate::memtable::bulk::part;
 use crate::sst::file::{RegionFileId, RegionIndexId};
 
 /// Generate region dir from table_dir, region_id and path_type
@@ -135,6 +137,31 @@ pub fn parse_file_id_from_path(filepath: &str) -> crate::error::Result<FileId> {
         }
         .build()
     })
+}
+
+pub fn parse_file_id_type_from_path(filepath: &str) -> crate::error::Result<(FileId, FileType)> {
+    let filename = filepath.rsplit('/').next().context(UnexpectedSnafu {
+        reason: format!("invalid file path: {}", filepath),
+    })?;
+    // get part before first '.'
+    let parts: Vec<&str> = filename.split('.').collect();
+    if parts.len() < 2 {
+        return UnexpectedSnafu {
+            reason: format!("invalid file name: {}", filename),
+        }
+        .fail();
+    }
+    let file_id = parts[0];
+    let file_id = FileId::parse_str(file_id).map_err(|e| {
+        UnexpectedSnafu {
+            reason: format!("invalid file id: {}, err: {}", file_id, e),
+        }
+        .build()
+    })?;
+    let file_type = FileType::parse(parts[1..].join(".").as_str()).context(UnexpectedSnafu {
+        reason: format!("invalid file type in file name: {}", filename),
+    })?;
+    Ok((file_id, file_type))
 }
 
 #[cfg(test)]

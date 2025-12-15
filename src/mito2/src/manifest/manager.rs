@@ -31,7 +31,7 @@ use crate::error::{
 };
 use crate::manifest::action::{
     RegionChange, RegionCheckpoint, RegionEdit, RegionManifest, RegionManifestBuilder,
-    RegionMetaAction, RegionMetaActionList,
+    RegionMetaAction, RegionMetaActionList, RemovedFile,
 };
 use crate::manifest::checkpointer::Checkpointer;
 use crate::manifest::storage::{
@@ -589,7 +589,7 @@ impl RegionManifestManager {
     }
 
     /// Clear deleted files from manifest's `removed_files` field without update version. Notice if datanode exit before checkpoint then new manifest by open region may still contain these deleted files, which is acceptable for gc process.
-    pub fn clear_deleted_files(&mut self, deleted_files: Vec<FileId>) {
+    pub fn clear_deleted_files(&mut self, deleted_files: Vec<RemovedFile>) {
         let mut manifest = (*self.manifest()).clone();
         manifest.removed_files.clear_deleted_files(deleted_files);
         self.set_manifest(Arc::new(manifest));
