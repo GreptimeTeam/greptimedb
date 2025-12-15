@@ -58,8 +58,8 @@ pub fn get_total_memory_bytes() -> i64 {
     }
 }
 
-/// Get the total CPU cores. The result will be rounded to the nearest integer.
-/// For example, if the total CPU is 1.5 cores(1500 millicores), the result will be 2.
+/// Get the total CPU cores. The result will be rounded up to the next integer (ceiling).
+/// For example, if the total CPU is 1.1 cores (1100 millicores) or 1.5 cores (1500 millicores), the result will be 2.
 pub fn get_total_cpu_cores() -> usize {
     cpu_cores(get_total_cpu_millicores())
 }
