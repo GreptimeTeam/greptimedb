@@ -457,7 +457,7 @@ compress_manifest = false
 #+ experimental_compaction_memory_limit = "0"
 
 ## Behavior when compaction cannot acquire memory from the budget.
-## Options: "wait" (default, 10s), "wait(<duration>)", "skip"
+## Options: "wait" (default, 10s), "wait(<duration>)", "fail"
 ## @toml2docs:none-default="wait"
 #+ experimental_compaction_on_exhausted = "wait"
 

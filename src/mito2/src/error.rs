@@ -19,6 +19,7 @@ use common_datasource::compression::CompressionType;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_memory_manager;
 use common_runtime::JoinError;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
@@ -1042,11 +1043,7 @@ pub enum Error {
     ManualCompactionOverride {},
 
     #[snafu(display(
-        "Compaction memory limit exceeded for region {}: required {} bytes, limit {} bytes (policy: {})",
-        region_id,
-        required_bytes,
-        limit_bytes,
-        policy
+        "Compaction memory limit exceeded for region {region_id}: required {required_bytes} bytes, limit {limit_bytes} bytes (policy: {policy})",
     ))]
     CompactionMemoryExhausted {
         region_id: RegionId,
@@ -1057,20 +1054,12 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Requested compaction memory ({} bytes) exceeds total limit ({} bytes)",
-        requested_bytes,
-        limit_bytes
-    ))]
-    CompactionMemoryLimitExceeded {
-        requested_bytes: u64,
-        limit_bytes: u64,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Compaction memory semaphore unexpectedly closed"))]
-    CompactionMemorySemaphoreClosed {
+    #[snafu(display("Failed to acquire memory for region {region_id} (policy: {policy})"))]
+    MemoryAcquireFailed {
+        region_id: RegionId,
+        policy: String,
+        #[snafu(source)]
+        source: common_memory_manager::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1359,9 +1348,7 @@ impl ErrorExt for Error {
 
             CompactionMemoryExhausted { .. } => StatusCode::RuntimeResourcesExhausted,
 
-            CompactionMemoryLimitExceeded { .. } => StatusCode::RuntimeResourcesExhausted,
-
-            CompactionMemorySemaphoreClosed { .. } => StatusCode::Unexpected,
+            MemoryAcquireFailed { source, .. } => source.status_code(),
 
             IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
 

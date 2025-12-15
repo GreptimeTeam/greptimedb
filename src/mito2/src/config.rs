@@ -20,13 +20,13 @@ use std::time::Duration;
 
 use common_base::memory_limit::MemoryLimit;
 use common_base::readable_size::ReadableSize;
+use common_memory_manager::OnExhaustedPolicy;
 use common_stat::{get_total_cpu_cores, get_total_memory_readable};
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 use crate::cache::file_cache::DEFAULT_INDEX_CACHE_PERCENT;
-use crate::compaction::memory_manager::OnExhaustedPolicy;
 use crate::error::Result;
 use crate::gc::GcConfig;
 use crate::memtable::MemtableConfig;

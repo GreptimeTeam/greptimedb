@@ -30,6 +30,7 @@ use std::time::Instant;
 use api::v1::region::compact_request;
 use api::v1::region::compact_request::Options;
 use common_base::Plugins;
+use common_memory_manager::OnExhaustedPolicy;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
@@ -47,7 +48,7 @@ use tokio::sync::mpsc::{self, Sender};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultCompactor};
-use crate::compaction::memory_manager::{CompactionMemoryManager, OnExhaustedPolicy};
+use crate::compaction::memory_manager::CompactionMemoryManager;
 use crate::compaction::picker::{CompactionTask, PickerOutput, new_picker};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
@@ -809,6 +810,7 @@ mod tests {
     use tokio::sync::{Barrier, oneshot};
 
     use super::*;
+    use crate::compaction::memory_manager::{CompactionMemoryGuard, new_compaction_memory_manager};
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::ManifestContext;
     use crate::sst::FormatType;
@@ -1181,7 +1183,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_memory_competition() {
-        let manager = Arc::new(CompactionMemoryManager::new(3 * 1024 * 1024)); // 3MB
+        let manager = Arc::new(new_compaction_memory_manager(3 * 1024 * 1024)); // 3MB
         let barrier = Arc::new(Barrier::new(3));
         let mut handles = vec![];
 
@@ -1196,7 +1198,7 @@ mod tests {
             handles.push(handle);
         }
 
-        let results: Vec<_> = futures::future::join_all(handles)
+        let results: Vec<Option<CompactionMemoryGuard>> = futures::future::join_all(handles)
             .await
             .into_iter()
             .map(|r| r.unwrap())

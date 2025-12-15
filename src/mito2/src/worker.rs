@@ -59,7 +59,7 @@ use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
-use crate::compaction::memory_manager::CompactionMemoryManager;
+use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
 use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
@@ -217,7 +217,7 @@ impl WorkerGroup {
             .experimental_compaction_memory_limit
             .resolve(total_memory);
         let compaction_memory_manager =
-            Arc::new(CompactionMemoryManager::new(compaction_limit_bytes));
+            Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
 
         let workers = (0..config.num_workers)
@@ -405,7 +405,7 @@ impl WorkerGroup {
             .experimental_compaction_memory_limit
             .resolve(total_memory);
         let compaction_memory_manager =
-            Arc::new(CompactionMemoryManager::new(compaction_limit_bytes));
+            Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
         let workers = (0..config.num_workers)
             .map(|id| {

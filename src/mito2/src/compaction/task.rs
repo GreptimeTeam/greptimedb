@@ -16,17 +16,16 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::time::Instant;
 
+use common_memory_manager::OnExhaustedPolicy;
 use common_telemetry::{error, info, warn};
 use itertools::Itertools;
 use snafu::ResultExt;
 use tokio::sync::mpsc;
 
 use crate::compaction::compactor::{CompactionRegion, Compactor};
-use crate::compaction::memory_manager::{
-    CompactionMemoryGuard, CompactionMemoryManager, OnExhaustedPolicy,
-};
+use crate::compaction::memory_manager::{CompactionMemoryGuard, CompactionMemoryManager};
 use crate::compaction::picker::{CompactionTask, PickerOutput};
-use crate::error::{CompactRegionSnafu, CompactionMemoryExhaustedSnafu};
+use crate::error::{CompactRegionSnafu, CompactionMemoryExhaustedSnafu, MemoryAcquireFailedSnafu};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_MEMORY_WAIT, COMPACTION_STAGE_ELAPSED};
 use crate::region::RegionRoleState;
@@ -130,7 +129,10 @@ impl CompactionTaskImpl {
                     }
                     Ok(Err(e)) => {
                         timer.observe_duration();
-                        Err(e)
+                        Err(e).with_context(|_| MemoryAcquireFailedSnafu {
+                            region_id,
+                            policy: format!("wait_timeout({}ms)", wait_timeout.as_millis()),
+                        })
                     }
                     Err(_) => {
                         timer.observe_duration();
@@ -148,21 +150,20 @@ impl CompactionTaskImpl {
                     }
                 }
             }
-            OnExhaustedPolicy::Skip => {
-                // Try to acquire, skip if not immediately available
+            OnExhaustedPolicy::Fail => {
+                // Try to acquire, fail immediately if not available
                 self.memory_manager
                     .try_acquire(requested_bytes)
                     .ok_or_else(|| {
                         warn!(
-                            "Skipping compaction for region {} due to memory limit \
-                             (need {} bytes, limit {} bytes)",
+                            "Compaction memory exhausted for region {} (policy=fail, need {} bytes, limit {} bytes)",
                             region_id, requested_bytes, limit_bytes
                         );
                         CompactionMemoryExhaustedSnafu {
                             region_id,
                             required_bytes: requested_bytes,
                             limit_bytes,
-                            policy: "skip".to_string(),
+                            policy: "fail".to_string(),
                         }
                         .build()
                     })
