@@ -61,7 +61,11 @@ pub fn get_total_memory_bytes() -> i64 {
 /// Get the total CPU cores. The result will be rounded to the nearest integer.
 /// For example, if the total CPU is 1.5 cores(1500 millicores), the result will be 2.
 pub fn get_total_cpu_cores() -> usize {
-    ((get_total_cpu_millicores() as f64) / 1000.0).round() as usize
+    cpu_cores(get_total_cpu_millicores())
+}
+
+fn cpu_cores(cpu_millicores: i64) -> usize {
+    ((cpu_millicores as f64) / 1_000.0).ceil() as usize
 }
 
 /// Get the total memory in readable size.
@@ -178,6 +182,13 @@ mod tests {
     #[test]
     fn test_get_total_cpu_cores() {
         assert!(get_total_cpu_cores() > 0);
+        assert_eq!(cpu_cores(1), 1);
+        assert_eq!(cpu_cores(100), 1);
+        assert_eq!(cpu_cores(500), 1);
+        assert_eq!(cpu_cores(1000), 1);
+        assert_eq!(cpu_cores(1100), 2);
+        assert_eq!(cpu_cores(1900), 2);
+        assert_eq!(cpu_cores(10_000), 10);
     }
 
     #[test]
