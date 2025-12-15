@@ -282,9 +282,9 @@ impl ColumnExtensions {
                 }
                 .build()
             })?;
-            if value == 0 {
+            if !(2..=2048).contains(&value) {
                 return InvalidSqlSnafu {
-                    msg: "VECTOR INDEX connectivity must be greater than 0".to_string(),
+                    msg: "VECTOR INDEX connectivity must be in the range [2, 2048].".to_string(),
                 }
                 .fail();
             }
@@ -1013,7 +1013,7 @@ AS SELECT number FROM numbers_input where number > 10"#,
             result
                 .unwrap_err()
                 .to_string()
-                .contains("connectivity must be greater than 0")
+                .contains("connectivity must be in the range [2, 2048]")
         );
 
         // Test zero expansion_add should fail
