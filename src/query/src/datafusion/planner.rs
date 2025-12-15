@@ -288,17 +288,19 @@ impl ContextProvider for DfContextProviderAdapter {
             let provider = tbl_func.create_table_provider(&args)?;
             Ok(provider_as_source(provider))
         } else {
-            // Table functions should be resolved by exact name. We only do a best-effort name alias
-            // fallback for compat.
-            let resolved_name = resolve_scalar_function_alias(name).unwrap_or(name);
             let tbl_func = self
                 .session_state
                 .table_functions()
-                .get(resolved_name)
+                .get(name)
                 .cloned()
-                .ok_or_else(|| {
-                    DataFusionError::Plan(format!("table function '{name}' not found"))
-                })?;
+                .or_else(|| {
+                    resolve_scalar_function_alias(name)
+                        .and_then(|alias| self.session_state.table_functions().get(alias).cloned())
+                });
+
+            let tbl_func = tbl_func.ok_or_else(|| {
+                DataFusionError::Plan(format!("table function '{name}' not found"))
+            })?;
             let provider = tbl_func.create_table_provider(&args)?;
 
             Ok(provider_as_source(provider))
