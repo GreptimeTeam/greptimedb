@@ -14,7 +14,6 @@
 
 use std::path::PathBuf;
 
-use async_trait::async_trait;
 use common_base::secrets::{ExposeSecret, SecretString};
 use common_error::ext::BoxedError;
 
@@ -57,7 +56,6 @@ fn format_uri(scheme: &str, bucket: &str, root: &str, path: &str) -> String {
 }
 
 /// Trait for storage backends that can be used for data export.
-#[async_trait]
 pub trait StorageExport: Send + Sync {
     /// Generate the storage path for COPY DATABASE command.
     /// Returns (path, connection_string) where connection_string includes CONNECTION clause.
@@ -98,7 +96,6 @@ impl FsBackend {
     }
 }
 
-#[async_trait]
 impl StorageExport for FsBackend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
         if self.output_dir.is_empty() {
@@ -123,7 +120,6 @@ impl StorageExport for FsBackend {
 
 define_backend!(S3Backend, PrefixedS3Connection);
 
-#[async_trait]
 impl StorageExport for S3Backend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
         let s3_path = format_uri(
@@ -178,7 +174,6 @@ impl StorageExport for S3Backend {
 
 define_backend!(OssBackend, PrefixedOssConnection);
 
-#[async_trait]
 impl StorageExport for OssBackend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
         let oss_path = format_uri(
@@ -225,7 +220,6 @@ impl StorageExport for OssBackend {
 
 define_backend!(GcsBackend, PrefixedGcsConnection);
 
-#[async_trait]
 impl StorageExport for GcsBackend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
         let gcs_path = format_uri(
@@ -282,7 +276,6 @@ impl StorageExport for GcsBackend {
 
 define_backend!(AzblobBackend, PrefixedAzblobConnection);
 
-#[async_trait]
 impl StorageExport for AzblobBackend {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
         let azblob_path = format_uri(
@@ -340,7 +333,6 @@ pub enum StorageType {
     Azblob(AzblobBackend),
 }
 
-#[async_trait]
 impl StorageExport for StorageType {
     fn get_storage_path(&self, catalog: &str, schema: &str) -> (String, String) {
         match self {
