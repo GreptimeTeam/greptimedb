@@ -129,7 +129,10 @@ impl CompactionTaskImpl {
                     }
                     Ok(Err(e)) => {
                         timer.observe_duration();
-                        Err(e).context(MemoryAcquireFailedSnafu)
+                        Err(e).with_context(|_| MemoryAcquireFailedSnafu {
+                            region_id,
+                            policy: format!("wait_timeout({}ms)", wait_timeout.as_millis()),
+                        })
                     }
                     Err(_) => {
                         timer.observe_duration();

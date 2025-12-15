@@ -1043,11 +1043,7 @@ pub enum Error {
     ManualCompactionOverride {},
 
     #[snafu(display(
-        "Compaction memory limit exceeded for region {}: required {} bytes, limit {} bytes (policy: {})",
-        region_id,
-        required_bytes,
-        limit_bytes,
-        policy
+        "Compaction memory limit exceeded for region {region_id}: required {required_bytes} bytes, limit {limit_bytes} bytes (policy: {policy})",
     ))]
     CompactionMemoryExhausted {
         region_id: RegionId,
@@ -1058,8 +1054,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to acquire memory: {source}"))]
+    #[snafu(display("Failed to acquire memory for region {region_id} (policy: {policy})"))]
     MemoryAcquireFailed {
+        region_id: RegionId,
+        policy: String,
         #[snafu(source)]
         source: common_memory_manager::Error,
         #[snafu(implicit)]

@@ -27,8 +27,6 @@ pub enum OnExhaustedPolicy {
     Wait { timeout: Duration },
 
     /// Fail immediately if memory is not available.
-    ///
-    /// Whether to skip, retry, or degrade the task is the caller's decision.
     Fail,
 }
 
