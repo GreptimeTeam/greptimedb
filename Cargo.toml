@@ -21,6 +21,7 @@ members = [
     "src/common/grpc-expr",
     "src/common/macro",
     "src/common/mem-prof",
+    "src/common/memory-manager",
     "src/common/meta",
     "src/common/options",
     "src/common/plugins",
@@ -266,6 +267,7 @@ common-grpc = { path = "src/common/grpc" }
 common-grpc-expr = { path = "src/common/grpc-expr" }
 common-macro = { path = "src/common/macro" }
 common-mem-prof = { path = "src/common/mem-prof" }
+common-memory-manager = { path = "src/common/memory-manager" }
 common-meta = { path = "src/common/meta" }
 common-options = { path = "src/common/options" }
 common-plugins = { path = "src/common/plugins" }
