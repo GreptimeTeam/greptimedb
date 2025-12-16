@@ -36,6 +36,7 @@ use crate::rpc::store::BatchGetRequest;
 /// And gc scheduler will use this information to clean up those files(and this mapping if all files from src region are cleaned).
 ///
 /// The layout: `__table_part/{table_id}`.
+#[derive(Debug, PartialEq)]
 pub struct TablePartKey {
     pub table_id: TableId,
 }
@@ -260,12 +261,9 @@ impl TablePartManager {
 
     /// Updates mappings from src region to dst regions.
     /// Should be called once repartition is done.
-    pub async fn update_mappings(
-        &self,
-        table_id: TableId,
-        src: RegionId,
-        dst: &[RegionId],
-    ) -> Result<()> {
+    pub async fn update_mappings(&self, src: RegionId, dst: &[RegionId]) -> Result<()> {
+        let table_id = src.table_id();
+
         // Get current table part with raw bytes for CAS operation
         let current_table_part = self
             .get_with_raw_bytes(table_id)
@@ -297,12 +295,9 @@ impl TablePartManager {
 
     /// Removes mappings from src region to dst regions.
     /// Should be called once files from src region are cleaned up in dst regions.
-    pub async fn remove_mappings(
-        &self,
-        table_id: TableId,
-        src: RegionId,
-        dsts: &[RegionId],
-    ) -> Result<()> {
+    pub async fn remove_mappings(&self, src: RegionId, dsts: &[RegionId]) -> Result<()> {
+        let table_id = src.table_id();
+
         // Get current table part with raw bytes for CAS operation
         let current_table_part = self
             .get_with_raw_bytes(table_id)
@@ -340,5 +335,507 @@ impl TablePartManager {
         let table_id = src_region.table_id();
         let table_part = self.get(table_id).await?;
         Ok(table_part.and_then(|part| part.src_to_dst.get(&src_region).cloned()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::kv_backend::TxnService;
+    use crate::kv_backend::memory::MemoryKvBackend;
+
+    #[test]
+    fn test_table_part_key_serialization() {
+        let key = TablePartKey::new(42);
+        let raw_key = key.to_bytes();
+        assert_eq!(raw_key, b"__table_part/42");
+    }
+
+    #[test]
+    fn test_table_part_key_deserialization() {
+        let expected = TablePartKey::new(42);
+        let key = TablePartKey::from_bytes(b"__table_part/42").unwrap();
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn test_table_part_key_deserialization_invalid_utf8() {
+        let result = TablePartKey::from_bytes(b"__table_part/\xff");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not a valid UTF8 string")
+        );
+    }
+
+    #[test]
+    fn test_table_part_key_deserialization_invalid_format() {
+        let result = TablePartKey::from_bytes(b"invalid_key_format");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid TablePartKey")
+        );
+    }
+
+    #[test]
+    fn test_table_part_value_serialization_deserialization() {
+        let mut src_to_dst = BTreeMap::new();
+        let src_region = RegionId::new(1, 1);
+        let dst_regions = vec![RegionId::new(1, 2), RegionId::new(1, 3)];
+        src_to_dst.insert(src_region, dst_regions.into_iter().collect());
+
+        let value = TablePartValue { src_to_dst };
+        let serialized = value.try_as_raw_value().unwrap();
+        let deserialized = TablePartValue::try_from_raw_value(&serialized).unwrap();
+
+        assert_eq!(value, deserialized);
+    }
+
+    #[test]
+    fn test_table_part_value_update_mappings_new_src() {
+        let mut value = TablePartValue {
+            src_to_dst: BTreeMap::new(),
+        };
+
+        let src = RegionId::new(1, 1);
+        let dst = vec![RegionId::new(1, 2), RegionId::new(1, 3)];
+
+        value.update_mappings(src, &dst);
+
+        assert_eq!(value.src_to_dst.len(), 1);
+        assert!(value.src_to_dst.contains_key(&src));
+        assert_eq!(value.src_to_dst.get(&src).unwrap().len(), 2);
+        assert!(
+            value
+                .src_to_dst
+                .get(&src)
+                .unwrap()
+                .contains(&RegionId::new(1, 2))
+        );
+        assert!(
+            value
+                .src_to_dst
+                .get(&src)
+                .unwrap()
+                .contains(&RegionId::new(1, 3))
+        );
+    }
+
+    #[test]
+    fn test_table_part_value_update_mappings_existing_src() {
+        let mut value = TablePartValue {
+            src_to_dst: BTreeMap::new(),
+        };
+
+        let src = RegionId::new(1, 1);
+        let initial_dst = vec![RegionId::new(1, 2)];
+        let additional_dst = vec![RegionId::new(1, 3), RegionId::new(1, 4)];
+
+        // Initial mapping
+        value.update_mappings(src, &initial_dst);
+        // Update with additional destinations
+        value.update_mappings(src, &additional_dst);
+
+        assert_eq!(value.src_to_dst.len(), 1);
+        assert_eq!(value.src_to_dst.get(&src).unwrap().len(), 3);
+        assert!(
+            value
+                .src_to_dst
+                .get(&src)
+                .unwrap()
+                .contains(&RegionId::new(1, 2))
+        );
+        assert!(
+            value
+                .src_to_dst
+                .get(&src)
+                .unwrap()
+                .contains(&RegionId::new(1, 3))
+        );
+        assert!(
+            value
+                .src_to_dst
+                .get(&src)
+                .unwrap()
+                .contains(&RegionId::new(1, 4))
+        );
+    }
+
+    #[test]
+    fn test_table_part_value_remove_mappings_existing() {
+        let mut value = TablePartValue {
+            src_to_dst: BTreeMap::new(),
+        };
+
+        let src = RegionId::new(1, 1);
+        let dst_regions = vec![
+            RegionId::new(1, 2),
+            RegionId::new(1, 3),
+            RegionId::new(1, 4),
+        ];
+        value.update_mappings(src, &dst_regions);
+
+        // Remove some mappings
+        let to_remove = vec![RegionId::new(1, 2), RegionId::new(1, 3)];
+        value.remove_mappings(src, &to_remove);
+
+        assert_eq!(value.src_to_dst.len(), 1);
+        assert_eq!(value.src_to_dst.get(&src).unwrap().len(), 1);
+        assert!(
+            value
+                .src_to_dst
+                .get(&src)
+                .unwrap()
+                .contains(&RegionId::new(1, 4))
+        );
+    }
+
+    #[test]
+    fn test_table_part_value_remove_mappings_all() {
+        let mut value = TablePartValue {
+            src_to_dst: BTreeMap::new(),
+        };
+
+        let src = RegionId::new(1, 1);
+        let dst_regions = vec![RegionId::new(1, 2), RegionId::new(1, 3)];
+        value.update_mappings(src, &dst_regions);
+
+        // Remove all mappings
+        value.remove_mappings(src, &dst_regions);
+
+        assert_eq!(value.src_to_dst.len(), 0);
+    }
+
+    #[test]
+    fn test_table_part_value_remove_mappings_nonexistent() {
+        let mut value = TablePartValue {
+            src_to_dst: BTreeMap::new(),
+        };
+
+        let src = RegionId::new(1, 1);
+        let dst_regions = vec![RegionId::new(1, 2)];
+        value.update_mappings(src, &dst_regions);
+
+        // Try to remove non-existent mappings
+        let nonexistent_dst = vec![RegionId::new(1, 3), RegionId::new(1, 4)];
+        value.remove_mappings(src, &nonexistent_dst);
+
+        // Should remain unchanged
+        assert_eq!(value.src_to_dst.len(), 1);
+        assert_eq!(value.src_to_dst.get(&src).unwrap().len(), 1);
+        assert!(
+            value
+                .src_to_dst
+                .get(&src)
+                .unwrap()
+                .contains(&RegionId::new(1, 2))
+        );
+    }
+
+    #[test]
+    fn test_table_part_value_remove_mappings_nonexistent_src() {
+        let mut value = TablePartValue {
+            src_to_dst: BTreeMap::new(),
+        };
+
+        let src = RegionId::new(1, 1);
+        let dst_regions = vec![RegionId::new(1, 2)];
+
+        // Try to remove mappings for non-existent source
+        value.remove_mappings(src, &dst_regions);
+
+        // Should remain empty
+        assert_eq!(value.src_to_dst.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_table_part_manager_get_empty() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let manager = TablePartManager::new(kv);
+        let result = manager.get(1024).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_table_part_manager_get_with_raw_bytes_empty() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let manager = TablePartManager::new(kv);
+        let result = manager.get_with_raw_bytes(1024).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_table_part_manager_create_and_get() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let manager = TablePartManager::new(kv.clone());
+
+        let mut src_to_dst = BTreeMap::new();
+        let src_region = RegionId::new(1, 1);
+        let dst_regions = vec![RegionId::new(1, 2), RegionId::new(1, 3)];
+        src_to_dst.insert(src_region, dst_regions.into_iter().collect());
+
+        let value = TablePartValue { src_to_dst };
+
+        // Create the table part
+        let (txn, _) = manager.build_create_txn(1024, &value).unwrap();
+        let result = kv.txn(txn).await.unwrap();
+        assert!(result.succeeded);
+
+        // Get the table part
+        let retrieved = manager.get(1024).await.unwrap().unwrap();
+        assert_eq!(retrieved, value);
+    }
+
+    #[tokio::test]
+    async fn test_table_part_manager_update_txn() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let manager = TablePartManager::new(kv.clone());
+
+        let initial_value = TablePartValue {
+            src_to_dst: BTreeMap::new(),
+        };
+
+        // Create initial table part
+        let (create_txn, _) = manager.build_create_txn(1024, &initial_value).unwrap();
+        let result = kv.txn(create_txn).await.unwrap();
+        assert!(result.succeeded);
+
+        // Get current value with raw bytes
+        let current_value = manager.get_with_raw_bytes(1024).await.unwrap().unwrap();
+
+        // Create updated value
+        let mut updated_src_to_dst = BTreeMap::new();
+        let src_region = RegionId::new(1, 1);
+        let dst_regions = vec![RegionId::new(1, 2)];
+        updated_src_to_dst.insert(src_region, dst_regions.into_iter().collect());
+        let updated_value = TablePartValue {
+            src_to_dst: updated_src_to_dst,
+        };
+
+        // Build update transaction
+        let (update_txn, _) = manager
+            .build_update_txn(1024, &current_value, &updated_value)
+            .unwrap();
+        let result = kv.txn(update_txn).await.unwrap();
+        assert!(result.succeeded);
+
+        // Verify update
+        let retrieved = manager.get(1024).await.unwrap().unwrap();
+        assert_eq!(retrieved, updated_value);
+    }
+
+    #[tokio::test]
+    async fn test_table_part_manager_batch_get() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let manager = TablePartManager::new(kv.clone());
+
+        // Create multiple table parts
+        let table_parts = vec![
+            (
+                1024,
+                TablePartValue {
+                    src_to_dst: {
+                        let mut map = BTreeMap::new();
+                        map.insert(
+                            RegionId::new(1, 1),
+                            vec![RegionId::new(1, 2)].into_iter().collect(),
+                        );
+                        map
+                    },
+                },
+            ),
+            (
+                1025,
+                TablePartValue {
+                    src_to_dst: {
+                        let mut map = BTreeMap::new();
+                        map.insert(
+                            RegionId::new(2, 1),
+                            vec![RegionId::new(2, 2), RegionId::new(2, 3)]
+                                .into_iter()
+                                .collect(),
+                        );
+                        map
+                    },
+                },
+            ),
+        ];
+
+        for (table_id, value) in &table_parts {
+            let (txn, _) = manager.build_create_txn(*table_id, value).unwrap();
+            let result = kv.txn(txn).await.unwrap();
+            assert!(result.succeeded);
+        }
+
+        // Batch get
+        let results = manager.batch_get(&[1024, 1025, 1026]).await.unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].as_ref().unwrap(), &table_parts[0].1);
+        assert_eq!(results[1].as_ref().unwrap(), &table_parts[1].1);
+        assert!(results[2].is_none());
+    }
+
+    #[tokio::test]
+    async fn test_table_part_manager_update_mappings() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let manager = TablePartManager::new(kv.clone());
+
+        // Create initial table part
+        let initial_value = TablePartValue {
+            src_to_dst: BTreeMap::new(),
+        };
+        let (txn, _) = manager.build_create_txn(1024, &initial_value).unwrap();
+        let result = kv.txn(txn).await.unwrap();
+        assert!(result.succeeded);
+
+        // Update mappings
+        let src = RegionId::new(1024, 1);
+        let dst = vec![RegionId::new(1024, 2), RegionId::new(1024, 3)];
+        manager.update_mappings(src, &dst).await.unwrap();
+
+        // Verify update
+        let retrieved = manager.get(1024).await.unwrap().unwrap();
+        assert_eq!(retrieved.src_to_dst.len(), 1);
+        assert!(retrieved.src_to_dst.contains_key(&src));
+        assert_eq!(retrieved.src_to_dst.get(&src).unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_table_part_manager_remove_mappings() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let manager = TablePartManager::new(kv.clone());
+
+        // Create initial table part with mappings
+        let mut initial_src_to_dst = BTreeMap::new();
+        let src = RegionId::new(1024, 1);
+        let dst_regions = vec![
+            RegionId::new(1024, 2),
+            RegionId::new(1024, 3),
+            RegionId::new(1024, 4),
+        ];
+        initial_src_to_dst.insert(src, dst_regions.into_iter().collect());
+
+        let initial_value = TablePartValue {
+            src_to_dst: initial_src_to_dst,
+        };
+        let (txn, _) = manager.build_create_txn(1024, &initial_value).unwrap();
+        let result = kv.txn(txn).await.unwrap();
+        assert!(result.succeeded);
+
+        // Remove some mappings
+        let to_remove = vec![RegionId::new(1024, 2), RegionId::new(1024, 3)];
+        manager.remove_mappings(src, &to_remove).await.unwrap();
+
+        // Verify removal
+        let retrieved = manager.get(1024).await.unwrap().unwrap();
+        assert_eq!(retrieved.src_to_dst.len(), 1);
+        assert_eq!(retrieved.src_to_dst.get(&src).unwrap().len(), 1);
+        assert!(
+            retrieved
+                .src_to_dst
+                .get(&src)
+                .unwrap()
+                .contains(&RegionId::new(1024, 4))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_table_part_manager_get_dst_regions() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let manager = TablePartManager::new(kv.clone());
+
+        // Create initial table part with mappings
+        let mut initial_src_to_dst = BTreeMap::new();
+        let src = RegionId::new(1024, 1);
+        let dst_regions = vec![RegionId::new(1024, 2), RegionId::new(1024, 3)];
+        initial_src_to_dst.insert(src, dst_regions.into_iter().collect());
+
+        let initial_value = TablePartValue {
+            src_to_dst: initial_src_to_dst,
+        };
+        let (txn, _) = manager.build_create_txn(1024, &initial_value).unwrap();
+        let result = kv.txn(txn).await.unwrap();
+        assert!(result.succeeded);
+
+        // Get destination regions
+        let dst_regions = manager.get_dst_regions(src).await.unwrap();
+        assert!(dst_regions.is_some());
+        let dst_set = dst_regions.unwrap();
+        assert_eq!(dst_set.len(), 2);
+        assert!(dst_set.contains(&RegionId::new(1024, 2)));
+        assert!(dst_set.contains(&RegionId::new(1024, 3)));
+
+        // Test non-existent source region
+        let nonexistent_src = RegionId::new(1024, 99);
+        let result = manager.get_dst_regions(nonexistent_src).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_table_part_manager_operations_on_nonexistent_table() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let manager = TablePartManager::new(kv);
+
+        let src = RegionId::new(1024, 1);
+        let dst = vec![RegionId::new(1024, 2)];
+
+        // Try to update mappings on non-existent table
+        let result = manager.update_mappings(src, &dst).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to find table partition for table id 1024"),
+            "{err_msg}"
+        );
+
+        // Try to remove mappings on non-existent table
+        let result = manager.remove_mappings(src, &dst).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to find table partition for table id 1024"),
+            "{err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_table_part_manager_batch_get_with_raw_bytes() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let manager = TablePartManager::new(kv.clone());
+
+        // Create table part
+        let value = TablePartValue {
+            src_to_dst: {
+                let mut map = BTreeMap::new();
+                map.insert(
+                    RegionId::new(1, 1),
+                    vec![RegionId::new(1, 2)].into_iter().collect(),
+                );
+                map
+            },
+        };
+        let (txn, _) = manager.build_create_txn(1024, &value).unwrap();
+        let result = kv.txn(txn).await.unwrap();
+        assert!(result.succeeded);
+
+        // Batch get with raw bytes
+        let results = manager
+            .batch_get_with_raw_bytes(&[1024, 1025])
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_some());
+        assert!(results[1].is_none());
+
+        let retrieved = &results[0].as_ref().unwrap().inner;
+        assert_eq!(retrieved, &value);
     }
 }
