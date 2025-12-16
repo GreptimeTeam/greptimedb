@@ -32,7 +32,6 @@ pub trait MemoryMetrics: Clone + Send + Sync + 'static {
 #[derive(Clone)]
 pub struct MemoryManager<M: MemoryMetrics> {
     quota: Option<MemoryQuota<M>>,
-    granularity: PermitGranularity,
 }
 
 #[derive(Clone)]
@@ -54,10 +53,7 @@ impl<M: MemoryMetrics> MemoryManager<M> {
     pub fn with_granularity(limit_bytes: u64, granularity: PermitGranularity, metrics: M) -> Self {
         if limit_bytes == 0 {
             metrics.set_limit(0);
-            return Self {
-                quota: None,
-                granularity,
-            };
+            return Self { quota: None };
         }
 
         let limit_permits = granularity.bytes_to_permits(limit_bytes);
@@ -71,13 +67,7 @@ impl<M: MemoryMetrics> MemoryManager<M> {
                 granularity,
                 metrics,
             }),
-            granularity,
         }
-    }
-
-    /// Returns the configured granularity.
-    pub fn granularity(&self) -> PermitGranularity {
-        self.granularity
     }
 
     /// Returns the configured limit in bytes (0 if unlimited).
