@@ -367,16 +367,16 @@ impl LocalGcWorker {
         Ok(deletable_files)
     }
 
-    async fn delete_files(&self, region_id: RegionId, file_ids: &[RemovedFile]) -> Result<()> {
-        let mut indices = vec![];
-        let file_pairs = file_ids
+    async fn delete_files(&self, region_id: RegionId, removed_files: &[RemovedFile]) -> Result<()> {
+        let mut index_ids = vec![];
+        let file_pairs = removed_files
             .iter()
             .filter_map(|f| match f {
                 RemovedFile::File(file_id, v) => Some((*file_id, v.unwrap_or(0))),
                 RemovedFile::Index(file_id, index_version) => {
                     let region_index_id =
                         RegionIndexId::new(RegionFileId::new(region_id, *file_id), *index_version);
-                    indices.push(region_index_id);
+                    index_ids.push(region_index_id);
                     None
                 }
             })
@@ -390,12 +390,12 @@ impl LocalGcWorker {
         )
         .await?;
 
-        for index_id in indices {
+        for index_id in index_ids {
             delete_index(index_id, &self.access_layer, &self.cache_manager).await?;
         }
 
         // FIXME(discord9): if files are already deleted before calling delete_files, the metric will be inaccurate, no clean way to fix it now
-        GC_DELETE_FILE_CNT.add(file_ids.len() as i64);
+        GC_DELETE_FILE_CNT.add(removed_files.len() as i64);
 
         Ok(())
     }
