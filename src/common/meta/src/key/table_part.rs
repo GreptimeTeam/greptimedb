@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
@@ -30,14 +30,16 @@ use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::Txn;
 use crate::rpc::store::BatchGetRequest;
 
-/// The key stores table repartition relation information.
-/// i.e. the src/dst region after repartition, which means dst region may still hold
-/// some files from src region, this should be updated after repartition is done.
-/// And gc scheduler will use this information to clean up those files(and this mapping if all files from src region are cleaned).
+/// The key stores table repartition metadata.
+/// Specifically, it records the relation between source and destination regions after a repartition operation is completed.
+/// This is distinct from the initial partitioning scheme of the table.
+/// For example, after repartition, a destination region may still hold files from a source region; this mapping should be updated once repartition is done.
+/// The GC scheduler uses this information to clean up those files (and removes this mapping if all files from the source region are cleaned).
 ///
 /// The layout: `__table_part/{table_id}`.
 #[derive(Debug, PartialEq)]
 pub struct TablePartKey {
+    /// The unique identifier of the table whose re-partition information is stored in this key.
     pub table_id: TableId,
 }
 
@@ -86,12 +88,25 @@ impl Display for TablePartKey {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct TablePartValue {
-    /// Mapping from src region to dst regions after repartition.
+    /// A mapping from source region IDs to sets of destination region IDs after repartition.
+    ///
+    /// Each key in the map is a `RegionId` representing a source region that has been repartitioned.
+    /// The corresponding value is a `BTreeSet<RegionId>` containing the IDs of destination regions
+    /// that currently hold files originally from the source region. This mapping is updated after
+    /// repartition and is used by the GC scheduler to track and clean up files that have been moved.
     pub src_to_dst: BTreeMap<RegionId, BTreeSet<RegionId>>,
 }
 
 impl TablePartValue {
+    /// Creates a new TablePartValue with an empty src_to_dst map.
+    pub fn new() -> Self {
+        Self {
+            src_to_dst: BTreeMap::new(),
+        }
+    }
     /// Update mapping from src region to dst regions. Should be called once repartition is done.
+    ///
+    /// If `dst` is empty, this method does nothing.
     pub fn update_mappings(&mut self, src: RegionId, dst: &[RegionId]) {
         self.src_to_dst.entry(src).or_default().extend(dst);
     }
@@ -244,19 +259,17 @@ impl TablePartManager {
         let kvs = resp
             .kvs
             .into_iter()
-            .map(|kv| (keys.binary_search(&kv.key).unwrap(), kv))
-            .collect::<BTreeMap<_, _>>();
-
-        let mut results = Vec::with_capacity(table_ids.len());
-        for (i, _key) in keys.iter().enumerate() {
-            results.push(
-                kvs.get(&i)
-                    .map(|kv| DeserializedValueWithBytes::from_inner_slice(&kv.value))
-                    .transpose()?,
-            );
-        }
-
-        Ok(results)
+            .map(|kv| (kv.key, kv.value))
+            .collect::<HashMap<_, _>>();
+        keys.into_iter()
+            .map(|key| {
+                if let Some(value) = kvs.get(&key) {
+                    Ok(Some(DeserializedValueWithBytes::from_inner_slice(value)?))
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect()
     }
 
     /// Updates mappings from src region to dst regions.
