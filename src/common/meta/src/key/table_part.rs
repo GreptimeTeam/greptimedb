@@ -86,7 +86,7 @@ impl Display for TablePartKey {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
 pub struct TablePartValue {
     /// A mapping from source region IDs to sets of destination region IDs after repartition.
     ///
@@ -100,9 +100,7 @@ pub struct TablePartValue {
 impl TablePartValue {
     /// Creates a new TablePartValue with an empty src_to_dst map.
     pub fn new() -> Self {
-        Self {
-            src_to_dst: BTreeMap::new(),
-        }
+        Default::default()
     }
     /// Update mapping from src region to dst regions. Should be called once repartition is done.
     ///
