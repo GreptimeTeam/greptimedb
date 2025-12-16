@@ -134,7 +134,7 @@ impl From<&S3Connection> for S3 {
                 .secret_access_key(connection.secret_access_key.expose_secret());
         } else {
             warn!("No access key id or secret access key provided, using anonymous access");
-            builder = builder.allow_anonymous();
+            builder = builder.allow_anonymous().disable_ec2_metadata();
         }
 
         if let Some(endpoint) = &connection.endpoint {
