@@ -164,7 +164,7 @@ impl FrontendClient {
         grpc_handler: Weak<dyn GrpcQueryHandlerWithBoxedError>,
         query: QueryOptions,
     ) -> Self {
-        let is_initialized = Arc::new(SetOnce::new());
+        let is_initialized = Arc::new(SetOnce::new_with(Some(())));
         let handler = HandlerMutable {
             handler: Arc::new(Mutex::new(Some(grpc_handler))),
             is_initialized: is_initialized.clone(),
@@ -494,5 +494,61 @@ impl std::fmt::Display for PeerDesc {
             PeerDesc::Dist { peer } => write!(f, "{}", peer.addr),
             PeerDesc::Standalone => write!(f, "standalone"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use common_query::Output;
+    use tokio::time::timeout;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct NoopHandler;
+
+    #[async_trait::async_trait]
+    impl GrpcQueryHandlerWithBoxedError for NoopHandler {
+        async fn do_query(
+            &self,
+            _query: Request,
+            _ctx: QueryContextRef,
+        ) -> std::result::Result<Output, BoxedError> {
+            Ok(Output::new_with_affected_rows(0))
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_initialized() {
+        let (client, handler_mut) =
+            FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+
+        assert!(
+            timeout(Duration::from_millis(50), client.wait_initialized())
+                .await
+                .is_err()
+        );
+
+        let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(NoopHandler);
+        handler_mut.set_handler(Arc::downgrade(&handler)).await;
+
+        timeout(Duration::from_secs(1), client.wait_initialized())
+            .await
+            .expect("wait_initialized should complete after handler is set");
+
+        timeout(Duration::from_millis(10), client.wait_initialized())
+            .await
+            .expect("wait_initialized should be a no-op once initialized");
+
+        let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(NoopHandler);
+        let client =
+            FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+        assert!(
+            timeout(Duration::from_millis(10), client.wait_initialized())
+                .await
+                .is_ok()
+        );
     }
 }
