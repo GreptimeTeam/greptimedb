@@ -43,7 +43,7 @@ use crate::error::{
     DurationOutOfRangeSnafu, JoinSnafu, OpenDalSnafu, Result, TooManyGcJobsSnafu, UnexpectedSnafu,
 };
 use crate::manifest::action::{RegionManifest, RemovedFile};
-use crate::metrics::GC_DELETE_FILE_CNT;
+use crate::metrics::{GC_DELETE_FILE_CNT, GC_ORPHANED_INDEX_FILES, GC_SKIPPED_UNPARSEABLE_FILES};
 use crate::region::{MitoRegionRef, RegionRoleState};
 use crate::sst::file::{RegionFileId, RegionIndexId, delete_files, delete_index};
 use crate::sst::location::{self};
@@ -361,7 +361,6 @@ impl LocalGcWorker {
             "Successfully deleted {} unused files for region {}",
             unused_file_cnt, region_id
         );
-        // TODO(discord9): update region manifest about deleted files
         self.update_manifest_removed_files(&region, deletable_files.clone())
             .await?;
 
@@ -608,6 +607,7 @@ impl LocalGcWorker {
                     error!(err; "Failed to parse file id from path: {}", entry.name());
                     // if we can't parse the file id, it means it's not a sst or index file
                     // shouldn't delete it because we don't know what it is
+                    GC_SKIPPED_UNPARSEABLE_FILES.inc();
                     continue;
                 }
             };
@@ -685,6 +685,7 @@ impl LocalGcWorker {
                         RemovedFile::File(file_id, None)
                     }
                     crate::cache::file_cache::FileType::Puffin(version) => {
+                        GC_ORPHANED_INDEX_FILES.inc();
                         RemovedFile::Index(file_id, version)
                     }
                 };
@@ -699,7 +700,7 @@ impl LocalGcWorker {
     ///
     /// When `full_file_listing` is false, this method will only delete (subset of) files tracked in
     /// `recently_removed_files`, which significantly
-    /// improves performance. When `full_file_listing` is true, it readd from `all_entries` to find
+    /// improves performance. When `full_file_listing` is true, it read from `all_entries` to find
     /// and delete orphan files (files not tracked in the manifest).
     ///
     pub async fn list_to_be_deleted_files(
@@ -742,7 +743,7 @@ impl LocalGcWorker {
 
         let all_may_linger_files = may_linger_files.values().flatten().collect::<HashSet<_>>();
 
-        // known files(trakced in removed files field) that are eligible for removal
+        // known files(tracked in removed files field) that are eligible for removal
         // (passed lingering time)
         let eligible_for_removal = recently_removed_files
             .values()
