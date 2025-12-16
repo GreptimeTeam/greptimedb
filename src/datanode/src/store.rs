@@ -86,6 +86,7 @@ fn clean_old_read_cache(store: &ObjectStoreConfig, data_home: &str) {
 
 pub async fn new_object_store(store: ObjectStoreConfig, data_home: &str) -> Result<ObjectStore> {
     // Cleans up old LRU read cache directories.
+    // TODO: Remove this line after the 1.0 release.
     clean_old_read_cache(&store, data_home);
 
     let object_store = new_raw_object_store(&store, data_home)

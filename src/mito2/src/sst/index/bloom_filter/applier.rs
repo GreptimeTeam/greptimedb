@@ -33,7 +33,7 @@ use snafu::ResultExt;
 use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 
-use crate::access_layer::{FilePathProvider, RegionFilePathFactory, WriteCachePathProvider};
+use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::bloom_filter_index::{
     BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader, Tag,
@@ -45,7 +45,7 @@ use crate::error::{
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::RegionIndexId;
-use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
+use crate::sst::index::{trigger_index_background_download, TYPE_BLOOM_FILTER_INDEX};
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 pub use crate::sst::index::bloom_filter::applier::builder::BloomFilterIndexApplierBuilder;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
@@ -381,20 +381,13 @@ impl BloomFilterIndexApplier {
         let path_factory = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
 
         // Trigger background download if file cache and file size are available
-        if let (Some(file_cache), Some(file_size)) = (&self.file_cache, file_size_hint) {
-            let index_key = IndexKey::new(
-                file_id.region_id(),
-                file_id.file_id(),
-                FileType::Puffin(file_id.version),
-            );
-            let remote_path = path_factory.build_index_file_path(file_id.file_id);
-            file_cache.maybe_download_background(
-                index_key,
-                remote_path,
-                self.object_store.clone(),
-                file_size,
-            );
-        }
+        trigger_index_background_download(
+            self.file_cache.as_ref(),
+            &file_id,
+            file_size_hint,
+            &path_factory,
+            &self.object_store,
+        );
 
         let puffin_manager = self
             .puffin_manager_factory

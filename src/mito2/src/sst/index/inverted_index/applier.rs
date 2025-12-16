@@ -32,7 +32,7 @@ use snafu::ResultExt;
 use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 
-use crate::access_layer::{FilePathProvider, RegionFilePathFactory, WriteCachePathProvider};
+use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::inverted_index::{CachedInvertedIndexBlobReader, InvertedIndexCacheRef};
 use crate::cache::index::result_cache::PredicateKey;
@@ -41,7 +41,7 @@ use crate::error::{
 };
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::RegionIndexId;
-use crate::sst::index::TYPE_INVERTED_INDEX;
+use crate::sst::index::{trigger_index_background_download, TYPE_INVERTED_INDEX};
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 
@@ -314,20 +314,13 @@ impl InvertedIndexApplier {
         let path_factory = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
 
         // Trigger background download if file cache and file size are available
-        if let (Some(file_cache), Some(file_size)) = (&self.file_cache, file_size_hint) {
-            let index_key = IndexKey::new(
-                file_id.region_id(),
-                file_id.file_id(),
-                FileType::Puffin(file_id.version),
-            );
-            let remote_path = path_factory.build_index_file_path(file_id.file_id);
-            file_cache.maybe_download_background(
-                index_key,
-                remote_path,
-                self.store.clone(),
-                file_size,
-            );
-        }
+        trigger_index_background_download(
+            self.file_cache.as_ref(),
+            &file_id,
+            file_size_hint,
+            &path_factory,
+            &self.store,
+        );
 
         let puffin_manager = self
             .puffin_manager_factory

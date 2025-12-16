@@ -126,8 +126,8 @@ pub struct MitoConfig {
     /// The remaining capacity is used for data (parquet) files.
     /// Must be between 0 and 100 (exclusive).
     pub index_cache_percent: u8,
-    /// Enable refilling cache on read operations (default: true).
-    /// When disabled, cache refilling on read won't happen.
+    /// Enable background downloading of files to the local cache when accessed during queries (default: true).
+    /// When enabled, files will be asynchronously downloaded to improve performance for subsequent reads.
     pub enable_refill_cache_on_read: bool,
     /// Capacity for manifest cache (default: 256MB).
     pub manifest_cache_size: ReadableSize,
