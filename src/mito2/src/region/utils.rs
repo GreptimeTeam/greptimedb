@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
@@ -91,9 +92,22 @@ pub struct RegionFileCopier {
 #[derive(Debug, Clone, Copy)]
 pub enum FileDescriptor {
     /// An index file.
-    Index((FileId, IndexVersion)),
+    Index {
+        file_id: FileId,
+        version: IndexVersion,
+        size: u64,
+    },
     /// A data file.
-    Data(FileId),
+    Data { file_id: FileId, size: u64 },
+}
+
+impl FileDescriptor {
+    pub fn size(&self) -> u64 {
+        match self {
+            FileDescriptor::Index { size, .. } => *size,
+            FileDescriptor::Data { size, .. } => *size,
+        }
+    }
 }
 
 /// Builds the source and target file paths for a given file descriptor.
@@ -115,7 +129,9 @@ fn build_copy_file_paths(
     path_type: PathType,
 ) -> (String, String) {
     match file_descriptor {
-        FileDescriptor::Index((file_id, version)) => (
+        FileDescriptor::Index {
+            file_id, version, ..
+        } => (
             location::index_file_path(
                 table_dir,
                 RegionIndexId::new(RegionFileId::new(source_region_id, file_id), version),
@@ -127,7 +143,7 @@ fn build_copy_file_paths(
                 path_type,
             ),
         ),
-        FileDescriptor::Data(file_id) => (
+        FileDescriptor::Data { file_id, .. } => (
             location::sst_file_path(
                 table_dir,
                 RegionFileId::new(source_region_id, file_id),
@@ -149,12 +165,14 @@ fn build_delete_file_path(
     path_type: PathType,
 ) -> String {
     match file_descriptor {
-        FileDescriptor::Index((file_id, version)) => location::index_file_path(
+        FileDescriptor::Index {
+            file_id, version, ..
+        } => location::index_file_path(
             table_dir,
             RegionIndexId::new(RegionFileId::new(target_region_id, file_id), version),
             path_type,
         ),
-        FileDescriptor::Data(file_id) => location::sst_file_path(
+        FileDescriptor::Data { file_id, .. } => location::sst_file_path(
             table_dir,
             RegionFileId::new(target_region_id, file_id),
             path_type,
@@ -223,10 +241,12 @@ impl RegionFileCopier {
                             |e| error!(e; "Failed to copy file {} to {}", source_path, target_path),
                         )
                         .context(error::OpenDalSnafu)?;
+                    let file_size = ReadableSize(file_desc.size());
                     info!(
-                        "Copied file {} to {}, elapsed: {:?}",
+                        "Copied file {} to {}, file size: {}, elapsed: {:?}",
                         source_path,
                         target_path,
+                        file_size,
                         now.elapsed(),
                     );
                 }
@@ -275,7 +295,7 @@ mod tests {
         let file_id = FileId::random();
         let source_region_id = RegionId::new(1, 1);
         let target_region_id = RegionId::new(1, 2);
-        let file_descriptor = FileDescriptor::Data(file_id);
+        let file_descriptor = FileDescriptor::Data { file_id, size: 100 };
         let table_dir = "/table_dir";
         let path_type = PathType::Bare;
         let (source_path, target_path) = build_copy_file_paths(
@@ -295,7 +315,11 @@ mod tests {
         );
 
         let version = 1;
-        let file_descriptor = FileDescriptor::Index((file_id, version));
+        let file_descriptor = FileDescriptor::Index {
+            file_id,
+            version,
+            size: 100,
+        };
         let (source_path, target_path) = build_copy_file_paths(
             source_region_id,
             target_region_id,

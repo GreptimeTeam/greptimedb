@@ -185,12 +185,25 @@ impl<S> RegionWorkerLoop<S> {
                     let region_index_id = file_meta.index_id();
                     let file_id = region_index_id.file_id.file_id();
                     let version = region_index_id.version;
+                    let file_size = file_meta.file_size;
+                    let index_file_size = file_meta.index_file_size();
                     vec![
-                        FileDescriptor::Data(file_meta.file_id),
-                        FileDescriptor::Index((file_id, version)),
+                        FileDescriptor::Data {
+                            file_id: file_meta.file_id,
+                            size: file_size,
+                        },
+                        FileDescriptor::Index {
+                            file_id,
+                            version,
+                            size: index_file_size,
+                        },
                     ]
                 } else {
-                    vec![FileDescriptor::Data(file_meta.file_id)]
+                    let file_size = file_meta.file_size;
+                    vec![FileDescriptor::Data {
+                        file_id: file_meta.file_id,
+                        size: file_size,
+                    }]
                 }
             })
             .collect();
