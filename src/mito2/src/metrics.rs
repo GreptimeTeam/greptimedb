@@ -510,10 +510,10 @@ lazy_static! {
         ).unwrap();
 
     /// Counter for the number of unparseable files skipped by GC.
-    pub static ref GC_SKIPPED_UNPARSEABLE_FILES: IntCounter =
+    pub static ref GC_SKIPPED_UNPARSABLE_FILES: IntCounter =
         register_int_counter!(
-            "greptime_mito_gc_skipped_unparseable_files",
-            "mito gc skipped unparseable files count",
+            "greptime_mito_gc_skipped_unparsable_files",
+            "mito gc skipped unparsable files count",
         ).unwrap();
 
     /// Counter for the number of orphaned index files found by GC.

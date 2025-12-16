@@ -43,7 +43,7 @@ use crate::error::{
     DurationOutOfRangeSnafu, JoinSnafu, OpenDalSnafu, Result, TooManyGcJobsSnafu, UnexpectedSnafu,
 };
 use crate::manifest::action::{RegionManifest, RemovedFile};
-use crate::metrics::{GC_DELETE_FILE_CNT, GC_ORPHANED_INDEX_FILES, GC_SKIPPED_UNPARSEABLE_FILES};
+use crate::metrics::{GC_DELETE_FILE_CNT, GC_ORPHANED_INDEX_FILES, GC_SKIPPED_UNPARSABLE_FILES};
 use crate::region::{MitoRegionRef, RegionRoleState};
 use crate::sst::file::{RegionFileId, RegionIndexId, delete_files, delete_index};
 use crate::sst::location::{self};
@@ -607,7 +607,7 @@ impl LocalGcWorker {
                     error!(err; "Failed to parse file id from path: {}", entry.name());
                     // if we can't parse the file id, it means it's not a sst or index file
                     // shouldn't delete it because we don't know what it is
-                    GC_SKIPPED_UNPARSEABLE_FILES.inc();
+                    GC_SKIPPED_UNPARSABLE_FILES.inc();
                     continue;
                 }
             };
