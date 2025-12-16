@@ -85,6 +85,7 @@ pub struct HandlerMutable {
 impl HandlerMutable {
     pub async fn set_handler(&self, handler: Weak<dyn GrpcQueryHandlerWithBoxedError>) {
         *self.handler.lock().unwrap() = Some(handler);
+        // Ignore the error, as we allow the handler to be set multiple times.
         let _ = self.is_initialized.set(());
     }
 }
