@@ -107,7 +107,6 @@ pub enum FrontendClient {
         /// notice the client here should all be lazy, so that can wait after frontend is booted then make conn
         database_client: HandlerMutable,
         query: QueryOptions,
-        is_initialized: Arc<SetOnce<()>>,
     },
 }
 
@@ -117,22 +116,24 @@ impl FrontendClient {
         let is_initialized = Arc::new(SetOnce::new());
         let handler = HandlerMutable {
             handler: Arc::new(Mutex::new(None)),
-            is_initialized: is_initialized.clone(),
+            is_initialized,
         };
         (
             Self::Standalone {
                 database_client: handler.clone(),
                 query,
-                is_initialized,
             },
             handler,
         )
     }
 
-    /// Wait until the frontend client is initialized.
+    /// Waits until the frontend client is initialized.
     pub async fn wait_initialized(&self) {
-        if let FrontendClient::Standalone { is_initialized, .. } = self {
-            is_initialized.wait().await;
+        if let FrontendClient::Standalone {
+            database_client, ..
+        } = self
+        {
+            database_client.is_initialized.wait().await;
         }
     }
 
@@ -173,7 +174,6 @@ impl FrontendClient {
         Self::Standalone {
             database_client: handler,
             query,
-            is_initialized,
         }
     }
 }
@@ -419,7 +419,6 @@ impl FrontendClient {
             FrontendClient::Standalone {
                 database_client,
                 query,
-                is_initialized: _,
             } => {
                 let ctx = QueryContextBuilder::default()
                     .current_catalog(catalog.to_string())
@@ -545,6 +544,20 @@ mod tests {
         let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(NoopHandler);
         let client =
             FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+        assert!(
+            timeout(Duration::from_millis(10), client.wait_initialized())
+                .await
+                .is_ok()
+        );
+
+        let meta_client = Arc::new(MetaClient::default());
+        let client = FrontendClient::from_meta_client(
+            meta_client,
+            None,
+            QueryOptions::default(),
+            BatchingModeOptions::default(),
+        )
+        .unwrap();
         assert!(
             timeout(Duration::from_millis(10), client.wait_initialized())
                 .await
