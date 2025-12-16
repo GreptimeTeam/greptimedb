@@ -106,6 +106,7 @@ mod schema_metadata_manager;
 pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
+pub mod table_part;
 pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
@@ -178,6 +179,7 @@ pub const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
 pub const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
 pub const SCHEMA_NAME_KEY_PREFIX: &str = "__schema_name";
 pub const TABLE_ROUTE_PREFIX: &str = "__table_route";
+pub const TABLE_PART_PREFIX: &str = "__table_part";
 pub const NODE_ADDRESS_PREFIX: &str = "__node_address";
 pub const KAFKA_TOPIC_KEY_PREFIX: &str = "__topic_name/kafka";
 // The legacy topic key prefix is used to store the topic name in previous versions.
