@@ -255,6 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delay_layer_basic() {
+        common_telemetry::init_default_ut_logging();
         let (store, _temp_dir) = create_fs_test_store_with_delays(
             Duration::from_millis(100),
             Duration::from_millis(50),
@@ -265,7 +266,11 @@ mod tests {
         let start = std::time::Instant::now();
         store.write("test.txt", "hello world").await.unwrap();
         let write_duration = start.elapsed();
-        assert!(write_duration < Duration::from_millis(50)); // Should be fast
+        assert!(
+            write_duration < Duration::from_millis(50),
+            "Write duration {:?}",
+            write_duration
+        ); // Should be fast
 
         // Test list operation (should be delayed)
         let start = std::time::Instant::now();

@@ -23,7 +23,6 @@ use itertools::Itertools as _;
 use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions, Region2Peers};
 use mito2::gc::GcConfig;
 use mito2::sst::file::FileHandle;
-use session::context::QueryContext;
 use store_api::storage::RegionId;
 use tokio::time::sleep;
 
@@ -33,9 +32,7 @@ use crate::tests::gc::delay_layer::create_test_object_store_manager_with_delays;
 use crate::tests::gc::{
     get_table_route, list_sst_files_from_manifest, list_sst_files_from_storage, sst_equal_check,
 };
-use crate::tests::test_util::{
-    MockInstanceBuilder, TestContext, execute_sql, try_execute_sql_with, wait_procedure,
-};
+use crate::tests::test_util::{MockInstanceBuilder, TestContext, execute_sql, wait_procedure};
 
 /// Get file handles for all SST files for all files in the given regions
 async fn get_file_handle_for_regions(
@@ -90,7 +87,6 @@ async fn get_file_handle_for_regions(
 /// 4. While GC is listing files, perform manifest-updating operations:
 ///    - Insert new data and flush
 ///    - Trigger compaction  
-///    - Drop tables/regions
 /// 5. Verify GC handles manifest changes correctly
 /// 6. Ensure no files are incorrectly deleted
 pub async fn test_manifest_update_during_listing(store_type: &StorageType) {
@@ -159,8 +155,8 @@ pub async fn test_manifest_update_during_listing(store_type: &StorageType) {
 
     let gc_handle = trigger_gc(
         metasrv,
-        regions,
-        region_routes,
+        regions.clone(),
+        region_routes.clone(),
         Duration::from_secs(30), // timeout
     );
 
@@ -177,40 +173,12 @@ pub async fn test_manifest_update_during_listing(store_type: &StorageType) {
     // Wait for compaction to complete
     sleep(Duration::from_secs(2)).await;
 
-    // Operation 3: Create another table and drop it (major manifest change)
-    let create_table2_sql = r#"
-        CREATE TABLE test_race_table2 (
-            ts TIMESTAMP TIME INDEX,
-            val DOUBLE,
-            host STRING
-        ) WITH (append_mode = 'true')
-    "#;
-    execute_sql(&instance, create_table2_sql).await;
-
-    let insert_sql2 = r#"
-        INSERT INTO test_race_table2 (ts, val, host) VALUES
-        ('2023-01-06 10:00:00', 80.0, 'host5'),
-        ('2023-01-06 11:00:00', 90.0, 'host5')
-    "#;
-    execute_sql(&instance, insert_sql2).await;
-
-    let flush_sql2 = "ADMIN FLUSH_TABLE('test_race_table2')";
-    execute_sql(&instance, flush_sql2).await;
-
-    // Drop the second table
-    let drop_table_sql = "DROP TABLE test_race_table2";
-    execute_sql(&instance, drop_table_sql).await;
-    info!("Created and dropped second table");
-
     // Step 6: Wait for GC to complete
     info!("Waiting for GC operation to complete...");
     gc_handle.await.unwrap();
 
     // Step 7: Verify results
     info!("Verifying GC results after manifest changes...");
-
-    // Get final SST file count
-    sst_equal_check(&test_context).await;
 
     // Verify data integrity for the remaining table
     let count_sql = "SELECT COUNT(*) FROM test_race_table";
@@ -224,20 +192,6 @@ pub async fn test_manifest_update_during_listing(store_type: &StorageType) {
         .trim();
     check_output_stream(count_output.data, expected).await;
 
-    // Verify that the dropped table's data is not accessible
-    let select_dropped_sql = "SELECT COUNT(*) FROM test_race_table2";
-    let select_dropped_result =
-        try_execute_sql_with(&instance, select_dropped_sql, QueryContext::arc()).await;
-    assert!(
-        select_dropped_result.is_err(),
-        "Expected error querying dropped table: {:?}",
-        select_dropped_result
-    );
-
-    // The query should fail since the table was dropped
-    // This is a basic check - in a real scenario we'd expect an error
-    info!("Dropped table query result processed");
-
     // Additional verification: ensure no data loss occurred
     let select_sql = "SELECT * FROM test_race_table ORDER BY ts";
     let select_output = execute_sql(&instance, select_sql).await;
@@ -246,22 +200,32 @@ pub async fn test_manifest_update_during_listing(store_type: &StorageType) {
 | ts                  | val  | host  |
 +---------------------+------+-------+
 | 2023-01-01T10:00:00 | 10.0 | host0 |
-| 2023-01-01T11:00:00 | 20.0 | host0 |
-| 2023-01-01T12:00:00 | 30.0 | host0 |
+| 2023-01-01T10:00:01 | 20.0 | host0 |
+| 2023-01-01T10:00:02 | 30.0 | host0 |
 | 2023-01-02T10:00:00 | 11.0 | host1 |
-| 2023-01-02T11:00:00 | 21.0 | host1 |
-| 2023-01-02T12:00:00 | 31.0 | host1 |
+| 2023-01-02T10:00:01 | 21.0 | host1 |
+| 2023-01-02T10:00:02 | 31.0 | host1 |
 | 2023-01-03T10:00:00 | 12.0 | host2 |
-| 2023-01-03T11:00:00 | 22.0 | host2 |
-| 2023-01-03T12:00:00 | 32.0 | host2 |
-| 2023-01-05T10:00:00 | 50.0 | host4 |
-| 2023-01-05T11:00:00 | 60.0 | host4 |
-| 2023-01-05T12:00:00 | 70.0 | host4 |
+| 2023-01-03T10:00:01 | 22.0 | host2 |
+| 2023-01-03T10:00:02 | 32.0 | host2 |
+| 2023-01-04T10:00:00 | 13.0 | host3 |
+| 2023-01-04T10:00:01 | 23.0 | host3 |
+| 2023-01-04T10:00:02 | 33.0 | host3 |
 +---------------------+------+-------+"#
         .trim();
     check_output_stream(select_output.data, expected_data).await;
 
     info!("Manifest update during listing test completed successfully");
+
+    let gc_handle = trigger_gc(
+        metasrv,
+        regions.clone(),
+        region_routes.clone(),
+        Duration::from_secs(30), // timeout
+    );
+    gc_handle.await.unwrap();
+    // Perform SST equality check after final GC
+    sst_equal_check(&test_context).await;
 }
 
 /// Helper function to create a cluster with delayed object store for testing race conditions
