@@ -81,3 +81,88 @@ impl fmt::Display for PermitGranularity {
         write!(f, "{}", self.as_str())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bytes_to_permits_kilobyte() {
+        let granularity = PermitGranularity::Kilobyte;
+
+        // Exact multiples
+        assert_eq!(granularity.bytes_to_permits(1024), 1);
+        assert_eq!(granularity.bytes_to_permits(2048), 2);
+        assert_eq!(granularity.bytes_to_permits(10 * 1024), 10);
+
+        // Rounds up
+        assert_eq!(granularity.bytes_to_permits(1), 1);
+        assert_eq!(granularity.bytes_to_permits(1025), 2);
+        assert_eq!(granularity.bytes_to_permits(2047), 2);
+    }
+
+    #[test]
+    fn test_bytes_to_permits_megabyte() {
+        let granularity = PermitGranularity::Megabyte;
+
+        // Exact multiples
+        assert_eq!(granularity.bytes_to_permits(1024 * 1024), 1);
+        assert_eq!(granularity.bytes_to_permits(2 * 1024 * 1024), 2);
+
+        // Rounds up
+        assert_eq!(granularity.bytes_to_permits(1), 1);
+        assert_eq!(granularity.bytes_to_permits(1024), 1);
+        assert_eq!(granularity.bytes_to_permits(1024 * 1024 + 1), 2);
+    }
+
+    #[test]
+    fn test_bytes_to_permits_zero_bytes() {
+        assert_eq!(PermitGranularity::Kilobyte.bytes_to_permits(0), 0);
+        assert_eq!(PermitGranularity::Megabyte.bytes_to_permits(0), 0);
+    }
+
+    #[test]
+    fn test_bytes_to_permits_clamps_to_maximum() {
+        use tokio::sync::Semaphore;
+
+        let max_permits = (Semaphore::MAX_PERMITS as u64).min(u32::MAX as u64) as u32;
+
+        assert_eq!(
+            PermitGranularity::Kilobyte.bytes_to_permits(u64::MAX),
+            max_permits
+        );
+        assert_eq!(
+            PermitGranularity::Megabyte.bytes_to_permits(u64::MAX),
+            max_permits
+        );
+    }
+
+    #[test]
+    fn test_permits_to_bytes() {
+        assert_eq!(PermitGranularity::Kilobyte.permits_to_bytes(1), 1024);
+        assert_eq!(PermitGranularity::Kilobyte.permits_to_bytes(10), 10 * 1024);
+
+        assert_eq!(PermitGranularity::Megabyte.permits_to_bytes(1), 1024 * 1024);
+        assert_eq!(
+            PermitGranularity::Megabyte.permits_to_bytes(10),
+            10 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn test_round_trip_conversion() {
+        // Kilobyte: bytes -> permits -> bytes (should round up)
+        let kb = PermitGranularity::Kilobyte;
+        let permits = kb.bytes_to_permits(1500);
+        let bytes = kb.permits_to_bytes(permits);
+        assert!(bytes >= 1500); // Must cover original request
+        assert_eq!(bytes, 2048); // 2KB
+
+        // Megabyte: bytes -> permits -> bytes (should round up)
+        let mb = PermitGranularity::Megabyte;
+        let permits = mb.bytes_to_permits(1500);
+        let bytes = mb.permits_to_bytes(permits);
+        assert!(bytes >= 1500);
+        assert_eq!(bytes, 1024 * 1024); // 1MB
+    }
+}
