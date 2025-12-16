@@ -2340,6 +2340,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-memory-manager"
+version = "1.0.0-beta.2"
+dependencies = [
+ "common-error",
+ "common-macro",
+ "common-telemetry",
+ "humantime",
+ "serde",
+ "snafu 0.8.6",
+ "tokio",
+]
+
+[[package]]
 name = "common-meta"
 version = "1.0.0-beta.2"
 dependencies = [
@@ -7742,6 +7755,7 @@ dependencies = [
  "common-function",
  "common-grpc",
  "common-macro",
+ "common-memory-manager",
  "common-meta",
  "common-query",
  "common-recordbatch",
