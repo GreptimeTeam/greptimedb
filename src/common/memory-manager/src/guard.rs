@@ -17,7 +17,7 @@ use std::{fmt, mem};
 use common_telemetry::debug;
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 
-use crate::manager::{MemoryMetrics, MemoryQuota, bytes_to_permits, permits_to_bytes};
+use crate::manager::{MemoryMetrics, MemoryQuota};
 
 /// Guard representing a slice of reserved memory.
 pub struct MemoryGuard<M: MemoryMetrics> {
@@ -49,7 +49,9 @@ impl<M: MemoryMetrics> MemoryGuard<M> {
     pub fn granted_bytes(&self) -> u64 {
         match &self.state {
             GuardState::Unlimited => 0,
-            GuardState::Limited { permit, .. } => permits_to_bytes(permit.num_permits() as u32),
+            GuardState::Limited { permit, quota } => {
+                quota.permits_to_bytes(permit.num_permits() as u32)
+            }
         }
     }
 
@@ -65,7 +67,7 @@ impl<M: MemoryMetrics> MemoryGuard<M> {
                     return true;
                 }
 
-                let additional_permits = bytes_to_permits(bytes);
+                let additional_permits = quota.bytes_to_permits(bytes);
 
                 match quota
                     .semaphore
@@ -99,11 +101,12 @@ impl<M: MemoryMetrics> MemoryGuard<M> {
                     return true;
                 }
 
-                let release_permits = bytes_to_permits(bytes);
+                let release_permits = quota.bytes_to_permits(bytes);
 
                 match permit.split(release_permits as usize) {
                     Some(released_permit) => {
-                        let released_bytes = permits_to_bytes(released_permit.num_permits() as u32);
+                        let released_bytes =
+                            quota.permits_to_bytes(released_permit.num_permits() as u32);
                         drop(released_permit);
                         quota.update_in_use_metric();
                         debug!("Early released {} bytes from memory guard", released_bytes);
@@ -121,7 +124,7 @@ impl<M: MemoryMetrics> Drop for MemoryGuard<M> {
         if let GuardState::Limited { permit, quota } =
             mem::replace(&mut self.state, GuardState::Unlimited)
         {
-            let bytes = permits_to_bytes(permit.num_permits() as u32);
+            let bytes = quota.permits_to_bytes(permit.num_permits() as u32);
             drop(permit);
             quota.update_in_use_metric();
             debug!("Released memory: {} bytes", bytes);

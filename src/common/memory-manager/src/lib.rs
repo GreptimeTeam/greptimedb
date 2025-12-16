@@ -19,6 +19,7 @@
 //! share the same allocation logic while using their own metrics.
 
 mod error;
+mod granularity;
 mod guard;
 mod manager;
 mod policy;
@@ -27,8 +28,9 @@ mod policy;
 mod tests;
 
 pub use error::{Error, Result};
+pub use granularity::PermitGranularity;
 pub use guard::MemoryGuard;
-pub use manager::{MemoryManager, MemoryMetrics, PERMIT_GRANULARITY_BYTES};
+pub use manager::{MemoryManager, MemoryMetrics};
 pub use policy::{DEFAULT_MEMORY_WAIT_TIMEOUT, OnExhaustedPolicy};
 
 /// No-op metrics implementation for testing.
