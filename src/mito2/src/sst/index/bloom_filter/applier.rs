@@ -45,10 +45,10 @@ use crate::error::{
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::RegionIndexId;
-use crate::sst::index::{trigger_index_background_download, TYPE_BLOOM_FILTER_INDEX};
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 pub use crate::sst::index::bloom_filter::applier::builder::BloomFilterIndexApplierBuilder;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
+use crate::sst::index::{TYPE_BLOOM_FILTER_INDEX, trigger_index_background_download};
 
 /// Metrics for tracking bloom filter index apply operations.
 #[derive(Default, Clone)]

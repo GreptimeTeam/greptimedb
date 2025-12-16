@@ -45,12 +45,12 @@ use crate::error::{
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::RegionIndexId;
-use crate::sst::index::{trigger_index_background_download, TYPE_FULLTEXT_INDEX};
 use crate::sst::index::fulltext_index::applier::builder::{FulltextRequest, FulltextTerm};
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::puffin_manager::{
     PuffinManagerFactory, SstPuffinBlob, SstPuffinDir, SstPuffinReader,
 };
+use crate::sst::index::{TYPE_FULLTEXT_INDEX, trigger_index_background_download};
 
 pub mod builder;
 

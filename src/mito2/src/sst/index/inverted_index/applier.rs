@@ -41,9 +41,9 @@ use crate::error::{
 };
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::RegionIndexId;
-use crate::sst::index::{trigger_index_background_download, TYPE_INVERTED_INDEX};
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
+use crate::sst::index::{TYPE_INVERTED_INDEX, trigger_index_background_download};
 
 /// Metrics for tracking inverted index apply operations.
 #[derive(Default, Clone)]
