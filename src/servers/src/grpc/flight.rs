@@ -309,6 +309,8 @@ pub struct PutRecordBatchRequestStream {
     catalog: String,
     schema_name: String,
     limiter: Option<RequestMemoryLimiter>,
+    // Client now lazily sends schema data so we cannot eagerly wait for it.
+    // Instead, we need to decode while receiving record batches.
     state: StreamState,
 }
 
