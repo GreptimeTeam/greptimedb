@@ -41,7 +41,7 @@ tantivy = { version = "0.24", features = ["zstd-compression"] }
 tantivy-jieba = "0.16"
 tokio.workspace = true
 tokio-util.workspace = true
-usearch = "2.21"
+usearch = { version = "2.21", default-features = false, features = ["fp16lib"] }
 uuid.workspace = true
 
 [dev-dependencies]
