@@ -509,7 +509,7 @@ lazy_static! {
             "mito gc deleted file count",
         ).unwrap();
 
-    /// Counter for the number of unparseable files skipped by GC.
+    /// Counter for the number of unparsable files skipped by GC.
     pub static ref GC_SKIPPED_UNPARSABLE_FILES: IntCounter =
         register_int_counter!(
             "greptime_mito_gc_skipped_unparsable_files",
