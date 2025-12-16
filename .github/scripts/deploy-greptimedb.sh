@@ -81,7 +81,7 @@ function deploy_greptimedb_cluster() {
     --create-namespace \
     --set image.tag="$GREPTIMEDB_IMAGE_TAG" \
     --set initializer.tag="$GREPTIMEDB_INITIALIZER_IMAGE_TAG" \
-    --set meta.backendStorage.etcd.endpoints="etcd.$install_namespace:2379" \
+    --set "meta.backendStorage.etcd.endpoints[0]=etcd.$install_namespace.svc.cluster.local:2379" \
     --set meta.backendStorage.etcd.storeKeyPrefix="$cluster_name" \
     -n "$install_namespace"
 
@@ -119,7 +119,7 @@ function deploy_greptimedb_cluster_with_s3_storage() {
     --create-namespace \
     --set image.tag="$GREPTIMEDB_IMAGE_TAG" \
     --set initializer.tag="$GREPTIMEDB_INITIALIZER_IMAGE_TAG" \
-    --set meta.backendStorage.etcd.endpoints="etcd.$install_namespace:2379" \
+    --set "meta.backendStorage.etcd.endpoints[0]=etcd.$install_namespace.svc.cluster.local:2379" \
     --set meta.backendStorage.etcd.storeKeyPrefix="$cluster_name" \
     --set objectStorage.s3.bucket="$AWS_CI_TEST_BUCKET" \
     --set objectStorage.s3.region="$AWS_REGION" \
