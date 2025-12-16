@@ -114,16 +114,16 @@ pub enum FrontendClient {
 impl FrontendClient {
     /// Create a new empty frontend client, with a `HandlerMutable` to set the grpc handler later
     pub fn from_empty_grpc_handler(query: QueryOptions) -> (Self, HandlerMutable) {
-        let initialized_flag = Arc::new(SetOnce::new());
+        let is_initialized = Arc::new(SetOnce::new());
         let handler = HandlerMutable {
             handler: Arc::new(Mutex::new(None)),
-            is_initialized: initialized_flag.clone(),
+            is_initialized: is_initialized.clone(),
         };
         (
             Self::Standalone {
                 database_client: handler.clone(),
                 query,
-                is_initialized: initialized_flag,
+                is_initialized,
             },
             handler,
         )
