@@ -157,6 +157,8 @@ impl ManifestObjectStore {
         total_manifest_size: Arc<AtomicU64>,
         manifest_cache: Option<ManifestCache>,
     ) -> Self {
+        common_telemetry::info!("Create manifest store, cache: {}", manifest_cache.is_some());
+
         let path = util::normalize_dir(path);
         let staging_path = {
             // Convert "region_dir/manifest/" to "region_dir/staging/manifest/"

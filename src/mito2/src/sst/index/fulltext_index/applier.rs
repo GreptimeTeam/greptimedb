@@ -45,12 +45,12 @@ use crate::error::{
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::RegionIndexId;
-use crate::sst::index::TYPE_FULLTEXT_INDEX;
 use crate::sst::index::fulltext_index::applier::builder::{FulltextRequest, FulltextTerm};
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::puffin_manager::{
     PuffinManagerFactory, SstPuffinBlob, SstPuffinDir, SstPuffinReader,
 };
+use crate::sst::index::{TYPE_FULLTEXT_INDEX, trigger_index_background_download};
 
 pub mod builder;
 
@@ -748,12 +748,20 @@ impl IndexSource {
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
     ) -> Result<SstPuffinReader> {
+        let path_factory = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
+
+        // Trigger background download if file cache and file size are available
+        trigger_index_background_download(
+            self.file_cache.as_ref(),
+            &file_id,
+            file_size_hint,
+            &path_factory,
+            &self.remote_store,
+        );
+
         let puffin_manager = self
             .puffin_manager_factory
-            .build(
-                self.remote_store.clone(),
-                RegionFilePathFactory::new(self.table_dir.clone(), self.path_type),
-            )
+            .build(self.remote_store.clone(), path_factory)
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
         let reader = puffin_manager

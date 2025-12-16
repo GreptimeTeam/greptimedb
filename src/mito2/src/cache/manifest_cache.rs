@@ -370,7 +370,22 @@ impl ManifestCache {
     /// If `check_mtime` is true, only removes directories that have not been modified
     /// for at least 1 hour.
     fn clean_empty_dirs_sync(dir: &PathBuf, check_mtime: bool) -> std::io::Result<()> {
-        Self::remove_empty_dirs_recursive_sync(dir, check_mtime)?;
+        let is_empty = Self::remove_empty_dirs_recursive_sync(dir, check_mtime)?;
+        if is_empty {
+            if let Err(e) = std::fs::remove_dir(dir) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!(e; "Failed to remove empty root dir {}", dir.display());
+                    return Err(e);
+                } else {
+                    warn!("Empty root dir not found before removal {}", dir.display());
+                }
+            } else {
+                info!(
+                    "Removed empty root dir {} from manifest cache",
+                    dir.display()
+                );
+            }
+        }
         Ok(())
     }
 
@@ -412,11 +427,16 @@ impl ManifestCache {
 
                 let subdir_empty = Self::remove_empty_dirs_recursive_sync(&path, check_mtime)?;
                 if subdir_empty {
-                    if let Err(e) = std::fs::remove_dir(&path)
-                        && e.kind() != std::io::ErrorKind::NotFound
-                    {
-                        warn!(e; "Failed to remove empty directory {}", path.display());
-                        is_empty = false;
+                    if let Err(e) = std::fs::remove_dir(&path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            warn!(e; "Failed to remove empty directory {}", path.display());
+                            is_empty = false;
+                        } else {
+                            info!(
+                                "Empty directory {} not found before removal",
+                                path.display()
+                            );
+                        }
                     } else {
                         info!(
                             "Removed empty directory {} from manifest cache",
@@ -570,5 +590,117 @@ mod tests {
             "cache/object/manifest/region_1/manifest/00000000000000000007.checkpoint",
             cache.cache_file_path("region_1/manifest/00000000000000000007.checkpoint")
         );
+    }
+
+    #[tokio::test]
+    async fn test_clean_empty_dirs_sync_no_mtime_check() {
+        common_telemetry::init_default_ut_logging();
+
+        let dir = create_temp_dir("");
+        let root = PathBuf::from(dir.path());
+
+        // Create a directory structure:
+        // root/
+        //   empty_dir1/
+        //   empty_dir2/
+        //     empty_subdir/
+        //   non_empty_dir/
+        //     file.txt
+        //   nested/
+        //     empty_subdir1/
+        //     non_empty_subdir/
+        //       file.txt
+
+        let empty_dir1 = root.join("empty_dir1");
+        let empty_dir2 = root.join("empty_dir2");
+        let empty_subdir = empty_dir2.join("empty_subdir");
+        let non_empty_dir = root.join("non_empty_dir");
+        let nested = root.join("nested");
+        let nested_empty = nested.join("empty_subdir1");
+        let nested_non_empty = nested.join("non_empty_subdir");
+
+        // Create directories
+        std::fs::create_dir_all(&empty_dir1).unwrap();
+        std::fs::create_dir_all(&empty_subdir).unwrap();
+        std::fs::create_dir_all(&non_empty_dir).unwrap();
+        std::fs::create_dir_all(&nested_empty).unwrap();
+        std::fs::create_dir_all(&nested_non_empty).unwrap();
+
+        // Create files in non-empty directories
+        std::fs::write(non_empty_dir.join("file.txt"), b"content").unwrap();
+        std::fs::write(nested_non_empty.join("file.txt"), b"content").unwrap();
+
+        // Verify initial state
+        assert!(empty_dir1.exists());
+        assert!(empty_dir2.exists());
+        assert!(empty_subdir.exists());
+        assert!(non_empty_dir.exists());
+        assert!(nested.exists());
+        assert!(nested_empty.exists());
+        assert!(nested_non_empty.exists());
+
+        // Clean empty directories with check_mtime = false
+        ManifestCache::clean_empty_dirs_sync(&root, false).unwrap();
+
+        // Verify empty directories are removed
+        assert!(!empty_dir1.exists());
+        assert!(!empty_dir2.exists());
+        assert!(!empty_subdir.exists());
+        assert!(!nested_empty.exists());
+
+        // Verify non-empty directories still exist
+        assert!(non_empty_dir.exists());
+        assert!(non_empty_dir.join("file.txt").exists());
+        assert!(nested.exists());
+        assert!(nested_non_empty.exists());
+        assert!(nested_non_empty.join("file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_clean_empty_dirs_sync_with_mtime_check() {
+        common_telemetry::init_default_ut_logging();
+
+        let dir = create_temp_dir("");
+        let root = PathBuf::from(dir.path());
+
+        // Create a directory structure with recently created empty directories
+        // root/
+        //   empty_dir1/
+        //   empty_dir2/
+        //     empty_subdir/
+        //   non_empty_dir/
+        //     file.txt
+
+        let empty_dir1 = root.join("empty_dir1");
+        let empty_dir2 = root.join("empty_dir2");
+        let empty_subdir = empty_dir2.join("empty_subdir");
+        let non_empty_dir = root.join("non_empty_dir");
+
+        // Create directories
+        std::fs::create_dir_all(&empty_dir1).unwrap();
+        std::fs::create_dir_all(&empty_subdir).unwrap();
+        std::fs::create_dir_all(&non_empty_dir).unwrap();
+
+        // Create file in non-empty directory
+        std::fs::write(non_empty_dir.join("file.txt"), b"content").unwrap();
+
+        // Verify initial state
+        assert!(empty_dir1.exists());
+        assert!(empty_dir2.exists());
+        assert!(empty_subdir.exists());
+        assert!(non_empty_dir.exists());
+
+        // Clean empty directories with check_mtime = true
+        // Since the directories were just created (mtime < 1 hour), they should NOT be removed
+        ManifestCache::clean_empty_dirs_sync(&root, true).unwrap();
+
+        // Verify empty directories are NOT removed (they're too recent)
+        assert!(empty_dir1.exists());
+        assert!(empty_dir2.exists());
+        assert!(empty_subdir.exists());
+
+        // Verify non-empty directory still exists
+        assert!(non_empty_dir.exists());
+        assert!(non_empty_dir.join("file.txt").exists());
     }
 }
