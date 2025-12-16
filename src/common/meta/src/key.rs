@@ -291,6 +291,11 @@ lazy_static! {
 }
 
 lazy_static! {
+    pub(crate) static ref TABLE_PART_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{TABLE_PART_PREFIX}/([0-9]+)$")).unwrap();
+}
+
+lazy_static! {
     static ref DATANODE_TABLE_KEY_PATTERN: Regex =
         Regex::new(&format!("^{DATANODE_TABLE_KEY_PREFIX}/([0-9]+)/([0-9]+)$")).unwrap();
 }

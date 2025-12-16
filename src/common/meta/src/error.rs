@@ -224,6 +224,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to find table partition for table id {}", table_id))]
+    TablePartitionNotFound {
+        table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to decode protobuf"))]
     DecodeProto {
         #[snafu(implicit)]
@@ -1091,6 +1098,7 @@ impl ErrorExt for Error {
             | DecodeProto { .. }
             | BuildTableMeta { .. }
             | TableRouteNotFound { .. }
+            | TablePartitionNotFound { .. }
             | ConvertRawTableInfo { .. }
             | RegionOperatingRace { .. }
             | EncodeWalOptions { .. }
