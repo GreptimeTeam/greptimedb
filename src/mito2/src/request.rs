@@ -33,7 +33,9 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::{PrimaryKeyEncoding, infer_primary_key_encoding_from_hint};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
-use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
+use store_api::region_engine::{
+    MitoCopyRegionFromResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
+};
 use store_api::region_request::{
     AffectedRows, EnterStagingRequest, RegionAlterRequest, RegionBuildIndexRequest,
     RegionBulkInsertsRequest, RegionCatchupRequest, RegionCloseRequest, RegionCompactRequest,
@@ -605,6 +607,9 @@ pub(crate) enum WorkerRequest {
 
     /// Remap manifests request.
     RemapManifests(RemapManifestsRequest),
+
+    /// Copy region from request.
+    CopyRegionFrom(CopyRegionFromRequest),
 }
 
 impl WorkerRequest {
@@ -813,6 +818,24 @@ impl WorkerRequest {
 
         Ok((WorkerRequest::RemapManifests(request), receiver))
     }
+
+    /// Converts [CopyRegionFromRequest] from a [CopyRegionFromRequest](store_api::region_engine::CopyRegionFromRequest).
+    pub(crate) fn try_from_copy_region_from_request(
+        region_id: RegionId,
+        store_api::region_engine::CopyRegionFromRequest {
+            source_region_id,
+            parallelism,
+        }: store_api::region_engine::CopyRegionFromRequest,
+    ) -> Result<(WorkerRequest, Receiver<Result<MitoCopyRegionFromResponse>>)> {
+        let (sender, receiver) = oneshot::channel();
+        let request = CopyRegionFromRequest {
+            region_id,
+            source_region_id,
+            parallelism,
+            sender,
+        };
+        Ok((WorkerRequest::CopyRegionFrom(request), receiver))
+    }
 }
 
 /// DDL request to a region.
@@ -867,6 +890,8 @@ pub(crate) enum BackgroundNotify {
     RegionEdit(RegionEditResult),
     /// Enter staging result.
     EnterStaging(EnterStagingResult),
+    /// Copy region result.
+    CopyRegionFromFinished(CopyRegionFromFinished),
 }
 
 /// Notifies a flush job is finished.
@@ -1023,6 +1048,16 @@ pub(crate) struct EnterStagingResult {
     pub(crate) result: Result<()>,
 }
 
+#[derive(Debug)]
+pub(crate) struct CopyRegionFromFinished {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// Region edit to apply.
+    pub(crate) edit: RegionEdit,
+    /// Result sender.
+    pub(crate) sender: Sender<Result<MitoCopyRegionFromResponse>>,
+}
+
 /// Request to edit a region directly.
 #[derive(Debug)]
 pub(crate) struct RegionEditRequest {
@@ -1075,6 +1110,18 @@ pub(crate) struct RemapManifestsRequest {
     pub(crate) new_partition_exprs: HashMap<RegionId, PartitionExpr>,
     /// Result sender.
     pub(crate) sender: Sender<Result<HashMap<RegionId, RegionManifest>>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CopyRegionFromRequest {
+    /// The [`RegionId`] of the target region.
+    pub(crate) region_id: RegionId,
+    /// The [`RegionId`] of the source region.
+    pub(crate) source_region_id: RegionId,
+    /// The parallelism of the copy operation.
+    pub(crate) parallelism: usize,
+    /// Result sender.
+    pub(crate) sender: Sender<Result<MitoCopyRegionFromResponse>>,
 }
 
 #[cfg(test)]
