@@ -15,7 +15,7 @@
 //! Frontend client to run flow as batching task which is time-window-aware normal query triggered every tick set by user
 
 use std::collections::HashMap;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::SystemTime;
 
 use api::v1::greptime_request::Request;
@@ -38,6 +38,7 @@ use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
+use tokio::sync::SetOnce;
 
 use crate::batching_mode::BatchingModeOptions;
 use crate::error::{
@@ -75,7 +76,18 @@ impl<E: ErrorExt + Send + Sync + 'static, T: GrpcQueryHandler<Error = E> + Send 
     }
 }
 
-type HandlerMutable = Arc<std::sync::Mutex<Option<Weak<dyn GrpcQueryHandlerWithBoxedError>>>>;
+#[derive(Debug, Clone)]
+pub struct HandlerMutable {
+    handler: Arc<Mutex<Option<Weak<dyn GrpcQueryHandlerWithBoxedError>>>>,
+    is_initialized: Arc<SetOnce<()>>,
+}
+
+impl HandlerMutable {
+    pub async fn set_handler(&self, handler: Weak<dyn GrpcQueryHandlerWithBoxedError>) {
+        *self.handler.lock().unwrap() = Some(handler);
+        self.is_initialized.set(());
+    }
+}
 
 /// A simple frontend client able to execute sql using grpc protocol
 ///
@@ -94,39 +106,32 @@ pub enum FrontendClient {
         /// notice the client here should all be lazy, so that can wait after frontend is booted then make conn
         database_client: HandlerMutable,
         query: QueryOptions,
+        is_initialized: Arc<SetOnce<()>>,
     },
 }
 
 impl FrontendClient {
     /// Create a new empty frontend client, with a `HandlerMutable` to set the grpc handler later
     pub fn from_empty_grpc_handler(query: QueryOptions) -> (Self, HandlerMutable) {
-        let handler = Arc::new(std::sync::Mutex::new(None));
+        let initialized_flag = Arc::new(SetOnce::new());
+        let handler = HandlerMutable {
+            handler: Arc::new(Mutex::new(None)),
+            is_initialized: initialized_flag.clone(),
+        };
         (
             Self::Standalone {
                 database_client: handler.clone(),
                 query,
+                is_initialized: initialized_flag,
             },
             handler,
         )
     }
 
-    /// Check if the frontend client is initialized.
-    ///
-    /// In distributed mode, it is always initialized.
-    /// In standalone mode, it checks if the database client is set.
-    pub fn is_initialized(&self) -> bool {
-        match self {
-            FrontendClient::Distributed { .. } => true,
-            FrontendClient::Standalone {
-                database_client, ..
-            } => {
-                let guard = database_client.lock();
-                if let Ok(guard) = guard {
-                    guard.is_some()
-                } else {
-                    false
-                }
-            }
+    /// Wait until the frontend client is initialized.
+    pub async fn wait_initialized(&self) {
+        if let FrontendClient::Standalone { is_initialized, .. } = self {
+            is_initialized.wait().await;
         }
     }
 
@@ -158,9 +163,16 @@ impl FrontendClient {
         grpc_handler: Weak<dyn GrpcQueryHandlerWithBoxedError>,
         query: QueryOptions,
     ) -> Self {
+        let is_initialized = Arc::new(SetOnce::new());
+        let handler = HandlerMutable {
+            handler: Arc::new(Mutex::new(Some(grpc_handler))),
+            is_initialized: is_initialized.clone(),
+        };
+
         Self::Standalone {
-            database_client: Arc::new(std::sync::Mutex::new(Some(grpc_handler))),
+            database_client: handler,
             query,
+            is_initialized,
         }
     }
 }
@@ -341,6 +353,7 @@ impl FrontendClient {
                 {
                     let database_client = {
                         database_client
+                            .handler
                             .lock()
                             .map_err(|e| {
                                 UnexpectedSnafu {
@@ -405,6 +418,7 @@ impl FrontendClient {
             FrontendClient::Standalone {
                 database_client,
                 query,
+                is_initialized: _,
             } => {
                 let ctx = QueryContextBuilder::default()
                     .current_catalog(catalog.to_string())
@@ -418,6 +432,7 @@ impl FrontendClient {
                 {
                     let database_client = {
                         database_client
+                            .handler
                             .lock()
                             .map_err(|e| {
                                 UnexpectedSnafu {

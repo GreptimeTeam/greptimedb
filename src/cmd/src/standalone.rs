@@ -551,10 +551,7 @@ impl StartCommand {
         // set the frontend client for flownode
         let grpc_handler = fe_instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;
         let weak_grpc_handler = Arc::downgrade(&grpc_handler);
-        frontend_instance_handler
-            .lock()
-            .unwrap()
-            .replace(weak_grpc_handler);
+        frontend_instance_handler.set_handler(weak_grpc_handler);
 
         // set the frontend invoker for flownode
         let flow_streaming_engine = flownode.flow_engine().streaming_engine();
