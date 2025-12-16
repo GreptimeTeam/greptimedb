@@ -22,7 +22,6 @@ use snafu::{ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::storage::{FileId, IndexVersion, RegionId};
-use tokio::sync::Semaphore;
 
 use crate::access_layer::AccessLayerRef;
 use crate::config::MitoConfig;
@@ -203,17 +202,12 @@ impl RegionFileCopier {
             "Copying files: {:?} from region {} to region {}",
             file_ids, source_region_id, target_region_id
         );
-        let semaphore = Arc::new(Semaphore::new(parallelism));
-        let num_file = file_ids.len();
-        for (chunk_idx, chunk) in file_ids.chunks(parallelism).enumerate() {
-            let mut tasks = Vec::with_capacity(chunk.len());
-            let chunk = chunk.to_vec();
+        let mut tasks = Vec::with_capacity(parallelism);
+        for skip in 0..parallelism {
+            let target_file_ids = file_ids.iter().skip(skip).step_by(parallelism).copied();
             let object_store = object_store.clone();
-            for (i, file_desc) in chunk.into_iter().enumerate() {
-                let moved_semaphore = semaphore.clone();
-                let object_store = object_store.clone();
-                tasks.push(async move {
-                    let _permit = moved_semaphore.acquire().await.unwrap();
+            tasks.push(async move {
+                for file_desc in target_file_ids {
                     let (source_path, target_path) = build_copy_file_paths(
                         source_region_id,
                         target_region_id,
@@ -230,22 +224,21 @@ impl RegionFileCopier {
                         )
                         .context(error::OpenDalSnafu)?;
                     info!(
-                        "Copied file {} to {}, elapsed: {:?}, progress: {}/{}",
+                        "Copied file {} to {}, elapsed: {:?}",
                         source_path,
                         target_path,
                         now.elapsed(),
-                        chunk_idx * parallelism + i + 1,
-                        num_file
                     );
-                    Ok(())
-                })
-            }
+                }
 
-            if let Err(err) = try_join_all(tasks).await {
-                error!(err; "Failed to copy files from region {} to region {}", source_region_id, target_region_id);
-                self.clean_target_region(target_region_id, file_ids).await;
-                return Err(err);
-            }
+                Ok(())
+            });
+        }
+
+        if let Err(err) = try_join_all(tasks).await {
+            error!(err; "Failed to copy files from region {} to region {}", source_region_id, target_region_id);
+            self.clean_target_region(target_region_id, file_ids).await;
+            return Err(err);
         }
 
         Ok(())
