@@ -14,7 +14,6 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use api::v1::meta::cluster_server::ClusterServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
@@ -23,7 +22,6 @@ use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
 use common_config::Configurable;
 use common_error::ext::BoxedError;
-use common_meta::distributed_time_constants::default_etcd_client_options;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use common_meta::distributed_time_constants::META_LEASE_SECS;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
@@ -42,7 +40,7 @@ use common_telemetry::info;
 #[cfg(feature = "pg_kvbackend")]
 use deadpool_postgres::{Config, Runtime};
 use either::Either;
-use etcd_client::Client;
+use etcd_client::{Client, ConnectOptions};
 use servers::configurator::ConfiguratorRef;
 use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
@@ -72,7 +70,9 @@ use crate::election::rds::postgres::PgElection;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::metasrv::builder::MetasrvBuilder;
-use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectTarget, SelectorRef};
+use crate::metasrv::{
+    BackendImpl, EtcdOptions, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
+};
 use crate::node_excluder::NodeExcluderRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
@@ -82,11 +82,6 @@ use crate::selector::SelectorType;
 use crate::service::admin;
 use crate::service::admin::admin_axum_router;
 use crate::{error, Result};
-
-/// The default keep-alive interval for gRPC.
-const DEFAULT_GRPC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
-/// The default keep-alive timeout for gRPC.
-const DEFAULT_GRPC_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct MetasrvInstance {
     metasrv: Arc<Metasrv>,
@@ -281,8 +276,8 @@ pub fn router(metasrv: Arc<Metasrv>) -> Router {
         // for admin services
         .accept_http1(true)
         // For quick network failures detection.
-        .http2_keepalive_interval(Some(DEFAULT_GRPC_KEEP_ALIVE_INTERVAL))
-        .http2_keepalive_timeout(Some(DEFAULT_GRPC_KEEP_ALIVE_TIMEOUT));
+        .http2_keepalive_interval(Some(metasrv.options().grpc.http2_keep_alive_interval))
+        .http2_keepalive_timeout(Some(metasrv.options().grpc.http2_keep_alive_timeout));
     let router = add_compressed_service!(router, HeartbeatServer::from_arc(metasrv.clone()));
     let router = add_compressed_service!(router, StoreServer::from_arc(metasrv.clone()));
     let router = add_compressed_service!(router, ClusterServer::from_arc(metasrv.clone()));
@@ -299,7 +294,7 @@ pub async fn metasrv_builder(
         (Some(kv_backend), _) => (kv_backend, None),
         (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
         (None, BackendImpl::EtcdStore) => {
-            let etcd_client = create_etcd_client(&opts.store_addrs).await?;
+            let etcd_client = create_etcd_client(&opts.store_addrs, &opts.etcd).await?;
             let kv_backend = EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
             let election = EtcdElection::with_etcd_client(
                 &opts.grpc.server_addr,
@@ -447,13 +442,22 @@ pub async fn metasrv_builder(
         .plugins(plugins))
 }
 
-pub async fn create_etcd_client(store_addrs: &[String]) -> Result<Client> {
+pub async fn create_etcd_client(
+    store_addrs: &[String],
+    etcd_options: &EtcdOptions,
+) -> Result<Client> {
     let etcd_endpoints = store_addrs
         .iter()
         .map(|x| x.trim())
         .filter(|x| !x.is_empty())
         .collect::<Vec<_>>();
-    let options = default_etcd_client_options();
+    let options = ConnectOptions::new()
+        .with_keep_alive_while_idle(true)
+        .with_keep_alive(
+            etcd_options.keep_alive_interval,
+            etcd_options.keep_alive_timeout,
+        )
+        .with_connect_timeout(etcd_options.connect_timeout);
     Client::connect(&etcd_endpoints, Some(options))
         .await
         .context(error::ConnectEtcdSnafu)

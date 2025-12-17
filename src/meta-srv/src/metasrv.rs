@@ -27,7 +27,7 @@ use common_event_recorder::EventRecorderOptions;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl_manager::DdlManagerRef;
-use common_meta::distributed_time_constants;
+use common_meta::distributed_time_constants::{self, default_distributed_time_constants};
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
@@ -98,6 +98,27 @@ pub enum BackendImpl {
     MysqlStore,
 }
 
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct EtcdOptions {
+    #[serde(with = "humantime_serde")]
+    pub keep_alive_timeout: Duration,
+    #[serde(with = "humantime_serde")]
+    pub keep_alive_interval: Duration,
+    #[serde(with = "humantime_serde")]
+    pub connect_timeout: Duration,
+}
+
+impl Default for EtcdOptions {
+    fn default() -> Self {
+        Self {
+            keep_alive_interval: Duration::from_secs(10),
+            keep_alive_timeout: Duration::from_secs(3),
+            connect_timeout: Duration::from_secs(3),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetasrvOptions {
@@ -119,6 +140,12 @@ pub struct MetasrvOptions {
     pub use_memory_store: bool,
     /// Whether to enable region failover.
     pub enable_region_failover: bool,
+    /// The base heartbeat interval.
+    ///
+    /// This value is used to calculate the distributed time constants for components.
+    /// e.g., the region lease time is `heartbeat_interval * 3 + Duration::from_secs(1)`.
+    #[serde(with = "humantime_serde")]
+    pub heartbeat_interval: Duration,
     /// The delay before starting region failure detection.
     /// This delay helps prevent Metasrv from triggering unnecessary region failovers before all Datanodes are fully started.
     /// Especially useful when the cluster is not deployed with GreptimeDB Operator and maintenance mode is not enabled.
@@ -172,6 +199,9 @@ pub struct MetasrvOptions {
     pub memory: MemoryOptions,
     /// The datastore for kv metadata.
     pub backend: BackendImpl,
+    /// The etcd options.
+    /// Only applicable when using etcd as the metadata store.
+    pub etcd: EtcdOptions,
     #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
     /// Table name of rds kv backend.
     pub meta_table_name: String,
@@ -211,7 +241,9 @@ impl fmt::Debug for MetasrvOptions {
             .field("max_txn_ops", &self.max_txn_ops)
             .field("flush_stats_factor", &self.flush_stats_factor)
             .field("tracing", &self.tracing)
-            .field("backend", &self.backend);
+            .field("backend", &self.backend)
+            .field("heartbeat_interval", &self.heartbeat_interval)
+            .field("etcd", &self.etcd);
 
         #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
         debug_struct.field("meta_table_name", &self.meta_table_name);
@@ -239,6 +271,7 @@ impl Default for MetasrvOptions {
             selector: SelectorType::default(),
             use_memory_store: false,
             enable_region_failover: false,
+            heartbeat_interval: distributed_time_constants::BASE_HEARTBEAT_INTERVAL,
             region_failure_detector_initialization_delay: Duration::from_secs(10 * 60),
             allow_region_failover_on_local_wal: false,
             grpc: GrpcOptions {
@@ -273,6 +306,7 @@ impl Default for MetasrvOptions {
             meta_election_lock_id: common_meta::kv_backend::DEFAULT_META_ELECTION_LOCK_ID,
             node_max_idle_time: Duration::from_secs(24 * 60 * 60),
             event_recorder: EventRecorderOptions::default(),
+            etcd: EtcdOptions::default(),
         }
     }
 }
@@ -660,7 +694,9 @@ impl Metasrv {
         lookup_datanode_peer(
             peer_id,
             &self.meta_peer_client,
-            distributed_time_constants::DATANODE_LEASE_SECS,
+            default_distributed_time_constants()
+                .datanode_lease
+                .as_secs(),
         )
         .await
     }

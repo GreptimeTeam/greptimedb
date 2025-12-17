@@ -770,7 +770,7 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::sync::Arc;
 
-    use common_meta::distributed_time_constants::REGION_LEASE_SECS;
+    use common_meta::distributed_time_constants::default_distributed_time_constants;
     use common_meta::instruction::Instruction;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::rpc::router::{Region, RegionRoute};
@@ -1004,8 +1004,10 @@ mod tests {
             .run_once()
             .await;
 
+        let region_lease = default_distributed_time_constants().region_lease.as_secs();
+
         // Ensure it didn't run into the slow path.
-        assert!(timer.elapsed().as_secs() < REGION_LEASE_SECS / 2);
+        assert!(timer.elapsed().as_secs() < region_lease / 2);
 
         runner.suite.verify_table_metadata().await;
     }
@@ -1059,8 +1061,9 @@ mod tests {
             .run_once()
             .await;
 
+        let region_lease = default_distributed_time_constants().region_lease.as_secs();
         // Ensure it didn't run into the slow path.
-        assert!(timer.elapsed().as_secs() < REGION_LEASE_SECS / 2);
+        assert!(timer.elapsed().as_secs() < region_lease / 2);
 
         runner.suite.verify_table_metadata().await;
     }
@@ -1380,8 +1383,9 @@ mod tests {
             .run_once()
             .await;
 
+        let region_lease = default_distributed_time_constants().region_lease.as_secs();
         // Ensure it didn't run into the slow path.
-        assert!(timer.elapsed().as_secs() < REGION_LEASE_SECS);
+        assert!(timer.elapsed().as_secs() < region_lease);
         runner.suite.verify_table_metadata().await;
     }
 }

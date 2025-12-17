@@ -98,6 +98,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
                                 break;
                             }
                         }
+                        error!(err; "Sending heartbeat response error");
 
                         if tx.send(Err(err)).await.is_err() {
                             info!("ReceiverStream was dropped; shutting down");

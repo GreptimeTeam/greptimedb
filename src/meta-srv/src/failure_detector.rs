@@ -15,7 +15,6 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use common_meta::distributed_time_constants;
 use serde::{Deserialize, Serialize};
 
 /// This is our port of Akka's "[PhiAccrualFailureDetector](https://github.com/akka/akka/blob/v2.6.21/akka-remote/src/main/scala/akka/remote/PhiAccrualFailureDetector.scala)"
@@ -83,9 +82,7 @@ impl Default for PhiAccrualFailureDetectorOptions {
         Self {
             threshold: 8_f32,
             min_std_deviation: Duration::from_millis(100),
-            acceptable_heartbeat_pause: Duration::from_secs(
-                distributed_time_constants::DATANODE_LEASE_SECS,
-            ),
+            acceptable_heartbeat_pause: Duration::from_secs(10),
             first_heartbeat_estimate: Duration::from_millis(1000),
         }
     }

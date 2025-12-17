@@ -209,6 +209,14 @@ recovery_parallelism = 2
 ## **It's only used when the provider is `kafka`**.
 broker_endpoints = ["127.0.0.1:9092"]
 
+## The connect timeout for kafka client.
+## **It's only used when the provider is `kafka`**.
+#+ connect_timeout = "3s"
+
+## The timeout for kafka client.
+## **It's only used when the provider is `kafka`**.
+#+ timeout = "3s"
+
 ## Automatically create topics for WAL.
 ## Set to `true` to automatically create topics for WAL.
 ## Otherwise, use topics named `topic_name_prefix_[0..num_topics)`
