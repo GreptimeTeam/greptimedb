@@ -14,7 +14,10 @@
 
 use tokio::time::{Duration, sleep};
 
-use crate::{MemoryManager, NoOpMetrics, PERMIT_GRANULARITY_BYTES};
+use crate::{MemoryManager, NoOpMetrics, PermitGranularity};
+
+// Helper constant for tests - use default Megabyte granularity
+const PERMIT_GRANULARITY_BYTES: u64 = PermitGranularity::Megabyte.bytes();
 
 #[test]
 fn test_try_acquire_unlimited() {

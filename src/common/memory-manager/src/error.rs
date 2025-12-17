@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::time::Duration;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -35,6 +36,14 @@ pub enum Error {
 
     #[snafu(display("Memory semaphore unexpectedly closed"))]
     MemorySemaphoreClosed,
+
+    #[snafu(display(
+        "Timeout waiting for memory quota: requested {requested_bytes} bytes, waited {waited:?}"
+    ))]
+    MemoryAcquireTimeout {
+        requested_bytes: u64,
+        waited: Duration,
+    },
 }
 
 impl ErrorExt for Error {
@@ -44,6 +53,7 @@ impl ErrorExt for Error {
         match self {
             MemoryLimitExceeded { .. } => StatusCode::RuntimeResourcesExhausted,
             MemorySemaphoreClosed => StatusCode::Unexpected,
+            MemoryAcquireTimeout { .. } => StatusCode::RuntimeResourcesExhausted,
         }
     }
 

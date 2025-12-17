@@ -17,11 +17,12 @@ use std::sync::Arc;
 use snafu::ensure;
 use tokio::sync::{Semaphore, TryAcquireError};
 
-use crate::error::{MemoryLimitExceededSnafu, MemorySemaphoreClosedSnafu, Result};
+use crate::error::{
+    MemoryAcquireTimeoutSnafu, MemoryLimitExceededSnafu, MemorySemaphoreClosedSnafu, Result,
+};
+use crate::granularity::PermitGranularity;
 use crate::guard::MemoryGuard;
-
-/// Minimum bytes controlled by one semaphore permit.
-pub const PERMIT_GRANULARITY_BYTES: u64 = 1 << 20; // 1 MB
+use crate::policy::OnExhaustedPolicy;
 
 /// Trait for recording memory usage metrics.
 pub trait MemoryMetrics: Clone + Send + Sync + 'static {
@@ -40,6 +41,7 @@ pub struct MemoryManager<M: MemoryMetrics> {
 pub(crate) struct MemoryQuota<M: MemoryMetrics> {
     pub(crate) semaphore: Arc<Semaphore>,
     pub(crate) limit_permits: u32,
+    pub(crate) granularity: PermitGranularity,
     pub(crate) metrics: M,
 }
 
@@ -47,19 +49,25 @@ impl<M: MemoryMetrics> MemoryManager<M> {
     /// Creates a new memory manager with the given limit in bytes.
     /// `limit_bytes = 0` disables the limit.
     pub fn new(limit_bytes: u64, metrics: M) -> Self {
+        Self::with_granularity(limit_bytes, PermitGranularity::default(), metrics)
+    }
+
+    /// Creates a new memory manager with specified granularity.
+    pub fn with_granularity(limit_bytes: u64, granularity: PermitGranularity, metrics: M) -> Self {
         if limit_bytes == 0 {
             metrics.set_limit(0);
             return Self { quota: None };
         }
 
-        let limit_permits = bytes_to_permits(limit_bytes);
-        let limit_aligned_bytes = permits_to_bytes(limit_permits);
+        let limit_permits = granularity.bytes_to_permits(limit_bytes);
+        let limit_aligned_bytes = granularity.permits_to_bytes(limit_permits);
         metrics.set_limit(limit_aligned_bytes as i64);
 
         Self {
             quota: Some(MemoryQuota {
                 semaphore: Arc::new(Semaphore::new(limit_permits as usize)),
                 limit_permits,
+                granularity,
                 metrics,
             }),
         }
@@ -69,7 +77,7 @@ impl<M: MemoryMetrics> MemoryManager<M> {
     pub fn limit_bytes(&self) -> u64 {
         self.quota
             .as_ref()
-            .map(|quota| permits_to_bytes(quota.limit_permits))
+            .map(|quota| quota.permits_to_bytes(quota.limit_permits))
             .unwrap_or(0)
     }
 
@@ -77,7 +85,7 @@ impl<M: MemoryMetrics> MemoryManager<M> {
     pub fn used_bytes(&self) -> u64 {
         self.quota
             .as_ref()
-            .map(|quota| permits_to_bytes(quota.used_permits()))
+            .map(|quota| quota.permits_to_bytes(quota.used_permits()))
             .unwrap_or(0)
     }
 
@@ -85,7 +93,7 @@ impl<M: MemoryMetrics> MemoryManager<M> {
     pub fn available_bytes(&self) -> u64 {
         self.quota
             .as_ref()
-            .map(|quota| permits_to_bytes(quota.available_permits_clamped()))
+            .map(|quota| quota.permits_to_bytes(quota.available_permits_clamped()))
             .unwrap_or(0)
     }
 
@@ -98,13 +106,13 @@ impl<M: MemoryMetrics> MemoryManager<M> {
         match &self.quota {
             None => Ok(MemoryGuard::unlimited()),
             Some(quota) => {
-                let permits = bytes_to_permits(bytes);
+                let permits = quota.bytes_to_permits(bytes);
 
                 ensure!(
                     permits <= quota.limit_permits,
                     MemoryLimitExceededSnafu {
                         requested_bytes: bytes,
-                        limit_bytes: permits_to_bytes(quota.limit_permits),
+                        limit_bytes: self.limit_bytes()
                     }
                 );
 
@@ -125,7 +133,7 @@ impl<M: MemoryMetrics> MemoryManager<M> {
         match &self.quota {
             None => Some(MemoryGuard::unlimited()),
             Some(quota) => {
-                let permits = bytes_to_permits(bytes);
+                let permits = quota.bytes_to_permits(bytes);
 
                 match quota.semaphore.clone().try_acquire_many_owned(permits) {
                     Ok(permit) => {
@@ -140,9 +148,56 @@ impl<M: MemoryMetrics> MemoryManager<M> {
             }
         }
     }
+
+    /// Acquires memory based on the given policy.
+    ///
+    /// - For `OnExhaustedPolicy::Wait`: Waits up to the timeout duration for memory to become available
+    /// - For `OnExhaustedPolicy::Fail`: Returns immediately if memory is not available
+    ///
+    /// # Errors
+    /// - `MemoryLimitExceeded`: Requested bytes exceed the total limit (both policies), or memory is currently exhausted (Fail policy only)
+    /// - `MemoryAcquireTimeout`: Timeout elapsed while waiting for memory (Wait policy only)
+    /// - `MemorySemaphoreClosed`: The internal semaphore is unexpectedly closed (rare, indicates system issue)
+    pub async fn acquire_with_policy(
+        &self,
+        bytes: u64,
+        policy: OnExhaustedPolicy,
+    ) -> Result<MemoryGuard<M>> {
+        match policy {
+            OnExhaustedPolicy::Wait { timeout } => {
+                match tokio::time::timeout(timeout, self.acquire(bytes)).await {
+                    Ok(Ok(guard)) => Ok(guard),
+                    Ok(Err(e)) => Err(e),
+                    Err(_elapsed) => {
+                        // Timeout elapsed while waiting
+                        MemoryAcquireTimeoutSnafu {
+                            requested_bytes: bytes,
+                            waited: timeout,
+                        }
+                        .fail()
+                    }
+                }
+            }
+            OnExhaustedPolicy::Fail => self.try_acquire(bytes).ok_or_else(|| {
+                MemoryLimitExceededSnafu {
+                    requested_bytes: bytes,
+                    limit_bytes: self.limit_bytes(),
+                }
+                .build()
+            }),
+        }
+    }
 }
 
 impl<M: MemoryMetrics> MemoryQuota<M> {
+    pub(crate) fn bytes_to_permits(&self, bytes: u64) -> u32 {
+        self.granularity.bytes_to_permits(bytes)
+    }
+
+    pub(crate) fn permits_to_bytes(&self, permits: u32) -> u64 {
+        self.granularity.permits_to_bytes(permits)
+    }
+
     pub(crate) fn used_permits(&self) -> u32 {
         self.limit_permits
             .saturating_sub(self.available_permits_clamped())
@@ -155,19 +210,7 @@ impl<M: MemoryMetrics> MemoryQuota<M> {
     }
 
     pub(crate) fn update_in_use_metric(&self) {
-        let bytes = permits_to_bytes(self.used_permits());
+        let bytes = self.permits_to_bytes(self.used_permits());
         self.metrics.set_in_use(bytes as i64);
     }
-}
-
-pub(crate) fn bytes_to_permits(bytes: u64) -> u32 {
-    bytes
-        .saturating_add(PERMIT_GRANULARITY_BYTES - 1)
-        .saturating_div(PERMIT_GRANULARITY_BYTES)
-        .min(Semaphore::MAX_PERMITS as u64)
-        .min(u32::MAX as u64) as u32
-}
-
-pub(crate) fn permits_to_bytes(permits: u32) -> u64 {
-    (permits as u64).saturating_mul(PERMIT_GRANULARITY_BYTES)
 }

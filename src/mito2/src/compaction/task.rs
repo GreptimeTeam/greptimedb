@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use crate::compaction::compactor::{CompactionRegion, Compactor};
 use crate::compaction::memory_manager::{CompactionMemoryGuard, CompactionMemoryManager};
 use crate::compaction::picker::{CompactionTask, PickerOutput};
-use crate::error::{CompactRegionSnafu, CompactionMemoryExhaustedSnafu, MemoryAcquireFailedSnafu};
+use crate::error::{CompactRegionSnafu, CompactionMemoryExhaustedSnafu};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_MEMORY_WAIT, COMPACTION_STAGE_ELAPSED};
 use crate::region::RegionRoleState;
@@ -95,80 +95,16 @@ impl CompactionTaskImpl {
     async fn acquire_memory_with_policy(&self) -> error::Result<CompactionMemoryGuard> {
         let region_id = self.compaction_region.region_id;
         let requested_bytes = self.estimated_memory_bytes;
-        let limit_bytes = self.memory_manager.limit_bytes();
+        let policy = self.memory_policy;
 
-        if limit_bytes > 0 && requested_bytes > limit_bytes {
-            warn!(
-                "Compaction for region {} requires {} bytes but limit is {} bytes; cannot satisfy request",
-                region_id, requested_bytes, limit_bytes
-            );
-            return Err(CompactionMemoryExhaustedSnafu {
+        let _timer = COMPACTION_MEMORY_WAIT.start_timer();
+        self.memory_manager
+            .acquire_with_policy(requested_bytes, policy)
+            .await
+            .context(CompactionMemoryExhaustedSnafu {
                 region_id,
-                required_bytes: requested_bytes,
-                limit_bytes,
-                policy: "exceed_limit".to_string(),
-            }
-            .build());
-        }
-
-        match self.memory_policy {
-            OnExhaustedPolicy::Wait {
-                timeout: wait_timeout,
-            } => {
-                let timer = COMPACTION_MEMORY_WAIT.start_timer();
-
-                match tokio::time::timeout(
-                    wait_timeout,
-                    self.memory_manager.acquire(requested_bytes),
-                )
-                .await
-                {
-                    Ok(Ok(guard)) => {
-                        timer.observe_duration();
-                        Ok(guard)
-                    }
-                    Ok(Err(e)) => {
-                        timer.observe_duration();
-                        Err(e).with_context(|_| MemoryAcquireFailedSnafu {
-                            region_id,
-                            policy: format!("wait_timeout({}ms)", wait_timeout.as_millis()),
-                        })
-                    }
-                    Err(_) => {
-                        timer.observe_duration();
-                        warn!(
-                            "Compaction for region {} waited {:?} for {} bytes but timed out",
-                            region_id, wait_timeout, requested_bytes
-                        );
-                        CompactionMemoryExhaustedSnafu {
-                            region_id,
-                            required_bytes: requested_bytes,
-                            limit_bytes,
-                            policy: format!("wait_timeout({}ms)", wait_timeout.as_millis()),
-                        }
-                        .fail()
-                    }
-                }
-            }
-            OnExhaustedPolicy::Fail => {
-                // Try to acquire, fail immediately if not available
-                self.memory_manager
-                    .try_acquire(requested_bytes)
-                    .ok_or_else(|| {
-                        warn!(
-                            "Compaction memory exhausted for region {} (policy=fail, need {} bytes, limit {} bytes)",
-                            region_id, requested_bytes, limit_bytes
-                        );
-                        CompactionMemoryExhaustedSnafu {
-                            region_id,
-                            required_bytes: requested_bytes,
-                            limit_bytes,
-                            policy: "fail".to_string(),
-                        }
-                        .build()
-                    })
-            }
-        }
+                policy: format!("{policy:?}"),
+            })
     }
 
     /// Remove expired ssts files, update manifest immediately
