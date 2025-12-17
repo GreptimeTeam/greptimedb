@@ -38,12 +38,12 @@ use crate::rpc::store::BatchGetRequest;
 ///
 /// The layout: `__table_part/{table_id}`.
 #[derive(Debug, PartialEq)]
-pub struct TablePartKey {
+pub struct TableRepartKey {
     /// The unique identifier of the table whose re-partition information is stored in this key.
     pub table_id: TableId,
 }
 
-impl TablePartKey {
+impl TableRepartKey {
     pub fn new(table_id: TableId) -> Self {
         Self { table_id }
     }
@@ -54,16 +54,16 @@ impl TablePartKey {
     }
 }
 
-impl MetadataKey<'_, TablePartKey> for TablePartKey {
+impl MetadataKey<'_, TableRepartKey> for TableRepartKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<TablePartKey> {
+    fn from_bytes(bytes: &[u8]) -> Result<TableRepartKey> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
             InvalidMetadataSnafu {
                 err_msg: format!(
-                    "TablePartKey '{}' is not a valid UTF8 string: {e}",
+                    "TableRepartKey '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
                 ),
             }
@@ -72,22 +72,22 @@ impl MetadataKey<'_, TablePartKey> for TablePartKey {
         let captures = TABLE_PART_KEY_PATTERN
             .captures(key)
             .context(InvalidMetadataSnafu {
-                err_msg: format!("Invalid TablePartKey '{key}'"),
+                err_msg: format!("Invalid TableRepartKey '{key}'"),
             })?;
         // Safety: pass the regex check above
         let table_id = captures[1].parse::<TableId>().unwrap();
-        Ok(TablePartKey { table_id })
+        Ok(TableRepartKey { table_id })
     }
 }
 
-impl Display for TablePartKey {
+impl Display for TableRepartKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", TABLE_PART_PREFIX, self.table_id)
     }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
-pub struct TablePartValue {
+pub struct TableRepartValue {
     /// A mapping from source region IDs to sets of destination region IDs after repartition.
     ///
     /// Each key in the map is a `RegionId` representing a source region that has been repartitioned.
@@ -97,8 +97,8 @@ pub struct TablePartValue {
     pub src_to_dst: BTreeMap<RegionId, BTreeSet<RegionId>>,
 }
 
-impl TablePartValue {
-    /// Creates a new TablePartValue with an empty src_to_dst map.
+impl TableRepartValue {
+    /// Creates a new TableRepartValue with an empty src_to_dst map.
     pub fn new() -> Self {
         Default::default()
     }
@@ -122,9 +122,9 @@ impl TablePartValue {
     }
 }
 
-impl MetadataValue for TablePartValue {
+impl MetadataValue for TableRepartValue {
     fn try_from_raw_value(raw_value: &[u8]) -> Result<Self> {
-        serde_json::from_slice::<TablePartValue>(raw_value).context(SerdeJsonSnafu)
+        serde_json::from_slice::<TableRepartValue>(raw_value).context(SerdeJsonSnafu)
     }
 
     fn try_as_raw_value(&self) -> Result<Vec<u8>> {
@@ -132,31 +132,32 @@ impl MetadataValue for TablePartValue {
     }
 }
 
-pub type TablePartValueDecodeResult = Result<Option<DeserializedValueWithBytes<TablePartValue>>>;
+pub type TableRepartValueDecodeResult =
+    Result<Option<DeserializedValueWithBytes<TableRepartValue>>>;
 
-pub struct TablePartManager {
+pub struct TableRepartManager {
     kv_backend: KvBackendRef,
 }
 
-impl TablePartManager {
+impl TableRepartManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
     }
 
-    /// Builds a create table part transaction,
+    /// Builds a create table repart transaction,
     /// it expected the `__table_part/{table_id}` wasn't occupied.
     pub fn build_create_txn(
         &self,
         table_id: TableId,
-        table_part_value: &TablePartValue,
+        table_repart_value: &TableRepartValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> TablePartValueDecodeResult + use<>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRepartValueDecodeResult + use<>,
     )> {
-        let key = TablePartKey::new(table_id);
+        let key = TableRepartKey::new(table_id);
         let raw_key = key.to_bytes();
 
-        let txn = Txn::put_if_not_exists(raw_key.clone(), table_part_value.try_as_raw_value()?);
+        let txn = Txn::put_if_not_exists(raw_key.clone(), table_repart_value.try_as_raw_value()?);
 
         Ok((
             txn,
@@ -164,22 +165,22 @@ impl TablePartManager {
         ))
     }
 
-    /// Builds a update table part transaction,
-    /// it expected the remote value equals the `current_table_part_value`.
+    /// Builds a update table repart transaction,
+    /// it expected the remote value equals the `current_table_repart_value`.
     /// It retrieves the latest value if the comparing failed.
     pub fn build_update_txn(
         &self,
         table_id: TableId,
-        current_table_part_value: &DeserializedValueWithBytes<TablePartValue>,
-        new_table_part_value: &TablePartValue,
+        current_table_repart_value: &DeserializedValueWithBytes<TableRepartValue>,
+        new_table_repart_value: &TableRepartValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> TablePartValueDecodeResult + use<>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRepartValueDecodeResult + use<>,
     )> {
-        let key = TablePartKey::new(table_id);
+        let key = TableRepartKey::new(table_id);
         let raw_key = key.to_bytes();
-        let raw_value = current_table_part_value.get_raw_bytes();
-        let new_raw_value: Vec<u8> = new_table_part_value.try_as_raw_value()?;
+        let raw_value = current_table_repart_value.get_raw_bytes();
+        let new_raw_value: Vec<u8> = new_table_repart_value.try_as_raw_value()?;
 
         let txn = Txn::compare_and_put(raw_key.clone(), raw_value, new_raw_value);
 
@@ -189,33 +190,33 @@ impl TablePartManager {
         ))
     }
 
-    /// Returns the [`TablePartValue`].
-    pub async fn get(&self, table_id: TableId) -> Result<Option<TablePartValue>> {
+    /// Returns the [`TableRepartValue`].
+    pub async fn get(&self, table_id: TableId) -> Result<Option<TableRepartValue>> {
         self.get_inner(table_id).await
     }
 
-    async fn get_inner(&self, table_id: TableId) -> Result<Option<TablePartValue>> {
-        let key = TablePartKey::new(table_id);
+    async fn get_inner(&self, table_id: TableId) -> Result<Option<TableRepartValue>> {
+        let key = TableRepartKey::new(table_id);
         self.kv_backend
             .get(&key.to_bytes())
             .await?
-            .map(|kv| TablePartValue::try_from_raw_value(&kv.value))
+            .map(|kv| TableRepartValue::try_from_raw_value(&kv.value))
             .transpose()
     }
 
-    /// Returns the [`TablePartValue`] wrapped with [`DeserializedValueWithBytes`].
+    /// Returns the [`TableRepartValue`] wrapped with [`DeserializedValueWithBytes`].
     pub async fn get_with_raw_bytes(
         &self,
         table_id: TableId,
-    ) -> Result<Option<DeserializedValueWithBytes<TablePartValue>>> {
+    ) -> Result<Option<DeserializedValueWithBytes<TableRepartValue>>> {
         self.get_with_raw_bytes_inner(table_id).await
     }
 
     async fn get_with_raw_bytes_inner(
         &self,
         table_id: TableId,
-    ) -> Result<Option<DeserializedValueWithBytes<TablePartValue>>> {
-        let key = TablePartKey::new(table_id);
+    ) -> Result<Option<DeserializedValueWithBytes<TableRepartValue>>> {
+        let key = TableRepartKey::new(table_id);
         self.kv_backend
             .get(&key.to_bytes())
             .await?
@@ -223,31 +224,31 @@ impl TablePartManager {
             .transpose()
     }
 
-    /// Returns batch of [`TablePartValue`] that respects the order of `table_ids`.
-    pub async fn batch_get(&self, table_ids: &[TableId]) -> Result<Vec<Option<TablePartValue>>> {
-        let raw_table_parts = self.batch_get_inner(table_ids).await?;
+    /// Returns batch of [`TableRepartValue`] that respects the order of `table_ids`.
+    pub async fn batch_get(&self, table_ids: &[TableId]) -> Result<Vec<Option<TableRepartValue>>> {
+        let raw_table_reparts = self.batch_get_inner(table_ids).await?;
 
-        Ok(raw_table_parts
+        Ok(raw_table_reparts
             .into_iter()
             .map(|v| v.map(|x| x.inner))
             .collect())
     }
 
-    /// Returns batch of [`TablePartValue`] wrapped with [`DeserializedValueWithBytes`].
+    /// Returns batch of [`TableRepartValue`] wrapped with [`DeserializedValueWithBytes`].
     pub async fn batch_get_with_raw_bytes(
         &self,
         table_ids: &[TableId],
-    ) -> Result<Vec<Option<DeserializedValueWithBytes<TablePartValue>>>> {
+    ) -> Result<Vec<Option<DeserializedValueWithBytes<TableRepartValue>>>> {
         self.batch_get_inner(table_ids).await
     }
 
     async fn batch_get_inner(
         &self,
         table_ids: &[TableId],
-    ) -> Result<Vec<Option<DeserializedValueWithBytes<TablePartValue>>>> {
+    ) -> Result<Vec<Option<DeserializedValueWithBytes<TableRepartValue>>>> {
         let keys = table_ids
             .iter()
-            .map(|id| TablePartKey::new(*id).to_bytes())
+            .map(|id| TableRepartKey::new(*id).to_bytes())
             .collect::<Vec<_>>();
         let resp = self
             .kv_backend
@@ -275,19 +276,19 @@ impl TablePartManager {
     pub async fn update_mappings(&self, src: RegionId, dst: &[RegionId]) -> Result<()> {
         let table_id = src.table_id();
 
-        // Get current table part with raw bytes for CAS operation
+        // Get current table repart with raw bytes for CAS operation
         let current_table_part = self
             .get_with_raw_bytes(table_id)
             .await?
             .context(crate::error::TablePartitionNotFoundSnafu { table_id })?;
 
-        // Clone the current part value and update mappings
-        let mut new_table_part_value = current_table_part.inner.clone();
-        new_table_part_value.update_mappings(src, dst);
+        // Clone the current repart value and update mappings
+        let mut new_table_repart_value = current_table_part.inner.clone();
+        new_table_repart_value.update_mappings(src, dst);
 
         // Execute atomic update
         let (txn, _) =
-            self.build_update_txn(table_id, &current_table_part, &new_table_part_value)?;
+            self.build_update_txn(table_id, &current_table_part, &new_table_repart_value)?;
 
         let result = self.kv_backend.txn(txn).await?;
 
@@ -309,19 +310,19 @@ impl TablePartManager {
     pub async fn remove_mappings(&self, src: RegionId, dsts: &[RegionId]) -> Result<()> {
         let table_id = src.table_id();
 
-        // Get current table part with raw bytes for CAS operation
+        // Get current table repart with raw bytes for CAS operation
         let current_table_part = self
             .get_with_raw_bytes(table_id)
             .await?
             .context(crate::error::TablePartitionNotFoundSnafu { table_id })?;
 
-        // Clone the current part value and remove mappings
-        let mut new_table_part_value = current_table_part.inner.clone();
-        new_table_part_value.remove_mappings(src, dsts);
+        // Clone the current repart value and remove mappings
+        let mut new_table_repart_value = current_table_part.inner.clone();
+        new_table_repart_value.remove_mappings(src, dsts);
 
         // Execute atomic update
         let (txn, _) =
-            self.build_update_txn(table_id, &current_table_part, &new_table_part_value)?;
+            self.build_update_txn(table_id, &current_table_part, &new_table_repart_value)?;
 
         let result = self.kv_backend.txn(txn).await?;
 
@@ -344,8 +345,8 @@ impl TablePartManager {
         src_region: RegionId,
     ) -> Result<Option<BTreeSet<RegionId>>> {
         let table_id = src_region.table_id();
-        let table_part = self.get(table_id).await?;
-        Ok(table_part.and_then(|part| part.src_to_dst.get(&src_region).cloned()))
+        let table_repart = self.get(table_id).await?;
+        Ok(table_repart.and_then(|repart| repart.src_to_dst.get(&src_region).cloned()))
     }
 }
 
@@ -359,22 +360,22 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
 
     #[test]
-    fn test_table_part_key_serialization() {
-        let key = TablePartKey::new(42);
+    fn test_table_repart_key_serialization() {
+        let key = TableRepartKey::new(42);
         let raw_key = key.to_bytes();
         assert_eq!(raw_key, b"__table_part/42");
     }
 
     #[test]
-    fn test_table_part_key_deserialization() {
-        let expected = TablePartKey::new(42);
-        let key = TablePartKey::from_bytes(b"__table_part/42").unwrap();
+    fn test_table_repart_key_deserialization() {
+        let expected = TableRepartKey::new(42);
+        let key = TableRepartKey::from_bytes(b"__table_part/42").unwrap();
         assert_eq!(key, expected);
     }
 
     #[test]
-    fn test_table_part_key_deserialization_invalid_utf8() {
-        let result = TablePartKey::from_bytes(b"__table_part/\xff");
+    fn test_table_repart_key_deserialization_invalid_utf8() {
+        let result = TableRepartKey::from_bytes(b"__table_part/\xff");
         assert!(result.is_err());
         assert!(
             result
@@ -385,34 +386,34 @@ mod tests {
     }
 
     #[test]
-    fn test_table_part_key_deserialization_invalid_format() {
-        let result = TablePartKey::from_bytes(b"invalid_key_format");
+    fn test_table_repart_key_deserialization_invalid_format() {
+        let result = TableRepartKey::from_bytes(b"invalid_key_format");
         assert!(result.is_err());
         assert!(
             result
                 .unwrap_err()
                 .to_string()
-                .contains("Invalid TablePartKey")
+                .contains("Invalid TableRepartKey")
         );
     }
 
     #[test]
-    fn test_table_part_value_serialization_deserialization() {
+    fn test_table_repart_value_serialization_deserialization() {
         let mut src_to_dst = BTreeMap::new();
         let src_region = RegionId::new(1, 1);
         let dst_regions = vec![RegionId::new(1, 2), RegionId::new(1, 3)];
         src_to_dst.insert(src_region, dst_regions.into_iter().collect());
 
-        let value = TablePartValue { src_to_dst };
+        let value = TableRepartValue { src_to_dst };
         let serialized = value.try_as_raw_value().unwrap();
-        let deserialized = TablePartValue::try_from_raw_value(&serialized).unwrap();
+        let deserialized = TableRepartValue::try_from_raw_value(&serialized).unwrap();
 
         assert_eq!(value, deserialized);
     }
 
     #[test]
-    fn test_table_part_value_update_mappings_new_src() {
-        let mut value = TablePartValue {
+    fn test_table_repart_value_update_mappings_new_src() {
+        let mut value = TableRepartValue {
             src_to_dst: BTreeMap::new(),
         };
 
@@ -441,8 +442,8 @@ mod tests {
     }
 
     #[test]
-    fn test_table_part_value_update_mappings_existing_src() {
-        let mut value = TablePartValue {
+    fn test_table_repart_value_update_mappings_existing_src() {
+        let mut value = TableRepartValue {
             src_to_dst: BTreeMap::new(),
         };
 
@@ -481,8 +482,8 @@ mod tests {
     }
 
     #[test]
-    fn test_table_part_value_remove_mappings_existing() {
-        let mut value = TablePartValue {
+    fn test_table_repart_value_remove_mappings_existing() {
+        let mut value = TableRepartValue {
             src_to_dst: BTreeMap::new(),
         };
 
@@ -510,8 +511,8 @@ mod tests {
     }
 
     #[test]
-    fn test_table_part_value_remove_mappings_all() {
-        let mut value = TablePartValue {
+    fn test_table_repart_value_remove_mappings_all() {
+        let mut value = TableRepartValue {
             src_to_dst: BTreeMap::new(),
         };
 
@@ -526,8 +527,8 @@ mod tests {
     }
 
     #[test]
-    fn test_table_part_value_remove_mappings_nonexistent() {
-        let mut value = TablePartValue {
+    fn test_table_repart_value_remove_mappings_nonexistent() {
+        let mut value = TableRepartValue {
             src_to_dst: BTreeMap::new(),
         };
 
@@ -552,8 +553,8 @@ mod tests {
     }
 
     #[test]
-    fn test_table_part_value_remove_mappings_nonexistent_src() {
-        let mut value = TablePartValue {
+    fn test_table_repart_value_remove_mappings_nonexistent_src() {
+        let mut value = TableRepartValue {
             src_to_dst: BTreeMap::new(),
         };
 
@@ -568,32 +569,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_part_manager_get_empty() {
+    async fn test_table_repart_manager_get_empty() {
         let kv = Arc::new(MemoryKvBackend::default());
-        let manager = TablePartManager::new(kv);
+        let manager = TableRepartManager::new(kv);
         let result = manager.get(1024).await.unwrap();
         assert!(result.is_none());
     }
 
     #[tokio::test]
-    async fn test_table_part_manager_get_with_raw_bytes_empty() {
+    async fn test_table_repart_manager_get_with_raw_bytes_empty() {
         let kv = Arc::new(MemoryKvBackend::default());
-        let manager = TablePartManager::new(kv);
+        let manager = TableRepartManager::new(kv);
         let result = manager.get_with_raw_bytes(1024).await.unwrap();
         assert!(result.is_none());
     }
 
     #[tokio::test]
-    async fn test_table_part_manager_create_and_get() {
+    async fn test_table_repart_manager_create_and_get() {
         let kv = Arc::new(MemoryKvBackend::default());
-        let manager = TablePartManager::new(kv.clone());
+        let manager = TableRepartManager::new(kv.clone());
 
         let mut src_to_dst = BTreeMap::new();
         let src_region = RegionId::new(1, 1);
         let dst_regions = vec![RegionId::new(1, 2), RegionId::new(1, 3)];
         src_to_dst.insert(src_region, dst_regions.into_iter().collect());
 
-        let value = TablePartValue { src_to_dst };
+        let value = TableRepartValue { src_to_dst };
 
         // Create the table part
         let (txn, _) = manager.build_create_txn(1024, &value).unwrap();
@@ -606,11 +607,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_part_manager_update_txn() {
+    async fn test_table_repart_manager_update_txn() {
         let kv = Arc::new(MemoryKvBackend::default());
-        let manager = TablePartManager::new(kv.clone());
+        let manager = TableRepartManager::new(kv.clone());
 
-        let initial_value = TablePartValue {
+        let initial_value = TableRepartValue {
             src_to_dst: BTreeMap::new(),
         };
 
@@ -627,7 +628,7 @@ mod tests {
         let src_region = RegionId::new(1, 1);
         let dst_regions = vec![RegionId::new(1, 2)];
         updated_src_to_dst.insert(src_region, dst_regions.into_iter().collect());
-        let updated_value = TablePartValue {
+        let updated_value = TableRepartValue {
             src_to_dst: updated_src_to_dst,
         };
 
@@ -644,15 +645,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_part_manager_batch_get() {
+    async fn test_table_repart_manager_batch_get() {
         let kv = Arc::new(MemoryKvBackend::default());
-        let manager = TablePartManager::new(kv.clone());
+        let manager = TableRepartManager::new(kv.clone());
 
-        // Create multiple table parts
-        let table_parts = vec![
+        // Create multiple table reparts
+        let table_reparts = vec![
             (
                 1024,
-                TablePartValue {
+                TableRepartValue {
                     src_to_dst: {
                         let mut map = BTreeMap::new();
                         map.insert(
@@ -665,7 +666,7 @@ mod tests {
             ),
             (
                 1025,
-                TablePartValue {
+                TableRepartValue {
                     src_to_dst: {
                         let mut map = BTreeMap::new();
                         map.insert(
@@ -680,7 +681,7 @@ mod tests {
             ),
         ];
 
-        for (table_id, value) in &table_parts {
+        for (table_id, value) in &table_reparts {
             let (txn, _) = manager.build_create_txn(*table_id, value).unwrap();
             let result = kv.txn(txn).await.unwrap();
             assert!(result.succeeded);
@@ -689,18 +690,18 @@ mod tests {
         // Batch get
         let results = manager.batch_get(&[1024, 1025, 1026]).await.unwrap();
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0].as_ref().unwrap(), &table_parts[0].1);
-        assert_eq!(results[1].as_ref().unwrap(), &table_parts[1].1);
+        assert_eq!(results[0].as_ref().unwrap(), &table_reparts[0].1);
+        assert_eq!(results[1].as_ref().unwrap(), &table_reparts[1].1);
         assert!(results[2].is_none());
     }
 
     #[tokio::test]
-    async fn test_table_part_manager_update_mappings() {
+    async fn test_table_repart_manager_update_mappings() {
         let kv = Arc::new(MemoryKvBackend::default());
-        let manager = TablePartManager::new(kv.clone());
+        let manager = TableRepartManager::new(kv.clone());
 
         // Create initial table part
-        let initial_value = TablePartValue {
+        let initial_value = TableRepartValue {
             src_to_dst: BTreeMap::new(),
         };
         let (txn, _) = manager.build_create_txn(1024, &initial_value).unwrap();
@@ -720,9 +721,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_part_manager_remove_mappings() {
+    async fn test_table_repart_manager_remove_mappings() {
         let kv = Arc::new(MemoryKvBackend::default());
-        let manager = TablePartManager::new(kv.clone());
+        let manager = TableRepartManager::new(kv.clone());
 
         // Create initial table part with mappings
         let mut initial_src_to_dst = BTreeMap::new();
@@ -734,7 +735,7 @@ mod tests {
         ];
         initial_src_to_dst.insert(src, dst_regions.into_iter().collect());
 
-        let initial_value = TablePartValue {
+        let initial_value = TableRepartValue {
             src_to_dst: initial_src_to_dst,
         };
         let (txn, _) = manager.build_create_txn(1024, &initial_value).unwrap();
@@ -759,9 +760,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_part_manager_get_dst_regions() {
+    async fn test_table_repart_manager_get_dst_regions() {
         let kv = Arc::new(MemoryKvBackend::default());
-        let manager = TablePartManager::new(kv.clone());
+        let manager = TableRepartManager::new(kv.clone());
 
         // Create initial table part with mappings
         let mut initial_src_to_dst = BTreeMap::new();
@@ -769,7 +770,7 @@ mod tests {
         let dst_regions = vec![RegionId::new(1024, 2), RegionId::new(1024, 3)];
         initial_src_to_dst.insert(src, dst_regions.into_iter().collect());
 
-        let initial_value = TablePartValue {
+        let initial_value = TableRepartValue {
             src_to_dst: initial_src_to_dst,
         };
         let (txn, _) = manager.build_create_txn(1024, &initial_value).unwrap();
@@ -791,9 +792,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_part_manager_operations_on_nonexistent_table() {
+    async fn test_table_repart_manager_operations_on_nonexistent_table() {
         let kv = Arc::new(MemoryKvBackend::default());
-        let manager = TablePartManager::new(kv);
+        let manager = TableRepartManager::new(kv);
 
         let src = RegionId::new(1024, 1);
         let dst = vec![RegionId::new(1024, 2)];
@@ -818,12 +819,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_part_manager_batch_get_with_raw_bytes() {
+    async fn test_table_repart_manager_batch_get_with_raw_bytes() {
         let kv = Arc::new(MemoryKvBackend::default());
-        let manager = TablePartManager::new(kv.clone());
+        let manager = TableRepartManager::new(kv.clone());
 
         // Create table part
-        let value = TablePartValue {
+        let value = TableRepartValue {
             src_to_dst: {
                 let mut map = BTreeMap::new();
                 map.insert(
