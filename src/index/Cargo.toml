@@ -7,6 +7,9 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+vector_index = ["dep:usearch"]
+
 [dependencies]
 async-trait.workspace = true
 asynchronous-codec = "0.7.0"
@@ -41,7 +44,7 @@ tantivy = { version = "0.24", features = ["zstd-compression"] }
 tantivy-jieba = "0.16"
 tokio.workspace = true
 tokio-util.workspace = true
-usearch = { version = "2.21", default-features = false, features = ["fp16lib"] }
+usearch = { version = "2.21", default-features = false, features = ["fp16lib"], optional = true }
 uuid.workspace = true
 
 [dev-dependencies]

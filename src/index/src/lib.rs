@@ -22,6 +22,7 @@ pub mod external_provider;
 pub mod fulltext_index;
 pub mod inverted_index;
 pub mod target;
+#[cfg(feature = "vector_index")]
 pub mod vector;
 
 pub type Bytes = Vec<u8>;
