@@ -68,7 +68,7 @@ function deploy_greptimedb_cluster() {
 
   helm install "$cluster_name" greptime/greptimedb-cluster \
     --set image.tag="$GREPTIMEDB_IMAGE_TAG" \
-    --set meta.backendStorage.etcd.endpoints="etcd.$install_namespace:2379" \
+    --set meta.backendStorage.etcd.endpoints[0]="etcd.$install_namespace:2379" \
     -n "$install_namespace"
 
   # Wait for greptimedb cluster to be ready.
@@ -103,14 +103,13 @@ function deploy_greptimedb_cluster_with_s3_storage() {
 
   helm install "$cluster_name" greptime/greptimedb-cluster -n "$install_namespace" \
     --set image.tag="$GREPTIMEDB_IMAGE_TAG" \
-    --set meta.backendStorage.etcd.endpoints="etcd.$install_namespace:2379" \
+    --set meta.backendStorage.etcd.endpoints[0]="etcd.$install_namespace:2379" \
     --set storage.s3.bucket="$AWS_CI_TEST_BUCKET" \
     --set storage.s3.region="$AWS_REGION" \
     --set storage.s3.root="$DATA_ROOT" \
     --set storage.credentials.secretName=s3-credentials \
     --set storage.credentials.accessKeyId="$AWS_ACCESS_KEY_ID" \
     --set storage.credentials.secretAccessKey="$AWS_SECRET_ACCESS_KEY"
-
   # Wait for greptimedb cluster to be ready.
   while true; do
     PHASE=$(kubectl -n "$install_namespace" get gtc "$cluster_name" -o jsonpath='{.status.clusterPhase}')
