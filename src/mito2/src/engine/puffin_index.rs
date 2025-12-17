@@ -32,7 +32,7 @@ use crate::cache::index::bloom_filter_index::{
     BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader, Tag,
 };
 use crate::cache::index::inverted_index::{CachedInvertedIndexBlobReader, InvertedIndexCacheRef};
-use crate::sst::file::RegionFileId;
+use crate::sst::file::RegionIndexId;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE as BLOOM_BLOB_TYPE;
 use crate::sst::index::fulltext_index::{
     INDEX_BLOB_TYPE_BLOOM as FULLTEXT_BLOOM_BLOB_TYPE,
@@ -66,14 +66,14 @@ pub(crate) struct IndexEntryContext<'a> {
 /// Collect index metadata entries present in the SST puffin file.
 pub(crate) async fn collect_index_entries_from_puffin(
     manager: SstPuffinManager,
-    region_file_id: RegionFileId,
+    region_index_id: RegionIndexId,
     context: IndexEntryContext<'_>,
     bloom_filter_cache: Option<BloomFilterIndexCacheRef>,
     inverted_index_cache: Option<InvertedIndexCacheRef>,
 ) -> Vec<PuffinIndexMetaEntry> {
     let mut entries = Vec::new();
 
-    let reader = match manager.reader(&region_file_id).await {
+    let reader = match manager.reader(&region_index_id).await {
         Ok(reader) => reader,
         Err(err) => {
             warn!(
@@ -104,7 +104,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
             Some(BlobIndexTypeTargetKey::BloomFilter(target_key)) => {
                 let bloom_meta = try_read_bloom_meta(
                     &reader,
-                    region_file_id,
+                    region_index_id,
                     blob.blob_type.as_str(),
                     target_key,
                     bloom_filter_cache.as_ref(),
@@ -130,7 +130,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
             Some(BlobIndexTypeTargetKey::FulltextBloom(target_key)) => {
                 let bloom_meta = try_read_bloom_meta(
                     &reader,
-                    region_file_id,
+                    region_index_id,
                     blob.blob_type.as_str(),
                     target_key,
                     bloom_filter_cache.as_ref(),
@@ -172,7 +172,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
             Some(BlobIndexTypeTargetKey::Inverted) => {
                 let mut inverted_entries = collect_inverted_entries(
                     &reader,
-                    region_file_id,
+                    region_index_id,
                     inverted_index_cache.as_ref(),
                     &context,
                 )
@@ -188,12 +188,12 @@ pub(crate) async fn collect_index_entries_from_puffin(
 
 async fn collect_inverted_entries(
     reader: &SstPuffinReader,
-    region_file_id: RegionFileId,
+    region_index_id: RegionIndexId,
     cache: Option<&InvertedIndexCacheRef>,
     context: &IndexEntryContext<'_>,
 ) -> Vec<PuffinIndexMetaEntry> {
     // Read the inverted index blob and surface its per-column metadata entries.
-    let file_id = region_file_id.file_id();
+    let file_id = region_index_id.file_id();
 
     let guard = match reader.blob(INVERTED_BLOB_TYPE).await {
         Ok(guard) => guard,
@@ -229,11 +229,12 @@ async fn collect_inverted_entries(
     let metas = if let (Some(cache), Some(blob_size)) = (cache, blob_size) {
         let reader = CachedInvertedIndexBlobReader::new(
             file_id,
+            region_index_id.version,
             blob_size,
             InvertedIndexBlobReader::new(blob_reader),
             cache.clone(),
         );
-        match reader.metadata().await {
+        match reader.metadata(None).await {
             Ok(metas) => metas,
             Err(err) => {
                 warn!(
@@ -247,7 +248,7 @@ async fn collect_inverted_entries(
         }
     } else {
         let reader = InvertedIndexBlobReader::new(blob_reader);
-        match reader.metadata().await {
+        match reader.metadata(None).await {
             Ok(metas) => metas,
             Err(err) => {
                 warn!(
@@ -289,7 +290,7 @@ fn build_inverted_entries(
 
 async fn try_read_bloom_meta(
     reader: &SstPuffinReader,
-    region_file_id: RegionFileId,
+    region_index_id: RegionIndexId,
     blob_type: &str,
     target_key: &str,
     cache: Option<&BloomFilterIndexCacheRef>,
@@ -311,17 +312,18 @@ async fn try_read_bloom_meta(
                 let result = match (cache, column_id, blob_size) {
                     (Some(cache), Some(column_id), Some(blob_size)) => {
                         CachedBloomFilterIndexBlobReader::new(
-                            region_file_id.file_id(),
+                            region_index_id.file_id(),
+                            region_index_id.version,
                             column_id,
                             tag,
                             blob_size,
                             bloom_reader,
                             cache.clone(),
                         )
-                        .metadata()
+                        .metadata(None)
                         .await
                     }
-                    _ => bloom_reader.metadata().await,
+                    _ => bloom_reader.metadata(None).await,
                 };
 
                 match result {

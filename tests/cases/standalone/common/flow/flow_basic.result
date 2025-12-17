@@ -20,19 +20,21 @@ Affected Rows: 0
 
 SHOW CREATE TABLE out_num_cnt_basic;
 
-+-------------------+--------------------------------------------------+
-| Table             | Create Table                                     |
-+-------------------+--------------------------------------------------+
-| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
-|                   |   "sum(numbers_input_basic.number)" BIGINT NULL, |
-|                   |   "time_window" TIMESTAMP(9) NOT NULL,           |
-|                   |   "update_at" TIMESTAMP(3) NULL,                 |
-|                   |   TIME INDEX ("time_window")                     |
-|                   | )                                                |
-|                   |                                                  |
-|                   | ENGINE=mito                                      |
-|                   |                                                  |
-+-------------------+--------------------------------------------------+
++-------------------+---------------------------------------------------+
+| Table             | Create Table                                      |
++-------------------+---------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" (  |
+|                   |   "sum(numbers_input_basic.number)" BIGINT NULL,  |
+|                   |   "time_window" TIMESTAMP(9) NOT NULL,            |
+|                   |   "update_at" TIMESTAMP(3) NULL,                  |
+|                   |   TIME INDEX ("time_window")                      |
+|                   | )                                                 |
+|                   |                                                   |
+|                   | ENGINE=mito                                       |
+|                   | WITH(                                             |
+|                   |   'comment' = 'Auto created table by flow engine' |
+|                   | )                                                 |
++-------------------+---------------------------------------------------+
 
 -- TODO(discord9): confirm if it's necessary to flush flow here?
 -- because flush_flow result is at most 1
@@ -47,19 +49,21 @@ ADMIN FLUSH_FLOW('test_numbers_basic');
 
 SHOW CREATE TABLE out_num_cnt_basic;
 
-+-------------------+--------------------------------------------------+
-| Table             | Create Table                                     |
-+-------------------+--------------------------------------------------+
-| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
-|                   |   "sum(numbers_input_basic.number)" BIGINT NULL, |
-|                   |   "time_window" TIMESTAMP(9) NOT NULL,           |
-|                   |   "update_at" TIMESTAMP(3) NULL,                 |
-|                   |   TIME INDEX ("time_window")                     |
-|                   | )                                                |
-|                   |                                                  |
-|                   | ENGINE=mito                                      |
-|                   |                                                  |
-+-------------------+--------------------------------------------------+
++-------------------+---------------------------------------------------+
+| Table             | Create Table                                      |
++-------------------+---------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" (  |
+|                   |   "sum(numbers_input_basic.number)" BIGINT NULL,  |
+|                   |   "time_window" TIMESTAMP(9) NOT NULL,            |
+|                   |   "update_at" TIMESTAMP(3) NULL,                  |
+|                   |   TIME INDEX ("time_window")                      |
+|                   | )                                                 |
+|                   |                                                   |
+|                   | ENGINE=mito                                       |
+|                   | WITH(                                             |
+|                   |   'comment' = 'Auto created table by flow engine' |
+|                   | )                                                 |
++-------------------+---------------------------------------------------+
 
 -- SQLNESS ARG restart=true
 SELECT 1;
@@ -172,19 +176,21 @@ Affected Rows: 0
 
 SHOW CREATE TABLE out_basic;
 
-+-----------+---------------------------------------------+
-| Table     | Create Table                                |
-+-----------+---------------------------------------------+
-| out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (    |
-|           |   "wildcard" BIGINT NULL,                   |
-|           |   "update_at" TIMESTAMP(3) NULL,            |
-|           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
-|           |   TIME INDEX ("__ts_placeholder")           |
-|           | )                                           |
-|           |                                             |
-|           | ENGINE=mito                                 |
-|           |                                             |
-+-----------+---------------------------------------------+
++-----------+---------------------------------------------------+
+| Table     | Create Table                                      |
++-----------+---------------------------------------------------+
+| out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (          |
+|           |   "wildcard" BIGINT NULL,                         |
+|           |   "update_at" TIMESTAMP(3) NULL,                  |
+|           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
+|           |   TIME INDEX ("__ts_placeholder")                 |
+|           | )                                                 |
+|           |                                                   |
+|           | ENGINE=mito                                       |
+|           | WITH(                                             |
+|           |   'comment' = 'Auto created table by flow engine' |
+|           | )                                                 |
++-----------+---------------------------------------------------+
 
 DROP FLOW test_wildcard_basic;
 
@@ -200,19 +206,21 @@ Affected Rows: 0
 
 SHOW CREATE TABLE out_basic;
 
-+-----------+---------------------------------------------+
-| Table     | Create Table                                |
-+-----------+---------------------------------------------+
-| out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (    |
-|           |   "wildcard" BIGINT NULL,                   |
-|           |   "update_at" TIMESTAMP(3) NULL,            |
-|           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
-|           |   TIME INDEX ("__ts_placeholder")           |
-|           | )                                           |
-|           |                                             |
-|           | ENGINE=mito                                 |
-|           |                                             |
-+-----------+---------------------------------------------+
++-----------+---------------------------------------------------+
+| Table     | Create Table                                      |
++-----------+---------------------------------------------------+
+| out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (          |
+|           |   "wildcard" BIGINT NULL,                         |
+|           |   "update_at" TIMESTAMP(3) NULL,                  |
+|           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
+|           |   TIME INDEX ("__ts_placeholder")                 |
+|           | )                                                 |
+|           |                                                   |
+|           | ENGINE=mito                                       |
+|           | WITH(                                             |
+|           |   'comment' = 'Auto created table by flow engine' |
+|           | )                                                 |
++-----------+---------------------------------------------------+
 
 -- SQLNESS ARG restart=true
 SELECT 1;
@@ -243,19 +251,21 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 
 SHOW CREATE TABLE out_basic;
 
-+-----------+---------------------------------------------+
-| Table     | Create Table                                |
-+-----------+---------------------------------------------+
-| out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (    |
-|           |   "wildcard" BIGINT NULL,                   |
-|           |   "update_at" TIMESTAMP(3) NULL,            |
-|           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
-|           |   TIME INDEX ("__ts_placeholder")           |
-|           | )                                           |
-|           |                                             |
-|           | ENGINE=mito                                 |
-|           |                                             |
-+-----------+---------------------------------------------+
++-----------+---------------------------------------------------+
+| Table     | Create Table                                      |
++-----------+---------------------------------------------------+
+| out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (          |
+|           |   "wildcard" BIGINT NULL,                         |
+|           |   "update_at" TIMESTAMP(3) NULL,                  |
+|           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
+|           |   TIME INDEX ("__ts_placeholder")                 |
+|           | )                                                 |
+|           |                                                   |
+|           | ENGINE=mito                                       |
+|           | WITH(                                             |
+|           |   'comment' = 'Auto created table by flow engine' |
+|           | )                                                 |
++-----------+---------------------------------------------------+
 
 SELECT wildcard FROM out_basic;
 
@@ -309,7 +319,9 @@ SHOW CREATE TABLE out_distinct_basic;
 |                    | )                                                 |
 |                    |                                                   |
 |                    | ENGINE=mito                                       |
-|                    |                                                   |
+|                    | WITH(                                             |
+|                    |   'comment' = 'Auto created table by flow engine' |
+|                    | )                                                 |
 +--------------------+---------------------------------------------------+
 
 -- TODO(discord9): confirm if it's necessary to flush flow here?
@@ -365,7 +377,9 @@ SHOW CREATE TABLE out_distinct_basic;
 |                    | )                                                 |
 |                    |                                                   |
 |                    | ENGINE=mito                                       |
-|                    |                                                   |
+|                    | WITH(                                             |
+|                    |   'comment' = 'Auto created table by flow engine' |
+|                    | )                                                 |
 +--------------------+---------------------------------------------------+
 
 SELECT
@@ -637,20 +651,22 @@ Affected Rows: 0
 
 SHOW CREATE TABLE ngx_country;
 
-+-------------+---------------------------------------------+
-| Table       | Create Table                                |
-+-------------+---------------------------------------------+
-| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (  |
-|             |   "country" STRING NULL,                    |
-|             |   "update_at" TIMESTAMP(3) NULL,            |
-|             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
-|             |   TIME INDEX ("__ts_placeholder"),          |
-|             |   PRIMARY KEY ("country")                   |
-|             | )                                           |
-|             |                                             |
-|             | ENGINE=mito                                 |
-|             |                                             |
-+-------------+---------------------------------------------+
++-------------+---------------------------------------------------+
+| Table       | Create Table                                      |
++-------------+---------------------------------------------------+
+| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (        |
+|             |   "country" STRING NULL,                          |
+|             |   "update_at" TIMESTAMP(3) NULL,                  |
+|             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
+|             |   TIME INDEX ("__ts_placeholder"),                |
+|             |   PRIMARY KEY ("country")                         |
+|             | )                                                 |
+|             |                                                   |
+|             | ENGINE=mito                                       |
+|             | WITH(                                             |
+|             |   'comment' = 'Auto created table by flow engine' |
+|             | )                                                 |
++-------------+---------------------------------------------------+
 
 INSERT INTO
     ngx_access_log
@@ -670,20 +686,22 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 
 SHOW CREATE TABLE ngx_country;
 
-+-------------+---------------------------------------------+
-| Table       | Create Table                                |
-+-------------+---------------------------------------------+
-| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (  |
-|             |   "country" STRING NULL,                    |
-|             |   "update_at" TIMESTAMP(3) NULL,            |
-|             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
-|             |   TIME INDEX ("__ts_placeholder"),          |
-|             |   PRIMARY KEY ("country")                   |
-|             | )                                           |
-|             |                                             |
-|             | ENGINE=mito                                 |
-|             |                                             |
-+-------------+---------------------------------------------+
++-------------+---------------------------------------------------+
+| Table       | Create Table                                      |
++-------------+---------------------------------------------------+
+| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (        |
+|             |   "country" STRING NULL,                          |
+|             |   "update_at" TIMESTAMP(3) NULL,                  |
+|             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
+|             |   TIME INDEX ("__ts_placeholder"),                |
+|             |   PRIMARY KEY ("country")                         |
+|             | )                                                 |
+|             |                                                   |
+|             | ENGINE=mito                                       |
+|             | WITH(                                             |
+|             |   'comment' = 'Auto created table by flow engine' |
+|             | )                                                 |
++-------------+---------------------------------------------------+
 
 SELECT
     country
@@ -787,20 +805,22 @@ Affected Rows: 0
 
 SHOW CREATE TABLE ngx_country;
 
-+-------------+--------------------------------------------+
-| Table       | Create Table                               |
-+-------------+--------------------------------------------+
-| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" ( |
-|             |   "country" STRING NULL,                   |
-|             |   "time_window" TIMESTAMP(3) NOT NULL,     |
-|             |   "update_at" TIMESTAMP(3) NULL,           |
-|             |   TIME INDEX ("time_window"),              |
-|             |   PRIMARY KEY ("country")                  |
-|             | )                                          |
-|             |                                            |
-|             | ENGINE=mito                                |
-|             |                                            |
-+-------------+--------------------------------------------+
++-------------+---------------------------------------------------+
+| Table       | Create Table                                      |
++-------------+---------------------------------------------------+
+| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (        |
+|             |   "country" STRING NULL,                          |
+|             |   "time_window" TIMESTAMP(3) NOT NULL,            |
+|             |   "update_at" TIMESTAMP(3) NULL,                  |
+|             |   TIME INDEX ("time_window"),                     |
+|             |   PRIMARY KEY ("country")                         |
+|             | )                                                 |
+|             |                                                   |
+|             | ENGINE=mito                                       |
+|             | WITH(                                             |
+|             |   'comment' = 'Auto created table by flow engine' |
+|             | )                                                 |
++-------------+---------------------------------------------------+
 
 INSERT INTO
     ngx_access_log
@@ -820,20 +840,22 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 
 SHOW CREATE TABLE ngx_country;
 
-+-------------+--------------------------------------------+
-| Table       | Create Table                               |
-+-------------+--------------------------------------------+
-| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" ( |
-|             |   "country" STRING NULL,                   |
-|             |   "time_window" TIMESTAMP(3) NOT NULL,     |
-|             |   "update_at" TIMESTAMP(3) NULL,           |
-|             |   TIME INDEX ("time_window"),              |
-|             |   PRIMARY KEY ("country")                  |
-|             | )                                          |
-|             |                                            |
-|             | ENGINE=mito                                |
-|             |                                            |
-+-------------+--------------------------------------------+
++-------------+---------------------------------------------------+
+| Table       | Create Table                                      |
++-------------+---------------------------------------------------+
+| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (        |
+|             |   "country" STRING NULL,                          |
+|             |   "time_window" TIMESTAMP(3) NOT NULL,            |
+|             |   "update_at" TIMESTAMP(3) NULL,                  |
+|             |   TIME INDEX ("time_window"),                     |
+|             |   PRIMARY KEY ("country")                         |
+|             | )                                                 |
+|             |                                                   |
+|             | ENGINE=mito                                       |
+|             | WITH(                                             |
+|             |   'comment' = 'Auto created table by flow engine' |
+|             | )                                                 |
++-------------+---------------------------------------------------+
 
 SELECT
     country,
@@ -991,11 +1013,11 @@ ADMIN FLUSH_FLOW('temp_monitoring');
 -- This table should not exist yet
 SHOW TABLES LIKE 'temp_alerts';
 
-+-------------+
-| Tables      |
-+-------------+
-| temp_alerts |
-+-------------+
++------------------+
+| Tables_in_public |
++------------------+
+| temp_alerts      |
++------------------+
 
 INSERT INTO
     temp_sensor_data
@@ -1015,11 +1037,11 @@ ADMIN FLUSH_FLOW('temp_monitoring');
 
 SHOW TABLES LIKE 'temp_alerts';
 
-+-------------+
-| Tables      |
-+-------------+
-| temp_alerts |
-+-------------+
++------------------+
+| Tables_in_public |
++------------------+
+| temp_alerts      |
++------------------+
 
 SELECT
     sensor_id,
@@ -1673,19 +1695,21 @@ Affected Rows: 0
 
 SHOW CREATE TABLE out_num_cnt_basic;
 
-+-------------------+--------------------------------------------------+
-| Table             | Create Table                                     |
-+-------------------+--------------------------------------------------+
-| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
-|                   |   "avg_after_filter_num" BIGINT NULL,            |
-|                   |   "update_at" TIMESTAMP(3) NULL,                 |
-|                   |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,      |
-|                   |   TIME INDEX ("__ts_placeholder")                |
-|                   | )                                                |
-|                   |                                                  |
-|                   | ENGINE=mito                                      |
-|                   |                                                  |
-+-------------------+--------------------------------------------------+
++-------------------+---------------------------------------------------+
+| Table             | Create Table                                      |
++-------------------+---------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" (  |
+|                   |   "avg_after_filter_num" BIGINT NULL,             |
+|                   |   "update_at" TIMESTAMP(3) NULL,                  |
+|                   |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
+|                   |   TIME INDEX ("__ts_placeholder")                 |
+|                   | )                                                 |
+|                   |                                                   |
+|                   | ENGINE=mito                                       |
+|                   | WITH(                                             |
+|                   |   'comment' = 'Auto created table by flow engine' |
+|                   | )                                                 |
++-------------------+---------------------------------------------------+
 
 -- TODO(discord9): confirm if it's necessary to flush flow here?
 -- because flush_flow result is at most 1

@@ -30,6 +30,7 @@ use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as co
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
+use promql::extension_plan::SeriesDivide;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -380,7 +381,23 @@ impl PlanRewriter {
         }
 
         match Categorizer::check_plan(plan, self.partition_cols.clone())? {
-            Commutativity::Commutative => {}
+            Commutativity::Commutative => {
+                // PATCH: we should reconsider SORT's commutativity instead of doing this trick.
+                // explain: for a fully commutative SeriesDivide, its child Sort plan only serves it. I.e., that
+                //   Sort plan is also fully commutative, instead of conditional commutative. So we can remove
+                //   the generated MergeSort from stage safely.
+                if let LogicalPlan::Extension(ext_a) = plan
+                    && ext_a.node.name() == SeriesDivide::name()
+                    && let Some(LogicalPlan::Extension(ext_b)) = self.stage.last()
+                    && ext_b.node.name() == MergeSortLogicalPlan::name()
+                {
+                    // revert last `ConditionalCommutative` result for Sort plan in this case.
+                    // `update_column_requirements` left unchanged because Sort won't generate
+                    // new columns or remove existing columns.
+                    self.stage.pop();
+                    self.expand_on_next_part_cond_trans_commutative = false;
+                }
+            }
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
                     // notice this plan is parent of current node, so `self.level - 1` when updating column requirements

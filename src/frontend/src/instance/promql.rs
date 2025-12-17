@@ -20,7 +20,6 @@ use common_catalog::consts::INFORMATION_SCHEMA_NAME;
 use common_catalog::format_full_table_name;
 use common_recordbatch::util;
 use common_telemetry::tracing;
-use datatypes::prelude::Value;
 use promql_parser::label::{MatchOp, Matcher, Matchers};
 use query::promql;
 use query::promql::planner::PromPlanner;
@@ -90,15 +89,10 @@ impl Instance {
 
         for batch in batches {
             // Only one column the results, ensured by `prometheus::metric_name_matchers_to_plan`.
-            let names = batch.column(0);
-
-            for i in 0..names.len() {
-                let Value::String(name) = names.get(i) else {
-                    unreachable!();
-                };
-
-                results.push(name.into_string());
-            }
+            batch
+                .iter_column_as_string(0)
+                .flatten()
+                .for_each(|x| results.push(x))
         }
 
         Ok(results)
@@ -142,7 +136,7 @@ impl Instance {
                 table_name: format_full_table_name(ctx.current_catalog(), &table_schema, &metric),
             })?;
 
-        let scan_plan = dataframe.into_logical_plan();
+        let scan_plan = dataframe.into_unoptimized_plan();
         let filter_conditions =
             PromPlanner::matchers_to_expr(Matchers::new(matchers), scan_plan.schema())
                 .context(PrometheusLabelValuesQueryPlanSnafu)?;
@@ -173,11 +167,10 @@ impl Instance {
         let mut results = Vec::with_capacity(batches.iter().map(|b| b.num_rows()).sum());
         for batch in batches {
             // Only one column in results, ensured by `prometheus::label_values_matchers_to_plan`.
-            let names = batch.column(0);
-
-            for i in 0..names.len() {
-                results.push(names.get(i).to_string());
-            }
+            batch
+                .iter_column_as_string(0)
+                .flatten()
+                .for_each(|x| results.push(x))
         }
 
         Ok(results)

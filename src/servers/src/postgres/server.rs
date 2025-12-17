@@ -80,7 +80,7 @@ impl PostgresServer {
         let process_manager = self.process_manager.clone();
         accepting_stream.for_each(move |tcp_stream| {
             let io_runtime = io_runtime.clone();
-            let tls_acceptor = tls_server_config.get_server_config().map(TlsAcceptor::from);
+            let tls_acceptor = tls_server_config.get_config().map(TlsAcceptor::from);
             let handler_maker = handler_maker.clone();
             let process_id = process_manager.as_ref().map(|p| p.next_id()).unwrap_or(0);
 

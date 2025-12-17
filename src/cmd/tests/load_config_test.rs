@@ -31,7 +31,6 @@ use meta_srv::selector::SelectorType;
 use metric_engine::config::EngineConfig as MetricEngineConfig;
 use mito2::config::MitoConfig;
 use query::options::QueryOptions;
-use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -53,7 +52,6 @@ fn test_load_datanode_example_config() {
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
-                heartbeat_timeout: Duration::from_millis(500),
                 ddl_timeout: Duration::from_secs(10),
                 connect_timeout: Duration::from_secs(1),
                 tcp_nodelay: true,
@@ -95,11 +93,6 @@ fn test_load_datanode_example_config() {
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
-            export_metrics: ExportMetricsOption {
-                self_import: None,
-                remote_write: Some(Default::default()),
-                ..Default::default()
-            },
             grpc: GrpcOptions::default()
                 .with_bind_addr("127.0.0.1:3001")
                 .with_server_addr("127.0.0.1:3001"),
@@ -124,7 +117,6 @@ fn test_load_frontend_example_config() {
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
-                heartbeat_timeout: Duration::from_millis(500),
                 ddl_timeout: Duration::from_secs(10),
                 connect_timeout: Duration::from_secs(1),
                 tcp_nodelay: true,
@@ -145,11 +137,6 @@ fn test_load_frontend_example_config() {
                     tcp_nodelay: true,
                     ..Default::default()
                 },
-            },
-            export_metrics: ExportMetricsOption {
-                self_import: None,
-                remote_write: Some(Default::default()),
-                ..Default::default()
             },
             grpc: GrpcOptions {
                 bind_addr: "127.0.0.1:4001".to_string(),
@@ -200,11 +187,6 @@ fn test_load_metasrv_example_config() {
                     connect_timeout: Duration::from_secs(10),
                     tcp_nodelay: true,
                 },
-            },
-            export_metrics: ExportMetricsOption {
-                self_import: None,
-                remote_write: Some(Default::default()),
-                ..Default::default()
             },
             backend_tls: Some(TlsOption {
                 mode: TlsMode::Prefer,
@@ -257,7 +239,6 @@ fn test_load_flownode_example_config() {
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
-                heartbeat_timeout: Duration::from_millis(500),
                 ddl_timeout: Duration::from_secs(10),
                 connect_timeout: Duration::from_secs(1),
                 tcp_nodelay: true,
@@ -315,11 +296,6 @@ fn test_load_standalone_example_config() {
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
-                ..Default::default()
-            },
-            export_metrics: ExportMetricsOption {
-                self_import: Some(Default::default()),
-                remote_write: Some(Default::default()),
                 ..Default::default()
             },
             http: HttpOptions {

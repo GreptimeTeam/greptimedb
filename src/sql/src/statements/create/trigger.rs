@@ -37,7 +37,7 @@ impl Display for CreateTrigger {
         }
 
         if let Some(keep_firing_for) = &self.keep_firing_for {
-            writeln!(f, "  KEEP_FIRING_FOR {}", keep_firing_for)?;
+            writeln!(f, "  KEEP FIRING FOR {}", keep_firing_for)?;
         }
 
         if !self.labels.is_empty() {
@@ -153,7 +153,7 @@ mod tests {
         let sql = r#"CREATE TRIGGER IF NOT EXISTS cpu_monitor
 ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2) EVERY '1day 5 minute'::INTERVAL
 FOR '5 minute'::INTERVAL
-KEEP_FIRING_FOR '10 minute'::INTERVAL
+KEEP FIRING FOR '10 minute'::INTERVAL
 LABELS (label_name=label_val)
 ANNOTATIONS (annotation_name=annotation_val)
 NOTIFY
@@ -174,7 +174,7 @@ WEBHOOK alert_manager2 URL 'http://127.0.0.1:9093' WITH (timeout='1m')
         let expected = r#"CREATE TRIGGER IF NOT EXISTS cpu_monitor
   ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2) EVERY '1day 5 minute'::INTERVAL
   FOR '5 minute'::INTERVAL
-  KEEP_FIRING_FOR '10 minute'::INTERVAL
+  KEEP FIRING FOR '10 minute'::INTERVAL
   LABELS (label_name = 'label_val')
   ANNOTATIONS (annotation_name = 'annotation_val')
   NOTIFY(

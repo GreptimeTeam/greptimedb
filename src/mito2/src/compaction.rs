@@ -14,6 +14,7 @@
 
 mod buckets;
 pub mod compactor;
+pub mod memory_manager;
 pub mod picker;
 pub mod run;
 mod task;
@@ -29,6 +30,7 @@ use std::time::Instant;
 use api::v1::region::compact_request;
 use api::v1::region::compact_request::Options;
 use common_base::Plugins;
+use common_memory_manager::OnExhaustedPolicy;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
@@ -46,7 +48,8 @@ use tokio::sync::mpsc::{self, Sender};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultCompactor};
-use crate::compaction::picker::{CompactionTask, new_picker};
+use crate::compaction::memory_manager::CompactionMemoryManager;
+use crate::compaction::picker::{CompactionTask, PickerOutput, new_picker};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -104,12 +107,15 @@ pub(crate) struct CompactionScheduler {
     request_sender: Sender<WorkerRequestWithTime>,
     cache_manager: CacheManagerRef,
     engine_config: Arc<MitoConfig>,
+    memory_manager: Arc<CompactionMemoryManager>,
+    memory_policy: OnExhaustedPolicy,
     listener: WorkerListener,
     /// Plugins for the compaction scheduler.
     plugins: Plugins,
 }
 
 impl CompactionScheduler {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         scheduler: SchedulerRef,
         request_sender: Sender<WorkerRequestWithTime>,
@@ -117,6 +123,8 @@ impl CompactionScheduler {
         engine_config: Arc<MitoConfig>,
         listener: WorkerListener,
         plugins: Plugins,
+        memory_manager: Arc<CompactionMemoryManager>,
+        memory_policy: OnExhaustedPolicy,
     ) -> Self {
         Self {
             scheduler,
@@ -124,6 +132,8 @@ impl CompactionScheduler {
             request_sender,
             cache_manager,
             engine_config,
+            memory_manager,
+            memory_policy,
             listener,
             plugins,
         }
@@ -429,7 +439,8 @@ impl CompactionScheduler {
         };
 
         // Create a local compaction task.
-        let mut local_compaction_task = Box::new(CompactionTaskImpl {
+        let estimated_bytes = estimate_compaction_bytes(&picker_output);
+        let local_compaction_task = Box::new(CompactionTaskImpl {
             request_sender,
             waiters,
             start_time,
@@ -437,18 +448,27 @@ impl CompactionScheduler {
             picker_output,
             compaction_region,
             compactor: Arc::new(DefaultCompactor {}),
+            memory_manager: self.memory_manager.clone(),
+            memory_policy: self.memory_policy,
+            estimated_memory_bytes: estimated_bytes,
         });
 
-        // Submit the compaction task.
+        self.submit_compaction_task(local_compaction_task, region_id)
+    }
+
+    fn submit_compaction_task(
+        &mut self,
+        mut task: Box<CompactionTaskImpl>,
+        region_id: RegionId,
+    ) -> Result<()> {
         self.scheduler
             .schedule(Box::pin(async move {
                 INFLIGHT_COMPACTION_COUNT.inc();
-                local_compaction_task.run().await;
+                task.run().await;
                 INFLIGHT_COMPACTION_COUNT.dec();
             }))
             .map_err(|e| {
                 error!(e; "Failed to submit compaction request for region {}", region_id);
-                // If failed to submit the job, we need to remove the region from the scheduler.
                 self.region_status.remove(&region_id);
                 e
             })
@@ -758,6 +778,20 @@ fn get_expired_ssts(
         .collect()
 }
 
+/// Estimates compaction memory as the sum of all input files' maximum row-group
+/// uncompressed sizes.
+fn estimate_compaction_bytes(picker_output: &PickerOutput) -> u64 {
+    picker_output
+        .outputs
+        .iter()
+        .flat_map(|output| output.inputs.iter())
+        .map(|file: &FileHandle| {
+            let meta = file.meta_ref();
+            meta.max_row_group_uncompressed_size
+        })
+        .sum()
+}
+
 /// Pending compaction request that is supposed to run after current task is finished,
 /// typically used for manual compactions.
 struct PendingCompaction {
@@ -773,9 +807,10 @@ struct PendingCompaction {
 mod tests {
     use api::v1::region::StrictWindow;
     use common_datasource::compression::CompressionType;
-    use tokio::sync::oneshot;
+    use tokio::sync::{Barrier, oneshot};
 
     use super::*;
+    use crate::compaction::memory_manager::{CompactionMemoryGuard, new_compaction_memory_manager};
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::ManifestContext;
     use crate::sst::FormatType;
@@ -1110,10 +1145,10 @@ mod tests {
                     compress_type: CompressionType::Uncompressed,
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
+                    manifest_cache: None,
                 },
-                Default::default(),
-                Default::default(),
                 FormatType::PrimaryKey,
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -1144,5 +1179,40 @@ mod tests {
         let result = rx.await.unwrap();
         assert_eq!(result.unwrap(), 0); // is there a better way to check this?
         assert_eq!(0, scheduler.region_status.len());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_memory_competition() {
+        let manager = Arc::new(new_compaction_memory_manager(3 * 1024 * 1024)); // 3MB
+        let barrier = Arc::new(Barrier::new(3));
+        let mut handles = vec![];
+
+        // Spawn 3 tasks competing for memory, each trying to acquire 2MB
+        for _i in 0..3 {
+            let mgr = manager.clone();
+            let bar = barrier.clone();
+            let handle = tokio::spawn(async move {
+                bar.wait().await; // Synchronize start
+                mgr.try_acquire(2 * 1024 * 1024)
+            });
+            handles.push(handle);
+        }
+
+        let results: Vec<Option<CompactionMemoryGuard>> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+
+        // Only 1 should succeed (3MB limit, 2MB request, can only fit one)
+        let succeeded = results.iter().filter(|r| r.is_some()).count();
+        let failed = results.iter().filter(|r| r.is_none()).count();
+
+        assert_eq!(succeeded, 1, "Expected exactly 1 task to acquire memory");
+        assert_eq!(failed, 2, "Expected 2 tasks to fail");
+
+        // Clean up
+        drop(results);
+        assert_eq!(manager.used_bytes(), 0);
     }
 }

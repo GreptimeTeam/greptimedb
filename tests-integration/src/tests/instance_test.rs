@@ -22,7 +22,9 @@ use common_query::Output;
 use common_recordbatch::util;
 use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir;
-use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt64Vector, VectorRef};
+use datatypes::arrow::array::{
+    ArrayRef, AsArray, StringArray, TimestampMillisecondArray, UInt64Array,
+};
 use frontend::error::{Error, Result};
 use frontend::instance::Instance;
 use operator::error::Error as OperatorError;
@@ -77,12 +79,10 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
         OutputData::Stream(s) => {
             let batches = util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
-            assert_eq!(
-                Arc::new(TimestampMillisecondVector::from_vec(vec![
-                    1655276557000_i64
-                ])) as VectorRef,
-                *batches[0].column(0)
-            );
+            let expected = Arc::new(TimestampMillisecondArray::from_iter_values(vec![
+                1655276557000_i64,
+            ])) as ArrayRef;
+            assert_eq!(batches[0].column(0), &expected);
         }
         _ => unreachable!(),
     }
@@ -210,7 +210,8 @@ async fn test_show_create_external_table(instance: Arc<dyn MockInstance>) {
     // We can't directly test `show create table` by check_output_stream because the location name length depends on the current filesystem.
     let record_batches = record_batches.iter().collect::<Vec<_>>();
     let column = record_batches[0].column_by_name("Create Table").unwrap();
-    let actual = column.get(0);
+    let column = column.as_string::<i32>();
+    let actual = column.value(0);
     let expect = format!(
         r#"CREATE EXTERNAL TABLE IF NOT EXISTS "various_type_csv" (
   "c_int" BIGINT NULL,
@@ -312,14 +313,11 @@ async fn assert_query_result(instance: &Arc<Instance>, sql: &str, ts: i64, host:
             let batches = util::collect(s).await.unwrap();
             // let columns = batches[0].df_recordbatch.columns();
             assert_eq!(2, batches[0].num_columns());
-            assert_eq!(
-                Arc::new(StringVector::from(vec![host])) as VectorRef,
-                *batches[0].column(0)
-            );
-            assert_eq!(
-                Arc::new(TimestampMillisecondVector::from_vec(vec![ts])) as VectorRef,
-                *batches[0].column(1)
-            );
+            let expected = vec![
+                Arc::new(StringArray::from_iter_values(vec![host])) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from_iter_values(vec![ts])) as ArrayRef,
+            ];
+            assert_eq!(batches[0].columns(), &expected);
         }
         _ => unreachable!(),
     }
@@ -446,10 +444,8 @@ async fn test_execute_query(instance: Arc<dyn MockInstance>) {
             assert_eq!(1, numbers[0].num_columns());
             assert_eq!(numbers[0].column(0).len(), 1);
 
-            assert_eq!(
-                Arc::new(UInt64Vector::from_vec(vec![4950_u64])) as VectorRef,
-                *numbers[0].column(0),
-            );
+            let expected = Arc::new(UInt64Array::from_iter_values(vec![4950_u64])) as ArrayRef;
+            assert_eq!(numbers[0].column(0), &expected);
         }
         _ => unreachable!(),
     }
@@ -482,11 +478,11 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
     check_unordered_output_stream(output, expected).await;
 
     let expected = "\
-+---------+
-| Tables  |
-+---------+
-| numbers |
-+---------+\
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
++------------------+\
 ";
     let output = execute_sql(&instance, "show tables").await;
     check_unordered_output_stream(output, expected).await;
@@ -498,23 +494,23 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(&instance, "show tables").await;
     let expected = "\
-+---------+
-| Tables  |
-+---------+
-| demo    |
-| numbers |
-+---------+\
++------------------+
+| Tables_in_public |
++------------------+
+| demo             |
+| numbers          |
++------------------+\
 ";
     check_unordered_output_stream(output, expected).await;
 
     let output = execute_sql(&instance, "SHOW FULL TABLES WHERE Table_type != 'VIEW'").await;
     let expected = "\
-+---------+-----------------+
-| Tables  | Table_type      |
-+---------+-----------------+
-| demo    | BASE TABLE      |
-| numbers | LOCAL TEMPORARY |
-+---------+-----------------+\
++------------------+-----------------+
+| Tables_in_public | Table_type      |
++------------------+-----------------+
+| demo             | BASE TABLE      |
+| numbers          | LOCAL TEMPORARY |
++------------------+-----------------+\
 ";
     check_unordered_output_stream(output, expected).await;
 
@@ -524,22 +520,22 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
     )
     .await;
     let expected = "\
-+--------+------------+
-| Tables | Table_type |
-+--------+------------+
-| demo   | BASE TABLE |
-+--------+------------+\
++------------------+------------+
+| Tables_in_public | Table_type |
++------------------+------------+
+| demo             | BASE TABLE |
++------------------+------------+\
 ";
     check_unordered_output_stream(output, expected).await;
 
     // show tables like [string]
     let output = execute_sql(&instance, "show tables like 'de%'").await;
     let expected = "\
-+--------+
-| Tables |
-+--------+
-| demo   |
-+--------+\
++------------------+
+| Tables_in_public |
++------------------+
+| demo             |
++------------------+\
 ";
     check_unordered_output_stream(output, expected).await;
 }
@@ -1256,11 +1252,11 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
         .await
         .data;
     let expect = "\
-+------------+
-| Tables     |
-+------------+
-| test_table |
-+------------+";
++--------------+
+| Tables_in_db |
++--------------+
+| test_table   |
++--------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql_with(
@@ -1327,12 +1323,12 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
     assert!(matches!(output, OutputData::AffectedRows(0)));
 
     let expect = "\
-+------------+
-| Tables     |
-+------------+
-| demo       |
-| test_table |
-+------------+";
++--------------+
+| Tables_in_db |
++--------------+
+| demo         |
+| test_table   |
++--------------+";
     let output = execute_sql_with(&instance, "show tables", query_ctx)
         .await
         .data;
@@ -1520,11 +1516,11 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
         .await
         .data;
     let expected = "\
-+--------+
-| Tables |
-+--------+
-| tb1    |
-+--------+";
++---------------+
+| Tables_in_db1 |
++---------------+
+| tb1           |
++---------------+";
     check_output_stream(output, expected).await;
 
     let output = execute_sql_with(
@@ -2175,7 +2171,8 @@ async fn test_custom_storage(instance: Arc<dyn MockInstance>) {
 
             let record_batches = record_batches.iter().collect::<Vec<_>>();
             let column = record_batches[0].column_by_name("Create Table").unwrap();
-            let actual = column.get(0);
+            let column = column.as_string::<i32>();
+            let actual = column.value(0);
 
             let expect = if instance.is_distributed_mode() {
                 format!(

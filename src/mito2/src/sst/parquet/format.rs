@@ -40,7 +40,10 @@ use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
 use datatypes::vectors::{Helper, Vector};
-use mito_codec::row_converter::{SortField, build_primary_key_codec_with_fields};
+use mito_codec::row_converter::{
+    CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
+    build_primary_key_codec_with_fields,
+};
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -48,7 +51,8 @@ use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{
-    ConvertVectorSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
+    ConvertVectorSnafu, DecodeSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu,
+    NewRecordBatchSnafu, Result,
 };
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::sst::file::{FileMeta, FileTimeRange};
@@ -386,6 +390,13 @@ impl ReadFormat {
         }
     }
 
+    /// Enables or disables eager decoding of primary key values into batches.
+    pub(crate) fn set_decode_primary_key_values(&mut self, decode: bool) {
+        if let ReadFormat::PrimaryKey(format) = self {
+            format.set_decode_primary_key_values(decode);
+        }
+    }
+
     /// Creates a sequence array to override.
     pub(crate) fn new_override_sequence_array(&self, length: usize) -> Option<ArrayRef> {
         match self {
@@ -411,6 +422,8 @@ pub struct PrimaryKeyReadFormat {
     field_id_to_projected_index: HashMap<ColumnId, usize>,
     /// Sequence number to override the sequence read from the SST.
     override_sequence: Option<SequenceNumber>,
+    /// Codec used to decode primary key values if eager decoding is enabled.
+    primary_key_codec: Option<Arc<dyn PrimaryKeyCodec>>,
 }
 
 impl PrimaryKeyReadFormat {
@@ -439,12 +452,22 @@ impl PrimaryKeyReadFormat {
             projection_indices: format_projection.projection_indices,
             field_id_to_projected_index: format_projection.column_id_to_projected_index,
             override_sequence: None,
+            primary_key_codec: None,
         }
     }
 
     /// Sets the sequence number to override.
     pub(crate) fn set_override_sequence(&mut self, sequence: Option<SequenceNumber>) {
         self.override_sequence = sequence;
+    }
+
+    /// Enables or disables eager decoding of primary key values into batches.
+    pub(crate) fn set_decode_primary_key_values(&mut self, decode: bool) {
+        self.primary_key_codec = if decode {
+            Some(build_primary_key_codec(&self.metadata))
+        } else {
+            None
+        };
     }
 
     /// Gets the arrow schema of the SST file.
@@ -561,7 +584,12 @@ impl PrimaryKeyReadFormat {
                 });
             }
 
-            let batch = builder.build()?;
+            let mut batch = builder.build()?;
+            if let Some(codec) = &self.primary_key_codec {
+                let pk_values: CompositeValues =
+                    codec.decode(batch.primary_key()).context(DecodeSnafu)?;
+                batch.set_pk_values(pk_values);
+            }
             batches.push_back(batch);
         }
 

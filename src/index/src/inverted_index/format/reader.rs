@@ -15,6 +15,7 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -29,37 +30,115 @@ pub use crate::inverted_index::format::reader::blob::InvertedIndexBlobReader;
 mod blob;
 mod footer;
 
+/// Metrics for inverted index read operations.
+#[derive(Default, Clone)]
+pub struct InvertedIndexReadMetrics {
+    /// Total byte size to read.
+    pub total_bytes: u64,
+    /// Total number of ranges to read.
+    pub total_ranges: usize,
+    /// Elapsed time to fetch data.
+    pub fetch_elapsed: Duration,
+    /// Number of cache hits.
+    pub cache_hit: usize,
+    /// Number of cache misses.
+    pub cache_miss: usize,
+}
+
+impl std::fmt::Debug for InvertedIndexReadMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            total_bytes,
+            total_ranges,
+            fetch_elapsed,
+            cache_hit,
+            cache_miss,
+        } = self;
+
+        // If both total_bytes and cache_hit are 0, we didn't read anything.
+        if *total_bytes == 0 && *cache_hit == 0 {
+            return write!(f, "{{}}");
+        }
+        write!(f, "{{")?;
+
+        if *total_bytes > 0 {
+            write!(f, "\"total_bytes\":{}", total_bytes)?;
+        }
+        if *cache_hit > 0 {
+            if *total_bytes > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "\"cache_hit\":{}", cache_hit)?;
+        }
+
+        if *total_ranges > 0 {
+            write!(f, ", \"total_ranges\":{}", total_ranges)?;
+        }
+        if !fetch_elapsed.is_zero() {
+            write!(f, ", \"fetch_elapsed\":\"{:?}\"", fetch_elapsed)?;
+        }
+        if *cache_miss > 0 {
+            write!(f, ", \"cache_miss\":{}", cache_miss)?;
+        }
+
+        write!(f, "}}")
+    }
+}
+
+impl InvertedIndexReadMetrics {
+    /// Merges another metrics into this one.
+    pub fn merge_from(&mut self, other: &Self) {
+        self.total_bytes += other.total_bytes;
+        self.total_ranges += other.total_ranges;
+        self.fetch_elapsed += other.fetch_elapsed;
+        self.cache_hit += other.cache_hit;
+        self.cache_miss += other.cache_miss;
+    }
+}
+
 /// InvertedIndexReader defines an asynchronous reader of inverted index data
 #[mockall::automock]
 #[async_trait]
 pub trait InvertedIndexReader: Send + Sync {
     /// Seeks to given offset and reads data with exact size as provided.
-    async fn range_read(&self, offset: u64, size: u32) -> Result<Vec<u8>>;
+    async fn range_read<'a>(
+        &self,
+        offset: u64,
+        size: u32,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Vec<u8>>;
 
     /// Reads the bytes in the given ranges.
-    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        let mut result = Vec::with_capacity(ranges.len());
-        for range in ranges {
-            let data = self
-                .range_read(range.start, (range.end - range.start) as u32)
-                .await?;
-            result.push(Bytes::from(data));
-        }
-        Ok(result)
-    }
+    async fn read_vec<'a>(
+        &self,
+        ranges: &[Range<u64>],
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Vec<Bytes>>;
 
     /// Retrieves metadata of all inverted indices stored within the blob.
-    async fn metadata(&self) -> Result<Arc<InvertedIndexMetas>>;
+    async fn metadata<'a>(
+        &self,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Arc<InvertedIndexMetas>>;
 
     /// Retrieves the finite state transducer (FST) map from the given offset and size.
-    async fn fst(&self, offset: u64, size: u32) -> Result<FstMap> {
-        let fst_data = self.range_read(offset, size).await?;
+    async fn fst<'a>(
+        &self,
+        offset: u64,
+        size: u32,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<FstMap> {
+        let fst_data = self.range_read(offset, size, metrics).await?;
         FstMap::new(fst_data).context(DecodeFstSnafu)
     }
 
     /// Retrieves the multiple finite state transducer (FST) maps from the given ranges.
-    async fn fst_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<FstMap>> {
-        self.read_vec(ranges)
+    async fn fst_vec<'a>(
+        &mut self,
+        ranges: &[Range<u64>],
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Vec<FstMap>> {
+        self.read_vec(ranges, metrics)
             .await?
             .into_iter()
             .map(|bytes| FstMap::new(bytes.to_vec()).context(DecodeFstSnafu))
@@ -67,19 +146,28 @@ pub trait InvertedIndexReader: Send + Sync {
     }
 
     /// Retrieves the bitmap from the given offset and size.
-    async fn bitmap(&self, offset: u64, size: u32, bitmap_type: BitmapType) -> Result<Bitmap> {
-        self.range_read(offset, size).await.and_then(|bytes| {
-            Bitmap::deserialize_from(&bytes, bitmap_type).context(DecodeBitmapSnafu)
-        })
+    async fn bitmap<'a>(
+        &self,
+        offset: u64,
+        size: u32,
+        bitmap_type: BitmapType,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Bitmap> {
+        self.range_read(offset, size, metrics)
+            .await
+            .and_then(|bytes| {
+                Bitmap::deserialize_from(&bytes, bitmap_type).context(DecodeBitmapSnafu)
+            })
     }
 
     /// Retrieves the multiple bitmaps from the given ranges.
-    async fn bitmap_deque(
+    async fn bitmap_deque<'a>(
         &mut self,
         ranges: &[(Range<u64>, BitmapType)],
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
     ) -> Result<VecDeque<Bitmap>> {
         let (ranges, types): (Vec<_>, Vec<_>) = ranges.iter().cloned().unzip();
-        let bytes = self.read_vec(&ranges).await?;
+        let bytes = self.read_vec(&ranges, metrics).await?;
         bytes
             .into_iter()
             .zip(types)

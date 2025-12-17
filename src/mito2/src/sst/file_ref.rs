@@ -80,56 +80,47 @@ impl FileReferenceManager {
         Some(ref_file_set)
     }
 
-    /// Gets all ref files for the given table id, excluding those already in region manifest.
-    ///
-    /// It's safe if manifest version became outdated when gc worker is called, as gc worker will check the changes between those two versions and act accordingly to make sure to get the real truly tmp ref file sets at the time of old manifest version.
-    ///
-    /// TODO(discord9): Since query will only possible refer to files in latest manifest when it's started, the only true risks is files removed from manifest between old version(when reading refs) and new version(at gc worker), so in case of having outdated manifest version, gc worker should make sure not to delete those files(Until next gc round which will use the latest manifest version and handle those files normally).
-    /// or perhaps using a two-phase commit style process where it proposes a set of files for deletion and then verifies no new references have appeared before committing the delete.
-    ///
-    /// gc worker could do this:
-    /// 1. if can get the files that got removed from old manifest to new manifest, then shouldn't delete those files even if they are not in tmp ref file, other files can be normally handled(deleted if not in use, otherwise keep)
-    ///    and report back allow next gc round to handle those files with newer tmp ref file sets.
-    /// 2. if can't get the files that got removed from old manifest to new manifest(possible if just did a checkpoint),
-    ///    then can do nothing as can't sure whether a file is truly unused or just tmp ref file sets haven't report it, so need to report back and try next gc round to handle those files with newer tmp ref file sets.
-    ///
-    #[allow(unused)]
-    pub(crate) async fn get_snapshot_of_unmanifested_refs(
+    /// Gets all ref files for the given regions, meaning all open FileHandles for those regions
+    /// and from related regions' manifests.
+    pub(crate) async fn get_snapshot_of_file_refs(
         &self,
-        regions: Vec<MitoRegionRef>,
+        query_regions: Vec<MitoRegionRef>,
+        related_regions: Vec<(MitoRegionRef, Vec<RegionId>)>,
     ) -> Result<FileRefsManifest> {
         let mut ref_files = HashMap::new();
-        for region_id in regions.iter().map(|r| r.region_id()) {
+        // get from in memory file handles
+        for region_id in query_regions.iter().map(|r| r.region_id()) {
             if let Some(files) = self.ref_file_set(region_id) {
-                ref_files.insert(region_id, files);
+                ref_files.insert(region_id, files.into_iter().map(|f| f.file_id).collect());
             }
         }
 
-        let mut in_manifest_files = HashSet::new();
         let mut manifest_version = HashMap::new();
 
-        for r in &regions {
+        for r in &query_regions {
             let manifest = r.manifest_ctx.manifest().await;
-            let files = manifest.files.keys().cloned().collect::<Vec<_>>();
-            in_manifest_files.extend(files);
             manifest_version.insert(r.region_id(), manifest.manifest_version);
         }
 
-        let ref_files_excluding_in_manifest = ref_files
-            .iter()
-            .map(|(r, f)| {
-                (
-                    *r,
-                    f.iter()
-                        .filter_map(|f| {
-                            (!in_manifest_files.contains(&f.file_id)).then_some(f.file_id)
-                        })
-                        .collect::<HashSet<_>>(),
-                )
-            })
-            .collect();
+        // get file refs from related regions' manifests
+        for (related_region, queries) in &related_regions {
+            let queries = queries.iter().cloned().collect::<HashSet<_>>();
+            let manifest = related_region.manifest_ctx.manifest().await;
+            for meta in manifest.files.values() {
+                if queries.contains(&meta.region_id) {
+                    ref_files
+                        .entry(meta.region_id)
+                        .or_insert_with(HashSet::new)
+                        .insert(meta.file_id);
+                }
+            }
+            // not sure if related region's manifest version is needed, but record it for now.
+            manifest_version.insert(related_region.region_id(), manifest.manifest_version);
+        }
+
+        // simply return all ref files, no manifest version filtering for now.
         Ok(FileRefsManifest {
-            file_refs: ref_files_excluding_in_manifest,
+            file_refs: ref_files,
             manifest_version,
         })
     }
@@ -166,7 +157,7 @@ impl FileReferenceManager {
     /// If the reference count reaches zero, the file reference will be removed from the manager.
     pub fn remove_file(&self, file_meta: &FileMeta) {
         let region_id = file_meta.region_id;
-        let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
+        let file_ref = FileRef::new(region_id, file_meta.file_id);
 
         let mut remove_table_entry = false;
         let mut remove_file_ref = false;
@@ -217,7 +208,7 @@ mod tests {
     use store_api::storage::{FileId, RegionId};
 
     use super::*;
-    use crate::sst::file::{FileMeta, FileTimeRange, IndexType, RegionFileId};
+    use crate::sst::file::{ColumnIndexMetadata, FileMeta, FileTimeRange, IndexType, RegionFileId};
 
     #[tokio::test]
     async fn test_file_ref_mgr() {
@@ -233,9 +224,14 @@ mod tests {
             time_range: FileTimeRange::default(),
             level: 0,
             file_size: 4096,
+            max_row_group_uncompressed_size: 4096,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            }],
             index_file_size: 4096,
-            index_file_id: None,
+            index_version: 0,
             num_rows: 1024,
             num_row_groups: 1,
             sequence: NonZeroU64::new(4096),

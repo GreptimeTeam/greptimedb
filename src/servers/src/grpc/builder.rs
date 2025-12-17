@@ -12,21 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::convert::Infallible;
+
 use api::v1::frontend::frontend_server::FrontendServer;
 use api::v1::greptime_database_server::GreptimeDatabaseServer;
 use api::v1::prometheus_gateway_server::PrometheusGatewayServer;
 use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
 use auth::UserProviderRef;
-use common_grpc::error::{Error, InvalidConfigFilePathSnafu, Result};
+use axum::extract::Request;
+use axum::response::IntoResponse;
+use axum::routing::Route;
+use common_grpc::error::{InvalidConfigFilePathSnafu, Result};
 use common_runtime::Runtime;
+use common_telemetry::warn;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsServiceServer;
 use snafu::ResultExt;
 use tokio::sync::Mutex;
 use tonic::codec::CompressionEncoding;
+use tonic::codegen::Service;
 use tonic::service::RoutesBuilder;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Identity, ServerTlsConfig};
+use tower::Layer;
 
 use crate::grpc::database::DatabaseService;
 use crate::grpc::flight::{FlightCraftRef, FlightCraftWrapper};
@@ -188,10 +196,7 @@ impl GrpcServerBuilder {
         // tonic does not support watching for tls config changes
         // so we don't support it either for now
         if tls_option.watch {
-            return Err(Error::NotSupported {
-                feat: "Certificates watch and reloading for gRPC is not supported at the moment"
-                    .to_string(),
-            });
+            warn!("Certificates watch and reloading for gRPC is NOT supported at the moment");
         }
         self.tls_config = if tls_option.should_force_tls() {
             let cert = std::fs::read_to_string(tls_option.cert_path)
@@ -204,6 +209,23 @@ impl GrpcServerBuilder {
             None
         };
         Ok(self)
+    }
+
+    pub fn add_layer<L>(self, layer: L) -> Self
+    where
+        L: Layer<Route> + Clone + Send + Sync + 'static,
+        L::Service: Service<Request> + Clone + Send + Sync + 'static,
+        <L::Service as Service<Request>>::Response: IntoResponse + 'static,
+        <L::Service as Service<Request>>::Error: Into<Infallible> + 'static,
+        <L::Service as Service<Request>>::Future: Send + 'static,
+    {
+        let routes = self.routes_builder.routes();
+        let router = routes.into_axum_router();
+        let router = router.layer(layer);
+        Self {
+            routes_builder: RoutesBuilder::from(router),
+            ..self
+        }
     }
 
     pub fn build(self) -> GrpcServer {

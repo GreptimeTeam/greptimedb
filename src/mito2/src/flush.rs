@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use common_telemetry::{debug, error, info, trace};
+use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
 use either::Either;
 use partition::expr::PartitionExpr;
@@ -89,6 +89,12 @@ pub trait WriteBufferManager: Send + Sync + std::fmt::Debug {
 
     /// Returns the total memory used by memtables.
     fn memory_usage(&self) -> usize;
+
+    /// Returns the mutable memtable memory limit.
+    ///
+    /// The write buffer manager should flush memtables when the mutable memory usage
+    /// exceeds this limit.
+    fn flush_limit(&self) -> usize;
 }
 
 pub type WriteBufferManagerRef = Arc<dyn WriteBufferManager>;
@@ -145,7 +151,7 @@ impl WriteBufferManagerImpl {
 impl WriteBufferManager for WriteBufferManagerImpl {
     fn should_flush_engine(&self) -> bool {
         let mutable_memtable_memory_usage = self.memory_active.load(Ordering::Relaxed);
-        if mutable_memtable_memory_usage > self.mutable_limit {
+        if mutable_memtable_memory_usage >= self.mutable_limit {
             debug!(
                 "Engine should flush (over mutable limit), mutable_usage: {}, memory_usage: {}, mutable_limit: {}, global_limit: {}",
                 mutable_memtable_memory_usage,
@@ -157,23 +163,8 @@ impl WriteBufferManager for WriteBufferManagerImpl {
         }
 
         let memory_usage = self.memory_used.load(Ordering::Relaxed);
-        // If the memory exceeds the buffer size, we trigger more aggressive
-        // flush. But if already more than half memory is being flushed,
-        // triggering more flush may not help. We will hold it instead.
         if memory_usage >= self.global_write_buffer_size {
-            if mutable_memtable_memory_usage >= self.global_write_buffer_size / 2 {
-                debug!(
-                    "Engine should flush (over total limit), memory_usage: {}, global_write_buffer_size: {}, \
-                 mutable_usage: {}.",
-                    memory_usage, self.global_write_buffer_size, mutable_memtable_memory_usage
-                );
-                return true;
-            } else {
-                trace!(
-                    "Engine won't flush, memory_usage: {}, global_write_buffer_size: {}, mutable_usage: {}.",
-                    memory_usage, self.global_write_buffer_size, mutable_memtable_memory_usage
-                );
-            }
+            return true;
         }
 
         false
@@ -205,10 +196,14 @@ impl WriteBufferManager for WriteBufferManagerImpl {
     fn memory_usage(&self) -> usize {
         self.memory_used.load(Ordering::Relaxed)
     }
+
+    fn flush_limit(&self) -> usize {
+        self.mutable_limit
+    }
 }
 
 /// Reason of a flush task.
-#[derive(Debug, IntoStaticStr)]
+#[derive(Debug, IntoStaticStr, Clone, Copy, PartialEq, Eq)]
 pub enum FlushReason {
     /// Other reasons.
     Others,
@@ -222,6 +217,8 @@ pub enum FlushReason {
     Periodically,
     /// Flush memtable during downgrading state.
     Downgrading,
+    /// Enter staging mode.
+    EnterStaging,
 }
 
 impl FlushReason {
@@ -253,6 +250,8 @@ pub(crate) struct RegionFlushTask {
     pub(crate) index_options: IndexOptions,
     /// Semaphore to control flush concurrency.
     pub(crate) flush_semaphore: Arc<Semaphore>,
+    /// Whether the region is in staging mode.
+    pub(crate) is_staging: bool,
 }
 
 impl RegionFlushTask {
@@ -316,6 +315,7 @@ impl RegionFlushTask {
                     _timer: timer,
                     edit,
                     memtables_to_remove,
+                    is_staging: self.is_staging,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -398,7 +398,10 @@ impl RegionFlushTask {
             flushed_sequence: Some(version_data.committed_sequence),
             committed_sequence: None,
         };
-        info!("Applying {edit:?} to region {}", self.region_id);
+        info!(
+            "Applying {edit:?} to region {}, is_staging: {}",
+            self.region_id, self.is_staging
+        );
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
 
@@ -417,11 +420,12 @@ impl RegionFlushTask {
         // add a cleanup job to remove them later.
         let version = self
             .manifest_ctx
-            .update_manifest(expected_state, action_list)
+            .update_manifest(expected_state, action_list, self.is_staging)
             .await?;
         info!(
-            "Successfully update manifest version to {version}, region: {}, reason: {}",
+            "Successfully update manifest version to {version}, region: {}, is_staging: {}, reason: {}",
             self.region_id,
+            self.is_staging,
             self.reason.as_str()
         );
 
@@ -636,9 +640,11 @@ impl RegionFlushTask {
             time_range: sst_info.time_range,
             level: 0,
             file_size: sst_info.file_size,
+            max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
             available_indexes: sst_info.index_metadata.build_available_indexes(),
+            indexes: sst_info.index_metadata.build_indexes(),
             index_file_size: sst_info.index_metadata.file_size,
-            index_file_id: None,
+            index_version: 0,
             num_rows: sst_info.num_rows as u64,
             num_row_groups: sst_info.num_row_groups,
             sequence: NonZeroU64::new(max_sequence),
@@ -725,11 +731,13 @@ async fn memtable_source(mem_ranges: MemtableRanges, options: &RegionOptions) ->
             // dedup according to merge mode
             match options.merge_mode.unwrap_or(MergeMode::LastRow) {
                 MergeMode::LastRow => {
-                    Box::new(DedupReader::new(merge_reader, LastRow::new(false))) as _
+                    Box::new(DedupReader::new(merge_reader, LastRow::new(false), None)) as _
                 }
-                MergeMode::LastNonNull => {
-                    Box::new(DedupReader::new(merge_reader, LastNonNull::new(false))) as _
-                }
+                MergeMode::LastNonNull => Box::new(DedupReader::new(
+                    merge_reader,
+                    LastNonNull::new(false),
+                    None,
+                )) as _,
             }
         };
         Source::Reader(maybe_dedup)
@@ -766,7 +774,12 @@ fn memtable_flat_sources(
             let iter = only_range.build_record_batch_iter(None)?;
             // Dedup according to append mode and merge mode.
             // Even single range may have duplicate rows.
-            let iter = maybe_dedup_one(options, field_column_start, iter);
+            let iter = maybe_dedup_one(
+                options.append_mode,
+                options.merge_mode(),
+                field_column_start,
+                iter,
+            );
             flat_sources.sources.push(FlatSource::Iter(iter));
         };
     } else {
@@ -834,17 +847,18 @@ fn merge_and_dedup(
     Ok(maybe_dedup)
 }
 
-fn maybe_dedup_one(
-    options: &RegionOptions,
+pub fn maybe_dedup_one(
+    append_mode: bool,
+    merge_mode: MergeMode,
     field_column_start: usize,
     input_iter: BoxedRecordBatchIterator,
 ) -> BoxedRecordBatchIterator {
-    if options.append_mode {
+    if append_mode {
         // No dedup in append mode
         input_iter
     } else {
         // Dedup according to merge mode.
-        match options.merge_mode() {
+        match merge_mode {
             MergeMode::LastRow => {
                 Box::new(FlatDedupIterator::new(input_iter, FlatLastRow::new(false)))
             }
@@ -878,6 +892,31 @@ impl FlushScheduler {
         self.region_status.contains_key(&region_id)
     }
 
+    fn schedule_flush_task(
+        &mut self,
+        version_control: &VersionControlRef,
+        task: RegionFlushTask,
+    ) -> Result<()> {
+        let region_id = task.region_id;
+
+        // If current region doesn't have flush status, we can flush the region directly.
+        if let Err(e) = version_control.freeze_mutable() {
+            error!(e; "Failed to freeze the mutable memtable for region {}", region_id);
+
+            return Err(e);
+        }
+        // Submit a flush job.
+        let job = task.into_flush_job(version_control);
+        if let Err(e) = self.scheduler.schedule(job) {
+            // If scheduler returns error, senders in the job will be dropped and waiters
+            // can get recv errors.
+            error!(e; "Failed to schedule flush job for region {}", region_id);
+
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Schedules a flush `task` for specific `region`.
     pub(crate) fn schedule_flush(
         &mut self,
@@ -900,46 +939,21 @@ impl FlushScheduler {
             .with_label_values(&[task.reason.as_str()])
             .inc();
 
+        // If current region has flush status, merge the task.
+        if let Some(flush_status) = self.region_status.get_mut(&region_id) {
+            // Checks whether we can flush the region now.
+            debug!("Merging flush task for region {}", region_id);
+            flush_status.merge_task(task);
+            return Ok(());
+        }
+
+        self.schedule_flush_task(version_control, task)?;
+
         // Add this region to status map.
-        let flush_status = self
-            .region_status
-            .entry(region_id)
-            .or_insert_with(|| FlushStatus::new(region_id, version_control.clone()));
-        // Checks whether we can flush the region now.
-        if flush_status.flushing {
-            // There is already a flush job running.
-            flush_status.merge_task(task);
-            return Ok(());
-        }
-
-        // TODO(yingwen): We can merge with pending and execute directly.
-        // If there are pending tasks, then we should push it to pending list.
-        if flush_status.pending_task.is_some() {
-            flush_status.merge_task(task);
-            return Ok(());
-        }
-
-        // Now we can flush the region directly.
-        if let Err(e) = version_control.freeze_mutable() {
-            error!(e; "Failed to freeze the mutable memtable for region {}", region_id);
-
-            // Remove from region status if we can't freeze the mutable memtable.
-            self.region_status.remove(&region_id);
-            return Err(e);
-        }
-        // Submit a flush job.
-        let job = task.into_flush_job(version_control);
-        if let Err(e) = self.scheduler.schedule(job) {
-            // If scheduler returns error, senders in the job will be dropped and waiters
-            // can get recv errors.
-            error!(e; "Failed to schedule flush job for region {}", region_id);
-
-            // Remove from region status if we can't submit the task.
-            self.region_status.remove(&region_id);
-            return Err(e);
-        }
-
-        flush_status.flushing = true;
+        let _ = self.region_status.insert(
+            region_id,
+            FlushStatus::new(region_id, version_control.clone()),
+        );
 
         Ok(())
     }
@@ -956,48 +970,56 @@ impl FlushScheduler {
         Vec<SenderBulkRequest>,
     )> {
         let flush_status = self.region_status.get_mut(&region_id)?;
-
-        // This region doesn't have running flush job.
-        flush_status.flushing = false;
-
-        let pending_requests = if flush_status.pending_task.is_none() {
+        // If region doesn't have any pending flush task, we need to remove it from the status.
+        if flush_status.pending_task.is_none() {
             // The region doesn't have any pending flush task.
             // Safety: The flush status must exist.
+            debug!(
+                "Region {} doesn't have any pending flush task, removing it from the status",
+                region_id
+            );
             let flush_status = self.region_status.remove(&region_id).unwrap();
-            Some((
+            return Some((
                 flush_status.pending_ddls,
                 flush_status.pending_writes,
                 flush_status.pending_bulk_writes,
-            ))
-        } else {
-            let version_data = flush_status.version_control.current();
-            if version_data.version.memtables.is_empty() {
-                // The region has nothing to flush, we also need to remove it from the status.
-                // Safety: The pending task is not None.
-                let task = flush_status.pending_task.take().unwrap();
-                // The region has nothing to flush. We can notify pending task.
-                task.on_success();
-                // `schedule_next_flush()` may pick up the same region to flush, so we must remove
-                // it from the status to avoid leaking pending requests.
-                // Safety: The flush status must exist.
-                let flush_status = self.region_status.remove(&region_id).unwrap();
-                Some((
-                    flush_status.pending_ddls,
-                    flush_status.pending_writes,
-                    flush_status.pending_bulk_writes,
-                ))
-            } else {
-                // We can flush the region again, keep it in the region status.
-                None
-            }
-        };
-
-        // Schedule next flush job.
-        if let Err(e) = self.schedule_next_flush() {
-            error!(e; "Flush of region {} is successful, but failed to schedule next flush", region_id);
+            ));
         }
 
-        pending_requests
+        // If region has pending task, but has nothing to flush, we need to remove it from the status.
+        let version_data = flush_status.version_control.current();
+        if version_data.version.memtables.is_empty() {
+            // The region has nothing to flush, we also need to remove it from the status.
+            // Safety: The pending task is not None.
+            let task = flush_status.pending_task.take().unwrap();
+            // The region has nothing to flush. We can notify pending task.
+            task.on_success();
+            debug!(
+                "Region {} has nothing to flush, removing it from the status",
+                region_id
+            );
+            // Safety: The flush status must exist.
+            let flush_status = self.region_status.remove(&region_id).unwrap();
+            return Some((
+                flush_status.pending_ddls,
+                flush_status.pending_writes,
+                flush_status.pending_bulk_writes,
+            ));
+        }
+
+        // If region has pending task and has something to flush, we need to schedule it.
+        debug!("Scheduling pending flush task for region {}", region_id);
+        // Safety: The flush status must exist.
+        let task = flush_status.pending_task.take().unwrap();
+        let version_control = flush_status.version_control.clone();
+        if let Err(err) = self.schedule_flush_task(&version_control, task) {
+            error!(
+                err;
+                "Flush succeeded for region {region_id}, but failed to schedule next flush for it."
+            );
+        }
+        // We can flush the region again, keep it in the region status.
+        None
     }
 
     /// Notifies the scheduler that the flush job is failed.
@@ -1013,11 +1035,6 @@ impl FlushScheduler {
 
         // Fast fail: cancels all pending tasks and sends error to their waiters.
         flush_status.on_failure(err);
-
-        // Still tries to schedule a new flush.
-        if let Err(e) = self.schedule_next_flush() {
-            error!(e; "Failed to schedule next flush after region {} flush is failed", region_id);
-        }
     }
 
     /// Notifies the scheduler that the region is dropped.
@@ -1088,30 +1105,6 @@ impl FlushScheduler {
             .map(|status| !status.pending_ddls.is_empty())
             .unwrap_or(false)
     }
-
-    /// Schedules a new flush task when the scheduler can submit next task.
-    pub(crate) fn schedule_next_flush(&mut self) -> Result<()> {
-        debug_assert!(
-            self.region_status
-                .values()
-                .all(|status| status.flushing || status.pending_task.is_some())
-        );
-
-        // Get the first region from status map.
-        let Some(flush_status) = self
-            .region_status
-            .values_mut()
-            .find(|status| status.pending_task.is_some())
-        else {
-            return Ok(());
-        };
-        debug_assert!(!flush_status.flushing);
-        let task = flush_status.pending_task.take().unwrap();
-        let region_id = flush_status.region_id;
-        let version_control = flush_status.version_control.clone();
-
-        self.schedule_flush(region_id, &version_control, task)
-    }
 }
 
 impl Drop for FlushScheduler {
@@ -1131,11 +1124,6 @@ struct FlushStatus {
     region_id: RegionId,
     /// Version control of the region.
     version_control: VersionControlRef,
-    /// There is a flush task running.
-    ///
-    /// It is possible that a region is not flushing but has pending task if the scheduler
-    /// doesn't schedules this region.
-    flushing: bool,
     /// Task waiting for next flush.
     pending_task: Option<RegionFlushTask>,
     /// Pending ddl requests.
@@ -1151,7 +1139,6 @@ impl FlushStatus {
         FlushStatus {
             region_id,
             version_control,
-            flushing: false,
             pending_task: None,
             pending_ddls: Vec::new(),
             pending_writes: Vec::new(),
@@ -1243,10 +1230,12 @@ mod tests {
         // Global usage is still 1100.
         manager.schedule_free_mem(200);
         assert!(manager.should_flush_engine());
+        assert!(manager.should_stall());
 
-        // More than global limit, but mutable (1100-200-450=450) is not enough (< 500).
+        // More than global limit, mutable (1100-200-450=450) is less than mutable limit (< 500).
         manager.schedule_free_mem(450);
-        assert!(!manager.should_flush_engine());
+        assert!(manager.should_flush_engine());
+        assert!(manager.should_stall());
 
         // Now mutable is enough.
         manager.reserve_mem(50);
@@ -1291,6 +1280,7 @@ mod tests {
                 .await,
             index_options: IndexOptions::default(),
             flush_semaphore: Arc::new(Semaphore::new(2)),
+            is_staging: false,
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler
@@ -1333,6 +1323,7 @@ mod tests {
                 manifest_ctx: manifest_ctx.clone(),
                 index_options: IndexOptions::default(),
                 flush_semaphore: Arc::new(Semaphore::new(2)),
+                is_staging: false,
             })
             .collect();
         // Schedule first task.
@@ -1490,5 +1481,93 @@ mod tests {
             }
             assert_eq!(2, total_rows, "append_mode should preserve duplicates");
         }
+    }
+
+    #[tokio::test]
+    async fn test_schedule_pending_request_on_flush_success() {
+        common_telemetry::init_default_ut_logging();
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_flush_scheduler();
+        let mut builder = VersionControlBuilder::new();
+        // Overwrites the empty memtable builder.
+        builder.set_memtable_builder(Arc::new(TimeSeriesMemtableBuilder::default()));
+        let version_control = Arc::new(builder.build());
+        // Writes data to the memtable so it is not empty.
+        let version_data = version_control.current();
+        write_rows_to_version(&version_data.version, "host0", 0, 10);
+        let manifest_ctx = env
+            .mock_manifest_context(version_data.version.metadata.clone())
+            .await;
+        // Creates 2 tasks.
+        let mut tasks: Vec<_> = (0..2)
+            .map(|_| RegionFlushTask {
+                region_id: builder.region_id(),
+                reason: FlushReason::Others,
+                senders: Vec::new(),
+                request_sender: tx.clone(),
+                access_layer: env.access_layer.clone(),
+                listener: WorkerListener::default(),
+                engine_config: Arc::new(MitoConfig::default()),
+                row_group_size: None,
+                cache_manager: Arc::new(CacheManager::default()),
+                manifest_ctx: manifest_ctx.clone(),
+                index_options: IndexOptions::default(),
+                flush_semaphore: Arc::new(Semaphore::new(2)),
+                is_staging: false,
+            })
+            .collect();
+        // Schedule first task.
+        let task = tasks.pop().unwrap();
+        scheduler
+            .schedule_flush(builder.region_id(), &version_control, task)
+            .unwrap();
+        // Should schedule 1 flush.
+        assert_eq!(1, scheduler.region_status.len());
+        assert_eq!(1, job_scheduler.num_jobs());
+        // Schedule second task.
+        let task = tasks.pop().unwrap();
+        scheduler
+            .schedule_flush(builder.region_id(), &version_control, task)
+            .unwrap();
+        assert!(
+            scheduler
+                .region_status
+                .get(&builder.region_id())
+                .unwrap()
+                .pending_task
+                .is_some()
+        );
+
+        // Check the new version.
+        let version_data = version_control.current();
+        assert_eq!(0, version_data.version.memtables.immutables()[0].id());
+        // Assumes the flush job is finished.
+        version_control.apply_edit(
+            Some(RegionEdit {
+                files_to_add: Vec::new(),
+                files_to_remove: Vec::new(),
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            }),
+            &[0],
+            builder.file_purger(),
+        );
+        write_rows_to_version(&version_data.version, "host1", 0, 10);
+        scheduler.on_flush_success(builder.region_id());
+        assert_eq!(2, job_scheduler.num_jobs());
+        // The pending task is cleared.
+        assert!(
+            scheduler
+                .region_status
+                .get(&builder.region_id())
+                .unwrap()
+                .pending_task
+                .is_none()
+        );
     }
 }

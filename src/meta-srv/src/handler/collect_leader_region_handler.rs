@@ -73,6 +73,7 @@ mod tests {
             region_manifest: RegionManifestInfo::Mito {
                 manifest_version,
                 flushed_entry_id: 0,
+                file_removed_cnt: 0,
             },
             rcus: 0,
             wcus: 0,

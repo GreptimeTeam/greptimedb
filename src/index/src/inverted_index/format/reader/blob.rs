@@ -14,6 +14,7 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -23,10 +24,10 @@ use snafu::{ResultExt, ensure};
 
 use crate::inverted_index::error::{CommonIoSnafu, Result, UnexpectedBlobSizeSnafu};
 use crate::inverted_index::format::MIN_BLOB_SIZE;
-use crate::inverted_index::format::reader::InvertedIndexReader;
 use crate::inverted_index::format::reader::footer::{
     DEFAULT_PREFETCH_SIZE, InvertedIndexFooterReader,
 };
+use crate::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
 
 /// Inverted index blob reader, implements [`InvertedIndexReader`]
 pub struct InvertedIndexBlobReader<R> {
@@ -53,27 +54,58 @@ impl<R> InvertedIndexBlobReader<R> {
 
 #[async_trait]
 impl<R: RangeReader + Sync> InvertedIndexReader for InvertedIndexBlobReader<R> {
-    async fn range_read(&self, offset: u64, size: u32) -> Result<Vec<u8>> {
+    async fn range_read<'a>(
+        &self,
+        offset: u64,
+        size: u32,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Vec<u8>> {
+        let start = metrics.as_ref().map(|_| Instant::now());
+
         let buf = self
             .source
             .read(offset..offset + size as u64)
             .await
             .context(CommonIoSnafu)?;
+
+        if let Some(m) = metrics {
+            m.total_bytes += size as u64;
+            m.total_ranges += 1;
+            m.fetch_elapsed += start.unwrap().elapsed();
+        }
+
         Ok(buf.into())
     }
 
-    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        self.source.read_vec(ranges).await.context(CommonIoSnafu)
+    async fn read_vec<'a>(
+        &self,
+        ranges: &[Range<u64>],
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Vec<Bytes>> {
+        let start = metrics.as_ref().map(|_| Instant::now());
+
+        let result = self.source.read_vec(ranges).await.context(CommonIoSnafu)?;
+
+        if let Some(m) = metrics {
+            m.total_bytes += ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+            m.total_ranges += ranges.len();
+            m.fetch_elapsed += start.unwrap().elapsed();
+        }
+
+        Ok(result)
     }
 
-    async fn metadata(&self) -> Result<Arc<InvertedIndexMetas>> {
+    async fn metadata<'a>(
+        &self,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Arc<InvertedIndexMetas>> {
         let metadata = self.source.metadata().await.context(CommonIoSnafu)?;
         let blob_size = metadata.content_length;
         Self::validate_blob_size(blob_size)?;
 
         let mut footer_reader = InvertedIndexFooterReader::new(&self.source, blob_size)
             .with_prefetch_size(DEFAULT_PREFETCH_SIZE);
-        footer_reader.metadata().await.map(Arc::new)
+        footer_reader.metadata(metrics).await.map(Arc::new)
     }
 }
 
@@ -173,7 +205,7 @@ mod tests {
         let blob = create_inverted_index_blob();
         let blob_reader = InvertedIndexBlobReader::new(blob);
 
-        let metas = blob_reader.metadata().await.unwrap();
+        let metas = blob_reader.metadata(None).await.unwrap();
         assert_eq!(metas.metas.len(), 2);
 
         let meta0 = metas.metas.get("tag0").unwrap();
@@ -200,13 +232,14 @@ mod tests {
         let blob = create_inverted_index_blob();
         let blob_reader = InvertedIndexBlobReader::new(blob);
 
-        let metas = blob_reader.metadata().await.unwrap();
+        let metas = blob_reader.metadata(None).await.unwrap();
         let meta = metas.metas.get("tag0").unwrap();
 
         let fst_map = blob_reader
             .fst(
                 meta.base_offset + meta.relative_fst_offset as u64,
                 meta.fst_size,
+                None,
             )
             .await
             .unwrap();
@@ -219,6 +252,7 @@ mod tests {
             .fst(
                 meta.base_offset + meta.relative_fst_offset as u64,
                 meta.fst_size,
+                None,
             )
             .await
             .unwrap();
@@ -232,30 +266,30 @@ mod tests {
         let blob = create_inverted_index_blob();
         let blob_reader = InvertedIndexBlobReader::new(blob);
 
-        let metas = blob_reader.metadata().await.unwrap();
+        let metas = blob_reader.metadata(None).await.unwrap();
         let meta = metas.metas.get("tag0").unwrap();
 
         let bitmap = blob_reader
-            .bitmap(meta.base_offset, 26, BitmapType::Roaring)
+            .bitmap(meta.base_offset, 26, BitmapType::Roaring, None)
             .await
             .unwrap();
         assert_eq!(bitmap, mock_bitmap());
         let bitmap = blob_reader
-            .bitmap(meta.base_offset + 26, 26, BitmapType::Roaring)
+            .bitmap(meta.base_offset + 26, 26, BitmapType::Roaring, None)
             .await
             .unwrap();
         assert_eq!(bitmap, mock_bitmap());
 
-        let metas = blob_reader.metadata().await.unwrap();
+        let metas = blob_reader.metadata(None).await.unwrap();
         let meta = metas.metas.get("tag1").unwrap();
 
         let bitmap = blob_reader
-            .bitmap(meta.base_offset, 26, BitmapType::Roaring)
+            .bitmap(meta.base_offset, 26, BitmapType::Roaring, None)
             .await
             .unwrap();
         assert_eq!(bitmap, mock_bitmap());
         let bitmap = blob_reader
-            .bitmap(meta.base_offset + 26, 26, BitmapType::Roaring)
+            .bitmap(meta.base_offset + 26, 26, BitmapType::Roaring, None)
             .await
             .unwrap();
         assert_eq!(bitmap, mock_bitmap());

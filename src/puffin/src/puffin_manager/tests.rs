@@ -356,7 +356,7 @@ async fn check_dir(
     stager: &BoundedStager<String>,
     puffin_reader: &impl PuffinReader,
 ) {
-    let res_dir = puffin_reader.dir(key).await.unwrap();
+    let (res_dir, _metrics) = puffin_reader.dir(key).await.unwrap();
     let metadata = res_dir.metadata();
     assert_eq!(
         metadata.properties,

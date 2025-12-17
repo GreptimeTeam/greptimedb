@@ -27,7 +27,6 @@ use common_stat::ResourceStatRef;
 use common_telemetry::{debug, error, info, warn};
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
 use servers::addrs;
-use servers::heartbeat_options::HeartbeatOptions;
 use snafu::ResultExt;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
@@ -54,7 +53,6 @@ impl HeartbeatTask {
     pub fn new(
         opts: &FrontendOptions,
         meta_client: Arc<MetaClient>,
-        heartbeat_opts: HeartbeatOptions,
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
         resource_stat: ResourceStatRef,
     ) -> Self {
@@ -68,8 +66,8 @@ impl HeartbeatTask {
                 addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr))
             },
             meta_client,
-            report_interval: heartbeat_opts.interval,
-            retry_interval: heartbeat_opts.retry_interval,
+            report_interval: opts.heartbeat.interval,
+            retry_interval: opts.heartbeat.retry_interval,
             resp_handler_executor,
             start_time_ms: common_time::util::current_time_millis() as u64,
             resource_stat,
@@ -196,7 +194,8 @@ impl HeartbeatTask {
         let report_interval = self.report_interval;
         let start_time_ms = self.start_time_ms;
         let self_peer = Some(Peer {
-            // The peer id doesn't make sense for frontend, so we just set it 0.
+            // The node id will be actually calculated from its address (by hashing the address
+            // string) in the metasrv. So it can be set to 0 here, as a placeholder.
             id: 0,
             addr: self.peer_addr.clone(),
         });

@@ -33,7 +33,7 @@ use crate::rpc::store::{
 
 // The TopicRegionKey is a key for the topic-region mapping in the kvbackend.
 // The layout of the key is `__topic_region/{topic_name}/{region_id}`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TopicRegionKey<'a> {
     pub region_id: RegionId,
     pub topic: &'a str,

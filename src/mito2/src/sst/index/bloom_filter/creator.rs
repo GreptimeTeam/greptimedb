@@ -481,7 +481,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::access_layer::FilePathProvider;
     use crate::read::BatchColumn;
-    use crate::sst::file::RegionFileId;
+    use crate::sst::file::{RegionFileId, RegionIndexId};
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     pub fn mock_object_store() -> ObjectStore {
@@ -497,6 +497,10 @@ pub(crate) mod tests {
     impl FilePathProvider for TestPathProvider {
         fn build_index_file_path(&self, file_id: RegionFileId) -> String {
             file_id.file_id().to_string()
+        }
+
+        fn build_index_file_path_with_version(&self, index_id: RegionIndexId) -> String {
+            index_id.file_id.file_id().to_string()
         }
 
         fn build_sst_file_path(&self, file_id: RegionFileId) -> String {
@@ -621,6 +625,7 @@ pub(crate) mod tests {
         let puffin_manager = factory.build(object_store, TestPathProvider);
 
         let file_id = RegionFileId::new(region_metadata.region_id, file_id);
+        let file_id = RegionIndexId::new(file_id, 0);
         let mut puffin_writer = puffin_manager.writer(&file_id).await.unwrap();
         let (row_count, byte_count) = indexer.finish(&mut puffin_writer).await.unwrap();
         assert_eq!(row_count, 20);
@@ -637,17 +642,17 @@ pub(crate) mod tests {
                 .unwrap();
             let reader = blob_guard.reader().await.unwrap();
             let bloom_filter = BloomFilterReaderImpl::new(reader);
-            let metadata = bloom_filter.metadata().await.unwrap();
+            let metadata = bloom_filter.metadata(None).await.unwrap();
 
             assert_eq!(metadata.segment_count, 10);
             for i in 0..5 {
                 let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[i] as usize];
-                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
+                let bf = bloom_filter.bloom_filter(loc, None).await.unwrap();
                 assert!(bf.contains(b"tag1"));
             }
             for i in 5..10 {
                 let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[i] as usize];
-                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
+                let bf = bloom_filter.bloom_filter(loc, None).await.unwrap();
                 assert!(bf.contains(b"tag2"));
             }
         }
@@ -662,13 +667,13 @@ pub(crate) mod tests {
                 .unwrap();
             let reader = blob_guard.reader().await.unwrap();
             let bloom_filter = BloomFilterReaderImpl::new(reader);
-            let metadata = bloom_filter.metadata().await.unwrap();
+            let metadata = bloom_filter.metadata(None).await.unwrap();
 
             assert_eq!(metadata.segment_count, 5);
             for i in 0u64..20 {
                 let idx = i as usize / 4;
                 let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[idx] as usize];
-                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
+                let bf = bloom_filter.bloom_filter(loc, None).await.unwrap();
                 let mut buf = vec![];
                 IndexValueCodec::encode_nonnull_value(ValueRef::UInt64(i), &sort_field, &mut buf)
                     .unwrap();

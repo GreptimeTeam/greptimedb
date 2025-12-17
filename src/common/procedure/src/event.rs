@@ -92,25 +92,96 @@ impl Event for ProcedureEvent {
         schema
     }
 
-    fn extra_row(&self) -> Result<Row> {
-        let error_str = match &self.state {
-            ProcedureState::Failed { error } => format!("{:?}", error),
-            ProcedureState::PrepareRollback { error } => format!("{:?}", error),
-            ProcedureState::RollingBack { error } => format!("{:?}", error),
-            ProcedureState::Retrying { error } => format!("{:?}", error),
-            ProcedureState::Poisoned { error, .. } => format!("{:?}", error),
-            _ => "".to_string(),
-        };
-        let mut row = vec![
-            ValueData::StringValue(self.procedure_id.to_string()).into(),
-            ValueData::StringValue(self.state.as_str_name().to_string()).into(),
-            ValueData::StringValue(error_str).into(),
-        ];
-        row.append(&mut self.internal_event.extra_row()?.values);
-        Ok(Row { values: row })
+    fn extra_rows(&self) -> Result<Vec<Row>> {
+        let mut internal_event_extra_rows = self.internal_event.extra_rows()?;
+        let mut rows = Vec::with_capacity(internal_event_extra_rows.len());
+        for internal_event_extra_row in internal_event_extra_rows.iter_mut() {
+            let error_str = match &self.state {
+                ProcedureState::Failed { error } => format!("{:?}", error),
+                ProcedureState::PrepareRollback { error } => format!("{:?}", error),
+                ProcedureState::RollingBack { error } => format!("{:?}", error),
+                ProcedureState::Retrying { error } => format!("{:?}", error),
+                ProcedureState::Poisoned { error, .. } => format!("{:?}", error),
+                _ => "".to_string(),
+            };
+            let mut values = Vec::with_capacity(3 + internal_event_extra_row.values.len());
+            values.extend([
+                ValueData::StringValue(self.procedure_id.to_string()).into(),
+                ValueData::StringValue(self.state.as_str_name().to_string()).into(),
+                ValueData::StringValue(error_str).into(),
+            ]);
+            values.append(&mut internal_event_extra_row.values);
+            rows.push(Row { values });
+        }
+
+        Ok(rows)
     }
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::value::ValueData;
+    use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType};
+    use common_event_recorder::Event;
+
+    use crate::{ProcedureEvent, ProcedureId, ProcedureState};
+
+    #[derive(Debug)]
+    struct TestEvent;
+
+    impl Event for TestEvent {
+        fn event_type(&self) -> &str {
+            "test_event"
+        }
+
+        fn extra_schema(&self) -> Vec<ColumnSchema> {
+            vec![ColumnSchema {
+                column_name: "test_event_column".to_string(),
+                datatype: ColumnDataType::String.into(),
+                semantic_type: SemanticType::Field.into(),
+                ..Default::default()
+            }]
+        }
+
+        fn extra_rows(&self) -> common_event_recorder::error::Result<Vec<Row>> {
+            Ok(vec![
+                Row {
+                    values: vec![ValueData::StringValue("test_event1".to_string()).into()],
+                },
+                Row {
+                    values: vec![ValueData::StringValue("test_event2".to_string()).into()],
+                },
+            ])
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn test_procedure_event_extra_rows() {
+        let procedure_event = ProcedureEvent::new(
+            ProcedureId::random(),
+            Box::new(TestEvent {}),
+            ProcedureState::Running,
+        );
+
+        let procedure_event_extra_rows = procedure_event.extra_rows().unwrap();
+        assert_eq!(procedure_event_extra_rows.len(), 2);
+        assert_eq!(procedure_event_extra_rows[0].values.len(), 4);
+        assert_eq!(
+            procedure_event_extra_rows[0].values[3],
+            ValueData::StringValue("test_event1".to_string()).into()
+        );
+        assert_eq!(procedure_event_extra_rows[1].values.len(), 4);
+        assert_eq!(
+            procedure_event_extra_rows[1].values[3],
+            ValueData::StringValue("test_event2".to_string()).into()
+        );
     }
 }

@@ -21,7 +21,7 @@ select * from with_filename order by ts;
 
 CREATE TABLE with_json(host string, cpu double, memory double, jsons JSON, ts timestamp time index);
 
-Copy with_json FROM '${SQLNESS_HOME}/demo/export/json/demo.json' with (format='json');
+Copy with_json FROM '${SQLNESS_HOME}/demo/export/csv/demo.csv' with (format='csv');
 
 select host, cpu, memory, json_to_string(jsons), ts from with_json order by ts;
 

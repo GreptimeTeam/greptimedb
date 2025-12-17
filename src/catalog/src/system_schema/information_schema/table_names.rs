@@ -38,7 +38,6 @@ pub const TABLE_PRIVILEGES: &str = "table_privileges";
 pub const TRIGGERS: &str = "triggers";
 pub const GLOBAL_STATUS: &str = "global_status";
 pub const SESSION_STATUS: &str = "session_status";
-pub const RUNTIME_METRICS: &str = "runtime_metrics";
 pub const PARTITIONS: &str = "partitions";
 pub const REGION_PEERS: &str = "region_peers";
 pub const TABLE_CONSTRAINTS: &str = "table_constraints";

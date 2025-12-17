@@ -14,6 +14,7 @@
 
 pub mod config;
 pub mod error;
+pub mod file_watcher;
 
 use std::time::Duration;
 

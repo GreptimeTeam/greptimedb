@@ -22,9 +22,10 @@ use api::v1::column_def::{
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    AlterRequest, AlterRequests, BulkInsertRequest, CloseRequest, CompactRequest, CreateRequest,
-    CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
-    OpenRequest, TruncateRequest, alter_request, compact_request, region_request, truncate_request,
+    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CloseRequest,
+    CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
+    FlushRequest, InsertRequests, OpenRequest, TruncateRequest, alter_request, compact_request,
+    region_request, truncate_request,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -150,6 +151,7 @@ pub enum RegionRequest {
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
     BulkInserts(RegionBulkInsertsRequest),
+    EnterStaging(EnterStagingRequest),
 }
 
 impl RegionRequest {
@@ -166,6 +168,7 @@ impl RegionRequest {
             region_request::Body::Alter(alter) => make_region_alter(alter),
             region_request::Body::Flush(flush) => make_region_flush(flush),
             region_request::Body::Compact(compact) => make_region_compact(compact),
+            region_request::Body::BuildIndex(index) => make_region_build_index(index),
             region_request::Body::Truncate(truncate) => make_region_truncate(truncate),
             region_request::Body::Creates(creates) => make_region_creates(creates),
             region_request::Body::Drops(drops) => make_region_drops(drops),
@@ -351,6 +354,14 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
             options,
             parallelism,
         }),
+    )])
+}
+
+fn make_region_build_index(index: BuildIndexRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let region_id = index.region_id.into();
+    Ok(vec![(
+        region_id,
+        RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
     )])
 }
 
@@ -1406,6 +1417,17 @@ impl RegionBulkInsertsRequest {
     }
 }
 
+/// Request to stage a region with a new region rule(partition expression).
+///
+/// This request transitions a region into the staging mode.
+/// It first flushes the memtable for the old region rule if it is not empty,
+/// then enters the staging mode with the new region rule.
+#[derive(Debug, Clone)]
+pub struct EnterStagingRequest {
+    /// The partition expression of the staging region.
+    pub partition_expr: String,
+}
+
 impl fmt::Display for RegionRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1422,6 +1444,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
             RegionRequest::BulkInserts(_) => write!(f, "BulkInserts"),
+            RegionRequest::EnterStaging(_) => write!(f, "EnterStaging"),
         }
     }
 }

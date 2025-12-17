@@ -24,8 +24,8 @@ use common_query::Output;
 use common_runtime::Runtime;
 use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use datafusion::catalog::TableFunction;
+use datafusion::dataframe::DataFrame;
 use datafusion_expr::{AggregateUDF, LogicalPlan};
-use query::dataframe::DataFrame;
 use query::planner::LogicalPlanner;
 use query::query_engine::{DescribeResult, QueryEngineState};
 use query::{QueryEngine, QueryEngineContext};
@@ -33,7 +33,8 @@ use servers::grpc::FlightCompression;
 use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
+    CopyRegionFromRequest, CopyRegionFromResponse, RegionEngine, RegionManifestInfo, RegionRole,
+    RegionScannerRef, RegionStatistic, RemapManifestsRequest, RemapManifestsResponse,
     SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
 };
 use store_api::region_request::{AffectedRows, RegionRequest};
@@ -288,6 +289,21 @@ impl RegionEngine for MockRegionEngine {
         _region_id: RegionId,
         _manifest_info: RegionManifestInfo,
     ) -> Result<SyncManifestResponse, BoxedError> {
+        unimplemented!()
+    }
+
+    async fn remap_manifests(
+        &self,
+        _request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse, BoxedError> {
+        unimplemented!()
+    }
+
+    async fn copy_region_from(
+        &self,
+        _region_id: RegionId,
+        _request: CopyRegionFromRequest,
+    ) -> Result<CopyRegionFromResponse, BoxedError> {
         unimplemented!()
     }
 

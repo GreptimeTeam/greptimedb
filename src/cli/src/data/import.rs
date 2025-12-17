@@ -56,9 +56,11 @@ pub struct ImportCommand {
     #[clap(long, default_value_t = default_database())]
     database: String,
 
-    /// Parallelism of the import.
-    #[clap(long, short = 'j', default_value = "1")]
-    import_jobs: usize,
+    /// The number of databases imported in parallel.
+    /// For example, if there are 20 databases and `db_parallelism` is 4,
+    /// 4 databases will be imported concurrently.
+    #[clap(long, short = 'j', default_value = "1", alias = "import-jobs")]
+    db_parallelism: usize,
 
     /// Max retry times for each job.
     #[clap(long, default_value = "3")]
@@ -109,7 +111,7 @@ impl ImportCommand {
             schema,
             database_client,
             input_dir: self.input_dir.clone(),
-            parallelism: self.import_jobs,
+            parallelism: self.db_parallelism,
             target: self.target.clone(),
         }))
     }

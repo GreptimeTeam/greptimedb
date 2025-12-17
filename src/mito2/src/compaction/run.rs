@@ -163,6 +163,10 @@ impl FileGroup {
         self.files.push(file);
     }
 
+    pub(crate) fn num_files(&self) -> usize {
+        self.files.len()
+    }
+
     #[cfg(test)]
     pub(crate) fn files(&self) -> &[FileHandle] {
         &self.files[..]
@@ -174,10 +178,6 @@ impl FileGroup {
 
     pub(crate) fn into_files(self) -> impl Iterator<Item = FileHandle> {
         self.files.into_iter()
-    }
-
-    pub(crate) fn is_all_level_0(&self) -> bool {
-        self.files.iter().all(|f| f.level() == 0)
     }
 }
 

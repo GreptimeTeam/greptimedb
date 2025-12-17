@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -31,6 +31,9 @@ use table::table_name::TableName;
 
 use crate::error::{self, Result};
 use crate::metrics::{METRIC_META_REGION_MIGRATION_DATANODES, METRIC_META_REGION_MIGRATION_FAIL};
+use crate::procedure::region_migration::utils::{
+    RegionMigrationAnalysis, RegionMigrationTaskBatch, analyze_region_migration_task,
+};
 use crate::procedure::region_migration::{
     DefaultContextFactory, PersistentContext, RegionMigrationProcedure,
 };
@@ -99,6 +102,7 @@ impl Drop for RegionMigrationProcedureGuard {
     }
 }
 
+/// A task of region migration procedure.
 #[derive(Debug, Clone)]
 pub struct RegionMigrationProcedureTask {
     pub(crate) region_id: RegionId,
@@ -149,6 +153,25 @@ impl Display for RegionMigrationProcedureTask {
             self.region_id, self.from_peer, self.to_peer, self.trigger_reason
         )
     }
+}
+
+/// The result of submitting a region migration task.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SubmitRegionMigrationTaskResult {
+    /// Regions already migrated to the `to_peer`.
+    pub migrated: Vec<RegionId>,
+    /// Regions where the leader peer has changed.
+    pub leader_changed: Vec<RegionId>,
+    /// Regions where `to_peer` is already a follower (conflict).
+    pub peer_conflict: Vec<RegionId>,
+    /// Regions whose table is not found.
+    pub table_not_found: Vec<RegionId>,
+    /// Regions still pending migration.
+    pub migrating: Vec<RegionId>,
+    /// Regions that have been submitted for migration.
+    pub submitted: Vec<RegionId>,
+    /// The procedure id of the region migration procedure.
+    pub procedure_id: Option<ProcedureId>,
 }
 
 impl RegionMigrationManager {
@@ -332,6 +355,168 @@ impl RegionMigrationManager {
         Ok(())
     }
 
+    /// Extracts regions from the migration task that are already running migration procedures.
+    ///
+    /// Returns a tuple containing those region ids that are already running and the newly created procedure guards.
+    /// The regions that are already running will be removed from the [`RegionMigrationTask`].
+    fn extract_running_regions(
+        &self,
+        task: &mut RegionMigrationTaskBatch,
+    ) -> (Vec<RegionId>, Vec<RegionMigrationProcedureGuard>) {
+        let mut migrating_region_ids = Vec::new();
+        let mut procedure_guards = Vec::with_capacity(task.region_ids.len());
+
+        for region_id in &task.region_ids {
+            let Some(guard) = self.insert_running_procedure(&RegionMigrationProcedureTask::new(
+                *region_id,
+                task.from_peer.clone(),
+                task.to_peer.clone(),
+                task.timeout,
+                task.trigger_reason,
+            )) else {
+                migrating_region_ids.push(*region_id);
+                continue;
+            };
+            procedure_guards.push(guard);
+        }
+
+        let migrating_set = migrating_region_ids.iter().cloned().collect::<HashSet<_>>();
+        task.region_ids.retain(|id| !migrating_set.contains(id));
+
+        (migrating_region_ids, procedure_guards)
+    }
+
+    pub async fn submit_region_migration_task(
+        &self,
+        mut task: RegionMigrationTaskBatch,
+    ) -> Result<SubmitRegionMigrationTaskResult> {
+        let (migrating_region_ids, procedure_guards) = self.extract_running_regions(&mut task);
+        let RegionMigrationAnalysis {
+            migrated,
+            leader_changed,
+            peer_conflict,
+            mut table_not_found,
+            pending,
+        } = analyze_region_migration_task(&task, &self.context_factory.table_metadata_manager)
+            .await?;
+        if pending.is_empty() {
+            return Ok(SubmitRegionMigrationTaskResult {
+                migrated,
+                leader_changed,
+                peer_conflict,
+                table_not_found,
+                migrating: migrating_region_ids,
+                submitted: vec![],
+                procedure_id: None,
+            });
+        }
+
+        // Updates the region ids to the pending region ids.
+        task.region_ids = pending;
+        let table_regions = task.table_regions();
+        let table_ids = table_regions.keys().cloned().collect::<Vec<_>>();
+        let table_info_values = self
+            .context_factory
+            .table_metadata_manager
+            .table_info_manager()
+            .batch_get(&table_ids)
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
+        let mut catalog_and_schema = Vec::with_capacity(table_info_values.len());
+        for (table_id, regions) in table_regions {
+            match table_info_values.get(&table_id) {
+                Some(table_info) => {
+                    let TableName {
+                        catalog_name,
+                        schema_name,
+                        ..
+                    } = table_info.table_name();
+                    catalog_and_schema.push((catalog_name, schema_name));
+                }
+                None => {
+                    task.region_ids.retain(|id| id.table_id() != table_id);
+                    table_not_found.extend(regions);
+                }
+            }
+        }
+        if task.region_ids.is_empty() {
+            return Ok(SubmitRegionMigrationTaskResult {
+                migrated,
+                leader_changed,
+                peer_conflict,
+                table_not_found,
+                migrating: migrating_region_ids,
+                submitted: vec![],
+                procedure_id: None,
+            });
+        }
+
+        let submitting_region_ids = task.region_ids.clone();
+        let procedure_id = self
+            .submit_procedure_inner(task, procedure_guards, catalog_and_schema)
+            .await?;
+        Ok(SubmitRegionMigrationTaskResult {
+            migrated,
+            leader_changed,
+            peer_conflict,
+            table_not_found,
+            migrating: migrating_region_ids,
+            submitted: submitting_region_ids,
+            procedure_id: Some(procedure_id),
+        })
+    }
+
+    async fn submit_procedure_inner(
+        &self,
+        task: RegionMigrationTaskBatch,
+        procedure_guards: Vec<RegionMigrationProcedureGuard>,
+        catalog_and_schema: Vec<(String, String)>,
+    ) -> Result<ProcedureId> {
+        let procedure = RegionMigrationProcedure::new(
+            PersistentContext::new(
+                catalog_and_schema,
+                task.from_peer.clone(),
+                task.to_peer.clone(),
+                task.region_ids.clone(),
+                task.timeout,
+                task.trigger_reason,
+            ),
+            self.context_factory.clone(),
+            procedure_guards,
+        );
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_id = procedure_with_id.id;
+        info!("Starting region migration procedure {procedure_id} for {task}");
+        let procedure_manager = self.procedure_manager.clone();
+        let num_region = task.region_ids.len();
+
+        common_runtime::spawn_global(async move {
+            let watcher = &mut match procedure_manager.submit(procedure_with_id).await {
+                Ok(watcher) => watcher,
+                Err(e) => {
+                    error!(e; "Failed to submit region migration procedure {procedure_id} for {task}");
+                    return;
+                }
+            };
+            METRIC_META_REGION_MIGRATION_DATANODES
+                .with_label_values(&["src", &task.from_peer.id.to_string()])
+                .inc_by(num_region as u64);
+            METRIC_META_REGION_MIGRATION_DATANODES
+                .with_label_values(&["desc", &task.to_peer.id.to_string()])
+                .inc_by(num_region as u64);
+
+            if let Err(e) = watcher::wait(watcher).await {
+                error!(e; "Failed to wait region migration procedure {procedure_id} for {task}");
+                METRIC_META_REGION_MIGRATION_FAIL.inc();
+                return;
+            }
+
+            info!("Region migration procedure {procedure_id} for {task} is finished successfully!");
+        });
+
+        Ok(procedure_id)
+    }
+
     /// Submits a new region migration procedure.
     pub async fn submit_procedure(
         &self,
@@ -384,17 +569,16 @@ impl RegionMigrationManager {
             trigger_reason,
         } = task.clone();
         let procedure = RegionMigrationProcedure::new(
-            PersistentContext {
-                catalog: catalog_name,
-                schema: schema_name,
-                region_id,
+            PersistentContext::new(
+                vec![(catalog_name, schema_name)],
                 from_peer,
                 to_peer,
+                vec![region_id],
                 timeout,
                 trigger_reason,
-            },
+            ),
             self.context_factory.clone(),
-            Some(guard),
+            vec![guard],
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;
@@ -644,5 +828,163 @@ mod test {
             .unwrap_err();
 
         assert_matches!(err, error::Error::Unexpected { .. });
+    }
+
+    #[tokio::test]
+    async fn test_submit_procedure_with_multiple_regions_invalid_task() {
+        let env = TestingEnv::new();
+        let context_factory = env.context_factory();
+        let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
+        let task = RegionMigrationTaskBatch {
+            region_ids: vec![RegionId::new(1024, 1)],
+            from_peer: Peer::empty(1),
+            to_peer: Peer::empty(1),
+            timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
+        };
+
+        let err = manager
+            .submit_region_migration_task(task)
+            .await
+            .unwrap_err();
+        assert_matches!(err, error::Error::InvalidArguments { .. });
+    }
+
+    #[tokio::test]
+    async fn test_submit_procedure_with_multiple_regions_no_region_to_migrate() {
+        common_telemetry::init_default_ut_logging();
+        let env = TestingEnv::new();
+        let context_factory = env.context_factory();
+        let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
+        let region_id = RegionId::new(1024, 1);
+        let task = RegionMigrationTaskBatch {
+            region_ids: vec![region_id],
+            from_peer: Peer::empty(1),
+            to_peer: Peer::empty(2),
+            timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
+        };
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(Peer::empty(2)),
+            ..Default::default()
+        }];
+        env.create_physical_table_metadata(table_info, region_routes)
+            .await;
+        let result = manager.submit_region_migration_task(task).await.unwrap();
+
+        assert_eq!(
+            result,
+            SubmitRegionMigrationTaskResult {
+                migrated: vec![region_id],
+                ..Default::default()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_submit_procedure_with_multiple_regions_leader_peer_changed() {
+        let env = TestingEnv::new();
+        let context_factory = env.context_factory();
+        let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
+        let region_id = RegionId::new(1024, 1);
+        let task = RegionMigrationTaskBatch {
+            region_ids: vec![region_id],
+            from_peer: Peer::empty(1),
+            to_peer: Peer::empty(2),
+            timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
+        };
+
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(RegionId::new(1024, 1)),
+            leader_peer: Some(Peer::empty(3)),
+            ..Default::default()
+        }];
+
+        env.create_physical_table_metadata(table_info, region_routes)
+            .await;
+        let result = manager.submit_region_migration_task(task).await.unwrap();
+        assert_eq!(
+            result,
+            SubmitRegionMigrationTaskResult {
+                leader_changed: vec![region_id],
+                ..Default::default()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_submit_procedure_with_multiple_regions_peer_conflict() {
+        let env = TestingEnv::new();
+        let context_factory = env.context_factory();
+        let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
+        let region_id = RegionId::new(1024, 1);
+        let task = RegionMigrationTaskBatch {
+            region_ids: vec![region_id],
+            from_peer: Peer::empty(3),
+            to_peer: Peer::empty(2),
+            timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
+        };
+
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(Peer::empty(3)),
+            follower_peers: vec![Peer::empty(2)],
+            ..Default::default()
+        }];
+
+        env.create_physical_table_metadata(table_info, region_routes)
+            .await;
+        let result = manager.submit_region_migration_task(task).await.unwrap();
+        assert_eq!(
+            result,
+            SubmitRegionMigrationTaskResult {
+                peer_conflict: vec![region_id],
+                ..Default::default()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_running_regions() {
+        let env = TestingEnv::new();
+        let context_factory = env.context_factory();
+        let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
+        let region_id = RegionId::new(1024, 1);
+        let task = RegionMigrationTaskBatch {
+            region_ids: vec![region_id, RegionId::new(1024, 2)],
+            from_peer: Peer::empty(1),
+            to_peer: Peer::empty(2),
+            timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
+        };
+        // Inserts one
+        manager.tracker.running_procedures.write().unwrap().insert(
+            region_id,
+            RegionMigrationProcedureTask::new(
+                region_id,
+                task.from_peer.clone(),
+                task.to_peer.clone(),
+                task.timeout,
+                task.trigger_reason,
+            ),
+        );
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(RegionId::new(1024, 2)),
+            leader_peer: Some(Peer::empty(1)),
+            ..Default::default()
+        }];
+        env.create_physical_table_metadata(table_info, region_routes)
+            .await;
+        let result = manager.submit_region_migration_task(task).await.unwrap();
+        assert_eq!(result.migrating, vec![region_id]);
+        assert_eq!(result.submitted, vec![RegionId::new(1024, 2)]);
+        assert!(result.procedure_id.is_some());
     }
 }

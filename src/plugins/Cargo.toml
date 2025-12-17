@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 auth.workspace = true
+catalog.workspace = true
 clap.workspace = true
 cli.workspace = true
 common-base.workspace = true
@@ -17,6 +18,7 @@ common-meta.workspace = true
 datanode.workspace = true
 flow.workspace = true
 frontend.workspace = true
+meta-client.workspace = true
 meta-srv.workspace = true
 serde.workspace = true
 snafu.workspace = true

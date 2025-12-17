@@ -166,9 +166,9 @@ impl Stream for NumbersStream {
             batch = batch.project(projection).unwrap();
         }
 
-        Poll::Ready(Some(RecordBatch::try_from_df_record_batch(
+        Poll::Ready(Some(Ok(RecordBatch::from_df_record_batch(
             self.projected_schema.clone(),
             batch,
-        )))
+        ))))
     }
 }

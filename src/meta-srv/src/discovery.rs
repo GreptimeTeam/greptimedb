@@ -26,6 +26,7 @@ use common_meta::distributed_time_constants::{
 use common_meta::error::Result;
 use common_meta::peer::{Peer, PeerDiscovery, PeerResolver};
 use common_meta::{DatanodeId, FlownodeId};
+use common_time::util::DefaultSystemTimer;
 use snafu::ResultExt;
 
 use crate::cluster::MetaPeerClient;
@@ -35,6 +36,7 @@ use crate::discovery::lease::{LeaseValueAccessor, LeaseValueType};
 impl PeerDiscovery for MetaPeerClient {
     async fn active_frontends(&self) -> Result<Vec<Peer>> {
         utils::alive_frontends(
+            &DefaultSystemTimer,
             self,
             Duration::from_millis(FRONTEND_HEARTBEAT_INTERVAL_MILLIS),
         )
@@ -47,20 +49,30 @@ impl PeerDiscovery for MetaPeerClient {
         &self,
         filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
     ) -> Result<Vec<Peer>> {
-        utils::alive_datanodes(self, Duration::from_secs(DATANODE_LEASE_SECS), filter)
-            .await
-            .map_err(BoxedError::new)
-            .context(common_meta::error::ExternalSnafu)
+        utils::alive_datanodes(
+            &DefaultSystemTimer,
+            self,
+            Duration::from_secs(DATANODE_LEASE_SECS),
+            filter,
+        )
+        .await
+        .map_err(BoxedError::new)
+        .context(common_meta::error::ExternalSnafu)
     }
 
     async fn active_flownodes(
         &self,
         filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
     ) -> Result<Vec<Peer>> {
-        utils::alive_flownodes(self, Duration::from_secs(FLOWNODE_LEASE_SECS), filter)
-            .await
-            .map_err(BoxedError::new)
-            .context(common_meta::error::ExternalSnafu)
+        utils::alive_flownodes(
+            &DefaultSystemTimer,
+            self,
+            Duration::from_secs(FLOWNODE_LEASE_SECS),
+            filter,
+        )
+        .await
+        .map_err(BoxedError::new)
+        .context(common_meta::error::ExternalSnafu)
     }
 }
 

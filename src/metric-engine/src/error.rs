@@ -156,6 +156,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Mito enter staging operation fails"))]
+    MitoEnterStagingOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to collect record batch stream"))]
     CollectRecordBatchStream {
         source: common_recordbatch::error::Error,
@@ -242,6 +249,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unsupported remap manifests request for region {}", region_id))]
+    UnsupportedRemapManifestsRequest {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported alter kind: {}", kind))]
     UnsupportedAlterKind {
         kind: String,
@@ -324,7 +338,8 @@ impl ErrorExt for Error {
             | AddingFieldColumn { .. }
             | ParseRegionOptions { .. }
             | UnexpectedRequest { .. }
-            | UnsupportedAlterKind { .. } => StatusCode::InvalidArguments,
+            | UnsupportedAlterKind { .. }
+            | UnsupportedRemapManifestsRequest { .. } => StatusCode::InvalidArguments,
 
             ForbiddenPhysicalAlter { .. } | UnsupportedRegionRequest { .. } => {
                 StatusCode::Unsupported
@@ -352,6 +367,7 @@ impl ErrorExt for Error {
             | MitoWriteOperation { source, .. }
             | MitoFlushOperation { source, .. }
             | MitoSyncOperation { source, .. }
+            | MitoEnterStagingOperation { source, .. }
             | BatchOpenMitoRegion { source, .. }
             | BatchCatchupMitoRegion { source, .. } => source.status_code(),
 

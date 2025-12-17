@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
@@ -20,10 +21,11 @@ use common_meta::ddl::utils::parse_region_wal_options;
 use common_meta::instruction::{
     Instruction, InstructionReply, UpgradeRegion, UpgradeRegionReply, UpgradeRegionsReply,
 };
+use common_meta::key::topic_region::TopicRegionKey;
 use common_meta::lock_key::RemoteWalLock;
 use common_meta::wal_options_allocator::extract_topic_from_wal_options;
 use common_procedure::{Context as ProcedureContext, Status};
-use common_telemetry::{error, warn};
+use common_telemetry::{error, info};
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -66,17 +68,9 @@ impl State for UpgradeCandidateRegion {
     ) -> Result<(Box<dyn State>, Status)> {
         let now = Instant::now();
 
-        let region_wal_option = self.get_region_wal_option(ctx).await?;
-        let region_id = ctx.persistent_ctx.region_id;
-        if region_wal_option.is_none() {
-            warn!(
-                "Region {} wal options not found, during upgrade candidate region",
-                region_id
-            );
-        }
-
+        let topics = self.get_kafka_topics(ctx).await?;
         if self
-            .upgrade_region_with_retry(ctx, procedure_ctx, region_wal_option.as_ref())
+            .upgrade_region_with_retry(ctx, procedure_ctx, topics)
             .await
         {
             ctx.update_upgrade_candidate_region_elapsed(now);
@@ -93,24 +87,32 @@ impl State for UpgradeCandidateRegion {
 }
 
 impl UpgradeCandidateRegion {
-    async fn get_region_wal_option(&self, ctx: &mut Context) -> Result<Option<WalOptions>> {
-        let region_id = ctx.persistent_ctx.region_id;
-        match ctx.get_from_peer_datanode_table_value().await {
-            Ok(datanode_table_value) => {
-                let region_wal_options =
-                    parse_region_wal_options(&datanode_table_value.region_info.region_wal_options)
-                        .context(error::ParseWalOptionsSnafu)?;
-                Ok(region_wal_options.get(&region_id.region_number()).cloned())
+    async fn get_kafka_topics(&self, ctx: &mut Context) -> Result<HashSet<String>> {
+        let table_regions = ctx.persistent_ctx.table_regions();
+        let datanode_table_values = ctx.get_from_peer_datanode_table_values().await?;
+        let mut topics = HashSet::new();
+        for (table_id, regions) in table_regions {
+            let Some(datanode_table_value) = datanode_table_values.get(&table_id) else {
+                continue;
+            };
+
+            let region_wal_options =
+                parse_region_wal_options(&datanode_table_value.region_info.region_wal_options)
+                    .context(error::ParseWalOptionsSnafu)?;
+
+            for region_id in regions {
+                let Some(WalOptions::Kafka(kafka_wal_options)) =
+                    region_wal_options.get(&region_id.region_number())
+                else {
+                    continue;
+                };
+                if !topics.contains(&kafka_wal_options.topic) {
+                    topics.insert(kafka_wal_options.topic.clone());
+                }
             }
-            Err(error::Error::DatanodeTableNotFound { datanode_id, .. }) => {
-                warn!(
-                    "Datanode table not found, during upgrade candidate region, the target region might already been migrated, region_id: {}, datanode_id: {}",
-                    region_id, datanode_id
-                );
-                Ok(None)
-            }
-            Err(e) => Err(e),
         }
+
+        Ok(topics)
     }
 
     /// Builds upgrade region instruction.
@@ -119,35 +121,105 @@ impl UpgradeCandidateRegion {
         ctx: &mut Context,
         replay_timeout: Duration,
     ) -> Result<Instruction> {
-        let pc = &ctx.persistent_ctx;
-        let region_id = pc.region_id;
-        let last_entry_id = ctx.volatile_ctx.leader_region_last_entry_id;
-        let metadata_last_entry_id = ctx.volatile_ctx.leader_region_metadata_last_entry_id;
-        // Try our best to retrieve replay checkpoint.
-        let datanode_table_value = ctx.get_from_peer_datanode_table_value().await.ok();
-        let checkpoint = if let Some(topic) = datanode_table_value.as_ref().and_then(|v| {
-            extract_topic_from_wal_options(region_id, &v.region_info.region_wal_options)
-        }) {
-            ctx.fetch_replay_checkpoint(&topic).await.ok().flatten()
-        } else {
-            None
-        };
+        let region_ids = ctx.persistent_ctx.region_ids.clone();
+        let datanode_table_values = ctx.get_from_peer_datanode_table_values().await?;
+        let mut region_topic = Vec::with_capacity(region_ids.len());
+        for region_id in region_ids.iter() {
+            let table_id = region_id.table_id();
+            if let Some(datanode_table_value) = datanode_table_values.get(&table_id)
+                && let Some(topic) = extract_topic_from_wal_options(
+                    *region_id,
+                    &datanode_table_value.region_info.region_wal_options,
+                )
+            {
+                region_topic.push((*region_id, topic));
+            }
+        }
 
-        let upgrade_instruction = Instruction::UpgradeRegions(vec![
-            UpgradeRegion {
+        let replay_checkpoints = ctx
+            .get_replay_checkpoints(
+                region_topic
+                    .iter()
+                    .map(|(region_id, topic)| TopicRegionKey::new(*region_id, topic))
+                    .collect(),
+            )
+            .await?;
+        // Build upgrade regions instruction.
+        let mut upgrade_regions = Vec::with_capacity(region_ids.len());
+        for region_id in region_ids {
+            let last_entry_id = ctx
+                .volatile_ctx
+                .leader_region_last_entry_ids
+                .get(&region_id)
+                .copied();
+            let metadata_last_entry_id = ctx
+                .volatile_ctx
+                .leader_region_metadata_last_entry_ids
+                .get(&region_id)
+                .copied();
+            let checkpoint = replay_checkpoints.get(&region_id).copied();
+            upgrade_regions.push(UpgradeRegion {
                 region_id,
                 last_entry_id,
                 metadata_last_entry_id,
                 replay_timeout,
                 location_id: Some(ctx.persistent_ctx.from_peer.id),
-                replay_entry_id: None,
-                metadata_replay_entry_id: None,
-            }
-            .with_replay_entry_id(checkpoint.map(|c| c.entry_id))
-            .with_metadata_replay_entry_id(checkpoint.and_then(|c| c.metadata_entry_id)),
-        ]);
+                replay_entry_id: checkpoint.map(|c| c.entry_id),
+                metadata_replay_entry_id: checkpoint.and_then(|c| c.metadata_entry_id),
+            });
+        }
 
-        Ok(upgrade_instruction)
+        Ok(Instruction::UpgradeRegions(upgrade_regions))
+    }
+
+    fn handle_upgrade_region_reply(
+        &self,
+        ctx: &mut Context,
+        UpgradeRegionReply {
+            region_id,
+            ready,
+            exists,
+            error,
+        }: &UpgradeRegionReply,
+        now: &Instant,
+    ) -> Result<()> {
+        let candidate = &ctx.persistent_ctx.to_peer;
+        if error.is_some() {
+            return error::RetryLaterSnafu {
+                reason: format!(
+                    "Failed to upgrade the region {} on datanode {:?}, error: {:?}, elapsed: {:?}",
+                    region_id,
+                    candidate,
+                    error,
+                    now.elapsed()
+                ),
+            }
+            .fail();
+        }
+
+        ensure!(
+            exists,
+            error::UnexpectedSnafu {
+                violated: format!(
+                    "Candidate region {} doesn't exist on datanode {:?}",
+                    region_id, candidate
+                )
+            }
+        );
+
+        if self.require_ready && !ready {
+            return error::RetryLaterSnafu {
+                reason: format!(
+                    "Candidate region {} still replaying the wal on datanode {:?}, elapsed: {:?}",
+                    region_id,
+                    candidate,
+                    now.elapsed()
+                ),
+            }
+            .fail();
+        }
+
+        Ok(())
     }
 
     /// Tries to upgrade a candidate region.
@@ -175,11 +247,11 @@ impl UpgradeCandidateRegion {
             .await?;
 
         let pc = &ctx.persistent_ctx;
-        let region_id = pc.region_id;
+        let region_ids = &pc.region_ids;
         let candidate = &pc.to_peer;
 
         let msg = MailboxMessage::json_message(
-            &format!("Upgrade candidate region: {}", region_id),
+            &format!("Upgrade candidate regions: {:?}", region_ids),
             &format!("Metasrv@{}", ctx.server_addr()),
             &format!("Datanode-{}@{}", candidate.id, candidate.addr),
             common_time::util::current_time_millis(),
@@ -192,9 +264,16 @@ impl UpgradeCandidateRegion {
         let ch = Channel::Datanode(candidate.id);
         let receiver = ctx.mailbox.send(&ch, msg, operation_timeout).await?;
 
+        let now = Instant::now();
         match receiver.await {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
+                info!(
+                    "Received upgrade region reply: {:?}, regions: {:?}, elapsed: {:?}",
+                    reply,
+                    region_ids,
+                    now.elapsed()
+                );
                 let InstructionReply::UpgradeRegions(UpgradeRegionsReply { replies }) = reply
                 else {
                     return error::UnexpectedInstructionReplySnafu {
@@ -203,51 +282,16 @@ impl UpgradeCandidateRegion {
                     }
                     .fail();
                 };
-                // TODO(weny): handle multiple replies.
-                let UpgradeRegionReply {
-                    ready,
-                    exists,
-                    error,
-                    ..
-                } = &replies[0];
-
-                // Notes: The order of handling is important.
-                if error.is_some() {
-                    return error::RetryLaterSnafu {
-                        reason: format!(
-                            "Failed to upgrade the region {} on datanode {:?}, error: {:?}",
-                            region_id, candidate, error
-                        ),
-                    }
-                    .fail();
+                for reply in replies {
+                    self.handle_upgrade_region_reply(ctx, &reply, &now)?;
                 }
-
-                ensure!(
-                    exists,
-                    error::UnexpectedSnafu {
-                        violated: format!(
-                            "Candidate region {} doesn't exist on datanode {:?}",
-                            region_id, candidate
-                        )
-                    }
-                );
-
-                if self.require_ready && !ready {
-                    return error::RetryLaterSnafu {
-                        reason: format!(
-                            "Candidate region {} still replaying the wal on datanode {:?}",
-                            region_id, candidate
-                        ),
-                    }
-                    .fail();
-                }
-
                 Ok(())
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
-                    "Mailbox received timeout for upgrade candidate region {region_id} on datanode {:?}",
+                    "Mailbox received timeout for upgrade candidate regions {region_ids:?} on datanode {:?}, elapsed: {:?}",
                     candidate,
+                    now.elapsed()
                 );
                 error::RetryLaterSnafu { reason }.fail()
             }
@@ -262,26 +306,24 @@ impl UpgradeCandidateRegion {
         &self,
         ctx: &mut Context,
         procedure_ctx: &ProcedureContext,
-        wal_options: Option<&WalOptions>,
+        topics: HashSet<String>,
     ) -> bool {
         let mut retry = 0;
         let mut upgraded = false;
 
+        let mut guards = Vec::with_capacity(topics.len());
         loop {
             let timer = Instant::now();
             // If using Kafka WAL, acquire a read lock on the topic to prevent WAL pruning during the upgrade.
-            let _guard = if let Some(WalOptions::Kafka(kafka_wal_options)) = wal_options {
-                Some(
+            for topic in &topics {
+                guards.push(
                     procedure_ctx
                         .provider
-                        .acquire_lock(
-                            &(RemoteWalLock::Read(kafka_wal_options.topic.clone()).into()),
-                        )
+                        .acquire_lock(&(RemoteWalLock::Read(topic.clone()).into()))
                         .await,
-                )
-            } else {
-                None
-            };
+                );
+            }
+
             if let Err(err) = self.upgrade_region(ctx).await {
                 retry += 1;
                 ctx.update_operations_elapsed(timer);
@@ -327,22 +369,21 @@ mod tests {
     };
 
     fn new_persistent_context() -> PersistentContext {
-        PersistentContext {
-            catalog: "greptime".into(),
-            schema: "public".into(),
-            from_peer: Peer::empty(1),
-            to_peer: Peer::empty(2),
-            region_id: RegionId::new(1024, 1),
-            timeout: Duration::from_millis(1000),
-            trigger_reason: RegionMigrationTriggerReason::Manual,
-        }
+        PersistentContext::new(
+            vec![("greptime".into(), "public".into())],
+            Peer::empty(1),
+            Peer::empty(2),
+            vec![RegionId::new(1024, 1)],
+            Duration::from_millis(1000),
+            RegionMigrationTriggerReason::Manual,
+        )
     }
 
     async fn prepare_table_metadata(ctx: &Context, wal_options: HashMap<u32, String>) {
-        let table_info =
-            new_test_table_info(ctx.persistent_ctx.region_id.table_id(), vec![1]).into();
+        let region_id = ctx.persistent_ctx.region_ids[0];
+        let table_info = new_test_table_info(region_id.table_id(), vec![1]).into();
         let region_routes = vec![RegionRoute {
-            region: Region::new_test(ctx.persistent_ctx.region_id),
+            region: Region::new_test(region_id),
             leader_peer: Some(ctx.persistent_ctx.from_peer.clone()),
             follower_peers: vec![ctx.persistent_ctx.to_peer.clone()],
             ..Default::default()

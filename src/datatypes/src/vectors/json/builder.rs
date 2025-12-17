@@ -14,13 +14,14 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-
-use snafu::OptionExt;
+use std::sync::LazyLock;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{Result, TryFromValueSnafu, UnsupportedOperationSnafu};
+use crate::json::value::JsonValueRef;
 use crate::prelude::{ValueRef, Vector, VectorRef};
-use crate::types::JsonType;
+use crate::types::json_type::JsonNativeType;
+use crate::types::{JsonType, json_type};
 use crate::value::StructValueRef;
 use crate::vectors::{MutableVector, StructVectorBuilder};
 
@@ -40,16 +41,16 @@ impl JsonStructsBuilder {
         self.inner.len()
     }
 
-    fn push(&mut self, value: &ValueRef) -> Result<()> {
-        if self.json_type.is_plain_json() {
-            let value = ValueRef::Struct(StructValueRef::RefList {
-                val: vec![value.clone()],
-                fields: self.json_type.as_struct_type(),
-            });
-            self.inner.try_push_value_ref(&value)
-        } else {
-            self.inner.try_push_value_ref(value)
+    fn push(&mut self, json: &JsonValueRef) -> Result<()> {
+        let mut value = json.as_value_ref();
+        if !json.is_object() {
+            let fields = json_type::plain_json_struct_type(value.data_type());
+            value = ValueRef::Struct(StructValueRef::RefList {
+                val: vec![value],
+                fields,
+            })
         }
+        self.inner.try_push_value_ref(&value)
     }
 
     /// Try to merge (and consume the data of) other json vector builder into this one.
@@ -181,9 +182,9 @@ pub(crate) struct JsonVectorBuilder {
 }
 
 impl JsonVectorBuilder {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn new(json_type: JsonNativeType, capacity: usize) -> Self {
         Self {
-            merged_type: JsonType::empty(),
+            merged_type: JsonType::new_native(json_type),
             capacity,
             builders: vec![],
         }
@@ -252,13 +253,17 @@ impl MutableVector for JsonVectorBuilder {
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
-        let data_type = value.data_type();
-        let json_type = data_type.as_json().with_context(|| TryFromValueSnafu {
-            reason: format!("expected json value, got {value:?}"),
-        })?;
+        let ValueRef::Json(value) = value else {
+            return TryFromValueSnafu {
+                reason: format!("expected json value, got {value:?}"),
+            }
+            .fail();
+        };
+        let json_type = value.json_type();
 
         let builder = match self.builders.last_mut() {
             Some(last) => {
+                // TODO(LFC): use "is_include" and amend json value with nulls
                 if &last.json_type != json_type {
                     self.try_create_new_builder(json_type)?
                 } else {
@@ -268,21 +273,16 @@ impl MutableVector for JsonVectorBuilder {
             None => self.try_create_new_builder(json_type)?,
         };
 
-        let ValueRef::Json(value) = value else {
-            // Safety: json datatype value must be the value of json.
-            unreachable!()
-        };
-        builder.push(value)
+        builder.push(value.as_ref())
     }
 
     fn push_null(&mut self) {
-        let null_json_value = ValueRef::Json(Box::new(ValueRef::Null));
-        self.try_push_value_ref(&null_json_value)
+        static NULL_JSON: LazyLock<ValueRef> =
+            LazyLock::new(|| ValueRef::Json(Box::new(JsonValueRef::null())));
+        self.try_push_value_ref(&NULL_JSON)
             // Safety: learning from the method "try_push_value_ref", a null json value should be
             // always able to push into any json vectors.
-            .unwrap_or_else(|e| {
-                panic!("failed to push null json value: {null_json_value:?}, error: {e}")
-            });
+            .unwrap_or_else(|e| panic!("failed to push null json value, error: {e}"));
     }
 
     fn extend_slice_of(&mut self, _: &dyn Vector, _: usize, _: usize) -> Result<()> {
@@ -307,12 +307,11 @@ mod tests {
         let value = settings.encode(json).unwrap();
 
         let value = value.as_value_ref();
-        let result = builder.try_push_value_ref(&value);
-        match (result, expected) {
-            (Ok(()), Ok(())) => (),
-            (Err(e), Err(expected)) => assert_eq!(e.to_string(), expected),
-            _ => unreachable!(),
-        }
+        let result = builder
+            .try_push_value_ref(&value)
+            .map_err(|e| e.to_string());
+        let expected = expected.map_err(|e| e.to_string());
+        assert_eq!(result, expected);
     }
 
     #[test]
@@ -322,24 +321,24 @@ mod tests {
             Ok(()),
             Ok(()),
             Err(
-                "Failed to merge JSON datatype: datatypes have conflict, this: Int64, that: String",
+                "Failed to merge JSON datatype: datatypes have conflict, this: Number(I64), that: String",
             ),
             Err(
-                "Failed to merge JSON datatype: datatypes have conflict, this: Int64, that: List<Boolean>",
+                "Failed to merge JSON datatype: datatypes have conflict, this: Number(I64), that: Array[Bool]",
             ),
         ];
-        let mut builder = JsonVectorBuilder::with_capacity(1);
+        let mut builder = JsonVectorBuilder::new(JsonNativeType::Null, 1);
         for (json, result) in jsons.into_iter().zip(results.into_iter()) {
             push(json, &mut builder, result);
         }
         let vector = builder.to_vector();
         let expected = r#"
-+----------------+
-| StructVector   |
-+----------------+
-| {__plain__: 1} |
-| {__plain__: 2} |
-+----------------+"#;
++---------------------+
+| StructVector        |
++---------------------+
+| {__json_plain__: 1} |
+| {__json_plain__: 2} |
++---------------------+"#;
         assert_eq!(pretty_print(vector), expected.trim());
         Ok(())
     }
@@ -388,7 +387,7 @@ mod tests {
             "object": {"timestamp": 1761523203000}
         }"#,
         ];
-        let mut builder = JsonVectorBuilder::with_capacity(1);
+        let mut builder = JsonVectorBuilder::new(JsonNativeType::Null, 1);
         for json in jsons {
             push(json, &mut builder, Ok(()));
         }
@@ -397,12 +396,12 @@ mod tests {
         // test children builders:
         assert_eq!(builder.builders.len(), 6);
         let expect_types = [
-            r#"Json<Struct<"list": List<Int64>, "s": String>>"#,
-            r#"Json<Struct<"float": Float64, "s": String>>"#,
-            r#"Json<Struct<"float": Float64, "int": Int64>>"#,
-            r#"Json<Struct<"int": Int64, "object": Struct<"hello": String, "timestamp": Int64>>>"#,
-            r#"Json<Struct<"nested": Struct<"a": Struct<"b": Struct<"b": Struct<"a": String>>>>, "object": Struct<"timestamp": Int64>>>"#,
-            r#"Json<Struct<"nested": Struct<"a": Struct<"b": Struct<"a": Struct<"b": String>>>>, "object": Struct<"timestamp": Int64>>>"#,
+            r#"Json<Object{"list": Array[Number(I64)], "s": String}>"#,
+            r#"Json<Object{"float": Number(F64), "s": String}>"#,
+            r#"Json<Object{"float": Number(F64), "int": Number(I64)}>"#,
+            r#"Json<Object{"int": Number(I64), "object": Object{"hello": String, "timestamp": Number(I64)}}>"#,
+            r#"Json<Object{"nested": Object{"a": Object{"b": Object{"b": Object{"a": String}}}}, "object": Object{"timestamp": Number(I64)}}>"#,
+            r#"Json<Object{"nested": Object{"a": Object{"b": Object{"a": Object{"b": String}}}}, "object": Object{"timestamp": Number(I64)}}>"#,
         ];
         let expect_vectors = [
             r#"
@@ -457,7 +456,7 @@ mod tests {
         }
 
         // test final merged json type:
-        let expected = r#"Json<Struct<"float": Float64, "int": Int64, "list": List<Int64>, "nested": Struct<"a": Struct<"b": Struct<"a": Struct<"b": String>, "b": Struct<"a": String>>>>, "object": Struct<"hello": String, "timestamp": Int64>, "s": String>>"#;
+        let expected = r#"Json<Object{"float": Number(F64), "int": Number(I64), "list": Array[Number(I64)], "nested": Object{"a": Object{"b": Object{"a": Object{"b": String}, "b": Object{"a": String}}}}, "object": Object{"hello": String, "timestamp": Number(I64)}, "s": String}>"#;
         assert_eq!(builder.data_type().to_string(), expected);
 
         // test final produced vector:

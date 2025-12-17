@@ -22,6 +22,7 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef};
+use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::datanode::TopicStatsReporter;
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
@@ -48,7 +49,6 @@ use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
 use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
-use servers::export_metrics::ExportMetricsTask;
 use servers::server::ServerHandlers;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::path_utils::WAL_DIR;
@@ -84,7 +84,6 @@ pub struct Datanode {
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leases_notifier: Option<Arc<Notify>>,
     plugins: Plugins,
-    export_metrics_task: Option<ExportMetricsTask>,
 }
 
 impl Datanode {
@@ -95,10 +94,6 @@ impl Datanode {
         self.wait_coordinated().await;
 
         self.start_telemetry();
-
-        if let Some(t) = self.export_metrics_task.as_ref() {
-            t.start(None).context(StartServerSnafu)?
-        }
 
         self.services.start_all().await.context(StartServerSnafu)
     }
@@ -287,21 +282,11 @@ impl DatanodeBuilder {
             open_all_regions.await?;
         }
 
-        let mut resource_stat = ResourceStatImpl::default();
-        resource_stat.start_collect_cpu_usage();
-
         let heartbeat_task = if let Some(meta_client) = meta_client {
-            Some(
-                HeartbeatTask::try_new(
-                    &self.opts,
-                    region_server.clone(),
-                    meta_client,
-                    cache_registry,
-                    self.plugins.clone(),
-                    Arc::new(resource_stat),
-                )
-                .await?,
-            )
+            let task = self
+                .create_heartbeat_task(&region_server, meta_client, cache_registry)
+                .await?;
+            Some(task)
         } else {
             None
         };
@@ -319,10 +304,6 @@ impl DatanodeBuilder {
             None
         };
 
-        let export_metrics_task =
-            ExportMetricsTask::try_new(&self.opts.export_metrics, Some(&self.plugins))
-                .context(StartServerSnafu)?;
-
         Ok(Datanode {
             services: ServerHandlers::default(),
             heartbeat_task,
@@ -331,8 +312,30 @@ impl DatanodeBuilder {
             region_event_receiver,
             leases_notifier,
             plugins: self.plugins.clone(),
-            export_metrics_task,
         })
+    }
+
+    async fn create_heartbeat_task(
+        &self,
+        region_server: &RegionServer,
+        meta_client: MetaClientRef,
+        cache_invalidator: CacheInvalidatorRef,
+    ) -> Result<HeartbeatTask> {
+        let stat = {
+            let mut stat = ResourceStatImpl::default();
+            stat.start_collect_cpu_usage();
+            Arc::new(stat)
+        };
+
+        HeartbeatTask::try_new(
+            &self.opts,
+            region_server.clone(),
+            meta_client,
+            cache_invalidator,
+            self.plugins.clone(),
+            stat,
+        )
+        .await
     }
 
     /// Builds [ObjectStoreManager] from [StorageConfig].

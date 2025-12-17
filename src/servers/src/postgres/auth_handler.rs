@@ -19,6 +19,7 @@ use ::auth::{Identity, Password, UserInfoRef, UserProviderRef, userinfo_by_name}
 use async_trait::async_trait;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
+use common_time::Timezone;
 use futures::{Sink, SinkExt};
 use pgwire::api::auth::StartupHandler;
 use pgwire::api::{ClientInfo, PgWireConnectionState, auth};
@@ -168,6 +169,23 @@ impl StartupHandler for PostgresServerHandlerInner {
                     DbResolution::NotFound(msg) => {
                         send_error(client, PgErrorCode::Ec3D000.to_err_info(msg)).await?;
                         return Ok(());
+                    }
+                }
+
+                // try to set TimeZone
+                if let Some(tz) = client.metadata().get("TimeZone") {
+                    match Timezone::from_tz_string(tz) {
+                        Ok(tz) => self.session.set_timezone(tz),
+                        Err(_) => {
+                            send_error(
+                                client,
+                                PgErrorCode::Ec22023
+                                    .to_err_info(format!("Invalid TimeZone: {}", tz)),
+                            )
+                            .await?;
+
+                            return Ok(());
+                        }
                     }
                 }
 

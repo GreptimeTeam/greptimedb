@@ -31,7 +31,7 @@ mod catchup_test;
 #[cfg(test)]
 mod close_test;
 #[cfg(test)]
-mod compaction_test;
+pub(crate) mod compaction_test;
 #[cfg(test)]
 mod create_test;
 #[cfg(test)]
@@ -71,6 +71,11 @@ mod sync_test;
 #[cfg(test)]
 mod truncate_test;
 
+#[cfg(test)]
+mod copy_region_from_test;
+#[cfg(test)]
+mod remap_manifests_test;
+
 mod puffin_index;
 
 use std::any::Any;
@@ -100,8 +105,10 @@ use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
 };
 use store_api::region_engine::{
-    BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
-    RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
+    BatchResponses, CopyRegionFromRequest, CopyRegionFromResponse, MitoCopyRegionFromResponse,
+    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
+    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    SettableRegionRoleState, SyncManifestResponse,
 };
 use store_api::region_request::{
     AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
@@ -115,8 +122,8 @@ use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::MitoConfig;
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
-    InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
-    SerdeJsonSnafu, SerializeColumnMetadataSnafu,
+    self, InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu,
+    Result, SerdeJsonSnafu, SerializeColumnMetadataSnafu, SerializeManifestSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
@@ -131,7 +138,7 @@ use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
-use crate::sst::file::{FileMeta, RegionFileId};
+use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::wal::entry_distributor::{
     DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE, build_wal_entry_distributor_and_receivers,
@@ -290,25 +297,30 @@ impl MitoEngine {
     }
 
     /// Get all tmp ref files for given region ids, excluding files that's already in manifest.
-    pub async fn get_snapshot_of_unmanifested_refs(
+    pub async fn get_snapshot_of_file_refs(
         &self,
-        region_ids: impl IntoIterator<Item = RegionId>,
+        file_handle_regions: impl IntoIterator<Item = RegionId>,
+        manifest_regions: HashMap<RegionId, Vec<RegionId>>,
     ) -> Result<FileRefsManifest> {
         let file_ref_mgr = self.file_ref_manager();
 
-        let region_ids = region_ids.into_iter().collect::<Vec<_>>();
-
-        // Convert region IDs to MitoRegionRef objects, error if any region doesn't exist
-        let regions: Vec<MitoRegionRef> = region_ids
+        let file_handle_regions = file_handle_regions.into_iter().collect::<Vec<_>>();
+        // Convert region IDs to MitoRegionRef objects, ignore regions that do not exist on current datanode
+        // as regions on other datanodes are not managed by this engine.
+        let query_regions: Vec<MitoRegionRef> = file_handle_regions
             .into_iter()
-            .map(|region_id| {
-                self.find_region(region_id)
-                    .with_context(|| RegionNotFoundSnafu { region_id })
+            .filter_map(|region_id| self.find_region(region_id))
+            .collect();
+
+        let related_regions: Vec<(MitoRegionRef, Vec<RegionId>)> = manifest_regions
+            .into_iter()
+            .filter_map(|(related_region, queries)| {
+                self.find_region(related_region).map(|r| (r, queries))
             })
-            .collect::<Result<_>>()?;
+            .collect();
 
         file_ref_mgr
-            .get_snapshot_of_unmanifested_refs(regions)
+            .get_snapshot_of_file_refs(query_regions, related_regions)
             .await
     }
 
@@ -369,7 +381,11 @@ impl MitoEngine {
     }
 
     /// Returns a scanner to scan for `request`.
-    async fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+    pub(crate) async fn scanner(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<Scanner> {
         self.scan_region(region_id, request)?.scanner().await
     }
 
@@ -406,6 +422,17 @@ impl MitoEngine {
             .submit_to_worker(region_id, request)
             .await?;
         rx.await.context(RecvSnafu)?
+    }
+
+    /// Handles copy region from request.
+    ///
+    /// This method is only supported for internal use and is not exposed in the trait implementation.
+    pub async fn copy_region_from(
+        &self,
+        region_id: RegionId,
+        request: CopyRegionFromRequest,
+    ) -> Result<MitoCopyRegionFromResponse> {
+        self.inner.copy_region_from(region_id, request).await
     }
 
     #[cfg(test)]
@@ -528,22 +555,23 @@ impl MitoEngine {
                         return Vec::new();
                     };
 
-                    let Some(index_file_id) = entry.index_file_id.as_ref() else {
-                        return Vec::new();
-                    };
-                    let file_id = match FileId::parse_str(index_file_id) {
+                    let index_version = entry.index_version;
+                    let file_id = match FileId::parse_str(&entry.file_id) {
                         Ok(file_id) => file_id,
                         Err(err) => {
                             warn!(
                                 err;
                                 "Failed to parse puffin index file id, table_dir: {}, file_id: {}",
                                 entry.table_dir,
-                                index_file_id
+                                entry.file_id
                             );
                             return Vec::new();
                         }
                     };
-                    let region_file_id = RegionFileId::new(entry.region_id, file_id);
+                    let region_index_id = RegionIndexId::new(
+                        RegionFileId::new(entry.region_id, file_id),
+                        index_version,
+                    );
                     let context = IndexEntryContext {
                         table_dir: &entry.table_dir,
                         index_file_path: index_file_path.as_str(),
@@ -552,7 +580,7 @@ impl MitoEngine {
                         region_number: entry.region_number,
                         region_group: entry.region_group,
                         region_sequence: entry.region_sequence,
-                        file_id: index_file_id,
+                        file_id: &entry.file_id,
                         index_file_size: entry.index_file_size,
                         node_id,
                     };
@@ -563,7 +591,7 @@ impl MitoEngine {
 
                     collect_index_entries_from_puffin(
                         manager,
-                        region_file_id,
+                        region_index_id,
                         context,
                         bloom_filter_cache,
                         inverted_index_cache,
@@ -607,7 +635,9 @@ impl MitoEngine {
     }
 }
 
-/// Check whether the region edit is valid. Only adding files to region is considered valid now.
+/// Check whether the region edit is valid.
+///
+/// Only adding or removing files to region is considered valid now.
 fn is_valid_region_edit(edit: &RegionEdit) -> bool {
     !edit.files_to_add.is_empty()
         && edit.files_to_remove.is_empty()
@@ -1018,6 +1048,40 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)?
     }
 
+    async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse> {
+        let region_id = request.region_id;
+        let (request, receiver) = WorkerRequest::try_from_remap_manifests_request(request)?;
+        self.workers.submit_to_worker(region_id, request).await?;
+        let manifests = receiver.await.context(RecvSnafu)??;
+
+        let new_manifests = manifests
+            .into_iter()
+            .map(|(region_id, manifest)| {
+                Ok((
+                    region_id,
+                    serde_json::to_string(&manifest)
+                        .context(SerializeManifestSnafu { region_id })?,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        Ok(RemapManifestsResponse { new_manifests })
+    }
+
+    async fn copy_region_from(
+        &self,
+        region_id: RegionId,
+        request: CopyRegionFromRequest,
+    ) -> Result<MitoCopyRegionFromResponse> {
+        let (request, receiver) =
+            WorkerRequest::try_from_copy_region_from_request(region_id, request)?;
+        self.workers.submit_to_worker(region_id, request).await?;
+        let response = receiver.await.context(RecvSnafu)??;
+        Ok(response)
+    }
+
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.workers.get_region(region_id).map(|region| {
             if region.is_follower() {
@@ -1192,6 +1256,29 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)?;
 
         Ok(SyncManifestResponse::Mito { synced })
+    }
+
+    async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse, BoxedError> {
+        self.inner
+            .remap_manifests(request)
+            .await
+            .map_err(BoxedError::new)
+    }
+
+    async fn copy_region_from(
+        &self,
+        _region_id: RegionId,
+        _request: CopyRegionFromRequest,
+    ) -> Result<CopyRegionFromResponse, BoxedError> {
+        Err(BoxedError::new(
+            error::UnsupportedOperationSnafu {
+                err_msg: "copy_region_from is not supported",
+            }
+            .build(),
+        ))
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {

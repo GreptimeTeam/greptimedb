@@ -21,6 +21,7 @@ members = [
     "src/common/grpc-expr",
     "src/common/macro",
     "src/common/mem-prof",
+    "src/common/memory-manager",
     "src/common/meta",
     "src/common/options",
     "src/common/plugins",
@@ -74,7 +75,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -131,7 +132,7 @@ datafusion-functions = "50"
 datafusion-functions-aggregate-common = "50"
 datafusion-optimizer = "50"
 datafusion-orc = "0.5"
-datafusion-pg-catalog = "0.12.1"
+datafusion-pg-catalog = "0.12.3"
 datafusion-physical-expr = "50"
 datafusion-physical-plan = "50"
 datafusion-sql = "50"
@@ -139,6 +140,7 @@ datafusion-substrait = "50"
 deadpool = "0.12"
 deadpool-postgres = "0.14"
 derive_builder = "0.20"
+derive_more = { version = "2.1", features = ["full"] }
 dotenv = "0.15"
 either = "1.15"
 etcd-client = { git = "https://github.com/GreptimeTeam/etcd-client", rev = "f62df834f0cffda355eba96691fe1a9a332b75a7", features = [
@@ -148,7 +150,7 @@ etcd-client = { git = "https://github.com/GreptimeTeam/etcd-client", rev = "f62d
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "14b9dc40bdc8288742b0cefc7bb024303b7429ef" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "0423fa30203187c75e2937a668df1da699c8b96c" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -200,7 +202,8 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "multipart",
 ] }
-rskafka = { git = "https://github.com/WenyXu/rskafka.git", rev = "7b0f31ed39db049b4ee2e5f1e95b5a30be9baf76", features = [
+# Branch: feat/request-timeout
+rskafka = { git = "https://github.com/GreptimeTeam/rskafka.git", rev = "f5688f83e7da591cda3f2674c2408b4c0ed4ed50", features = [
     "transport-tls",
 ] }
 rstest = "0.25"
@@ -234,6 +237,7 @@ tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
 tracing-appender = "0.2"
+tracing-opentelemetry = "0.31.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
 uuid = { version = "1.17", features = ["serde", "v4", "fast-rng"] }
@@ -263,6 +267,7 @@ common-grpc = { path = "src/common/grpc" }
 common-grpc-expr = { path = "src/common/grpc-expr" }
 common-macro = { path = "src/common/macro" }
 common-mem-prof = { path = "src/common/mem-prof" }
+common-memory-manager = { path = "src/common/memory-manager" }
 common-meta = { path = "src/common/meta" }
 common-options = { path = "src/common/options" }
 common-plugins = { path = "src/common/plugins" }

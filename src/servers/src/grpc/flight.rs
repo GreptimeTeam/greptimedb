@@ -25,12 +25,16 @@ use arrow_flight::{
     HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaResult, Ticket,
 };
 use async_trait::async_trait;
+use bytes;
 use bytes::Bytes;
 use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
-use common_grpc::flight::{FlightEncoder, FlightMessage};
+use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_query::{Output, OutputData};
+use common_recordbatch::DfRecordBatch;
+use common_telemetry::debug;
 use common_telemetry::tracing::info_span;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
+use datatypes::arrow::datatypes::SchemaRef;
 use futures::{Stream, future, ready};
 use futures_util::{StreamExt, TryStreamExt};
 use prost::Message;
@@ -41,7 +45,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::error::{InvalidParameterSnafu, ParseJsonSnafu, Result, ToJsonSnafu};
+use crate::error::{InvalidParameterSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::grpc::greptime_handler::{GreptimeRequestHandler, get_request_type};
 use crate::grpc::{FlightCompression, TonicResult, context_auth};
@@ -223,14 +227,15 @@ impl FlightCraft for GreptimeRequestHandler {
         const MAX_PENDING_RESPONSES: usize = 32;
         let (tx, rx) = mpsc::channel::<TonicResult<DoPutResponse>>(MAX_PENDING_RESPONSES);
 
-        let stream = PutRecordBatchRequestStream {
-            flight_data_stream: stream,
-            state: PutRecordBatchRequestStreamState::Init(
-                query_ctx.current_catalog().to_string(),
-                query_ctx.current_schema(),
-            ),
+        let stream = PutRecordBatchRequestStream::new(
+            stream,
+            query_ctx.current_catalog().to_string(),
+            query_ctx.current_schema(),
             limiter,
-        };
+        )
+        .await?;
+        // Ack immediately when stream is created successfully (in Init state)
+        let _ = tx.send(Ok(DoPutResponse::new(0, 0, 0.0))).await;
         self.put_record_batches(stream, tx, query_ctx).await;
 
         let response = ReceiverStream::new(rx)
@@ -249,33 +254,33 @@ impl FlightCraft for GreptimeRequestHandler {
     }
 }
 
-pub(crate) struct PutRecordBatchRequest {
-    pub(crate) table_name: TableName,
-    pub(crate) request_id: i64,
-    pub(crate) data: FlightData,
+pub struct PutRecordBatchRequest {
+    pub table_name: TableName,
+    pub request_id: i64,
+    pub record_batch: DfRecordBatch,
+    pub schema_bytes: Bytes,
+    pub flight_data: FlightData,
     pub(crate) _guard: Option<RequestMemoryGuard>,
 }
 
 impl PutRecordBatchRequest {
     fn try_new(
         table_name: TableName,
+        record_batch: DfRecordBatch,
+        request_id: i64,
+        schema_bytes: Bytes,
         flight_data: FlightData,
         limiter: Option<&RequestMemoryLimiter>,
     ) -> Result<Self> {
-        let request_id = if !flight_data.app_metadata.is_empty() {
-            let metadata: DoPutMetadata =
-                serde_json::from_slice(&flight_data.app_metadata).context(ParseJsonSnafu)?;
-            metadata.request_id()
-        } else {
-            0
-        };
+        let memory_usage = flight_data.data_body.len()
+            + flight_data.app_metadata.len()
+            + flight_data.data_header.len();
 
         let _guard = limiter
             .filter(|limiter| limiter.is_enabled())
             .map(|limiter| {
-                let message_size = flight_data.encoded_len();
                 limiter
-                    .try_acquire(message_size)
+                    .try_acquire(memory_usage)
                     .map(|guard| {
                         guard.inspect(|g| {
                             METRIC_GRPC_MEMORY_USAGE_BYTES.set(g.current_usage() as i64);
@@ -291,93 +296,224 @@ impl PutRecordBatchRequest {
         Ok(Self {
             table_name,
             request_id,
-            data: flight_data,
+            record_batch,
+            schema_bytes,
+            flight_data,
             _guard,
         })
     }
 }
 
-pub(crate) struct PutRecordBatchRequestStream {
+pub struct PutRecordBatchRequestStream {
     flight_data_stream: Streaming<FlightData>,
-    state: PutRecordBatchRequestStreamState,
+    catalog: String,
+    schema_name: String,
     limiter: Option<RequestMemoryLimiter>,
+    // Client now lazily sends schema data so we cannot eagerly wait for it.
+    // Instead, we need to decode while receiving record batches.
+    state: StreamState,
 }
 
-enum PutRecordBatchRequestStreamState {
-    Init(String, String),
-    Started(TableName),
+enum StreamState {
+    Init,
+    Ready {
+        table_name: TableName,
+        schema: SchemaRef,
+        schema_bytes: Bytes,
+        decoder: FlightDecoder,
+    },
+}
+
+impl PutRecordBatchRequestStream {
+    /// Creates a new `PutRecordBatchRequestStream` in Init state.
+    /// The stream will transition to Ready state when it receives the schema message.
+    pub async fn new(
+        flight_data_stream: Streaming<FlightData>,
+        catalog: String,
+        schema: String,
+        limiter: Option<RequestMemoryLimiter>,
+    ) -> TonicResult<Self> {
+        Ok(Self {
+            flight_data_stream,
+            catalog,
+            schema_name: schema,
+            limiter,
+            state: StreamState::Init,
+        })
+    }
+
+    /// Returns the table name extracted from the flight descriptor.
+    /// Returns None if the stream is still in Init state.
+    pub fn table_name(&self) -> Option<&TableName> {
+        match &self.state {
+            StreamState::Init => None,
+            StreamState::Ready { table_name, .. } => Some(table_name),
+        }
+    }
+
+    /// Returns the Arrow schema decoded from the first flight message.
+    /// Returns None if the stream is still in Init state.
+    pub fn schema(&self) -> Option<&SchemaRef> {
+        match &self.state {
+            StreamState::Init => None,
+            StreamState::Ready { schema, .. } => Some(schema),
+        }
+    }
+
+    /// Returns the raw schema bytes in IPC format.
+    /// Returns None if the stream is still in Init state.
+    pub fn schema_bytes(&self) -> Option<&Bytes> {
+        match &self.state {
+            StreamState::Init => None,
+            StreamState::Ready { schema_bytes, .. } => Some(schema_bytes),
+        }
+    }
+
+    fn extract_table_name(mut descriptor: FlightDescriptor) -> Result<String> {
+        ensure!(
+            descriptor.r#type == arrow_flight::flight_descriptor::DescriptorType::Path as i32,
+            InvalidParameterSnafu {
+                reason: "expect FlightDescriptor::type == 'Path' only",
+            }
+        );
+        ensure!(
+            descriptor.path.len() == 1,
+            InvalidParameterSnafu {
+                reason: "expect FlightDescriptor::path has only one table name",
+            }
+        );
+        Ok(descriptor.path.remove(0))
+    }
 }
 
 impl Stream for PutRecordBatchRequestStream {
     type Item = TonicResult<PutRecordBatchRequest>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        fn extract_table_name(mut descriptor: FlightDescriptor) -> Result<String> {
-            ensure!(
-                descriptor.r#type == arrow_flight::flight_descriptor::DescriptorType::Path as i32,
-                InvalidParameterSnafu {
-                    reason: "expect FlightDescriptor::type == 'Path' only",
+        loop {
+            let poll = ready!(self.flight_data_stream.poll_next_unpin(cx));
+
+            match poll {
+                Some(Ok(flight_data)) => {
+                    // Clone limiter once to avoid borrowing issues
+                    let limiter = self.limiter.clone();
+
+                    match &mut self.state {
+                        StreamState::Init => {
+                            // First message - expecting schema
+                            let flight_descriptor = match flight_data.flight_descriptor.as_ref() {
+                                Some(descriptor) => descriptor.clone(),
+                                None => {
+                                    return Poll::Ready(Some(Err(Status::failed_precondition(
+                                        "table to put is not found in flight descriptor",
+                                    ))));
+                                }
+                            };
+
+                            let table_name_str = match Self::extract_table_name(flight_descriptor) {
+                                Ok(name) => name,
+                                Err(e) => {
+                                    return Poll::Ready(Some(Err(Status::invalid_argument(
+                                        e.to_string(),
+                                    ))));
+                                }
+                            };
+                            let table_name = TableName::new(
+                                self.catalog.clone(),
+                                self.schema_name.clone(),
+                                table_name_str,
+                            );
+
+                            // Decode the schema
+                            let mut decoder = FlightDecoder::default();
+                            let schema_message = decoder.try_decode(&flight_data).map_err(|e| {
+                                Status::invalid_argument(format!("Failed to decode schema: {}", e))
+                            })?;
+
+                            match schema_message {
+                                Some(FlightMessage::Schema(schema)) => {
+                                    let schema_bytes = decoder.schema_bytes().ok_or_else(|| {
+                                        Status::internal(
+                                            "decoder should have schema bytes after decoding schema",
+                                        )
+                                    })?;
+
+                                    // Transition to Ready state with all necessary data
+                                    self.state = StreamState::Ready {
+                                        table_name,
+                                        schema,
+                                        schema_bytes,
+                                        decoder,
+                                    };
+                                    // Continue to next iteration to process RecordBatch messages
+                                    continue;
+                                }
+                                _ => {
+                                    return Poll::Ready(Some(Err(Status::failed_precondition(
+                                        "first message must be a Schema message",
+                                    ))));
+                                }
+                            }
+                        }
+                        StreamState::Ready {
+                            table_name,
+                            schema: _,
+                            schema_bytes,
+                            decoder,
+                        } => {
+                            // Extract request_id and body_size from FlightData before decoding
+                            let request_id = if !flight_data.app_metadata.is_empty() {
+                                serde_json::from_slice::<DoPutMetadata>(&flight_data.app_metadata)
+                                    .map(|meta| meta.request_id())
+                                    .unwrap_or_default()
+                            } else {
+                                0
+                            };
+
+                            // Decode FlightData to RecordBatch
+                            match decoder.try_decode(&flight_data) {
+                                Ok(Some(FlightMessage::RecordBatch(record_batch))) => {
+                                    let table_name = table_name.clone();
+                                    let schema_bytes = schema_bytes.clone();
+                                    return Poll::Ready(Some(
+                                        PutRecordBatchRequest::try_new(
+                                            table_name,
+                                            record_batch,
+                                            request_id,
+                                            schema_bytes,
+                                            flight_data,
+                                            limiter.as_ref(),
+                                        )
+                                        .map_err(|e| Status::invalid_argument(e.to_string())),
+                                    ));
+                                }
+                                Ok(Some(other)) => {
+                                    debug!("Unexpected flight message: {:?}", other);
+                                    return Poll::Ready(Some(Err(Status::invalid_argument(
+                                        "Expected RecordBatch message, got other message type",
+                                    ))));
+                                }
+                                Ok(None) => {
+                                    // Dictionary batch - processed internally by decoder, continue polling
+                                    continue;
+                                }
+                                Err(e) => {
+                                    return Poll::Ready(Some(Err(Status::invalid_argument(
+                                        format!("Failed to decode RecordBatch: {}", e),
+                                    ))));
+                                }
+                            }
+                        }
+                    }
                 }
-            );
-            ensure!(
-                descriptor.path.len() == 1,
-                InvalidParameterSnafu {
-                    reason: "expect FlightDescriptor::path has only one table name",
+                Some(Err(e)) => {
+                    return Poll::Ready(Some(Err(e)));
                 }
-            );
-            Ok(descriptor.path.remove(0))
+                None => {
+                    return Poll::Ready(None);
+                }
+            }
         }
-
-        let poll = ready!(self.flight_data_stream.poll_next_unpin(cx));
-        let limiter = self.limiter.clone();
-
-        let result = match &mut self.state {
-            PutRecordBatchRequestStreamState::Init(catalog, schema) => match poll {
-                Some(Ok(mut flight_data)) => {
-                    let flight_descriptor = flight_data.flight_descriptor.take();
-                    let result = if let Some(descriptor) = flight_descriptor {
-                        let table_name = extract_table_name(descriptor)
-                            .map(|x| TableName::new(catalog.clone(), schema.clone(), x));
-                        let table_name = match table_name {
-                            Ok(table_name) => table_name,
-                            Err(e) => return Poll::Ready(Some(Err(e.into()))),
-                        };
-
-                        let request = PutRecordBatchRequest::try_new(
-                            table_name.clone(),
-                            flight_data,
-                            limiter.as_ref(),
-                        );
-                        let request = match request {
-                            Ok(request) => request,
-                            Err(e) => return Poll::Ready(Some(Err(e.into()))),
-                        };
-
-                        self.state = PutRecordBatchRequestStreamState::Started(table_name);
-
-                        Ok(request)
-                    } else {
-                        Err(Status::failed_precondition(
-                            "table to put is not found in flight descriptor",
-                        ))
-                    };
-                    Some(result)
-                }
-                Some(Err(e)) => Some(Err(e)),
-                None => None,
-            },
-            PutRecordBatchRequestStreamState::Started(table_name) => poll.map(|x| {
-                x.and_then(|flight_data| {
-                    PutRecordBatchRequest::try_new(
-                        table_name.clone(),
-                        flight_data,
-                        limiter.as_ref(),
-                    )
-                    .map_err(Into::into)
-                })
-            }),
-        };
-        Poll::Ready(result)
     }
 }
 

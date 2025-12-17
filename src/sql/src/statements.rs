@@ -14,6 +14,7 @@
 
 pub mod admin;
 pub mod alter;
+pub mod comment;
 pub mod copy;
 pub mod create;
 pub mod cursor;
@@ -41,7 +42,8 @@ use common_time::timezone::Timezone;
 use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema};
-use datatypes::types::TimestampType;
+use datatypes::types::json_type::JsonNativeType;
+use datatypes::types::{JsonFormat, JsonType, TimestampType};
 use datatypes::value::Value;
 use snafu::ResultExt;
 use sqlparser::ast::{ExactNumberInfo, Ident};
@@ -53,9 +55,9 @@ use crate::ast::{
 use crate::error::{
     self, ConvertToGrpcDataTypeSnafu, ConvertValueSnafu, Result,
     SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu, SetJsonStructureSettingsSnafu,
-    SetSkippingIndexOptionSnafu, SqlCommonSnafu,
+    SetSkippingIndexOptionSnafu, SetVectorIndexOptionSnafu, SqlCommonSnafu,
 };
-use crate::statements::create::Column;
+use crate::statements::create::{Column, ColumnExtensions};
 pub use crate::statements::option_map::OptionMap;
 pub(crate) use crate::statements::transform::transform_statements;
 
@@ -109,7 +111,7 @@ pub fn column_to_schema(
         && !is_time_index;
 
     let name = column.name().value.clone();
-    let data_type = sql_data_type_to_concrete_data_type(column.data_type())?;
+    let data_type = sql_data_type_to_concrete_data_type(column.data_type(), &column.extensions)?;
     let default_constraint =
         parse_column_default_constraint(&name, &data_type, column.options(), timezone)
             .context(SqlCommonSnafu)?;
@@ -145,6 +147,12 @@ pub fn column_to_schema(
             .context(SetSkippingIndexOptionSnafu)?;
     }
 
+    if let Some(options) = column.extensions.build_vector_index_options()? {
+        column_schema = column_schema
+            .with_vector_index_options(&options)
+            .context(SetVectorIndexOptionSnafu)?;
+    }
+
     column_schema.set_inverted_index(column.extensions.inverted_index_options.is_some());
 
     if matches!(column.data_type(), SqlDataType::JSON) {
@@ -171,7 +179,7 @@ pub fn sql_column_def_to_grpc_column_def(
     timezone: Option<&Timezone>,
 ) -> Result<api::v1::ColumnDef> {
     let name = col.name.value.clone();
-    let data_type = sql_data_type_to_concrete_data_type(&col.data_type)?;
+    let data_type = sql_data_type_to_concrete_data_type(&col.data_type, &Default::default())?;
 
     let is_nullable = col
         .options
@@ -217,7 +225,10 @@ pub fn sql_column_def_to_grpc_column_def(
     })
 }
 
-pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
+pub fn sql_data_type_to_concrete_data_type(
+    data_type: &SqlDataType,
+    column_extensions: &ColumnExtensions,
+) -> Result<ConcreteDataType> {
     match data_type {
         SqlDataType::BigInt(_) | SqlDataType::Int64 => Ok(ConcreteDataType::int64_datatype()),
         SqlDataType::BigIntUnsigned(_) => Ok(ConcreteDataType::uint64_datatype()),
@@ -269,7 +280,14 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
                 Ok(ConcreteDataType::decimal128_datatype(*p as u8, *s as i8))
             }
         },
-        SqlDataType::JSON => Ok(ConcreteDataType::json_datatype()),
+        SqlDataType::JSON => {
+            let format = if column_extensions.json_datatype_options.is_some() {
+                JsonFormat::Native(Box::new(JsonNativeType::Null))
+            } else {
+                JsonFormat::Jsonb
+            };
+            Ok(ConcreteDataType::Json(JsonType::new(format)))
+        }
         // Vector type
         SqlDataType::Custom(name, d)
             if name.0.as_slice().len() == 1
@@ -354,7 +372,7 @@ mod tests {
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
         assert_eq!(
             data_type,
-            sql_data_type_to_concrete_data_type(&sql_type).unwrap()
+            sql_data_type_to_concrete_data_type(&sql_type, &Default::default()).unwrap()
         );
     }
 
@@ -698,6 +716,7 @@ mod tests {
                 skipping_index_options: None,
                 inverted_index_options: None,
                 json_datatype_options: None,
+                vector_index_options: None,
             },
         };
 
@@ -707,5 +726,83 @@ mod tests {
         let fulltext_options = column_schema.fulltext_options().unwrap().unwrap();
         assert_eq!(fulltext_options.analyzer, FulltextAnalyzer::English);
         assert!(fulltext_options.case_sensitive);
+    }
+
+    #[test]
+    fn test_column_to_schema_with_vector_index() {
+        use datatypes::schema::{VectorDistanceMetric, VectorIndexEngineType};
+
+        // Test with custom metric and parameters
+        let column = Column {
+            column_def: ColumnDef {
+                name: "embedding".into(),
+                data_type: SqlDataType::Custom(
+                    vec![Ident::new(VECTOR_TYPE_NAME)].into(),
+                    vec!["128".to_string()],
+                ),
+                options: vec![],
+            },
+            extensions: ColumnExtensions {
+                fulltext_index_options: None,
+                vector_options: None,
+                skipping_index_options: None,
+                inverted_index_options: None,
+                json_datatype_options: None,
+                vector_index_options: Some(OptionMap::from([
+                    ("metric".to_string(), "cosine".to_string()),
+                    ("connectivity".to_string(), "32".to_string()),
+                    ("expansion_add".to_string(), "200".to_string()),
+                    ("expansion_search".to_string(), "100".to_string()),
+                ])),
+            },
+        };
+
+        let column_schema = column_to_schema(&column, "ts", None).unwrap();
+        assert_eq!("embedding", column_schema.name);
+        assert!(column_schema.is_vector_indexed());
+
+        let vector_options = column_schema.vector_index_options().unwrap().unwrap();
+        assert_eq!(vector_options.engine, VectorIndexEngineType::Usearch);
+        assert_eq!(vector_options.metric, VectorDistanceMetric::Cosine);
+        assert_eq!(vector_options.connectivity, 32);
+        assert_eq!(vector_options.expansion_add, 200);
+        assert_eq!(vector_options.expansion_search, 100);
+    }
+
+    #[test]
+    fn test_column_to_schema_with_vector_index_defaults() {
+        use datatypes::schema::{VectorDistanceMetric, VectorIndexEngineType};
+
+        // Test with default values (empty options map)
+        let column = Column {
+            column_def: ColumnDef {
+                name: "vec".into(),
+                data_type: SqlDataType::Custom(
+                    vec![Ident::new(VECTOR_TYPE_NAME)].into(),
+                    vec!["64".to_string()],
+                ),
+                options: vec![],
+            },
+            extensions: ColumnExtensions {
+                fulltext_index_options: None,
+                vector_options: None,
+                skipping_index_options: None,
+                inverted_index_options: None,
+                json_datatype_options: None,
+                vector_index_options: Some(OptionMap::default()),
+            },
+        };
+
+        let column_schema = column_to_schema(&column, "ts", None).unwrap();
+        assert_eq!("vec", column_schema.name);
+        assert!(column_schema.is_vector_indexed());
+
+        let vector_options = column_schema.vector_index_options().unwrap().unwrap();
+        // Verify defaults
+        assert_eq!(vector_options.engine, VectorIndexEngineType::Usearch);
+        assert_eq!(vector_options.metric, VectorDistanceMetric::L2sq);
+        assert_eq!(vector_options.connectivity, 16);
+        assert_eq!(vector_options.expansion_add, 128);
+        assert_eq!(vector_options.expansion_search, 64);
     }
 }

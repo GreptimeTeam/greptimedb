@@ -514,23 +514,24 @@ async fn insert_with_hints_and_assert(db: &Database) {
 
     let pretty = record_batches.pretty_print().unwrap();
     let expected = "\
-+-------+-------------------------------------+
-| Table | Create Table                        |
-+-------+-------------------------------------+
-| demo  | CREATE TABLE IF NOT EXISTS \"demo\" ( |
-|       |   \"host\" STRING NULL,               |
-|       |   \"cpu\" DOUBLE NULL,                |
-|       |   \"memory\" DOUBLE NULL,             |
-|       |   \"ts\" TIMESTAMP(3) NOT NULL,       |
-|       |   TIME INDEX (\"ts\"),                |
-|       |   PRIMARY KEY (\"host\")              |
-|       | )                                   |
-|       |                                     |
-|       | ENGINE=mito                         |
-|       | WITH(                               |
-|       |   append_mode = 'true'              |
-|       | )                                   |
-+-------+-------------------------------------+\
++-------+---------------------------------------+
+| Table | Create Table                          |
++-------+---------------------------------------+
+| demo  | CREATE TABLE IF NOT EXISTS \"demo\" (   |
+|       |   \"host\" STRING NULL,                 |
+|       |   \"cpu\" DOUBLE NULL,                  |
+|       |   \"memory\" DOUBLE NULL,               |
+|       |   \"ts\" TIMESTAMP(3) NOT NULL,         |
+|       |   TIME INDEX (\"ts\"),                  |
+|       |   PRIMARY KEY (\"host\")                |
+|       | )                                     |
+|       |                                       |
+|       | ENGINE=mito                           |
+|       | WITH(                                 |
+|       |   'comment' = 'Created on insertion', |
+|       |   append_mode = 'true'                |
+|       | )                                     |
++-------+---------------------------------------+\
 ";
     assert_eq!(pretty, expected);
 
@@ -953,6 +954,7 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         Some(TlsMode::Require),
         Some(server_cert_path),
         Some(server_key_path),
+        false,
     );
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
@@ -970,6 +972,7 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         server_ca_cert_path: Some(ca_path),
         client_cert_path: Some(client_cert_path),
         client_key_path: Some(client_key_path),
+        watch: false,
     };
     {
         let grpc_client =
@@ -1007,7 +1010,8 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         let runtime = Runtime::builder().build().unwrap();
         let grpc_builder =
             GrpcServerBuilder::new(config.clone(), runtime).with_tls_config(config.tls);
-        assert!(grpc_builder.is_err());
+        // ok but print warning
+        assert!(grpc_builder.is_ok());
     }
 
     let _ = fe_grpc_server.shutdown().await;

@@ -14,6 +14,8 @@
 
 use common_telemetry::warn;
 
+use crate::access_layer::TempFileCleaner;
+use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::index::Indexer;
 
 impl Indexer {
@@ -22,6 +24,9 @@ impl Indexer {
         self.do_abort_fulltext_index().await;
         self.do_abort_bloom_filter().await;
         self.do_prune_intm_sst_dir().await;
+        if self.write_cache_enabled {
+            self.do_abort_clean_fs_temp_dir().await;
+        }
         self.puffin_manager = None;
     }
 
@@ -86,5 +91,19 @@ impl Indexer {
                 self.region_id, self.file_id,
             );
         }
+    }
+
+    async fn do_abort_clean_fs_temp_dir(&mut self) {
+        let Some(puffin_manager) = &self.puffin_manager else {
+            return;
+        };
+        let fs_accessor = puffin_manager.file_accessor();
+
+        let fs_handle = RegionIndexId::new(
+            RegionFileId::new(self.region_id, self.file_id),
+            self.index_version,
+        )
+        .to_string();
+        TempFileCleaner::clean_atomic_dir_files(fs_accessor.store().store(), &[&fs_handle]).await;
     }
 }

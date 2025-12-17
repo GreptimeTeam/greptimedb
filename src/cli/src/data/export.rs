@@ -67,9 +67,17 @@ pub struct ExportCommand {
     #[clap(long, default_value_t = default_database())]
     database: String,
 
-    /// Parallelism of the export.
-    #[clap(long, short = 'j', default_value = "1")]
-    export_jobs: usize,
+    /// The number of databases exported in parallel.
+    /// For example, if there are 20 databases and `db_parallelism` is 4,
+    /// 4 databases will be exported concurrently.
+    #[clap(long, short = 'j', default_value = "1", alias = "export-jobs")]
+    db_parallelism: usize,
+
+    /// The number of tables exported in parallel within a single database.
+    /// For example, if a database has 30 tables and `parallelism` is 8,
+    /// 8 tables will be exported concurrently.
+    #[clap(long, default_value = "4")]
+    table_parallelism: usize,
 
     /// Max retry times for each job.
     #[clap(long, default_value = "3")]
@@ -210,10 +218,11 @@ impl ExportCommand {
             schema,
             database_client,
             output_dir: self.output_dir.clone(),
-            parallelism: self.export_jobs,
+            export_jobs: self.db_parallelism,
             target: self.target.clone(),
             start_time: self.start_time.clone(),
             end_time: self.end_time.clone(),
+            parallelism: self.table_parallelism,
             s3: self.s3,
             ddl_local_dir: self.ddl_local_dir.clone(),
             s3_bucket: self.s3_bucket.clone(),
@@ -251,10 +260,11 @@ pub struct Export {
     schema: Option<String>,
     database_client: DatabaseClient,
     output_dir: Option<String>,
-    parallelism: usize,
+    export_jobs: usize,
     target: ExportTarget,
     start_time: Option<String>,
     end_time: Option<String>,
+    parallelism: usize,
     s3: bool,
     ddl_local_dir: Option<String>,
     s3_bucket: Option<String>,
@@ -464,7 +474,7 @@ impl Export {
 
     async fn export_create_table(&self) -> Result<()> {
         let timer = Instant::now();
-        let semaphore = Arc::new(Semaphore::new(self.parallelism));
+        let semaphore = Arc::new(Semaphore::new(self.export_jobs));
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
         let operator = Arc::new(self.build_prefer_fs_operator().await?);
@@ -625,13 +635,13 @@ impl Export {
 
     async fn export_database_data(&self) -> Result<()> {
         let timer = Instant::now();
-        let semaphore = Arc::new(Semaphore::new(self.parallelism));
+        let semaphore = Arc::new(Semaphore::new(self.export_jobs));
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
         let mut tasks = Vec::with_capacity(db_count);
         let operator = Arc::new(self.build_operator().await?);
         let fs_first_operator = Arc::new(self.build_prefer_fs_operator().await?);
-        let with_options = build_with_options(&self.start_time, &self.end_time);
+        let with_options = build_with_options(&self.start_time, &self.end_time, self.parallelism);
 
         for schema in db_names {
             let semaphore_moved = semaphore.clone();
@@ -888,7 +898,11 @@ impl Tool for Export {
 }
 
 /// Builds the WITH options string for SQL commands, assuming consistent syntax across S3 and local exports.
-fn build_with_options(start_time: &Option<String>, end_time: &Option<String>) -> String {
+fn build_with_options(
+    start_time: &Option<String>,
+    end_time: &Option<String>,
+    parallelism: usize,
+) -> String {
     let mut options = vec!["format = 'parquet'".to_string()];
     if let Some(start) = start_time {
         options.push(format!("start_time = '{}'", start));
@@ -896,5 +910,6 @@ fn build_with_options(start_time: &Option<String>, end_time: &Option<String>) ->
     if let Some(end) = end_time {
         options.push(format!("end_time = '{}'", end));
     }
+    options.push(format!("parallelism = {}", parallelism));
     options.join(", ")
 }

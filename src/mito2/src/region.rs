@@ -17,12 +17,13 @@
 pub mod catchup;
 pub mod opener;
 pub mod options;
+pub mod utils;
 pub(crate) mod version;
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
@@ -34,9 +35,11 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
 };
+use store_api::region_request::PathType;
 use store_api::sst_entry::ManifestSstEntry;
-use store_api::storage::{RegionId, SequenceNumber};
+use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::RwLockWriteGuard;
+pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
@@ -49,6 +52,7 @@ use crate::manifest::action::{
 use crate::manifest::manager::RegionManifestManager;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
+use crate::sst::file::FileMeta;
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location::{index_file_path, sst_file_path};
 use crate::time_provider::TimeProviderRef;
@@ -77,6 +81,8 @@ pub enum RegionLeaderState {
     Writable,
     /// The region is in staging mode - writable but no checkpoint/compaction.
     Staging,
+    /// The region is entering staging mode. - write requests will be stalled.
+    EnteringStaging,
     /// The region is altering.
     Altering,
     /// The region is dropping.
@@ -138,6 +144,14 @@ pub struct MitoRegion {
     pub(crate) topic_latest_entry_id: AtomicU64,
     /// The total bytes written to the region.
     pub(crate) written_bytes: Arc<AtomicU64>,
+    /// The partition expression of the region in staging mode.
+    ///
+    /// During the staging mode, the region metadata in [`VersionControlRef`] is not updated,
+    /// so we need to store the partition expression separately.
+    /// TODO(weny):
+    /// 1. Reload the staging partition expr during region open.
+    /// 2. Rejects requests with mismatching partition expr.
+    pub(crate) staging_partition_expr: Mutex<Option<String>>,
     /// manifest stats
     stats: ManifestStats,
 }
@@ -203,6 +217,11 @@ impl MitoRegion {
     /// Returns the table dir.
     pub(crate) fn table_dir(&self) -> &str {
         self.access_layer.table_dir()
+    }
+
+    /// Returns the path type of the region.
+    pub(crate) fn path_type(&self) -> PathType {
+        self.access_layer.path_type()
     }
 
     /// Returns whether the region is writable.
@@ -326,11 +345,19 @@ impl MitoRegion {
         )
     }
 
+    /// Sets the entering staging state.
+    pub(crate) fn set_entering_staging(&self) -> Result<()> {
+        self.compare_exchange_state(
+            RegionLeaderState::Writable,
+            RegionRoleState::Leader(RegionLeaderState::EnteringStaging),
+        )
+    }
+
     /// Exits the staging state back to writable.
     ///
     /// You should call this method in the worker loop.
     /// Transitions from Staging to Writable state.
-    fn exit_staging(&self) -> Result<()> {
+    pub fn exit_staging(&self) -> Result<()> {
         self.compare_exchange_state(
             RegionLeaderState::Staging,
             RegionRoleState::Leader(RegionLeaderState::Writable),
@@ -457,10 +484,7 @@ impl MitoRegion {
                     sst_format: current_version.options.sst_format.unwrap_or_default(),
                 });
                 let result = manager
-                    .update(
-                        RegionMetaActionList::with_action(action),
-                        RegionRoleState::Leader(RegionLeaderState::Writable),
-                    )
+                    .update(RegionMetaActionList::with_action(action), false)
                     .await;
 
                 match result {
@@ -492,6 +516,16 @@ impl MitoRegion {
         }
     }
 
+    /// Switches the region state to `RegionRoleState::Leader(RegionLeaderState::Staging)` if the current state is `expect`.
+    /// Otherwise, logs an error.
+    pub(crate) fn switch_state_to_staging(&self, expect: RegionLeaderState) {
+        if let Err(e) =
+            self.compare_exchange_state(expect, RegionRoleState::Leader(RegionLeaderState::Staging))
+        {
+            error!(e; "failed to switch region state to staging, expect state is {:?}", expect);
+        }
+    }
+
     /// Returns the region statistic.
     pub(crate) fn region_statistic(&self) -> RegionStatistic {
         let version = self.version();
@@ -507,6 +541,7 @@ impl MitoRegion {
         let num_rows = version.ssts.num_rows() + version.memtables.num_rows();
         let num_files = version.ssts.num_files();
         let manifest_version = self.stats.manifest_version();
+        let file_removed_cnt = self.stats.file_removed_cnt();
 
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
         let written_bytes = self.written_bytes.load(Ordering::Relaxed);
@@ -522,6 +557,7 @@ impl MitoRegion {
             manifest: RegionManifestInfo::Mito {
                 manifest_version,
                 flushed_entry_id,
+                file_removed_cnt,
             },
             data_topic_latest_entry_id: topic_latest_entry_id,
             metadata_topic_latest_entry_id: topic_latest_entry_id,
@@ -573,25 +609,33 @@ impl MitoRegion {
             .flat_map(|level| level.files().map(|file| file.file_id().file_id()))
             .collect::<HashSet<_>>();
 
-        self.manifest_ctx
-            .manifest()
+        let manifest_files = self.manifest_ctx.manifest().await.files.clone();
+        let staging_files = self
+            .manifest_ctx
+            .staging_manifest()
             .await
-            .files
+            .map(|m| m.files.clone())
+            .unwrap_or_default();
+        let files = manifest_files
+            .into_iter()
+            .chain(staging_files.into_iter())
+            .collect::<HashMap<_, _>>();
+
+        files
             .values()
             .map(|meta| {
                 let region_id = self.region_id;
                 let origin_region_id = meta.region_id;
-                let (index_file_id, index_file_path, index_file_size) = if meta.index_file_size > 0
+                let (index_version, index_file_path, index_file_size) = if meta.index_file_size > 0
                 {
-                    let index_file_path =
-                        index_file_path(table_dir, meta.index_file_id(), path_type);
+                    let index_file_path = index_file_path(table_dir, meta.index_id(), path_type);
                     (
-                        Some(meta.index_file_id().file_id().to_string()),
+                        meta.index_version,
                         Some(index_file_path),
                         Some(meta.index_file_size),
                     )
                 } else {
-                    (None, None, None)
+                    (0, None, None)
                 };
                 let visible = visible_ssts.contains(&meta.file_id);
                 ManifestSstEntry {
@@ -602,7 +646,7 @@ impl MitoRegion {
                     region_group: region_id.region_group(),
                     region_sequence: region_id.region_sequence(),
                     file_id: meta.file_id.to_string(),
-                    index_file_id,
+                    index_version,
                     level: meta.level,
                     file_path: sst_file_path(table_dir, meta.file_id(), path_type),
                     file_size: meta.file_size,
@@ -620,6 +664,16 @@ impl MitoRegion {
                 }
             })
             .collect()
+    }
+
+    /// Returns the file metas of the region by file ids.
+    pub async fn file_metas(&self, file_ids: &[FileId]) -> Vec<Option<FileMeta>> {
+        let manifest_files = self.manifest_ctx.manifest().await.files.clone();
+
+        file_ids
+            .iter()
+            .map(|file_id| manifest_files.get(file_id).cloned())
+            .collect::<Vec<_>>()
     }
 
     /// Exit staging mode successfully by merging all staged manifests and making them visible.
@@ -652,9 +706,8 @@ impl MitoRegion {
         };
 
         // Submit merged actions using the manifest manager's update method
-        // Pass the target state (Writable) so it saves to normal directory, not staging
-        let target_state = RegionRoleState::Leader(RegionLeaderState::Writable);
-        let new_version = manager.update(merged_actions.clone(), target_state).await?;
+        // Pass the `false` so it saves to normal directory, not staging
+        let new_version = manager.update(merged_actions.clone(), false).await?;
 
         info!(
             "Successfully submitted merged staged manifests for region {}, new version: {}",
@@ -729,6 +782,7 @@ impl ManifestContext {
         &self,
         expect_state: RegionLeaderState,
         action_list: RegionMetaActionList,
+        is_staging: bool,
     ) -> Result<ManifestVersion> {
         // Acquires the write lock of the manifest manager.
         let mut manager = self.manifest_manager.write().await;
@@ -804,7 +858,7 @@ impl ManifestContext {
         }
 
         // Now we can update the manifest.
-        let version = manager.update(action_list, current_state).await.inspect_err(
+        let version = manager.update(action_list, is_staging).await.inspect_err(
             |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
         )?;
 
@@ -911,8 +965,16 @@ impl ManifestContext {
         }
     }
 
+    /// Returns the normal manifest of the region.
     pub(crate) async fn manifest(&self) -> Arc<crate::manifest::action::RegionManifest> {
         self.manifest_manager.read().await.manifest()
+    }
+
+    /// Returns the staging manifest of the region.
+    pub(crate) async fn staging_manifest(
+        &self,
+    ) -> Option<Arc<crate::manifest::action::RegionManifest>> {
+        self.manifest_manager.read().await.staging_manifest()
     }
 }
 
@@ -1030,6 +1092,24 @@ impl RegionMap {
             }
             .build());
         }
+        Ok(region)
+    }
+
+    /// Gets staging region by region id.
+    ///
+    /// Returns error if the region does not exist or is not in staging state.
+    pub(crate) fn staging_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+        let region = self
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+        ensure!(
+            region.is_staging(),
+            RegionStateSnafu {
+                region_id,
+                state: region.state(),
+                expect: RegionRoleState::Leader(RegionLeaderState::Staging),
+            }
+        );
         Ok(region)
     }
 
@@ -1171,9 +1251,10 @@ pub(crate) type CatchupRegionsRef = Arc<CatchupRegions>;
 
 /// Manifest stats.
 #[derive(Default, Debug, Clone)]
-pub(crate) struct ManifestStats {
-    total_manifest_size: Arc<AtomicU64>,
-    manifest_version: Arc<AtomicU64>,
+pub struct ManifestStats {
+    pub(crate) total_manifest_size: Arc<AtomicU64>,
+    pub(crate) manifest_version: Arc<AtomicU64>,
+    pub(crate) file_removed_cnt: Arc<AtomicU64>,
 }
 
 impl ManifestStats {
@@ -1184,12 +1265,16 @@ impl ManifestStats {
     fn manifest_version(&self) -> u64 {
         self.manifest_version.load(Ordering::Relaxed)
     }
+
+    fn file_removed_cnt(&self) -> u64 {
+        self.file_removed_cnt.load(Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, Mutex};
 
     use common_datasource::compression::CompressionType;
     use common_test_util::temp_dir::create_temp_dir;
@@ -1288,10 +1373,10 @@ mod tests {
                     compress_type: CompressionType::Uncompressed,
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
+                    manifest_cache: None,
                 },
-                Default::default(),
-                Default::default(),
                 FormatType::PrimaryKey,
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -1355,10 +1440,10 @@ mod tests {
                 compress_type: CompressionType::Uncompressed,
                 checkpoint_distance: 10,
                 remove_file_options: Default::default(),
+                manifest_cache: None,
             },
-            Default::default(),
-            Default::default(),
             FormatType::PrimaryKey,
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -1381,6 +1466,7 @@ mod tests {
             topic_latest_entry_id: Default::default(),
             written_bytes: Arc::new(AtomicU64::new(0)),
             stats: ManifestStats::default(),
+            staging_partition_expr: Mutex::new(None),
         };
 
         // Test initial state

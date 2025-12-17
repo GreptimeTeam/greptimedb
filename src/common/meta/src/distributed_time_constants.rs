@@ -14,6 +14,8 @@
 
 use std::time::Duration;
 
+use etcd_client::ConnectOptions;
+
 /// Heartbeat interval time (is the basic unit of various time).
 pub const HEARTBEAT_INTERVAL_MILLIS: u64 = 3000;
 
@@ -40,6 +42,23 @@ pub const POSTGRES_KEEP_ALIVE_SECS: u64 = 30;
 
 /// In a lease, there are two opportunities for renewal.
 pub const META_KEEP_ALIVE_INTERVAL_SECS: u64 = META_LEASE_SECS / 2;
+
+/// The timeout of the heartbeat request.
+pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1);
+
+/// The keep-alive interval of the heartbeat channel.
+pub const HEARTBEAT_CHANNEL_KEEP_ALIVE_INTERVAL_SECS: Duration = Duration::from_secs(15);
+
+/// The keep-alive timeout of the heartbeat channel.
+pub const HEARTBEAT_CHANNEL_KEEP_ALIVE_TIMEOUT_SECS: Duration = Duration::from_secs(5);
+
+/// The default options for the etcd client.
+pub fn default_etcd_client_options() -> ConnectOptions {
+    ConnectOptions::new()
+        .with_keep_alive_while_idle(true)
+        .with_keep_alive(Duration::from_secs(15), Duration::from_secs(5))
+        .with_connect_timeout(Duration::from_secs(10))
+}
 
 /// The default mailbox round-trip timeout.
 pub const MAILBOX_RTT_SECS: u64 = 1;

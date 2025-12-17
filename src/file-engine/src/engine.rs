@@ -26,7 +26,8 @@ use object_store::ObjectStore;
 use snafu::{OptionExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
+    CopyRegionFromRequest, CopyRegionFromResponse, RegionEngine, RegionManifestInfo, RegionRole,
+    RegionScannerRef, RegionStatistic, RemapManifestsRequest, RemapManifestsResponse,
     SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
     SinglePartitionScanner, SyncManifestResponse,
 };
@@ -148,6 +149,31 @@ impl RegionEngine for FileRegionEngine {
     ) -> Result<SyncManifestResponse, BoxedError> {
         // File engine doesn't need to sync region manifest.
         Ok(SyncManifestResponse::NotSupported)
+    }
+
+    async fn remap_manifests(
+        &self,
+        _request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse, BoxedError> {
+        Err(BoxedError::new(
+            UnsupportedSnafu {
+                operation: "remap_manifests",
+            }
+            .build(),
+        ))
+    }
+
+    async fn copy_region_from(
+        &self,
+        _region_id: RegionId,
+        _request: CopyRegionFromRequest,
+    ) -> Result<CopyRegionFromResponse, BoxedError> {
+        Err(BoxedError::new(
+            UnsupportedSnafu {
+                operation: "copy_region_from",
+            }
+            .build(),
+        ))
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {

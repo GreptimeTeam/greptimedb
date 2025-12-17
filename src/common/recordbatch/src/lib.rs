@@ -18,7 +18,7 @@ pub mod adapter;
 pub mod cursor;
 pub mod error;
 pub mod filter;
-mod recordbatch;
+pub mod recordbatch;
 pub mod util;
 
 use std::fmt;
@@ -30,19 +30,20 @@ use adapter::RecordBatchMetrics;
 use arc_swap::ArcSwapOption;
 use common_base::readable_size::ReadableSize;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
+use datatypes::arrow::array::{ArrayRef, AsArray, StringBuilder};
 use datatypes::arrow::compute::SortOptions;
 pub use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::util::pretty;
 use datatypes::prelude::{ConcreteDataType, VectorRef};
-use datatypes::scalars::{ScalarVector, ScalarVectorBuilder};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::types::{JsonFormat, jsonb_to_string};
-use datatypes::vectors::{BinaryVector, StringVectorBuilder};
 use error::Result;
 use futures::task::{Context, Poll};
 use futures::{Stream, TryStreamExt};
 pub use recordbatch::RecordBatch;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{ResultExt, ensure};
+
+use crate::error::NewDfRecordBatchSnafu;
 
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
     fn name(&self) -> &str {
@@ -92,20 +93,14 @@ pub fn map_json_type_to_string(
     mapped_schema: &SchemaRef,
 ) -> Result<RecordBatch> {
     let mut vectors = Vec::with_capacity(original_schema.column_schemas().len());
-    for (vector, schema) in batch.columns.iter().zip(original_schema.column_schemas()) {
+    for (vector, schema) in batch.columns().iter().zip(original_schema.column_schemas()) {
         if let ConcreteDataType::Json(j) = &schema.data_type {
             if matches!(&j.format, JsonFormat::Jsonb) {
-                let mut string_vector_builder = StringVectorBuilder::with_capacity(vector.len());
-                let binary_vector = vector
-                    .as_any()
-                    .downcast_ref::<BinaryVector>()
-                    .with_context(|| error::DowncastVectorSnafu {
-                        from_type: schema.data_type.clone(),
-                        to_type: ConcreteDataType::binary_datatype(),
-                    })?;
-                for value in binary_vector.iter_data() {
+                let mut string_vector_builder = StringBuilder::new();
+                let binary_vector = vector.as_binary::<i32>();
+                for value in binary_vector.iter() {
                     let Some(value) = value else {
-                        string_vector_builder.push(None);
+                        string_vector_builder.append_null();
                         continue;
                     };
                     let string_value =
@@ -113,11 +108,11 @@ pub fn map_json_type_to_string(
                             from_type: schema.data_type.clone(),
                             to_type: ConcreteDataType::string_datatype(),
                         })?;
-                    string_vector_builder.push(Some(string_value.as_str()));
+                    string_vector_builder.append_value(string_value);
                 }
 
                 let string_vector = string_vector_builder.finish();
-                vectors.push(Arc::new(string_vector) as VectorRef);
+                vectors.push(Arc::new(string_vector) as ArrayRef);
             } else {
                 vectors.push(vector.clone());
             }
@@ -126,7 +121,15 @@ pub fn map_json_type_to_string(
         }
     }
 
-    RecordBatch::new(mapped_schema.clone(), vectors)
+    let record_batch = datatypes::arrow::record_batch::RecordBatch::try_new(
+        mapped_schema.arrow_schema().clone(),
+        vectors,
+    )
+    .context(NewDfRecordBatchSnafu)?;
+    Ok(RecordBatch::from_df_record_batch(
+        mapped_schema.clone(),
+        record_batch,
+    ))
 }
 
 /// Maps the json type to string in the schema.
@@ -755,11 +758,7 @@ impl Stream for MemoryTrackedStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
-                let additional = batch
-                    .columns()
-                    .iter()
-                    .map(|c| c.memory_size())
-                    .sum::<usize>();
+                let additional = batch.buffer_memory_size();
 
                 if let Err(e) = self.permit.track(additional, self.total_tracked) {
                     return Poll::Ready(Some(Err(e)));

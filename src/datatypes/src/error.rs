@@ -189,7 +189,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid JSON text: {}", value))]
+    #[snafu(display("Invalid JSON: {}", value))]
     InvalidJson {
         value: String,
         #[snafu(implicit)]

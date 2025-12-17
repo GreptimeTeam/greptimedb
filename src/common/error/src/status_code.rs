@@ -42,6 +42,8 @@ pub enum StatusCode {
     External = 1007,
     /// The request is deadline exceeded (typically server-side).
     DeadlineExceeded = 1008,
+    /// Service got suspended for various reason. For example, resources exceed limit.
+    Suspended = 1009,
     // ====== End of common status code ================
 
     // ====== Begin of SQL related status code =========
@@ -175,7 +177,8 @@ impl StatusCode {
             | StatusCode::AccessDenied
             | StatusCode::PermissionDenied
             | StatusCode::RequestOutdated
-            | StatusCode::External => false,
+            | StatusCode::External
+            | StatusCode::Suspended => false,
         }
     }
 
@@ -223,7 +226,8 @@ impl StatusCode {
             | StatusCode::InvalidAuthHeader
             | StatusCode::AccessDenied
             | StatusCode::PermissionDenied
-            | StatusCode::RequestOutdated => false,
+            | StatusCode::RequestOutdated
+            | StatusCode::Suspended => false,
         }
     }
 
@@ -347,7 +351,8 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::RegionNotReady => Code::Unavailable,
         StatusCode::RuntimeResourcesExhausted
         | StatusCode::RateLimited
-        | StatusCode::RegionBusy => Code::ResourceExhausted,
+        | StatusCode::RegionBusy
+        | StatusCode::Suspended => Code::ResourceExhausted,
         StatusCode::UnsupportedPasswordType
         | StatusCode::UserPasswordMismatch
         | StatusCode::AuthHeaderNotFound

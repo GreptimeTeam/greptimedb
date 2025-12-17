@@ -31,6 +31,29 @@ const INDEX_METADATA_TYPE: &str = "index_metadata";
 /// Metrics for index content.
 const INDEX_CONTENT_TYPE: &str = "index_content";
 
+/// Metrics collected from IndexCache operations.
+#[derive(Debug, Default, Clone)]
+pub struct IndexCacheMetrics {
+    /// Number of cache hits.
+    pub cache_hit: usize,
+    /// Number of cache misses.
+    pub cache_miss: usize,
+    /// Number of pages accessed.
+    pub num_pages: usize,
+    /// Total bytes from pages.
+    pub page_bytes: u64,
+}
+
+impl IndexCacheMetrics {
+    /// Merges another set of metrics into this one.
+    pub fn merge(&mut self, other: &Self) {
+        self.cache_hit += other.cache_hit;
+        self.cache_miss += other.cache_miss;
+        self.num_pages += other.num_pages;
+        self.page_bytes += other.page_bytes;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PageKey {
     page_id: u64,
@@ -160,18 +183,20 @@ where
         offset: u64,
         size: u32,
         load: F,
-    ) -> Result<Vec<u8>, E>
+    ) -> Result<(Vec<u8>, IndexCacheMetrics), E>
     where
         F: Fn(Vec<Range<u64>>) -> Fut,
         Fut: Future<Output = Result<Vec<Bytes>, E>>,
         E: std::error::Error,
     {
+        let mut metrics = IndexCacheMetrics::default();
         let page_keys =
             PageKey::generate_page_keys(offset, size, self.page_size).collect::<Vec<_>>();
         // Size is 0, return empty data.
         if page_keys.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), metrics));
         }
+        metrics.num_pages = page_keys.len();
         let mut data = Vec::with_capacity(page_keys.len());
         data.resize(page_keys.len(), Bytes::new());
         let mut cache_miss_range = vec![];
@@ -182,10 +207,13 @@ where
             match self.get_page(key, *page_key) {
                 Some(page) => {
                     CACHE_HIT.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
+                    metrics.cache_hit += 1;
+                    metrics.page_bytes += page.len() as u64;
                     data[i] = page;
                 }
                 None => {
                     CACHE_MISS.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
+                    metrics.cache_miss += 1;
                     let base_offset = page_key.page_id * self.page_size;
                     let pruned_size = if i == last_index {
                         prune_size(page_keys.iter(), file_size, self.page_size)
@@ -201,14 +229,18 @@ where
             let pages = load(cache_miss_range).await?;
             for (i, page) in cache_miss_idx.into_iter().zip(pages.into_iter()) {
                 let page_key = page_keys[i];
+                metrics.page_bytes += page.len() as u64;
                 data[i] = page.clone();
                 self.put_page(key, page_key, page.clone());
             }
         }
         let buffer = Buffer::from_iter(data.into_iter());
-        Ok(buffer
-            .slice(PageKey::calculate_range(offset, size, self.page_size))
-            .to_vec())
+        Ok((
+            buffer
+                .slice(PageKey::calculate_range(offset, size, self.page_size))
+                .to_vec(),
+            metrics,
+        ))
     }
 
     fn get_page(&self, key: K, page_key: PageKey) -> Option<Bytes> {
@@ -216,6 +248,8 @@ where
     }
 
     fn put_page(&self, key: K, page_key: PageKey, value: Bytes) {
+        // Clones the value to ensure it doesn't reference a larger buffer.
+        let value = Bytes::from(value.to_vec());
         CACHE_BYTES
             .with_label_values(&[INDEX_CONTENT_TYPE])
             .add((self.weight_of_content)(&(key, page_key), &value).into());

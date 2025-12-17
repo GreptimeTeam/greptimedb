@@ -15,7 +15,7 @@
 mod extract_new_columns;
 mod validate;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use extract_new_columns::extract_new_columns;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -143,16 +143,20 @@ impl MetricEngineInner {
         };
         let data_region_id = to_data_region_id(physical_region_id);
 
-        let mut write_guards = HashMap::with_capacity(requests.len());
-        for (region_id, _) in requests.iter() {
-            if write_guards.contains_key(region_id) {
-                continue;
-            }
-            let _write_guard = self
-                .metadata_region
-                .write_lock_logical_region(*region_id)
-                .await?;
-            write_guards.insert(*region_id, _write_guard);
+        // Acquire logical region locks in a deterministic order to avoid deadlocks when multiple
+        // alter operations target overlapping regions concurrently.
+        let region_ids = requests
+            .iter()
+            .map(|(region_id, _)| *region_id)
+            .collect::<BTreeSet<_>>();
+
+        let mut write_guards = Vec::with_capacity(region_ids.len());
+        for region_id in region_ids {
+            write_guards.push(
+                self.metadata_region
+                    .write_lock_logical_region(region_id)
+                    .await?,
+            );
         }
 
         self.data_region

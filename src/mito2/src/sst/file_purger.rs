@@ -21,7 +21,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::{FileMeta, delete_files};
+use crate::sst::file::{FileMeta, delete_files, delete_index};
 use crate::sst::file_ref::FileReferenceManagerRef;
 
 /// A worker to delete files in background.
@@ -29,7 +29,8 @@ pub trait FilePurger: Send + Sync + fmt::Debug {
     /// Send a request to remove the file.
     /// If `is_delete` is true, the file will be deleted from the storage.
     /// Otherwise, only the reference will be removed.
-    fn remove_file(&self, file_meta: FileMeta, is_delete: bool);
+    /// If `index_outdated` is true, the index file will be deleted regardless of `is_delete`.
+    fn remove_file(&self, file_meta: FileMeta, is_delete: bool, index_outdated: bool);
 
     /// Notify the purger of a new file created.
     /// This is useful for object store based storage, where we need to track the file references
@@ -46,7 +47,7 @@ pub type FilePurgerRef = Arc<dyn FilePurger>;
 pub struct NoopFilePurger;
 
 impl FilePurger for NoopFilePurger {
-    fn remove_file(&self, _file_meta: FileMeta, _is_delete: bool) {
+    fn remove_file(&self, _file_meta: FileMeta, _is_delete: bool, _index_outdated: bool) {
         // noop
     }
 }
@@ -80,15 +81,16 @@ pub fn is_local_fs(sst_layer: &AccessLayerRef) -> bool {
 /// only manages the file references without deleting the actual files.
 ///
 pub fn create_file_purger(
+    gc_enabled: bool,
     scheduler: SchedulerRef,
     sst_layer: AccessLayerRef,
     cache_manager: Option<CacheManagerRef>,
     file_ref_manager: FileReferenceManagerRef,
 ) -> FilePurgerRef {
-    if is_local_fs(&sst_layer) {
-        Arc::new(LocalFilePurger::new(scheduler, sst_layer, cache_manager))
-    } else {
+    if gc_enabled && !is_local_fs(&sst_layer) {
         Arc::new(ObjectStoreFilePurger { file_ref_manager })
+    } else {
+        Arc::new(LocalFilePurger::new(scheduler, sst_layer, cache_manager))
     }
 }
 
@@ -128,7 +130,7 @@ impl LocalFilePurger {
         if let Err(e) = self.scheduler.schedule(Box::pin(async move {
             if let Err(e) = delete_files(
                 file_meta.region_id,
-                &[(file_meta.file_id, file_meta.index_file_id().file_id())],
+                &[(file_meta.file_id, file_meta.index_id().version)],
                 file_meta.exists_index(),
                 &sst_layer,
                 &cache_manager,
@@ -141,12 +143,27 @@ impl LocalFilePurger {
             error!(e; "Failed to schedule the file purge request");
         }
     }
+
+    fn delete_index(&self, file_meta: FileMeta) {
+        let sst_layer = self.sst_layer.clone();
+        let cache_manager = self.cache_manager.clone();
+        if let Err(e) = self.scheduler.schedule(Box::pin(async move {
+            let index_id = file_meta.index_id();
+            if let Err(e) = delete_index(index_id, &sst_layer, &cache_manager).await {
+                error!(e; "Failed to delete index for file {:?} from storage", file_meta);
+            }
+        })) {
+            error!(e; "Failed to schedule the index purge request");
+        }
+    }
 }
 
 impl FilePurger for LocalFilePurger {
-    fn remove_file(&self, file_meta: FileMeta, is_delete: bool) {
+    fn remove_file(&self, file_meta: FileMeta, is_delete: bool, index_outdated: bool) {
         if is_delete {
             self.delete_file(file_meta);
+        } else if index_outdated {
+            self.delete_index(file_meta);
         }
     }
 }
@@ -157,7 +174,7 @@ pub struct ObjectStoreFilePurger {
 }
 
 impl FilePurger for ObjectStoreFilePurger {
-    fn remove_file(&self, file_meta: FileMeta, _is_delete: bool) {
+    fn remove_file(&self, file_meta: FileMeta, _is_delete: bool, _index_outdated: bool) {
         // if not on local file system, instead inform the global file purger to remove the file reference.
         // notice that no matter whether the file is deleted or not, we need to remove the reference
         // because the file is no longer in use nonetheless.
@@ -184,7 +201,10 @@ mod tests {
     use super::*;
     use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
-    use crate::sst::file::{FileHandle, FileMeta, FileTimeRange, IndexType, RegionFileId};
+    use crate::sst::file::{
+        ColumnIndexMetadata, FileHandle, FileMeta, FileTimeRange, IndexType, RegionFileId,
+        RegionIndexId,
+    };
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
@@ -231,9 +251,11 @@ mod tests {
                     time_range: FileTimeRange::default(),
                     level: 0,
                     file_size: 4096,
+                    max_row_group_uncompressed_size: 4096,
                     available_indexes: Default::default(),
+                    indexes: Default::default(),
                     index_file_size: 0,
-                    index_file_id: None,
+                    index_version: 0,
                     num_rows: 0,
                     num_row_groups: 0,
                     sequence: None,
@@ -259,6 +281,7 @@ mod tests {
         let dir_path = dir.path().display().to_string();
         let builder = Fs::default().root(&dir_path);
         let sst_file_id = RegionFileId::new(RegionId::new(0, 0), FileId::random());
+        let index_file_id = RegionIndexId::new(sst_file_id, 0);
         let sst_dir = "table1";
 
         let index_aux_path = dir.path().join("index_aux");
@@ -281,7 +304,7 @@ mod tests {
         let path = location::sst_file_path(sst_dir, sst_file_id, layer.path_type());
         object_store.write(&path, vec![0; 4096]).await.unwrap();
 
-        let index_path = location::index_file_path(sst_dir, sst_file_id, layer.path_type());
+        let index_path = location::index_file_path(sst_dir, index_file_id, layer.path_type());
         object_store
             .write(&index_path, vec![0; 4096])
             .await
@@ -299,9 +322,14 @@ mod tests {
                     time_range: FileTimeRange::default(),
                     level: 0,
                     file_size: 4096,
+                    max_row_group_uncompressed_size: 4096,
                     available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                    indexes: vec![ColumnIndexMetadata {
+                        column_id: 0,
+                        created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                    }],
                     index_file_size: 4096,
-                    index_file_id: None,
+                    index_version: 0,
                     num_rows: 1024,
                     num_row_groups: 1,
                     sequence: NonZeroU64::new(4096),

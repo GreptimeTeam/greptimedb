@@ -27,3 +27,78 @@ SHOW DATABASES;
 | public             |
 +--------------------+
 
+-- ======================================================
+-- MySQL compatibility tests for JDBC connectors
+-- ======================================================
+-- Test MySQL IF() function (issue #7278 compatibility)
+-- SQLNESS PROTOCOL MYSQL
+SELECT IF(1, 'yes', 'no') as result;
+
++--------+
+| result |
++--------+
+| yes    |
++--------+
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT IF(0, 'yes', 'no') as result;
+
++--------+
+| result |
++--------+
+| no     |
++--------+
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT IF(NULL, 'yes', 'no') as result;
+
++--------+
+| result |
++--------+
+| no     |
++--------+
+
+-- Test IFNULL (should work via DataFusion)
+-- SQLNESS PROTOCOL MYSQL
+SELECT IFNULL(NULL, 'default') as result;
+
++---------+
+| result  |
++---------+
+| default |
++---------+
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT IFNULL('value', 'default') as result;
+
++--------+
+| result |
++--------+
+| value  |
++--------+
+
+-- Test COALESCE
+-- SQLNESS PROTOCOL MYSQL
+SELECT COALESCE(NULL, NULL, 'third') as result;
+
++--------+
+| result |
++--------+
+| third  |
++--------+
+
+-- Verify SHOW TABLES column naming
+-- SQLNESS PROTOCOL MYSQL
+USE public;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW TABLES;
+
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
++------------------+
+

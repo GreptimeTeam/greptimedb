@@ -39,7 +39,7 @@ use common_meta::cache::{new_schema_cache, new_table_schema_cache};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array};
@@ -50,6 +50,7 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use moka::future::CacheBuilder;
 use object_store::ObjectStore;
+use object_store::layers::mock::MockLayer;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
@@ -221,13 +222,14 @@ pub struct TestEnv {
     data_home: TempDir,
     intermediate_manager: IntermediateManager,
     puffin_manager: PuffinManagerFactory,
-    log_store: Option<LogStoreImpl>,
+    pub(crate) log_store: Option<LogStoreImpl>,
     log_store_factory: LogStoreFactory,
-    object_store_manager: Option<ObjectStoreManagerRef>,
+    pub(crate) object_store_manager: Option<ObjectStoreManagerRef>,
     schema_metadata_manager: SchemaMetadataManagerRef,
     file_ref_manager: FileReferenceManagerRef,
     kv_backend: KvBackendRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
+    object_store_mock_layer: Option<MockLayer>,
 }
 
 impl TestEnv {
@@ -264,12 +266,19 @@ impl TestEnv {
             file_ref_manager: Arc::new(FileReferenceManager::new(None)),
             kv_backend,
             partition_expr_fetcher: noop_partition_expr_fetcher(),
+            object_store_mock_layer: None,
         }
     }
 
     /// Overwrites the original `log_store_factory`.
     pub fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
         self.log_store_factory = log_store_factory;
+        self
+    }
+
+    /// Sets the original `object_store_mock_layer`.
+    pub fn with_mock_layer(mut self, mock_layer: MockLayer) -> TestEnv {
+        self.object_store_mock_layer = Some(mock_layer);
         self
     }
 
@@ -287,7 +296,7 @@ impl TestEnv {
         self.object_store_manager.clone()
     }
 
-    async fn new_mito_engine(&self, config: MitoConfig) -> MitoEngine {
+    pub(crate) async fn new_mito_engine(&self, config: MitoConfig) -> MitoEngine {
         async fn create<S: LogStore>(
             zelf: &TestEnv,
             config: MitoConfig,
@@ -541,35 +550,51 @@ impl TestEnv {
 
     /// Returns the log store and object store manager.
     async fn create_log_and_object_store_manager(&self) -> (LogStoreImpl, ObjectStoreManager) {
+        let log_store = self.create_log_store().await;
+        let object_store_manager = self.create_object_store_manager();
+
+        (log_store, object_store_manager)
+    }
+
+    pub(crate) async fn create_log_store(&self) -> LogStoreImpl {
         let data_home = self.data_home.path();
         let wal_path = data_home.join("wal");
-        let object_store_manager = self.create_object_store_manager();
 
         match &self.log_store_factory {
             LogStoreFactory::RaftEngine(factory) => {
                 let log_store = factory.create_log_store(wal_path).await;
-                (
-                    LogStoreImpl::RaftEngine(Arc::new(log_store)),
-                    object_store_manager,
-                )
+
+                LogStoreImpl::RaftEngine(Arc::new(log_store))
             }
             LogStoreFactory::Kafka(factory) => {
                 let log_store = factory.create_log_store().await;
 
-                (
-                    LogStoreImpl::Kafka(Arc::new(log_store)),
-                    object_store_manager,
-                )
+                LogStoreImpl::Kafka(Arc::new(log_store))
             }
         }
     }
 
-    fn create_object_store_manager(&self) -> ObjectStoreManager {
+    pub(crate) fn create_object_store_manager(&self) -> ObjectStoreManager {
         let data_home = self.data_home.path();
         let data_path = data_home.join("data").as_path().display().to_string();
         let builder = Fs::default().root(&data_path);
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+
+        let object_store = if let Some(mock_layer) = self.object_store_mock_layer.as_ref() {
+            debug!("create object store with mock layer");
+            ObjectStore::new(builder)
+                .unwrap()
+                .layer(mock_layer.clone())
+                .finish()
+        } else {
+            ObjectStore::new(builder).unwrap().finish()
+        };
         ObjectStoreManager::new("default", object_store)
+    }
+
+    pub(crate) fn create_in_memory_object_store_manager(&self) -> ObjectStoreManager {
+        let builder = object_store::services::Memory::default();
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+        ObjectStoreManager::new("memory", object_store)
     }
 
     /// If `initial_metadata` is `Some`, creates a new manifest. If `initial_metadata`
@@ -601,6 +626,7 @@ impl TestEnv {
             compress_type,
             checkpoint_distance,
             remove_file_options: Default::default(),
+            manifest_cache: None,
         };
 
         if let Some(metadata) = initial_metadata {
@@ -608,14 +634,13 @@ impl TestEnv {
                 metadata,
                 0,
                 manifest_opts,
-                Default::default(),
-                Default::default(),
                 FormatType::PrimaryKey,
+                &Default::default(),
             )
             .await
             .map(Some)
         } else {
-            RegionManifestManager::open(manifest_opts, Default::default(), Default::default()).await
+            RegionManifestManager::open(manifest_opts, &Default::default()).await
         }
     }
 
@@ -630,8 +655,10 @@ impl TestEnv {
             capacity,
             None,
             None,
+            true, // enable_background_worker
             self.puffin_manager.clone(),
             self.intermediate_manager.clone(),
+            None, // manifest_cache
         )
         .await
         .unwrap();
@@ -650,8 +677,10 @@ impl TestEnv {
             capacity,
             None,
             None,
+            true, // enable_background_worker
             self.puffin_manager.clone(),
             self.intermediate_manager.clone(),
+            ReadableSize::mb(0), // manifest_cache_capacity
         )
         .await
         .unwrap();
@@ -996,9 +1025,15 @@ pub struct MockWriteBufferManager {
     should_stall: AtomicBool,
     memory_used: AtomicUsize,
     memory_active: AtomicUsize,
+    flush_limit: usize,
 }
 
 impl MockWriteBufferManager {
+    /// Set flush limit.
+    pub fn set_flush_limit(&mut self, flush_limit: usize) {
+        self.flush_limit = flush_limit;
+    }
+
     /// Set whether to flush the engine.
     pub fn set_should_flush(&self, value: bool) {
         self.should_flush.store(value, Ordering::Relaxed);
@@ -1039,6 +1074,10 @@ impl WriteBufferManager for MockWriteBufferManager {
 
     fn memory_usage(&self) -> usize {
         self.memory_used.load(Ordering::Relaxed)
+    }
+
+    fn flush_limit(&self) -> usize {
+        self.flush_limit
     }
 }
 

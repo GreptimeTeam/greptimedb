@@ -226,9 +226,6 @@ metasrv_addrs = ["127.0.0.1:3002"]
 ## Operation timeout.
 timeout = "3s"
 
-## Heartbeat timeout.
-heartbeat_timeout = "500ms"
-
 ## DDL timeout.
 ddl_timeout = "10s"
 
@@ -328,21 +325,6 @@ sample_ratio = 1.0
 
 ## The TTL of the `slow_queries` system table. Default is `90d` when `record_type` is `system_table`.
 ttl = "90d"
-
-## The frontend can export its metrics and send to Prometheus compatible service (e.g. `greptimedb` itself) from remote-write API.
-## This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.
-[export_metrics]
-## whether enable export metrics.
-enable = false
-## The interval of export metrics.
-write_interval = "30s"
-
-[export_metrics.remote_write]
-## The prometheus remote write endpoint that the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=greptime_metrics`.
-url = ""
-
-## HTTP headers of Prometheus remote-write carry.
-headers = { }
 
 ## The tracing options. Only effect when compiled with `tokio-console` feature.
 #+ [tracing]

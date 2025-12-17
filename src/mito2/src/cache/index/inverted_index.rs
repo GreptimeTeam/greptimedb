@@ -14,14 +14,15 @@
 
 use core::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use api::v1::index::InvertedIndexMetas;
 use async_trait::async_trait;
 use bytes::Bytes;
 use index::inverted_index::error::Result;
-use index::inverted_index::format::reader::InvertedIndexReader;
+use index::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
 use prost::Message;
-use store_api::storage::FileId;
+use store_api::storage::{FileId, IndexVersion};
 
 use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache, PageKey};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
@@ -29,7 +30,7 @@ use crate::metrics::{CACHE_HIT, CACHE_MISS};
 const INDEX_TYPE_INVERTED_INDEX: &str = "inverted_index";
 
 /// Cache for inverted index.
-pub type InvertedIndexCache = IndexCache<FileId, InvertedIndexMetas>;
+pub type InvertedIndexCache = IndexCache<(FileId, IndexVersion), InvertedIndexMetas>;
 pub type InvertedIndexCacheRef = Arc<InvertedIndexCache>;
 
 impl InvertedIndexCache {
@@ -47,23 +48,24 @@ impl InvertedIndexCache {
 
     /// Removes all cached entries for the given `file_id`.
     pub fn invalidate_file(&self, file_id: FileId) {
-        self.invalidate_if(move |key| *key == file_id);
+        self.invalidate_if(move |key| key.0 == file_id);
     }
 }
 
 /// Calculates weight for inverted index metadata.
-fn inverted_index_metadata_weight(k: &FileId, v: &Arc<InvertedIndexMetas>) -> u32 {
-    (k.as_bytes().len() + v.encoded_len()) as u32
+fn inverted_index_metadata_weight(k: &(FileId, IndexVersion), v: &Arc<InvertedIndexMetas>) -> u32 {
+    (k.0.as_bytes().len() + size_of::<IndexVersion>() + v.encoded_len()) as u32
 }
 
 /// Calculates weight for inverted index content.
-fn inverted_index_content_weight((k, _): &(FileId, PageKey), v: &Bytes) -> u32 {
-    (k.as_bytes().len() + v.len()) as u32
+fn inverted_index_content_weight((k, _): &((FileId, IndexVersion), PageKey), v: &Bytes) -> u32 {
+    (k.0.as_bytes().len() + size_of::<IndexVersion>() + v.len()) as u32
 }
 
 /// Inverted index blob reader with cache.
 pub struct CachedInvertedIndexBlobReader<R> {
     file_id: FileId,
+    index_version: IndexVersion,
     blob_size: u64,
     inner: R,
     cache: InvertedIndexCacheRef,
@@ -71,9 +73,16 @@ pub struct CachedInvertedIndexBlobReader<R> {
 
 impl<R> CachedInvertedIndexBlobReader<R> {
     /// Creates a new inverted index blob reader with cache.
-    pub fn new(file_id: FileId, blob_size: u64, inner: R, cache: InvertedIndexCacheRef) -> Self {
+    pub fn new(
+        file_id: FileId,
+        index_version: IndexVersion,
+        blob_size: u64,
+        inner: R,
+        cache: InvertedIndexCacheRef,
+    ) -> Self {
         Self {
             file_id,
+            index_version,
             blob_size,
             inner,
             cache,
@@ -83,47 +92,88 @@ impl<R> CachedInvertedIndexBlobReader<R> {
 
 #[async_trait]
 impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobReader<R> {
-    async fn range_read(&self, offset: u64, size: u32) -> Result<Vec<u8>> {
+    async fn range_read<'a>(
+        &self,
+        offset: u64,
+        size: u32,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Vec<u8>> {
+        let start = metrics.as_ref().map(|_| Instant::now());
+
         let inner = &self.inner;
-        self.cache
+        let (result, cache_metrics) = self
+            .cache
             .get_or_load(
-                self.file_id,
+                (self.file_id, self.index_version),
                 self.blob_size,
                 offset,
                 size,
-                move |ranges| async move { inner.read_vec(&ranges).await },
+                move |ranges| async move { inner.read_vec(&ranges, None).await },
             )
-            .await
+            .await?;
+
+        if let Some(m) = metrics {
+            m.total_bytes += cache_metrics.page_bytes;
+            m.total_ranges += cache_metrics.num_pages;
+            m.cache_hit += cache_metrics.cache_hit;
+            m.cache_miss += cache_metrics.cache_miss;
+            m.fetch_elapsed += start.unwrap().elapsed();
+        }
+
+        Ok(result)
     }
 
-    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn read_vec<'a>(
+        &self,
+        ranges: &[Range<u64>],
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Vec<Bytes>> {
+        let start = metrics.as_ref().map(|_| Instant::now());
+
         let mut pages = Vec::with_capacity(ranges.len());
+        let mut total_cache_metrics = crate::cache::index::IndexCacheMetrics::default();
         for range in ranges {
             let inner = &self.inner;
-            let page = self
+            let (page, cache_metrics) = self
                 .cache
                 .get_or_load(
-                    self.file_id,
+                    (self.file_id, self.index_version),
                     self.blob_size,
                     range.start,
                     (range.end - range.start) as u32,
-                    move |ranges| async move { inner.read_vec(&ranges).await },
+                    move |ranges| async move { inner.read_vec(&ranges, None).await },
                 )
                 .await?;
 
+            total_cache_metrics.merge(&cache_metrics);
             pages.push(Bytes::from(page));
+        }
+
+        if let Some(m) = metrics {
+            m.total_bytes += total_cache_metrics.page_bytes;
+            m.total_ranges += total_cache_metrics.num_pages;
+            m.cache_hit += total_cache_metrics.cache_hit;
+            m.cache_miss += total_cache_metrics.cache_miss;
+            m.fetch_elapsed += start.unwrap().elapsed();
         }
 
         Ok(pages)
     }
 
-    async fn metadata(&self) -> Result<Arc<InvertedIndexMetas>> {
-        if let Some(cached) = self.cache.get_metadata(self.file_id) {
+    async fn metadata<'a>(
+        &self,
+        metrics: Option<&'a mut InvertedIndexReadMetrics>,
+    ) -> Result<Arc<InvertedIndexMetas>> {
+        if let Some(cached) = self.cache.get_metadata((self.file_id, self.index_version)) {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
+            if let Some(m) = metrics {
+                m.cache_hit += 1;
+            }
             Ok(cached)
         } else {
-            let meta = self.inner.metadata().await?;
-            self.cache.put_metadata(self.file_id, meta.clone());
+            let meta = self.inner.metadata(metrics).await?;
+            self.cache
+                .put_metadata((self.file_id, self.index_version), meta.clone());
             CACHE_MISS.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(meta)
         }
@@ -258,6 +308,7 @@ mod test {
         // Init a test range reader in local fs.
         let mut env = TestEnv::new().await;
         let file_size = blob.len() as u64;
+        let index_version = 0;
         let store = env.init_object_store_manager();
         let temp_path = "data";
         store.write(temp_path, blob).await.unwrap();
@@ -273,11 +324,12 @@ mod test {
         let reader = InvertedIndexBlobReader::new(range_reader);
         let cached_reader = CachedInvertedIndexBlobReader::new(
             FileId::random(),
+            index_version,
             file_size,
             reader,
             Arc::new(InvertedIndexCache::new(8192, 8192, 50)),
         );
-        let metadata = cached_reader.metadata().await.unwrap();
+        let metadata = cached_reader.metadata(None).await.unwrap();
         assert_eq!(metadata.total_row_count, 8);
         assert_eq!(metadata.segment_row_count, 1);
         assert_eq!(metadata.metas.len(), 2);
@@ -292,13 +344,19 @@ mod test {
             .fst(
                 tag0.base_offset + tag0.relative_fst_offset as u64,
                 tag0.fst_size,
+                None,
             )
             .await
             .unwrap();
         assert_eq!(fst0.len(), 3);
         let [offset, size] = unpack(fst0.get(b"a").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag0.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -307,7 +365,12 @@ mod test {
         );
         let [offset, size] = unpack(fst0.get(b"b").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag0.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -316,7 +379,12 @@ mod test {
         );
         let [offset, size] = unpack(fst0.get(b"c").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag0.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -335,13 +403,19 @@ mod test {
             .fst(
                 tag1.base_offset + tag1.relative_fst_offset as u64,
                 tag1.fst_size,
+                None,
             )
             .await
             .unwrap();
         assert_eq!(fst1.len(), 3);
         let [offset, size] = unpack(fst1.get(b"x").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag1.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -350,7 +424,12 @@ mod test {
         );
         let [offset, size] = unpack(fst1.get(b"y").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag1.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -359,7 +438,12 @@ mod test {
         );
         let [offset, size] = unpack(fst1.get(b"z").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag1.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -372,16 +456,16 @@ mod test {
         for _ in 0..FUZZ_REPEAT_TIMES {
             let offset = rng.random_range(0..file_size);
             let size = rng.random_range(0..file_size as u32 - offset as u32);
-            let expected = cached_reader.range_read(offset, size).await.unwrap();
+            let expected = cached_reader.range_read(offset, size, None).await.unwrap();
             let inner = &cached_reader.inner;
-            let read = cached_reader
+            let (read, _cache_metrics) = cached_reader
                 .cache
                 .get_or_load(
-                    cached_reader.file_id,
+                    (cached_reader.file_id, cached_reader.index_version),
                     file_size,
                     offset,
                     size,
-                    |ranges| async move { inner.read_vec(&ranges).await },
+                    |ranges| async move { inner.read_vec(&ranges, None).await },
                 )
                 .await
                 .unwrap();

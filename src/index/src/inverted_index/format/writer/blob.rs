@@ -122,7 +122,7 @@ mod tests {
             .unwrap();
 
         let reader = InvertedIndexBlobReader::new(blob);
-        let metadata = reader.metadata().await.unwrap();
+        let metadata = reader.metadata(None).await.unwrap();
         assert_eq!(metadata.total_row_count, 8);
         assert_eq!(metadata.segment_row_count, 1);
         assert_eq!(metadata.metas.len(), 0);
@@ -182,7 +182,7 @@ mod tests {
             .unwrap();
 
         let reader = InvertedIndexBlobReader::new(blob);
-        let metadata = reader.metadata().await.unwrap();
+        let metadata = reader.metadata(None).await.unwrap();
         assert_eq!(metadata.total_row_count, 8);
         assert_eq!(metadata.segment_row_count, 1);
         assert_eq!(metadata.metas.len(), 2);
@@ -198,13 +198,19 @@ mod tests {
             .fst(
                 tag0.base_offset + tag0.relative_fst_offset as u64,
                 tag0.fst_size,
+                None,
             )
             .await
             .unwrap();
         assert_eq!(fst0.len(), 3);
         let [offset, size] = unpack(fst0.get(b"a").unwrap());
         let bitmap = reader
-            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag0.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -213,7 +219,12 @@ mod tests {
         );
         let [offset, size] = unpack(fst0.get(b"b").unwrap());
         let bitmap = reader
-            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag0.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -222,7 +233,12 @@ mod tests {
         );
         let [offset, size] = unpack(fst0.get(b"c").unwrap());
         let bitmap = reader
-            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag0.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -241,13 +257,19 @@ mod tests {
             .fst(
                 tag1.base_offset + tag1.relative_fst_offset as u64,
                 tag1.fst_size,
+                None,
             )
             .await
             .unwrap();
         assert_eq!(fst1.len(), 3);
         let [offset, size] = unpack(fst1.get(b"x").unwrap());
         let bitmap = reader
-            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag1.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -256,7 +278,12 @@ mod tests {
         );
         let [offset, size] = unpack(fst1.get(b"y").unwrap());
         let bitmap = reader
-            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag1.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -265,7 +292,12 @@ mod tests {
         );
         let [offset, size] = unpack(fst1.get(b"z").unwrap());
         let bitmap = reader
-            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
+            .bitmap(
+                tag1.base_offset + offset as u64,
+                size,
+                BitmapType::Roaring,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(

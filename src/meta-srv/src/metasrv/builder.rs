@@ -28,7 +28,7 @@ use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocato
 use common_meta::ddl::{
     DdlContext, NoopRegionFailureDetectorControl, RegionFailureDetectorControllerRef,
 };
-use common_meta::ddl_manager::DdlManager;
+use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef};
 use common_meta::distributed_time_constants::{self};
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
@@ -54,8 +54,9 @@ use store_api::storage::MAX_REGION_SEQ;
 use crate::bootstrap::build_default_meta_peer_client;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
-use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
+use crate::error::{self, BuildWalOptionsAllocatorSnafu, OtherSnafu, Result};
 use crate::events::EventHandlerImpl;
+use crate::gc::GcScheduler;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
@@ -401,13 +402,23 @@ impl MetasrvBuilder {
         let procedure_manager_c = procedure_manager.clone();
         let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager_c, true)
             .context(error::InitDdlManagerSnafu)?;
-        #[cfg(feature = "enterprise")]
-        let ddl_manager = {
-            let trigger_ddl_manager = plugins.as_ref().and_then(|plugins| {
-                plugins.get::<common_meta::ddl_manager::TriggerDdlManagerRef>()
-            });
-            ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
+
+        let ddl_manager = if let Some(configurator) = plugins
+            .as_ref()
+            .and_then(|p| p.get::<DdlManagerConfiguratorRef<DdlManagerConfigureContext>>())
+        {
+            let ctx = DdlManagerConfigureContext {
+                kv_backend: kv_backend.clone(),
+                meta_peer_client: meta_peer_client.clone(),
+            };
+            configurator
+                .configure(ddl_manager, ctx)
+                .await
+                .context(OtherSnafu)?
+        } else {
+            ddl_manager
         };
+
         let ddl_manager = Arc::new(ddl_manager);
 
         let region_flush_ticker = if is_remote_wal {
@@ -454,6 +465,22 @@ impl MetasrvBuilder {
                 tx.clone(),
             ));
             Some(wal_prune_ticker)
+        } else {
+            None
+        };
+
+        let gc_ticker = if options.gc.enable {
+            let (gc_scheduler, gc_ticker) = GcScheduler::new_with_config(
+                table_metadata_manager.clone(),
+                procedure_manager.clone(),
+                meta_peer_client.clone(),
+                mailbox.clone(),
+                options.grpc.server_addr.clone(),
+                options.gc.clone(),
+            )?;
+            gc_scheduler.try_start()?;
+
+            Some(Arc::new(gc_ticker))
         } else {
             None
         };
@@ -562,6 +589,7 @@ impl MetasrvBuilder {
             reconciliation_manager,
             topic_stats_registry,
             resource_stat: Arc::new(resource_stat),
+            gc_ticker,
         })
     }
 }
@@ -609,4 +637,10 @@ impl Default for MetasrvBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The context for [`DdlManagerConfiguratorRef`].
+pub struct DdlManagerConfigureContext {
+    pub kv_backend: KvBackendRef,
+    pub meta_peer_client: MetaPeerClientRef,
 }

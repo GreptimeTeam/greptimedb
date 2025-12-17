@@ -157,19 +157,27 @@ pub async fn stream_to_csv(
     concurrency: usize,
     format: &CsvFormat,
 ) -> Result<usize> {
-    stream_to_file(stream, store, path, threshold, concurrency, |buffer| {
-        let mut builder = WriterBuilder::new();
-        if let Some(timestamp_format) = &format.timestamp_format {
-            builder = builder.with_timestamp_format(timestamp_format.to_owned())
-        }
-        if let Some(date_format) = &format.date_format {
-            builder = builder.with_date_format(date_format.to_owned())
-        }
-        if let Some(time_format) = &format.time_format {
-            builder = builder.with_time_format(time_format.to_owned())
-        }
-        builder.build(buffer)
-    })
+    stream_to_file(
+        stream,
+        store,
+        path,
+        threshold,
+        concurrency,
+        format.compression_type,
+        |buffer| {
+            let mut builder = WriterBuilder::new();
+            if let Some(timestamp_format) = &format.timestamp_format {
+                builder = builder.with_timestamp_format(timestamp_format.to_owned())
+            }
+            if let Some(date_format) = &format.date_format {
+                builder = builder.with_date_format(date_format.to_owned())
+            }
+            if let Some(time_format) = &format.time_format {
+                builder = builder.with_time_format(time_format.to_owned())
+            }
+            builder.build(buffer)
+        },
+    )
     .await
 }
 
@@ -181,13 +189,21 @@ impl DfRecordBatchEncoder for csv::Writer<SharedBuffer> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
 
+    use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
+    use common_recordbatch::{RecordBatch, RecordBatches};
     use common_test_util::find_workspace_path;
+    use datafusion::datasource::physical_plan::{CsvSource, FileSource};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{Float64Vector, StringVector, UInt32Vector, VectorRef};
+    use futures::TryStreamExt;
 
     use super::*;
     use crate::file_format::{
         FORMAT_COMPRESSION_TYPE, FORMAT_DELIMITER, FORMAT_HAS_HEADER,
-        FORMAT_SCHEMA_INFER_MAX_RECORD, FileFormat,
+        FORMAT_SCHEMA_INFER_MAX_RECORD, FileFormat, file_to_stream,
     };
     use crate::test_util::{format_schema, test_store};
 
@@ -296,5 +312,167 @@ mod tests {
                 date_format: None
             }
         );
+    }
+
+    #[tokio::test]
+    async fn test_compressed_csv() {
+        // Create test data
+        let column_schemas = vec![
+            ColumnSchema::new("id", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas));
+
+        // Create multiple record batches with different data
+        let batch1_columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![1, 2, 3])),
+            Arc::new(StringVector::from(vec!["Alice", "Bob", "Charlie"])),
+            Arc::new(Float64Vector::from_slice(vec![10.5, 20.3, 30.7])),
+        ];
+        let batch1 = RecordBatch::new(schema.clone(), batch1_columns).unwrap();
+
+        let batch2_columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![4, 5, 6])),
+            Arc::new(StringVector::from(vec!["David", "Eva", "Frank"])),
+            Arc::new(Float64Vector::from_slice(vec![40.1, 50.2, 60.3])),
+        ];
+        let batch2 = RecordBatch::new(schema.clone(), batch2_columns).unwrap();
+
+        let batch3_columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![7, 8, 9])),
+            Arc::new(StringVector::from(vec!["Grace", "Henry", "Ivy"])),
+            Arc::new(Float64Vector::from_slice(vec![70.4, 80.5, 90.6])),
+        ];
+        let batch3 = RecordBatch::new(schema.clone(), batch3_columns).unwrap();
+
+        // Combine all batches into a RecordBatches collection
+        let recordbatches = RecordBatches::try_new(schema, vec![batch1, batch2, batch3]).unwrap();
+
+        // Test with different compression types
+        let compression_types = vec![
+            CompressionType::Gzip,
+            CompressionType::Bzip2,
+            CompressionType::Xz,
+            CompressionType::Zstd,
+        ];
+
+        // Create a temporary file path
+        let temp_dir = common_test_util::temp_dir::create_temp_dir("test_compressed_csv");
+        for compression_type in compression_types {
+            let format = CsvFormat {
+                compression_type,
+                ..CsvFormat::default()
+            };
+
+            // Use correct format without Debug formatter
+            let compressed_file_name =
+                format!("test_compressed_csv.{}", compression_type.file_extension());
+            let compressed_file_path = temp_dir.path().join(&compressed_file_name);
+            let compressed_file_path_str = compressed_file_path.to_str().unwrap();
+
+            // Create a simple file store for testing
+            let store = test_store("/");
+
+            // Export CSV with compression
+            let rows = stream_to_csv(
+                Box::pin(DfRecordBatchStreamAdapter::new(recordbatches.as_stream())),
+                store,
+                compressed_file_path_str,
+                1024,
+                1,
+                &format,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(rows, 9);
+
+            // Verify compressed file was created and has content
+            assert!(compressed_file_path.exists());
+            let file_size = std::fs::metadata(&compressed_file_path).unwrap().len();
+            assert!(file_size > 0);
+
+            // Verify the file is actually compressed
+            let file_content = std::fs::read(&compressed_file_path).unwrap();
+            // Compressed files should not start with CSV header
+            // They should have compression magic bytes
+            match compression_type {
+                CompressionType::Gzip => {
+                    // Gzip magic bytes: 0x1f 0x8b
+                    assert_eq!(file_content[0], 0x1f, "Gzip file should start with 0x1f");
+                    assert_eq!(
+                        file_content[1], 0x8b,
+                        "Gzip file should have 0x8b as second byte"
+                    );
+                }
+                CompressionType::Bzip2 => {
+                    // Bzip2 magic bytes: 'BZ'
+                    assert_eq!(file_content[0], b'B', "Bzip2 file should start with 'B'");
+                    assert_eq!(
+                        file_content[1], b'Z',
+                        "Bzip2 file should have 'Z' as second byte"
+                    );
+                }
+                CompressionType::Xz => {
+                    // XZ magic bytes: 0xFD '7zXZ'
+                    assert_eq!(file_content[0], 0xFD, "XZ file should start with 0xFD");
+                }
+                CompressionType::Zstd => {
+                    // Zstd magic bytes: 0x28 0xB5 0x2F 0xFD
+                    assert_eq!(file_content[0], 0x28, "Zstd file should start with 0x28");
+                    assert_eq!(
+                        file_content[1], 0xB5,
+                        "Zstd file should have 0xB5 as second byte"
+                    );
+                }
+                _ => {}
+            }
+
+            // Verify the compressed file can be decompressed and content matches original data
+            let store = test_store("/");
+            let schema = Arc::new(
+                CsvFormat {
+                    compression_type,
+                    ..Default::default()
+                }
+                .infer_schema(&store, compressed_file_path_str)
+                .await
+                .unwrap(),
+            );
+            let csv_source = CsvSource::new(true, b',', b'"')
+                .with_schema(schema.clone())
+                .with_batch_size(8192);
+
+            let stream = file_to_stream(
+                &store,
+                compressed_file_path_str,
+                schema.clone(),
+                csv_source.clone(),
+                None,
+                compression_type,
+            )
+            .await
+            .unwrap();
+
+            let batches = stream.try_collect::<Vec<_>>().await.unwrap();
+            let pretty_print = arrow::util::pretty::pretty_format_batches(&batches)
+                .unwrap()
+                .to_string();
+            let expected = r#"+----+---------+-------+
+| id | name    | value |
++----+---------+-------+
+| 1  | Alice   | 10.5  |
+| 2  | Bob     | 20.3  |
+| 3  | Charlie | 30.7  |
+| 4  | David   | 40.1  |
+| 5  | Eva     | 50.2  |
+| 6  | Frank   | 60.3  |
+| 7  | Grace   | 70.4  |
+| 8  | Henry   | 80.5  |
+| 9  | Ivy     | 90.6  |
++----+---------+-------+"#;
+            assert_eq!(expected, pretty_print);
+        }
     }
 }

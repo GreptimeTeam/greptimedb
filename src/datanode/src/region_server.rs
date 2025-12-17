@@ -17,6 +17,7 @@ mod catalog;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -52,7 +53,9 @@ pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
 use serde_json;
-use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult};
+use servers::error::{
+    self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult, SuspendedSnafu,
+};
 use servers::grpc::FlightCompression;
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
@@ -89,6 +92,7 @@ use crate::region_server::catalog::{NameAwareCatalogList, NameAwareDataSourceInj
 pub struct RegionServer {
     inner: Arc<RegionServerInner>,
     flight_compression: FlightCompression,
+    suspend: Arc<AtomicBool>,
 }
 
 pub struct RegionStat {
@@ -136,6 +140,7 @@ impl RegionServer {
                 ),
             )),
             flight_compression,
+            suspend: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -518,7 +523,7 @@ impl RegionServer {
 
         let manifest_info = match manifest_info {
             ManifestInfo::MitoManifestInfo(info) => {
-                RegionManifestInfo::mito(info.data_manifest_version, 0)
+                RegionManifestInfo::mito(info.data_manifest_version, 0, 0)
             }
             ManifestInfo::MetricManifestInfo(info) => RegionManifestInfo::metric(
                 info.data_manifest_version,
@@ -595,6 +600,14 @@ impl RegionServer {
             .handle_sync_region(engine_with_status.engine(), region_id, manifest_info)
             .await
     }
+
+    fn is_suspended(&self) -> bool {
+        self.suspend.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn suspend_state(&self) -> Arc<AtomicBool> {
+        self.suspend.clone()
+    }
 }
 
 #[async_trait]
@@ -644,6 +657,8 @@ impl FlightCraft for RegionServer {
         &self,
         request: Request<Ticket>,
     ) -> TonicResult<Response<TonicStream<FlightData>>> {
+        ensure!(!self.is_suspended(), SuspendedSnafu);
+
         let ticket = request.into_inner().ticket;
         let request = api::v1::region::QueryRequest::decode(ticket.as_ref())
             .context(servers_error::InvalidFlightTicketSnafu)?;
@@ -1200,7 +1215,8 @@ impl RegionServerInner {
             | RegionRequest::Flush(_)
             | RegionRequest::Compact(_)
             | RegionRequest::Truncate(_)
-            | RegionRequest::BuildIndex(_) => RegionChange::None,
+            | RegionRequest::BuildIndex(_)
+            | RegionRequest::EnterStaging(_) => RegionChange::None,
             RegionRequest::Catchup(_) => RegionChange::Catchup,
         };
 
@@ -1260,7 +1276,6 @@ impl RegionServerInner {
             .with_context(|_| HandleRegionRequestSnafu { region_id })?
             .new_opened_logical_region_ids()
         else {
-            warn!("No new opened logical regions");
             return Ok(());
         };
 

@@ -272,13 +272,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to send message: {err_msg}"))]
-    SendMessage {
-        err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to serde json"))]
     SerdeJson {
         #[snafu(source)]
@@ -1118,7 +1111,7 @@ impl ErrorExt for Error {
             | DeserializeFlexbuffers { .. }
             | ConvertTimeRanges { .. } => StatusCode::Unexpected,
 
-            SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
+            GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 
             SchemaAlreadyExists { .. } => StatusCode::DatabaseAlreadyExists,
 

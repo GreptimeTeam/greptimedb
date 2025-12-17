@@ -365,7 +365,7 @@ impl SeriesNormalizeStream {
             Arc::new(ts_column.clone()) as _
         } else {
             Arc::new(TimestampMillisecondArray::from_iter(
-                ts_column.iter().map(|ts| ts.map(|ts| ts - self.offset)),
+                ts_column.iter().map(|ts| ts.map(|ts| ts + self.offset)),
             ))
         };
         let mut columns = input.columns().to_vec();
@@ -518,11 +518,11 @@ mod test {
             "+---------------------+--------+------+\
             \n| timestamp           | value  | path |\
             \n+---------------------+--------+------+\
-            \n| 1970-01-01T00:00:59 | 0.0    | foo  |\
-            \n| 1970-01-01T00:01:59 | 1.0    | foo  |\
-            \n| 1969-12-31T23:59:59 | 10.0   | foo  |\
-            \n| 1970-01-01T00:00:29 | 100.0  | foo  |\
-            \n| 1970-01-01T00:01:29 | 1000.0 | foo  |\
+            \n| 1970-01-01T00:01:01 | 0.0    | foo  |\
+            \n| 1970-01-01T00:02:01 | 1.0    | foo  |\
+            \n| 1970-01-01T00:00:01 | 10.0   | foo  |\
+            \n| 1970-01-01T00:00:31 | 100.0  | foo  |\
+            \n| 1970-01-01T00:01:31 | 1000.0 | foo  |\
             \n+---------------------+--------+------+",
         );
 

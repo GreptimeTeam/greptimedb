@@ -28,7 +28,7 @@ use crate::region::MitoRegionRef;
 use crate::request::{
     BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, OptionOutputTx,
 };
-use crate::sst::file::{FileHandle, RegionFileId};
+use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
 };
@@ -68,9 +68,11 @@ impl<S> RegionWorkerLoop<S> {
             row_group_size: WriteOptions::default().row_group_size,
             intermediate_manager,
             puffin_manager,
+            write_cache_enabled: self.cache_manager.write_cache().is_some(),
         });
 
         IndexBuildTask {
+            file: file.clone(),
             file_meta: file.meta_ref().clone(),
             reason: build_type,
             access_layer: access_layer.clone(),
@@ -85,7 +87,6 @@ impl<S> RegionWorkerLoop<S> {
     }
 
     /// Handles manual build index requests.
-    /// TODO(SNC123): Support admin function of manual index building later.
     pub(crate) async fn handle_build_index_request(
         &mut self,
         region_id: RegionId,
@@ -126,10 +127,16 @@ impl<S> RegionWorkerLoop<S> {
             .collect();
 
         let build_tasks = if request.file_metas.is_empty() {
-            // NOTE: Currently, rebuilding the index will reconstruct the index for all
-            // files in the region, which is a simplified approach and is not yet available for
-            // production use; further optimization is required.
-            all_files.values().cloned().collect::<Vec<_>>()
+            // If no specific files are provided, find files whose index is inconsistent with the region metadata.
+            all_files
+                .values()
+                .filter(|file| {
+                    !file
+                        .meta_ref()
+                        .is_index_consistent_with_region(&version.metadata.column_metadatas)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
         } else {
             request
                 .file_metas
@@ -211,7 +218,8 @@ impl<S> RegionWorkerLoop<S> {
         let cache_strategy = CacheStrategy::EnableAll(self.cache_manager.clone());
         for file_meta in &request.edit.files_to_add {
             let region_file_id = RegionFileId::new(region_id, file_meta.file_id);
-            cache_strategy.evict_puffin_cache(region_file_id).await;
+            let index_id = RegionIndexId::new(region_file_id, file_meta.index_version);
+            cache_strategy.evict_puffin_cache(index_id).await;
         }
 
         region.version_control.apply_edit(

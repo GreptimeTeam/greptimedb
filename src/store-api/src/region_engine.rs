@@ -37,7 +37,7 @@ use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
     BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
 };
-use crate::storage::{RegionId, ScanRequest, SequenceNumber};
+use crate::storage::{FileId, RegionId, ScanRequest, SequenceNumber};
 
 /// The settable region role state.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -204,7 +204,7 @@ impl From<PbGrantedRegion> for GrantedRegion {
 
 /// The role of the region.
 /// TODO(weny): rename it to `RegionRoleState`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RegionRole {
     // Readonly region(mito2)
     Follower,
@@ -421,6 +421,8 @@ pub struct QueryScanContext {
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
 /// You can use this trait to implement an [`ExecutionPlan`](datafusion_physical_plan::ExecutionPlan).
 pub trait RegionScanner: Debug + DisplayAs + Send {
+    fn name(&self) -> &str;
+
     /// Returns the properties of the scanner.
     fn properties(&self) -> &ScannerProperties;
 
@@ -497,6 +499,8 @@ pub enum RegionManifestInfo {
     Mito {
         manifest_version: u64,
         flushed_entry_id: u64,
+        /// Number of files removed in the manifest's `removed_files` field.
+        file_removed_cnt: u64,
     },
     Metric {
         data_manifest_version: u64,
@@ -508,10 +512,11 @@ pub enum RegionManifestInfo {
 
 impl RegionManifestInfo {
     /// Creates a new [RegionManifestInfo] for mito2 engine.
-    pub fn mito(manifest_version: u64, flushed_entry_id: u64) -> Self {
+    pub fn mito(manifest_version: u64, flushed_entry_id: u64, file_removal_rate: u64) -> Self {
         Self::Mito {
             manifest_version,
             flushed_entry_id,
+            file_removed_cnt: file_removal_rate,
         }
     }
 
@@ -604,6 +609,7 @@ impl Default for RegionManifestInfo {
         Self::Mito {
             manifest_version: 0,
             flushed_entry_id: 0,
+            file_removed_cnt: 0,
         }
     }
 }
@@ -683,6 +689,72 @@ impl SyncManifestResponse {
                 ..
             } => Some(new_opened_logical_region_ids),
             _ => None,
+        }
+    }
+}
+
+/// Request to remap manifests from old regions to new regions.
+#[derive(Debug, Clone)]
+pub struct RemapManifestsRequest {
+    /// The [`RegionId`] of a staging region used to obtain table directory and storage configuration for the remap operation.
+    pub region_id: RegionId,
+    /// Regions to remap manifests from.
+    pub input_regions: Vec<RegionId>,
+    /// For each old region, which new regions should receive its files
+    pub region_mapping: HashMap<RegionId, Vec<RegionId>>,
+    /// New partition expressions for the new regions.
+    pub new_partition_exprs: HashMap<RegionId, String>,
+}
+
+/// Response to remap manifests from old regions to new regions.
+#[derive(Debug, Clone)]
+pub struct RemapManifestsResponse {
+    /// The new manifests for the new regions.
+    pub new_manifests: HashMap<RegionId, String>,
+}
+
+/// Request to copy files from a source region to a target region.
+#[derive(Debug, Clone)]
+pub struct CopyRegionFromRequest {
+    /// The [`RegionId`] of the source region.
+    pub source_region_id: RegionId,
+    /// The parallelism of the copy operation.
+    pub parallelism: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct MitoCopyRegionFromResponse {
+    /// The file ids that were copied from the source region to the target region.
+    pub copied_file_ids: Vec<FileId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetricCopyRegionFromResponse {
+    /// The logical regions that were newly opened after the copy operation.
+    pub new_opened_logical_region_ids: Vec<RegionId>,
+}
+
+/// Response to copy region from a source region to a target region.
+#[derive(Debug, Clone)]
+pub enum CopyRegionFromResponse {
+    Mito(MitoCopyRegionFromResponse),
+    Metric(MetricCopyRegionFromResponse),
+}
+
+impl CopyRegionFromResponse {
+    /// Converts the response to a mito2 response.
+    pub fn into_mito(self) -> Option<MitoCopyRegionFromResponse> {
+        match self {
+            CopyRegionFromResponse::Mito(response) => Some(response),
+            CopyRegionFromResponse::Metric(_) => None,
+        }
+    }
+
+    /// Converts the response to a metric response.
+    pub fn into_metric(self) -> Option<MetricCopyRegionFromResponse> {
+        match self {
+            CopyRegionFromResponse::Metric(response) => Some(response),
+            CopyRegionFromResponse::Mito(_) => None,
         }
     }
 }
@@ -811,6 +883,19 @@ pub trait RegionEngine: Send + Sync {
         manifest_info: RegionManifestInfo,
     ) -> Result<SyncManifestResponse, BoxedError>;
 
+    /// Remaps manifests from old regions to new regions.
+    async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse, BoxedError>;
+
+    /// Copies region from a source region to a target region.
+    async fn copy_region_from(
+        &self,
+        region_id: RegionId,
+        request: CopyRegionFromRequest,
+    ) -> Result<CopyRegionFromResponse, BoxedError>;
+
     /// Sets region role state gracefully.
     ///
     /// After the call returns, the engine ensures no more write operations will succeed in the region.
@@ -862,6 +947,10 @@ impl Debug for SinglePartitionScanner {
 }
 
 impl RegionScanner for SinglePartitionScanner {
+    fn name(&self) -> &str {
+        "SinglePartition"
+    }
+
     fn properties(&self) -> &ScannerProperties {
         &self.properties
     }

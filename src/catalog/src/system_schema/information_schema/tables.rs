@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
@@ -255,14 +254,17 @@ impl InformationSchemaTablesBuilder {
         // TODO(dennis): `region_stats` API is not stable in distributed cluster because of network issue etc.
         // But we don't want the statements such as `show tables` fail,
         // so using `unwrap_or_else` here instead of `?` operator.
-        let region_stats = information_extension
-            .region_stats()
-            .await
-            .map_err(|e| {
-                error!(e; "Failed to call region_stats");
-                e
-            })
-            .unwrap_or_else(|_| vec![]);
+        let region_stats = {
+            let mut x = information_extension
+                .region_stats()
+                .await
+                .unwrap_or_else(|e| {
+                    error!(e; "Failed to find region stats in information_schema, fallback to all empty");
+                    vec![]
+                });
+            x.sort_unstable_by_key(|x| x.id);
+            x
+        };
 
         for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
             let mut stream = catalog_manager.tables(&catalog_name, &schema_name, None);
@@ -273,16 +275,16 @@ impl InformationSchemaTablesBuilder {
                 // TODO(dennis): make it working for metric engine
                 let table_region_stats =
                     if table_info.meta.engine == MITO_ENGINE || table_info.is_physical_table() {
-                        let region_ids = table_info
+                        table_info
                             .meta
                             .region_numbers
                             .iter()
                             .map(|n| RegionId::new(table_info.ident.table_id, *n))
-                            .collect::<HashSet<_>>();
-
-                        region_stats
-                            .iter()
-                            .filter(|stat| region_ids.contains(&stat.id))
+                            .flat_map(|region_id| {
+                                region_stats
+                                    .binary_search_by_key(&region_id, |x| x.id)
+                                    .map(|i| &region_stats[i])
+                            })
                             .collect::<Vec<_>>()
                     } else {
                         vec![]

@@ -19,6 +19,8 @@ use api::v1::{
     ColumnDataType, ColumnDef, ColumnSchema as PbColumnSchema, Row, RowInsertRequest,
     RowInsertRequests, Rows, SemanticType,
 };
+use arrow::array::{Array, AsArray};
+use arrow::datatypes::TimestampNanosecondType;
 use common_query::OutputData;
 use common_recordbatch::util as record_util;
 use common_telemetry::{debug, info};
@@ -27,14 +29,11 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::col;
 use datafusion_common::TableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan};
-use datatypes::prelude::ScalarVector;
 use datatypes::timestamp::TimestampNanosecond;
-use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
 use itertools::Itertools;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
 use query::QueryEngineRef;
-use query::dataframe::DataFrame;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt, ensure};
 use table::TableRef;
@@ -413,7 +412,6 @@ impl PipelineTable {
             .query_engine
             .read_table(self.table.clone())
             .context(DataFrameSnafu)?;
-        let DataFrame::DataFusion(dataframe) = dataframe;
 
         let dataframe = dataframe
             .filter(prepare_dataframe_conditions(name, version))
@@ -474,7 +472,6 @@ impl PipelineTable {
             .query_engine
             .read_table(self.table.clone())
             .context(DataFrameSnafu)?;
-        let DataFrame::DataFusion(dataframe) = dataframe;
 
         // select all pipelines with name and version
         let dataframe = dataframe
@@ -527,8 +524,7 @@ impl PipelineTable {
         for r in records {
             let pipeline_content_column = r.column(0);
             let pipeline_content = pipeline_content_column
-                .as_any()
-                .downcast_ref::<StringVector>()
+                .as_string_opt::<i32>()
                 .with_context(|| CastTypeSnafu {
                     msg: format!(
                         "can't downcast {:?} array into string vector",
@@ -537,20 +533,19 @@ impl PipelineTable {
                 })?;
 
             let pipeline_schema_column = r.column(1);
-            let pipeline_schema = pipeline_schema_column
-                .as_any()
-                .downcast_ref::<StringVector>()
-                .with_context(|| CastTypeSnafu {
-                    msg: format!(
-                        "can't downcast {:?} array into string vector",
-                        pipeline_schema_column.data_type()
-                    ),
-                })?;
+            let pipeline_schema =
+                pipeline_schema_column
+                    .as_string_opt::<i32>()
+                    .with_context(|| CastTypeSnafu {
+                        msg: format!(
+                            "expecting pipeline schema column of type string, actual: {}",
+                            pipeline_schema_column.data_type()
+                        ),
+                    })?;
 
             let pipeline_created_at_column = r.column(2);
             let pipeline_created_at = pipeline_created_at_column
-                .as_any()
-                .downcast_ref::<TimestampNanosecondVector>()
+                .as_primitive_opt::<TimestampNanosecondType>()
                 .with_context(|| CastTypeSnafu {
                     msg: format!(
                         "can't downcast {:?} array into scalar vector",
@@ -572,9 +567,9 @@ impl PipelineTable {
             let len = pipeline_content.len();
             for i in 0..len {
                 re.push((
-                    pipeline_content.get_data(i).unwrap().to_string(),
-                    pipeline_schema.get_data(i).unwrap().to_string(),
-                    pipeline_created_at.get_data(i).unwrap(),
+                    pipeline_content.value(i).to_string(),
+                    pipeline_schema.value(i).to_string(),
+                    TimestampNanosecond::new(pipeline_created_at.value(i)),
                 ));
             }
         }

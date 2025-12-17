@@ -30,6 +30,7 @@ use crate::access_layer::{
     TempFileCleaner, WriteCachePathProvider, WriteType, new_fs_cache_store,
 };
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
+use crate::cache::manifest_cache::ManifestCache;
 use crate::error::{self, Result};
 use crate::metrics::UPLOAD_BYTES_TOTAL;
 use crate::region::opener::RegionLoadCacheTask;
@@ -53,6 +54,8 @@ pub struct WriteCache {
     intermediate_manager: IntermediateManager,
     /// Sender for region load cache tasks.
     task_sender: UnboundedSender<RegionLoadCacheTask>,
+    /// Optional cache for manifest files.
+    manifest_cache: Option<ManifestCache>,
 }
 
 pub type WriteCacheRef = Arc<WriteCache>;
@@ -60,13 +63,16 @@ pub type WriteCacheRef = Arc<WriteCache>;
 impl WriteCache {
     /// Create the cache with a `local_store` to cache files and a
     /// `object_store_manager` for all object stores.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         local_store: ObjectStore,
         cache_capacity: ReadableSize,
         ttl: Option<Duration>,
         index_cache_percent: Option<u8>,
+        enable_background_worker: bool,
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
+        manifest_cache: Option<ManifestCache>,
     ) -> Result<Self> {
         let (task_sender, task_receiver) = unbounded_channel();
 
@@ -75,6 +81,7 @@ impl WriteCache {
             cache_capacity,
             ttl,
             index_cache_percent,
+            enable_background_worker,
         ));
         file_cache.recover(false, Some(task_receiver)).await;
 
@@ -83,28 +90,42 @@ impl WriteCache {
             puffin_manager_factory,
             intermediate_manager,
             task_sender,
+            manifest_cache,
         })
     }
 
     /// Creates a write cache based on local fs.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new_fs(
         cache_dir: &str,
         cache_capacity: ReadableSize,
         ttl: Option<Duration>,
         index_cache_percent: Option<u8>,
+        enable_background_worker: bool,
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
+        manifest_cache_capacity: ReadableSize,
     ) -> Result<Self> {
         info!("Init write cache on {cache_dir}, capacity: {cache_capacity}");
 
         let local_store = new_fs_cache_store(cache_dir).await?;
+
+        // Create manifest cache if capacity is non-zero
+        let manifest_cache = if manifest_cache_capacity.as_bytes() > 0 {
+            Some(ManifestCache::new(local_store.clone(), manifest_cache_capacity, ttl).await)
+        } else {
+            None
+        };
+
         Self::new(
             local_store,
             cache_capacity,
             ttl,
             index_cache_percent,
+            enable_background_worker,
             puffin_manager_factory,
             intermediate_manager,
+            manifest_cache,
         )
         .await
     }
@@ -112,6 +133,11 @@ impl WriteCache {
     /// Returns the file cache of the write cache.
     pub(crate) fn file_cache(&self) -> FileCacheRef {
         self.file_cache.clone()
+    }
+
+    /// Returns the manifest cache if available.
+    pub(crate) fn manifest_cache(&self) -> Option<ManifestCache> {
+        self.manifest_cache.clone()
     }
 
     /// Build the puffin manager
@@ -195,6 +221,7 @@ impl WriteCache {
             puffin_manager: self
                 .puffin_manager_factory
                 .build(store.clone(), path_provider.clone()),
+            write_cache_enabled: true,
             intermediate_manager: self.intermediate_manager.clone(),
             index_options: write_request.index_options,
             inverted_index_config: write_request.inverted_index_config,
@@ -246,7 +273,7 @@ impl WriteCache {
             upload_tracker.push_uploaded_file(parquet_path);
 
             if sst.index_metadata.file_size > 0 {
-                let puffin_key = IndexKey::new(region_id, sst.file_id, FileType::Puffin);
+                let puffin_key = IndexKey::new(region_id, sst.file_id, FileType::Puffin(0));
                 let puffin_path = upload_request
                     .dest_path_provider
                     .build_index_file_path(RegionFileId::new(region_id, sst.file_id));
@@ -419,7 +446,11 @@ impl UploadTracker {
             file_cache.remove(parquet_key).await;
 
             if sst.index_metadata.file_size > 0 {
-                let puffin_key = IndexKey::new(self.region_id, sst.file_id, FileType::Puffin);
+                let puffin_key = IndexKey::new(
+                    self.region_id,
+                    sst.file_id,
+                    FileType::Puffin(sst.index_metadata.version),
+                );
                 file_cache.remove(puffin_key).await;
             }
         }
@@ -528,7 +559,7 @@ mod tests {
         assert_eq!(remote_data.to_vec(), cache_data.to_vec());
 
         // Check write cache contains the index key
-        let index_key = IndexKey::new(region_id, file_id, FileType::Puffin);
+        let index_key = IndexKey::new(region_id, file_id, FileType::Puffin(0));
         assert!(write_cache.file_cache.contains_key(&index_key));
 
         let remote_index_data = mock_store.read(&index_upload_path).await.unwrap();

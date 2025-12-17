@@ -49,14 +49,41 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to watch file: {}", path))]
+    FileWatch {
+        path: String,
+        #[snafu(source)]
+        error: notify::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to canonicalize path: {}", path))]
+    CanonicalizePath {
+        path: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid path '{}': expected a file, not a directory", path))]
+    InvalidPath {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::TomlFormat { .. } | Error::LoadLayeredConfig { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::TomlFormat { .. }
+            | Error::LoadLayeredConfig { .. }
+            | Error::FileWatch { .. }
+            | Error::InvalidPath { .. }
+            | Error::CanonicalizePath { .. } => StatusCode::InvalidArguments,
             Error::SerdeJson { .. } => StatusCode::Unexpected,
         }
     }

@@ -676,15 +676,10 @@ WITH time_shifted AS (
 )
 SELECT * FROM time_shifted;
 
-+---------------------+-----+
-| ts                  | val |
-+---------------------+-----+
-| 1970-01-01T00:00:00 | 3.0 |
-| 1970-01-01T00:00:10 | 3.0 |
-| 1970-01-01T00:00:20 | 3.0 |
-| 1970-01-01T00:00:30 | 3.0 |
-| 1970-01-01T00:00:40 | 3.0 |
-+---------------------+-----+
++----+-----+
+| ts | val |
++----+-----+
++----+-----+
 
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
@@ -702,7 +697,7 @@ SELECT * FROM time_shifted;
 |               |     PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                      |
 |               |       PromSeriesNormalize: offset=[50000], time index=[ts], filter NaN: [false]                                        |
 |               |         PromSeriesDivide: tags=[]                                                                                      |
-|               |           Filter: metric.ts >= TimestampMillisecond(-250000, None) AND metric.ts <= TimestampMillisecond(390000, None) |
+|               |           Filter: metric.ts >= TimestampMillisecond(-350000, None) AND metric.ts <= TimestampMillisecond(290000, None) |
 |               |             TableScan: metric                                                                                          |
 |               | ]]                                                                                                                     |
 | physical_plan | CooperativeExec                                                                                                        |

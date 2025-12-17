@@ -163,6 +163,8 @@ impl ParserContext<'_> {
 
                 Keyword::TRUNCATE => self.parse_truncate(),
 
+                Keyword::COMMENT => self.parse_comment(),
+
                 Keyword::SET => self.parse_set_variables(),
 
                 Keyword::ADMIN => self.parse_admin_command(),
@@ -353,7 +355,8 @@ mod tests {
                 let ts_col = columns.first().unwrap();
                 assert_eq!(
                     expected_type,
-                    sql_data_type_to_concrete_data_type(ts_col.data_type()).unwrap()
+                    sql_data_type_to_concrete_data_type(ts_col.data_type(), &Default::default())
+                        .unwrap()
                 );
             }
             _ => unreachable!(),

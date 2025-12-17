@@ -320,4 +320,15 @@ mod tests {
         assert!(flush_reply.results[0].1.is_ok());
         assert!(flush_reply.results[1].1.is_err());
     }
+
+    #[test]
+    fn test_flush_regions_display() {
+        let region_id = RegionId::new(1024, 1);
+        let flush_regions = FlushRegions::sync_single(region_id);
+        let display = format!("{}", flush_regions);
+        assert_eq!(
+            display,
+            "FlushRegions(region_ids=[4398046511105(1024, 1)], strategy=Sync, error_strategy=FailFast)"
+        );
+    }
 }

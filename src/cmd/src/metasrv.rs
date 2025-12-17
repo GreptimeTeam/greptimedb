@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
+use std::fmt::{self, Debug};
 use std::path::Path;
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ use common_config::Configurable;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_version::{short_version, verbose_version};
-use meta_srv::bootstrap::MetasrvInstance;
+use meta_srv::bootstrap::{MetasrvInstance, metasrv_builder};
 use meta_srv::metasrv::BackendImpl;
 use snafu::ResultExt;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -177,7 +177,7 @@ pub struct StartCommand {
     backend: Option<BackendImpl>,
 }
 
-impl fmt::Debug for StartCommand {
+impl Debug for StartCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StartCommand")
             .field("rpc_bind_addr", &self.rpc_bind_addr)
@@ -341,7 +341,7 @@ impl StartCommand {
             .await
             .context(StartMetaServerSnafu)?;
 
-        let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins, None)
+        let builder = metasrv_builder(&opts, plugins, None)
             .await
             .context(error::BuildMetaServerSnafu)?;
         let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;

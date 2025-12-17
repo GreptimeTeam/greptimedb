@@ -284,6 +284,10 @@ fn new_channel_list(num_partitions: usize) -> (SenderList, ReceiverList) {
 }
 
 impl RegionScanner for SeriesScan {
+    fn name(&self) -> &str {
+        "SeriesScan"
+    }
+
     fn properties(&self) -> &ScannerProperties {
         &self.properties
     }
@@ -423,6 +427,7 @@ impl SeriesDistributor {
                     &part_metrics,
                     range_builder_list.clone(),
                     &mut sources,
+                    self.semaphore.clone(),
                 )
                 .await?;
             }
@@ -433,6 +438,7 @@ impl SeriesDistributor {
             &self.stream_ctx,
             sources,
             self.semaphore.clone(),
+            Some(&part_metrics),
         )
         .await?;
         let mut metrics = SeriesDistributorMetrics::default();
@@ -507,15 +513,20 @@ impl SeriesDistributor {
                     &part_metrics,
                     range_builder_list.clone(),
                     &mut sources,
+                    self.semaphore.clone(),
                 )
                 .await?;
             }
         }
 
         // Builds a reader that merge sources from all parts.
-        let mut reader =
-            SeqScan::build_reader_from_sources(&self.stream_ctx, sources, self.semaphore.clone())
-                .await?;
+        let mut reader = SeqScan::build_reader_from_sources(
+            &self.stream_ctx,
+            sources,
+            self.semaphore.clone(),
+            Some(&part_metrics),
+        )
+        .await?;
         let mut metrics = SeriesDistributorMetrics::default();
         let mut fetch_start = Instant::now();
 

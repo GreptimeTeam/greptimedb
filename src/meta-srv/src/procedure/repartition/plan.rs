@@ -12,20 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datafusion::dataframe::DataFrame as DfDataFrame;
-use datafusion_expr::LogicalPlan;
+use partition::expr::PartitionExpr;
+use serde::{Deserialize, Serialize};
+use store_api::storage::RegionId;
 
-/// DataFrame represents a logical set of rows with the same named columns.
-/// Similar to a Pandas DataFrame or Spark DataFrame
-#[derive(Clone)]
-pub enum DataFrame {
-    DataFusion(DfDataFrame),
-}
-
-impl DataFrame {
-    pub fn into_logical_plan(self) -> LogicalPlan {
-        match self {
-            Self::DataFusion(dataframe) => dataframe.into_parts().1,
-        }
-    }
+/// Metadata describing a region involved in the plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegionDescriptor {
+    /// The region id of the region involved in the plan.
+    pub region_id: RegionId,
+    /// The new partition expression of the region.
+    pub partition_expr: PartitionExpr,
 }

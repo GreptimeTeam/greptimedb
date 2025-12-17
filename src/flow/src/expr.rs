@@ -25,6 +25,7 @@ mod signature;
 pub(crate) mod utils;
 
 use arrow::compute::FilterBuilder;
+use common_recordbatch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::Value;
 use datatypes::vectors::{BooleanVector, Helper, VectorRef};
@@ -38,6 +39,8 @@ pub(crate) use relation::{Accum, Accumulator, AggregateExpr, AggregateFunc};
 pub(crate) use scalar::{ScalarExpr, TypedExpr};
 use snafu::{ResultExt, ensure};
 
+use crate::Error;
+use crate::error::DatatypesSnafu;
 use crate::expr::error::{ArrowSnafu, DataTypeSnafu};
 use crate::repr::Diff;
 
@@ -55,13 +58,19 @@ pub struct Batch {
     diffs: Option<VectorRef>,
 }
 
-impl From<common_recordbatch::RecordBatch> for Batch {
-    fn from(value: common_recordbatch::RecordBatch) -> Self {
-        Self {
+impl TryFrom<RecordBatch> for Batch {
+    type Error = Error;
+
+    fn try_from(value: RecordBatch) -> Result<Self, Self::Error> {
+        let columns = value.columns();
+        let batch = Helper::try_into_vectors(columns).context(DatatypesSnafu {
+            extra: "failed to convert Arrow array to vector when building Flow batch",
+        })?;
+        Ok(Self {
             row_count: value.num_rows(),
-            batch: value.columns,
+            batch,
             diffs: None,
-        }
+        })
     }
 }
 

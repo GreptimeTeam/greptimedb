@@ -49,9 +49,9 @@ use common_procedure::options::ProcedureConfig;
 use common_stat::ResourceStatRef;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{error, info, warn};
+use common_time::util::DefaultSystemTimer;
 use common_wal::config::MetasrvWalConfig;
 use serde::{Deserialize, Serialize};
-use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use servers::tls::TlsOption;
@@ -67,6 +67,7 @@ use crate::error::{
     StartTelemetryTaskSnafu, StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
+use crate::gc::{GcSchedulerOptions, GcTickerRef};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
@@ -168,8 +169,6 @@ pub struct MetasrvOptions {
     pub data_home: String,
     /// The WAL options.
     pub wal: MetasrvWalConfig,
-    /// The metrics export options.
-    pub export_metrics: ExportMetricsOption,
     /// The store key prefix. If it is not empty, all keys in the store will be prefixed with it.
     /// This is useful when multiple metasrv clusters share the same store.
     pub store_key_prefix: String,
@@ -209,6 +208,8 @@ pub struct MetasrvOptions {
     pub event_recorder: EventRecorderOptions,
     /// The stats persistence options.
     pub stats_persistence: StatsPersistenceOptions,
+    /// The GC scheduler options.
+    pub gc: GcSchedulerOptions,
 }
 
 impl fmt::Debug for MetasrvOptions {
@@ -233,7 +234,6 @@ impl fmt::Debug for MetasrvOptions {
             .field("enable_telemetry", &self.enable_telemetry)
             .field("data_home", &self.data_home)
             .field("wal", &self.wal)
-            .field("export_metrics", &self.export_metrics)
             .field("store_key_prefix", &self.store_key_prefix)
             .field("max_txn_ops", &self.max_txn_ops)
             .field("flush_stats_factor", &self.flush_stats_factor)
@@ -291,7 +291,6 @@ impl Default for MetasrvOptions {
             enable_telemetry: true,
             data_home: DEFAULT_DATA_HOME.to_string(),
             wal: MetasrvWalConfig::default(),
-            export_metrics: ExportMetricsOption::default(),
             store_key_prefix: String::new(),
             max_txn_ops: 128,
             flush_stats_factor: 3,
@@ -307,6 +306,7 @@ impl Default for MetasrvOptions {
             node_max_idle_time: Duration::from_secs(24 * 60 * 60),
             event_recorder: EventRecorderOptions::default(),
             stats_persistence: StatsPersistenceOptions::default(),
+            gc: GcSchedulerOptions::default(),
         }
     }
 }
@@ -452,6 +452,7 @@ pub struct MetaStateHandler {
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
     leadership_change_notifier: LeadershipChangeNotifier,
+    mailbox: MailboxRef,
     state: StateRef,
 }
 
@@ -475,6 +476,9 @@ impl MetaStateHandler {
     pub async fn on_leader_stop(&self) {
         self.state.write().unwrap().next_state(become_follower());
 
+        // Enforces the mailbox to clear all pushers.
+        // The remaining heartbeat connections will be closed by the remote peer or keep-alive detection.
+        self.mailbox.reset().await;
         self.leadership_change_notifier
             .notify_on_leader_stop()
             .await;
@@ -528,6 +532,7 @@ pub struct Metasrv {
     table_id_sequence: SequenceRef,
     reconciliation_manager: ReconciliationManagerRef,
     resource_stat: ResourceStatRef,
+    gc_ticker: Option<GcTickerRef>,
 
     plugins: Plugins,
 }
@@ -588,6 +593,9 @@ impl Metasrv {
             if let Some(region_flush_trigger) = &self.region_flush_ticker {
                 leadership_change_notifier.add_listener(region_flush_trigger.clone() as _);
             }
+            if let Some(gc_ticker) = &self.gc_ticker {
+                leadership_change_notifier.add_listener(gc_ticker.clone() as _);
+            }
             if let Some(customizer) = self.plugins.get::<LeadershipChangeNotifierCustomizerRef>() {
                 customizer.customize(&mut leadership_change_notifier);
             }
@@ -598,6 +606,7 @@ impl Metasrv {
                 state: self.state.clone(),
                 leader_cached_kv_backend: leader_cached_kv_backend.clone(),
                 leadership_change_notifier,
+                mailbox: self.mailbox.clone(),
             };
             let _handle = common_runtime::spawn_global(async move {
                 loop {
@@ -735,6 +744,7 @@ impl Metasrv {
     /// A datanode is considered alive when it's still within the lease period.
     pub(crate) async fn lookup_datanode_peer(&self, peer_id: u64) -> Result<Option<Peer>> {
         discovery::utils::alive_datanode(
+            &DefaultSystemTimer,
             self.meta_peer_client.as_ref(),
             peer_id,
             Duration::from_secs(distributed_time_constants::DATANODE_LEASE_SECS),

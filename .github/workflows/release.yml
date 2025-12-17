@@ -49,14 +49,9 @@ on:
         description: Do not run integration tests during the build
         type: boolean
         default: true
-      build_linux_amd64_artifacts:
+      build_linux_artifacts:
         type: boolean
-        description: Build linux-amd64 artifacts
-        required: false
-        default: false
-      build_linux_arm64_artifacts:
-        type: boolean
-        description: Build linux-arm64 artifacts
+        description: Build linux artifacts (both amd64 and arm64)
         required: false
         default: false
       build_macos_artifacts:
@@ -144,7 +139,7 @@ jobs:
           ./.github/scripts/check-version.sh "${{ steps.create-version.outputs.version }}"
 
       - name: Allocate linux-amd64 runner
-        if: ${{ inputs.build_linux_amd64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+        if: ${{ inputs.build_linux_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
         uses: ./.github/actions/start-runner
         id: start-linux-amd64-runner
         with:
@@ -158,7 +153,7 @@ jobs:
           subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
 
       - name: Allocate linux-arm64 runner
-        if: ${{ inputs.build_linux_arm64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+        if: ${{ inputs.build_linux_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
         uses: ./.github/actions/start-runner
         id: start-linux-arm64-runner
         with:
@@ -173,7 +168,7 @@ jobs:
 
   build-linux-amd64-artifacts:
     name: Build linux-amd64 artifacts
-    if: ${{ inputs.build_linux_amd64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ inputs.build_linux_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
     needs: [
       allocate-runners,
     ]
@@ -195,7 +190,7 @@ jobs:
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
-    if: ${{ inputs.build_linux_arm64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ inputs.build_linux_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
     needs: [
       allocate-runners,
     ]
@@ -214,6 +209,18 @@ jobs:
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
           image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
+
+  run-multi-lang-tests:
+    name: Run Multi-language SDK Tests
+    if: ${{ inputs.build_linux_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+      build-linux-amd64-artifacts,
+    ]
+    uses: ./.github/workflows/run-multi-lang-tests.yml
+    with:
+      artifact-name: greptime-linux-amd64-${{ needs.allocate-runners.outputs.version }}
+      artifact-is-tarball: true
 
   build-macos-artifacts:
     name: Build macOS artifacts
@@ -303,6 +310,7 @@ jobs:
       allocate-runners,
       build-linux-amd64-artifacts,
       build-linux-arm64-artifacts,
+      run-multi-lang-tests,
     ]
     runs-on: ubuntu-latest
     outputs:
@@ -373,7 +381,18 @@ jobs:
 
   publish-github-release:
     name: Create GitHub release and upload artifacts
-    if: ${{ inputs.publish_github_release || github.event_name == 'push' || github.event_name == 'schedule' }}
+    # Use always() to run even when optional jobs (macos, windows) are skipped.
+    # Then check that required jobs succeeded and optional jobs didn't fail.
+    if: |
+      always() &&
+      (inputs.publish_github_release || github.event_name == 'push' || github.event_name == 'schedule') &&
+      needs.allocate-runners.result == 'success' &&
+      (needs.build-linux-amd64-artifacts.result == 'success' || needs.build-linux-amd64-artifacts.result == 'skipped') &&
+      (needs.build-linux-arm64-artifacts.result == 'success' || needs.build-linux-arm64-artifacts.result == 'skipped') &&
+      (needs.build-macos-artifacts.result == 'success' || needs.build-macos-artifacts.result == 'skipped') &&
+      (needs.build-windows-artifacts.result == 'success' || needs.build-windows-artifacts.result == 'skipped') &&
+      (needs.release-images-to-dockerhub.result == 'success' || needs.release-images-to-dockerhub.result == 'skipped') &&
+      (needs.run-multi-lang-tests.result == 'success' || needs.run-multi-lang-tests.result == 'skipped')
     needs: [ # The job have to wait for all the artifacts are built.
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -381,6 +400,7 @@ jobs:
       build-macos-artifacts,
       build-windows-artifacts,
       release-images-to-dockerhub,
+      run-multi-lang-tests,
     ]
     runs-on: ubuntu-latest
     steps:

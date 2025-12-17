@@ -4,12 +4,12 @@ Affected Rows: 0
 
 SHOW TABLES;
 
-+---------+
-| Tables  |
-+---------+
-| numbers |
-| phy     |
-+---------+
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
+| phy              |
++------------------+
 
 DESC TABLE phy;
 

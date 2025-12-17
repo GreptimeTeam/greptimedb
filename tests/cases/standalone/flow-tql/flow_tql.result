@@ -15,20 +15,22 @@ Affected Rows: 0
 
 SHOW CREATE TABLE cnt_reqs;
 
-+----------+-------------------------------------------+
-| Table    | Create Table                              |
-+----------+-------------------------------------------+
-| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" (   |
-|          |   "count(http_requests.val)" DOUBLE NULL, |
-|          |   "ts" TIMESTAMP(3) NOT NULL,             |
-|          |   "status_code" STRING NULL,              |
-|          |   TIME INDEX ("ts"),                      |
-|          |   PRIMARY KEY ("status_code")             |
-|          | )                                         |
-|          |                                           |
-|          | ENGINE=mito                               |
-|          |                                           |
-+----------+-------------------------------------------+
++----------+---------------------------------------------------+
+| Table    | Create Table                                      |
++----------+---------------------------------------------------+
+| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" (           |
+|          |   "count(http_requests.val)" DOUBLE NULL,         |
+|          |   "ts" TIMESTAMP(3) NOT NULL,                     |
+|          |   "status_code" STRING NULL,                      |
+|          |   TIME INDEX ("ts"),                              |
+|          |   PRIMARY KEY ("status_code")                     |
+|          | )                                                 |
+|          |                                                   |
+|          | ENGINE=mito                                       |
+|          | WITH(                                             |
+|          |   'comment' = 'Auto created table by flow engine' |
+|          | )                                                 |
++----------+---------------------------------------------------+
 
 -- test if sink table is tql queryable
 TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", cnt_reqs);
@@ -113,7 +115,7 @@ Error: 3001(EngineExecuteQuery), Invalid query: TQL query only supports one f64 
 SHOW TABLES;
 
 +------------------------+
-| Tables                 |
+| Tables_in_public       |
 +------------------------+
 | http_requests_two_vals |
 | numbers                |
@@ -157,20 +159,22 @@ Affected Rows: 0
 
 SHOW CREATE TABLE cnt_reqs;
 
-+----------+-------------------------------------------+
-| Table    | Create Table                              |
-+----------+-------------------------------------------+
-| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" (   |
-|          |   "count(http_requests.val)" DOUBLE NULL, |
-|          |   "ts" TIMESTAMP(3) NOT NULL,             |
-|          |   "status_code" STRING NULL,              |
-|          |   TIME INDEX ("ts"),                      |
-|          |   PRIMARY KEY ("status_code")             |
-|          | )                                         |
-|          |                                           |
-|          | ENGINE=mito                               |
-|          |                                           |
-+----------+-------------------------------------------+
++----------+---------------------------------------------------+
+| Table    | Create Table                                      |
++----------+---------------------------------------------------+
+| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" (           |
+|          |   "count(http_requests.val)" DOUBLE NULL,         |
+|          |   "ts" TIMESTAMP(3) NOT NULL,                     |
+|          |   "status_code" STRING NULL,                      |
+|          |   TIME INDEX ("ts"),                              |
+|          |   PRIMARY KEY ("status_code")                     |
+|          | )                                                 |
+|          |                                                   |
+|          | ENGINE=mito                                       |
+|          | WITH(                                             |
+|          |   'comment' = 'Auto created table by flow engine' |
+|          | )                                                 |
++----------+---------------------------------------------------+
 
 -- test if sink table is tql queryable
 TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", cnt_reqs);
@@ -258,7 +262,9 @@ SHOW CREATE TABLE rate_reqs;
 |           | )                                                         |
 |           |                                                           |
 |           | ENGINE=mito                                               |
-|           |                                                           |
+|           | WITH(                                                     |
+|           |   'comment' = 'Auto created table by flow engine'         |
+|           | )                                                         |
 +-----------+-----------------------------------------------------------+
 
 -- test if sink table is tql queryable
@@ -337,7 +343,9 @@ SHOW CREATE TABLE rate_reqs;
 |           | )                                                         |
 |           |                                                           |
 |           | ENGINE=mito                                               |
-|           |                                                           |
+|           | WITH(                                                     |
+|           |   'comment' = 'Auto created table by flow engine'         |
+|           | )                                                         |
 +-----------+-----------------------------------------------------------+
 
 -- test if sink table is tql queryable

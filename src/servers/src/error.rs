@@ -229,12 +229,31 @@ pub enum Error {
         error: prost::DecodeError,
     },
 
-    #[snafu(display("Failed to decode OTLP request"))]
+    #[snafu(display(
+        "Failed to decode OTLP request (content-type: {content_type}): {error}. The endpoint only accepts 'application/x-protobuf' format."
+    ))]
     DecodeOtlpRequest {
+        content_type: String,
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: prost::DecodeError,
+    },
+
+    #[snafu(display("Failed to decode Loki request: {error}"))]
+    DecodeLokiRequest {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: prost::DecodeError,
+    },
+
+    #[snafu(display(
+        "Unsupported content type 'application/json'. OTLP endpoint only supports 'application/x-protobuf'. Please configure your OTLP exporter to use protobuf encoding."
+    ))]
+    UnsupportedJsonContentType {
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display(
@@ -267,21 +286,6 @@ pub enum Error {
         location: Location,
         #[snafu(source)]
         error: std::io::Error,
-    },
-
-    #[snafu(display("Failed to send prometheus remote request"))]
-    SendPromRemoteRequest {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: reqwest::Error,
-    },
-
-    #[snafu(display("Invalid export metrics config, msg: {}", msg))]
-    InvalidExportMetricsConfig {
-        msg: String,
-        #[snafu(implicit)]
-        location: Location,
     },
 
     #[snafu(display("Failed to compress prometheus remote request"))]
@@ -647,6 +651,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Service suspended"))]
+    Suspended {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -661,7 +671,6 @@ impl ErrorExt for Error {
             | StartHttp { .. }
             | StartGrpc { .. }
             | TcpBind { .. }
-            | SendPromRemoteRequest { .. }
             | BuildHttpResponse { .. }
             | Arrow { .. }
             | FileWatch { .. } => StatusCode::Internal,
@@ -694,11 +703,12 @@ impl ErrorExt for Error {
             | InvalidOpentsdbJsonRequest { .. }
             | DecodePromRemoteRequest { .. }
             | DecodeOtlpRequest { .. }
+            | DecodeLokiRequest { .. }
+            | UnsupportedJsonContentType { .. }
             | CompressPromRemoteRequest { .. }
             | DecompressSnappyPromRemoteRequest { .. }
             | DecompressZstdPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
-            | InvalidExportMetricsConfig { .. }
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }
             | DataFrame { .. }
@@ -773,6 +783,8 @@ impl ErrorExt for Error {
             HandleOtelArrowRequest { .. } => StatusCode::Internal,
 
             Cancelled { .. } => StatusCode::Cancelled,
+
+            Suspended { .. } => StatusCode::Suspended,
         }
     }
 
@@ -853,7 +865,8 @@ pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
         | StatusCode::TableUnavailable
         | StatusCode::RegionBusy
         | StatusCode::StorageUnavailable
-        | StatusCode::External => HttpStatusCode::SERVICE_UNAVAILABLE,
+        | StatusCode::External
+        | StatusCode::Suspended => HttpStatusCode::SERVICE_UNAVAILABLE,
 
         StatusCode::Internal
         | StatusCode::Unexpected

@@ -15,6 +15,7 @@
 mod show_create_table;
 
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
@@ -52,7 +53,7 @@ use regex::Regex;
 use session::context::{Channel, QueryContextRef};
 pub use show_create_table::create_table_stmt;
 use snafu::{OptionExt, ResultExt, ensure};
-use sql::ast::Ident;
+use sql::ast::{Ident, visit_expressions_mut};
 use sql::parser::ParserContext;
 use sql::statements::OptionMap;
 use sql::statements::create::{CreateDatabase, CreateFlow, CreateView, Partitions, SqlOrTql};
@@ -64,16 +65,15 @@ use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::TableRef;
+use table::metadata::TableInfoRef;
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 
 use crate::QueryEngineRef;
-use crate::dataframe::DataFrame;
 use crate::error::{self, Result, UnsupportedVariableSnafu};
 use crate::planner::DfLogicalPlanner;
 
 const SCHEMAS_COLUMN: &str = "Database";
 const OPTIONS_COLUMN: &str = "Options";
-const TABLES_COLUMN: &str = "Tables";
 const VIEWS_COLUMN: &str = "Views";
 const FLOWS_COLUMN: &str = "Flows";
 const FIELD_COLUMN: &str = "Field";
@@ -210,6 +210,29 @@ pub async fn show_databases(
     .await
 }
 
+/// Replaces column identifier references in a SQL expression.
+/// Used for backward compatibility where old column names should work with new ones.
+fn replace_column_in_expr(expr: &mut sqlparser::ast::Expr, from_column: &str, to_column: &str) {
+    let _ = visit_expressions_mut(expr, |e| {
+        match e {
+            sqlparser::ast::Expr::Identifier(ident) => {
+                if ident.value.eq_ignore_ascii_case(from_column) {
+                    ident.value = to_column.to_string();
+                }
+            }
+            sqlparser::ast::Expr::CompoundIdentifier(idents) => {
+                if let Some(last) = idents.last_mut()
+                    && last.value.eq_ignore_ascii_case(from_column)
+                {
+                    last.value = to_column.to_string();
+                }
+            }
+            _ => {}
+        }
+        ControlFlow::<()>::Continue(())
+    });
+}
+
 /// Cast a `show` statement execution into a query from tables in  `information_schema`.
 /// - `table_name`: the table name in `information_schema`,
 /// - `projects`: query projection, a list of `(column, renamed_column)`,
@@ -247,7 +270,7 @@ async fn query_from_information_schema_table(
             ),
         })?;
 
-    let DataFrame::DataFusion(dataframe) = query_engine.read_table(table)?;
+    let dataframe = query_engine.read_table(table)?;
 
     // Apply filters
     let dataframe = filters.into_iter().try_fold(dataframe, |df, expr| {
@@ -540,15 +563,15 @@ pub async fn show_tables(
         query_ctx.current_schema()
     };
 
-    // (dennis): MySQL rename `table_name` to `Tables_in_{schema}`, but we use `Tables` instead.
-    // I don't want to modify this currently, our dashboard may depend on it.
+    // MySQL renames `table_name` to `Tables_in_{schema}` for protocol compatibility
+    let tables_column = format!("Tables_in_{}", schema_name);
     let projects = if stmt.full {
         vec![
-            (tables::TABLE_NAME, TABLES_COLUMN),
+            (tables::TABLE_NAME, tables_column.as_str()),
             (tables::TABLE_TYPE, TABLE_TYPE_COLUMN),
         ]
     } else {
-        vec![(tables::TABLE_NAME, TABLES_COLUMN)]
+        vec![(tables::TABLE_NAME, tables_column.as_str())]
     };
     let filters = vec![
         col(tables::TABLE_SCHEMA).eq(lit(schema_name.clone())),
@@ -556,6 +579,16 @@ pub async fn show_tables(
     ];
     let like_field = Some(tables::TABLE_NAME);
     let sort = vec![col(tables::TABLE_NAME).sort(true, true)];
+
+    // Transform the WHERE clause for backward compatibility:
+    // Replace "Tables" with "Tables_in_{schema}" to support old queries
+    let kind = match stmt.kind {
+        ShowKind::Where(mut filter) => {
+            replace_column_in_expr(&mut filter, "Tables", &tables_column);
+            ShowKind::Where(filter)
+        }
+        other => other,
+    };
 
     query_from_information_schema_table(
         query_engine,
@@ -567,7 +600,7 @@ pub async fn show_tables(
         filters,
         like_field,
         sort,
-        stmt.kind,
+        kind,
     )
     .await
 }
@@ -789,13 +822,12 @@ pub fn show_create_database(database_name: &str, options: OptionMap) -> Result<O
 }
 
 pub fn show_create_table(
-    table: TableRef,
+    table_info: TableInfoRef,
     schema_options: Option<SchemaOptions>,
     partitions: Option<Partitions>,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let table_info = table.table_info();
-    let table_name = &table_info.name;
+    let table_name = table_info.name.clone();
 
     let quote_style = query_ctx.quote_style();
 
@@ -806,7 +838,7 @@ pub fn show_create_table(
     });
     let sql = format!("{}", stmt);
     let columns = vec![
-        Arc::new(StringVector::from(vec![table_name.clone()])) as _,
+        Arc::new(StringVector::from(vec![table_name])) as _,
         Arc::new(StringVector::from(vec![sql])) as _,
     ];
     let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)
@@ -1440,8 +1472,7 @@ mod test {
                 ..
             }) => {
                 let record = record.take().first().cloned().unwrap();
-                let data = record.column(0);
-                Ok(data.get(0).to_string())
+                Ok(record.iter_column_as_string(0).next().unwrap().unwrap())
             }
             Ok(_) => unreachable!(),
             Err(e) => Err(e),

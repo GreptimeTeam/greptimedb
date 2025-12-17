@@ -30,16 +30,26 @@ use crate::request::{BuildIndexRequest, FlushFailed, FlushFinished, OnFailure, O
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     /// On region flush job failed.
     pub(crate) async fn handle_flush_failed(&mut self, region_id: RegionId, request: FlushFailed) {
         self.flush_scheduler.on_flush_failed(region_id, request.err);
+        debug!(
+            "Flush failed for region {}, handling stalled requests",
+            region_id
+        );
+        // Maybe flush worker again.
+        self.maybe_flush_worker();
+
+        // Handle stalled requests.
+        self.handle_stalled_requests().await;
     }
 
     /// Checks whether the engine reaches flush threshold. If so, finds regions in this
     /// worker to flush.
     pub(crate) fn maybe_flush_worker(&mut self) {
         if !self.write_buffer_manager.should_flush_engine() {
+            debug!("No need to flush worker");
             // No need to flush worker.
             return;
         }
@@ -56,9 +66,7 @@ impl<S> RegionWorkerLoop<S> {
         let regions = self.regions.list_regions();
         let now = self.time_provider.current_time_millis();
         let min_last_flush_time = now - self.config.auto_flush_interval.as_millis() as i64;
-        let mut max_mutable_size = 0;
-        // Region with max mutable memtable size.
-        let mut max_mem_region = None;
+        let mut pending_regions = vec![];
 
         for region in &regions {
             if self.flush_scheduler.is_flush_requested(region.region_id) || !region.is_writable() {
@@ -67,34 +75,68 @@ impl<S> RegionWorkerLoop<S> {
             }
 
             let version = region.version();
-            let region_mutable_size = version.memtables.mutable_usage();
-            // Tracks region with max mutable memtable size.
-            if region_mutable_size > max_mutable_size {
-                max_mem_region = Some(region);
-                max_mutable_size = region_mutable_size;
-            }
+            let region_memtable_size =
+                version.memtables.mutable_usage() + version.memtables.immutables_usage();
 
             if region.last_flush_millis() < min_last_flush_time {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
-                let task =
-                    self.new_flush_task(region, FlushReason::EngineFull, None, self.config.clone());
+                let task = self.new_flush_task(
+                    region,
+                    FlushReason::EngineFull,
+                    None,
+                    self.config.clone(),
+                    region.is_staging(),
+                );
                 self.flush_scheduler.schedule_flush(
                     region.region_id,
                     &region.version_control,
                     task,
                 )?;
+            } else if region_memtable_size > 0 {
+                // We should only consider regions with memtable size > 0 to flush.
+                pending_regions.push((region, region_memtable_size));
             }
         }
+        pending_regions.sort_unstable_by_key(|(_, size)| std::cmp::Reverse(*size));
+        // The flush target is the mutable memtable limit (half of the global buffer).
+        // When memory is full, we aggressively flush regions until usage drops below this target,
+        // not just below the full limit.
+        let target_memory_usage = self.write_buffer_manager.flush_limit();
+        let mut memory_usage = self.write_buffer_manager.memory_usage();
 
-        // Flush memtable with max mutable memtable.
-        // TODO(yingwen): Maybe flush more tables to reduce write buffer size.
-        if let Some(region) = max_mem_region
-            && !self.flush_scheduler.is_flush_requested(region.region_id)
+        #[cfg(test)]
         {
-            let task =
-                self.new_flush_task(region, FlushReason::EngineFull, None, self.config.clone());
+            debug!(
+                "Flushing regions on engine full, target memory usage: {}, memory usage: {}, pending regions: {:?}",
+                target_memory_usage,
+                memory_usage,
+                pending_regions
+                    .iter()
+                    .map(|(region, mem_size)| (region.region_id, mem_size))
+                    .collect::<Vec<_>>()
+            );
+        }
+        // Iterate over pending regions in descending order of their memory size and schedule flush tasks
+        // for each region until the overall memory usage drops below the flush limit.
+        for (region, region_mem_size) in pending_regions.into_iter() {
+            // Make sure the first region is always flushed.
+            if memory_usage < target_memory_usage {
+                // Stop flushing regions if memory usage is already below the flush limit
+                break;
+            }
+            let task = self.new_flush_task(
+                region,
+                FlushReason::EngineFull,
+                None,
+                self.config.clone(),
+                region.is_staging(),
+            );
+            debug!("Scheduling flush task for region {}", region.region_id);
+            // Schedule a flush task for the current region
             self.flush_scheduler
                 .schedule_flush(region.region_id, &region.version_control, task)?;
+            // Reduce memory usage by the region's size, ensuring it doesn't go negative
+            memory_usage = memory_usage.saturating_sub(region_mem_size);
         }
 
         Ok(())
@@ -107,6 +149,7 @@ impl<S> RegionWorkerLoop<S> {
         reason: FlushReason,
         row_group_size: Option<usize>,
         engine_config: Arc<MitoConfig>,
+        is_staging: bool,
     ) -> RegionFlushTask {
         RegionFlushTask {
             region_id: region.region_id,
@@ -121,13 +164,14 @@ impl<S> RegionWorkerLoop<S> {
             manifest_ctx: region.manifest_ctx.clone(),
             index_options: region.version().options.index_options.clone(),
             flush_semaphore: self.flush_semaphore.clone(),
+            is_staging,
         }
     }
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles manual flush request.
-    pub(crate) async fn handle_flush_request(
+    pub(crate) fn handle_flush_request(
         &mut self,
         region_id: RegionId,
         request: RegionFlushRequest,
@@ -147,8 +191,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             FlushReason::Manual
         };
 
-        let mut task =
-            self.new_flush_task(&region, reason, request.row_group_size, self.config.clone());
+        let mut task = self.new_flush_task(
+            &region,
+            reason,
+            request.row_group_size,
+            self.config.clone(),
+            region.is_staging(),
+        );
         task.push_sender(sender);
         if let Err(e) =
             self.flush_scheduler
@@ -178,6 +227,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     FlushReason::Periodically,
                     None,
                     self.config.clone(),
+                    region.is_staging(),
                 );
                 self.flush_scheduler.schedule_flush(
                     region.region_id,
@@ -208,11 +258,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        // Check if region is currently in staging mode
-        let is_staging = region.manifest_ctx.current_state()
-            == crate::region::RegionRoleState::Leader(crate::region::RegionLeaderState::Staging);
-
-        if is_staging {
+        if request.is_staging {
+            // Skip the region metadata update.
             info!(
                 "Skipping region metadata update for region {} in staging mode",
                 region_id
@@ -275,6 +322,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.handle_write_requests(&mut write_requests, &mut bulk_writes, false)
                 .await;
         }
+
+        // Maybe flush worker again.
+        self.maybe_flush_worker();
 
         // Handle stalled requests.
         self.handle_stalled_requests().await;

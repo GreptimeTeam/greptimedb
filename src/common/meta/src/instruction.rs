@@ -339,6 +339,16 @@ pub struct FlushRegions {
     pub error_strategy: FlushErrorStrategy,
 }
 
+impl Display for FlushRegions {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "FlushRegions(region_ids={:?}, strategy={:?}, error_strategy={:?})",
+            self.region_ids, self.strategy, self.error_strategy
+        )
+    }
+}
+
 impl FlushRegions {
     /// Create synchronous single-region flush
     pub fn sync_single(region_id: RegionId) -> Self {
@@ -420,20 +430,25 @@ where
 /// Instruction to get file references for specified regions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GetFileRefs {
-    /// List of region IDs to get file references for.
-    pub region_ids: Vec<RegionId>,
+    /// List of region IDs to get file references from active FileHandles (in-memory).
+    pub query_regions: Vec<RegionId>,
+    /// Mapping from the source region ID (where to read the manifest) to
+    /// the target region IDs (whose file references to look for).
+    /// Key: The region ID of the manifest.
+    /// Value: The list of region IDs to find references for in that manifest.
+    pub related_regions: HashMap<RegionId, Vec<RegionId>>,
 }
 
 impl Display for GetFileRefs {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "GetFileRefs(region_ids={:?})", self.region_ids)
+        write!(f, "GetFileRefs(region_ids={:?})", self.query_regions)
     }
 }
 
 /// Instruction to trigger garbage collection for a region.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GcRegions {
-    /// The region ID to perform GC on.
+    /// The region ID to perform GC on, only regions that are currently on the given datanode can be garbage collected, regions not on the datanode will report errors.
     pub regions: Vec<RegionId>,
     /// The file references manifest containing temporary file references.
     pub file_refs_manifest: FileRefsManifest,
@@ -524,6 +539,8 @@ pub enum Instruction {
     GetFileRefs(GetFileRefs),
     /// Triggers garbage collection for a region.
     GcRegions(GcRegions),
+    /// Temporary suspend serving reads or writes
+    Suspend,
 }
 
 impl Instruction {

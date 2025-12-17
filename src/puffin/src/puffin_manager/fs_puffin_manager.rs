@@ -56,6 +56,10 @@ impl<S, F> FsPuffinManager<S, F> {
         self.puffin_metadata_cache = puffin_metadata_cache;
         self
     }
+
+    pub fn file_accessor(&self) -> &F {
+        &self.puffin_file_accessor
+    }
 }
 
 #[async_trait]

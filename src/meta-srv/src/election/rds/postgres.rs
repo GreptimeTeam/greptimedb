@@ -1583,6 +1583,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reset_campaign() {
+        maybe_skip_postgres_integration_test!();
+        let leader_value = "test_leader".to_string();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let table_name = "test_reset_campaign_greptime_metakv";
+        let candidate_lease_ttl = Duration::from_secs(5);
+        let execution_timeout = Duration::from_secs(10);
+        let statement_timeout = Duration::from_secs(10);
+        let meta_lease_ttl = Duration::from_secs(2);
+        let idle_session_timeout = Duration::from_secs(0);
+        let client = create_postgres_client(
+            Some(table_name),
+            execution_timeout,
+            idle_session_timeout,
+            statement_timeout,
+        )
+        .await
+        .unwrap();
+
+        let (tx, _) = broadcast::channel(100);
+        let leader_pg_election = PgElection {
+            leader_value,
+            pg_client: RwLock::new(client),
+            is_leader: AtomicBool::new(false),
+            leader_infancy: AtomicBool::new(true),
+            leader_watcher: tx,
+            store_key_prefix: uuid,
+            candidate_lease_ttl,
+            meta_lease_ttl,
+            sql_set: ElectionSqlFactory::new(28321, None, table_name).build(),
+        };
+        leader_pg_election.is_leader.store(true, Ordering::Relaxed);
+        leader_pg_election.reset_campaign().await;
+        assert!(!leader_pg_election.is_leader());
+        drop_table(&leader_pg_election, table_name).await;
+    }
+
+    #[tokio::test]
     async fn test_idle_session_timeout() {
         maybe_skip_postgres_integration_test!();
         common_telemetry::init_default_ut_logging();

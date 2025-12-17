@@ -21,7 +21,7 @@
 //! `unknown files`: files that are not recorded in the manifest, usually due to saved checkpoint which remove actions before the checkpoint.
 //!
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,7 +30,7 @@ use common_telemetry::{debug, error, info, warn};
 use common_time::Timestamp;
 use object_store::{Entry, Lister};
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt as _, ensure};
+use snafu::ResultExt as _;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 use tokio_stream::StreamExt;
@@ -39,15 +39,16 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
-    DurationOutOfRangeSnafu, EmptyRegionDirSnafu, JoinSnafu, OpenDalSnafu, RegionNotFoundSnafu,
-    Result, TooManyGcJobsSnafu, UnexpectedSnafu,
+    DurationOutOfRangeSnafu, JoinSnafu, OpenDalSnafu, Result, TooManyGcJobsSnafu, UnexpectedSnafu,
 };
-use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
-use crate::manifest::storage::manifest_compress_type;
-use crate::metrics::GC_DEL_FILE_CNT;
-use crate::region::opener::new_manifest_dir;
+use crate::manifest::action::RegionManifest;
+use crate::metrics::GC_DELETE_FILE_CNT;
+use crate::region::{MitoRegionRef, RegionRoleState};
 use crate::sst::file::delete_files;
-use crate::sst::location::{self, region_dir_from_table_dir};
+use crate::sst::location::{self};
+
+#[cfg(test)]
+mod worker_test;
 
 /// Limit the amount of concurrent GC jobs on the datanode
 pub struct GcLimiter {
@@ -95,16 +96,18 @@ impl GcLimiter {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GcConfig {
     /// Whether GC is enabled.
     pub enable: bool,
     /// Lingering time before deleting files.
     /// Should be long enough to allow long running queries to finish.
+    /// If set to None, then unused files will be deleted immediately.
     ///
     /// TODO(discord9): long running queries should actively write tmp manifest files
     /// to prevent deletion of files they are using.
     #[serde(with = "humantime_serde")]
-    pub lingering_time: Duration,
+    pub lingering_time: Option<Duration>,
     /// Lingering time before deleting unknown files(files with undetermine expel time).
     /// expel time is the time when the file is considered as removed, as in removed from the manifest.
     /// This should only occur rarely, as manifest keep tracks in `removed_files` field
@@ -124,10 +127,10 @@ impl Default for GcConfig {
     fn default() -> Self {
         Self {
             enable: false,
-            // expect long running queries to be finished within a reasonable time
-            lingering_time: Duration::from_secs(60 * 5),
-            // 6 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
-            unknown_file_lingering_time: Duration::from_secs(60 * 60 * 6),
+            // expect long running queries to be finished(or at least be able to notify it's using a deleted file) within a reasonable time
+            lingering_time: Some(Duration::from_secs(60)),
+            // 1 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
+            unknown_file_lingering_time: Duration::from_secs(60 * 60),
             max_concurrent_lister_per_gc_job: 32,
             max_concurrent_gc_job: 4,
         }
@@ -137,10 +140,9 @@ impl Default for GcConfig {
 pub struct LocalGcWorker {
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) cache_manager: Option<CacheManagerRef>,
-    pub(crate) manifest_mgrs: HashMap<RegionId, RegionManifestManager>,
+    pub(crate) regions: BTreeMap<RegionId, MitoRegionRef>,
     /// Lingering time before deleting files.
     pub(crate) opt: GcConfig,
-    pub(crate) manifest_open_config: ManifestOpenConfig,
     /// Tmp ref files manifest, used to determine which files are still in use by ongoing queries.
     ///
     /// Also contains manifest versions of regions when the tmp ref files are generated.
@@ -186,81 +188,29 @@ impl LocalGcWorker {
     pub async fn try_new(
         access_layer: AccessLayerRef,
         cache_manager: Option<CacheManagerRef>,
-        regions_to_gc: BTreeSet<RegionId>,
+        regions_to_gc: BTreeMap<RegionId, MitoRegionRef>,
         opt: GcConfig,
-        manifest_open_config: ManifestOpenConfig,
         file_ref_manifest: FileRefsManifest,
         limiter: &GcLimiterRef,
         full_file_listing: bool,
     ) -> Result<Self> {
-        let table_id = regions_to_gc
-            .first()
-            .context(UnexpectedSnafu {
-                reason: "Expect at least one region, found none",
-            })?
-            .table_id();
         let permit = limiter.permit()?;
-        let mut zelf = Self {
+
+        Ok(Self {
             access_layer,
             cache_manager,
-            manifest_mgrs: HashMap::new(),
+            regions: regions_to_gc,
             opt,
-            manifest_open_config,
             file_ref_manifest,
             _permit: permit,
             full_file_listing,
-        };
-
-        // dedup just in case
-        for region_id in regions_to_gc {
-            ensure!(
-                region_id.table_id() == table_id,
-                UnexpectedSnafu {
-                    reason: format!(
-                        "All regions should belong to the same table, found region {} and table {}",
-                        region_id, table_id
-                    ),
-                }
-            );
-            let mgr = zelf.open_mgr_for(region_id).await?;
-            zelf.manifest_mgrs.insert(region_id, mgr);
-        }
-
-        Ok(zelf)
+        })
     }
 
     /// Get tmp ref files for all current regions
-    ///
-    /// Outdated regions are added to `outdated_regions` set
-    pub async fn read_tmp_ref_files(
-        &self,
-        outdated_regions: &mut HashSet<RegionId>,
-    ) -> Result<HashMap<RegionId, HashSet<FileId>>> {
-        for (region_id, region_mgr) in &self.manifest_mgrs {
-            let current_version = region_mgr.manifest().manifest_version;
-            if &current_version
-                > self
-                    .file_ref_manifest
-                    .manifest_version
-                    .get(region_id)
-                    .with_context(|| UnexpectedSnafu {
-                        reason: format!(
-                            "Region {} not found in tmp ref manifest version map",
-                            region_id
-                        ),
-                    })?
-            {
-                outdated_regions.insert(*region_id);
-            }
-        }
-        // TODO(discord9): verify manifest version before reading tmp ref files
-
+    pub async fn read_tmp_ref_files(&self) -> Result<HashMap<RegionId, HashSet<FileId>>> {
         let mut tmp_ref_files = HashMap::new();
         for (region_id, file_refs) in &self.file_ref_manifest.file_refs {
-            if outdated_regions.contains(region_id) {
-                // skip outdated regions
-                continue;
-            }
             tmp_ref_files
                 .entry(*region_id)
                 .or_insert_with(HashSet::new)
@@ -279,26 +229,38 @@ impl LocalGcWorker {
         info!("LocalGcWorker started");
         let now = std::time::Instant::now();
 
-        let mut outdated_regions = HashSet::new();
         let mut deleted_files = HashMap::new();
-        let tmp_ref_files = self.read_tmp_ref_files(&mut outdated_regions).await?;
-        for region_id in self.manifest_mgrs.keys() {
-            debug!("Doing gc for region {}", region_id);
+        let tmp_ref_files = self.read_tmp_ref_files().await?;
+        for (region_id, region) in &self.regions {
+            let per_region_time = std::time::Instant::now();
+            if region.manifest_ctx.current_state() == RegionRoleState::Follower {
+                return UnexpectedSnafu {
+                    reason: format!(
+                        "Region {} is in Follower state, should not run GC on follower regions",
+                        region_id
+                    ),
+                }
+                .fail();
+            }
             let tmp_ref_files = tmp_ref_files
                 .get(region_id)
                 .cloned()
                 .unwrap_or_else(HashSet::new);
-            let files = self.do_region_gc(*region_id, &tmp_ref_files).await?;
+            let files = self.do_region_gc(region.clone(), &tmp_ref_files).await?;
             deleted_files.insert(*region_id, files);
-            debug!("Gc for region {} finished", region_id);
+            debug!(
+                "GC for region {} took {} secs.",
+                region_id,
+                per_region_time.elapsed().as_secs_f32()
+            );
         }
         info!(
             "LocalGcWorker finished after {} secs.",
-            now.elapsed().as_secs()
+            now.elapsed().as_secs_f32()
         );
         let report = GcReport {
             deleted_files,
-            need_retry_regions: outdated_regions.into_iter().collect(),
+            need_retry_regions: HashSet::new(),
         };
         Ok(report)
     }
@@ -319,62 +281,64 @@ impl LocalGcWorker {
     /// to avoid deleting files that are still needed.
     pub async fn do_region_gc(
         &self,
-        region_id: RegionId,
+        region: MitoRegionRef,
         tmp_ref_files: &HashSet<FileId>,
     ) -> Result<Vec<FileId>> {
+        let region_id = region.region_id();
+
         debug!("Doing gc for region {}", region_id);
-        let manifest = self
-            .manifest_mgrs
-            .get(&region_id)
-            .context(RegionNotFoundSnafu { region_id })?
-            .manifest();
+        // do the time consuming listing only when full_file_listing is true
+        // and do it first to make sure we have the latest manifest etc.
+        let all_entries = if self.full_file_listing {
+            self.list_from_object_store(&region).await?
+        } else {
+            vec![]
+        };
+
+        let manifest = region.manifest_ctx.manifest().await;
         let region_id = manifest.metadata.region_id;
         let current_files = &manifest.files;
 
-        let recently_removed_files = self.get_removed_files_expel_times(region_id).await?;
+        let recently_removed_files = self.get_removed_files_expel_times(&manifest).await?;
 
         if recently_removed_files.is_empty() {
             // no files to remove, skip
             debug!("No recently removed files to gc for region {}", region_id);
         }
 
-        debug!(
-            "Found {} recently removed files sets for region {}",
-            recently_removed_files.len(),
-            region_id
-        );
+        let removed_file_cnt = recently_removed_files
+            .values()
+            .map(|s| s.len())
+            .sum::<usize>();
 
-        let concurrency = (current_files.len() / Self::CONCURRENCY_LIST_PER_FILES)
-            .max(1)
-            .min(self.opt.max_concurrent_lister_per_gc_job);
-
-        let in_used = current_files
+        let in_used: HashSet<FileId> = current_files
             .keys()
             .cloned()
             .chain(tmp_ref_files.clone().into_iter())
             .collect();
 
         let unused_files = self
-            .list_to_be_deleted_files(region_id, in_used, recently_removed_files, concurrency)
+            .list_to_be_deleted_files(region_id, &in_used, recently_removed_files, all_entries)
             .await?;
 
-        let unused_len = unused_files.len();
+        let unused_file_cnt = unused_files.len();
 
         debug!(
-            "Found {} unused files to delete for region {}",
-            unused_len, region_id
+            "gc: for region {region_id}: In manifest files: {}, Tmp ref file cnt: {}, In-used files: {}, recently removed files: {}, Unused files to delete: {} ",
+            current_files.len(),
+            tmp_ref_files.len(),
+            in_used.len(),
+            removed_file_cnt,
+            unused_files.len()
         );
 
-        let file_pairs: Vec<(FileId, FileId)> = unused_files
-            .iter()
-            .filter_map(|file_id| {
-                current_files
-                    .get(file_id)
-                    .map(|meta| (meta.file_id().file_id(), meta.index_file_id().file_id()))
-            })
-            .collect();
+        // TODO(discord9): for now, ignore async index file as it's design is not stable, need to be improved once
+        // index file design is stable
+        let file_pairs: Vec<(FileId, u64)> =
+            unused_files.iter().map(|file_id| (*file_id, 0)).collect();
+        // TODO(discord9): gc worker need another major refactor to support versioned index files
 
-        info!(
+        debug!(
             "Found {} unused index files to delete for region {}",
             file_pairs.len(),
             region_id
@@ -384,13 +348,16 @@ impl LocalGcWorker {
 
         debug!(
             "Successfully deleted {} unused files for region {}",
-            unused_len, region_id
+            unused_file_cnt, region_id
         );
+        // TODO(discord9): update region manifest about deleted files
+        self.update_manifest_removed_files(&region, unused_files.clone())
+            .await?;
 
         Ok(unused_files)
     }
 
-    async fn delete_files(&self, region_id: RegionId, file_ids: &[(FileId, FileId)]) -> Result<()> {
+    async fn delete_files(&self, region_id: RegionId, file_ids: &[(FileId, u64)]) -> Result<()> {
         delete_files(
             region_id,
             file_ids,
@@ -401,40 +368,32 @@ impl LocalGcWorker {
         .await?;
 
         // FIXME(discord9): if files are already deleted before calling delete_files, the metric will be inaccurate, no clean way to fix it now
-        GC_DEL_FILE_CNT.add(file_ids.len() as i64);
+        GC_DELETE_FILE_CNT.add(file_ids.len() as i64);
 
         Ok(())
     }
 
-    /// Get the manifest manager for the region.
-    async fn open_mgr_for(&self, region_id: RegionId) -> Result<RegionManifestManager> {
-        let table_dir = self.access_layer.table_dir();
-        let path_type = self.access_layer.path_type();
-        let mito_config = &self.manifest_open_config;
+    /// Update region manifest for clear the actually deleted files
+    async fn update_manifest_removed_files(
+        &self,
+        region: &MitoRegionRef,
+        deleted_files: Vec<FileId>,
+    ) -> Result<()> {
+        let deleted_file_cnt = deleted_files.len();
+        debug!(
+            "Trying to update manifest for {deleted_file_cnt} removed files for region {}",
+            region.region_id()
+        );
 
-        let region_manifest_options = RegionManifestOptions {
-            manifest_dir: new_manifest_dir(&region_dir_from_table_dir(
-                table_dir, region_id, path_type,
-            )),
-            object_store: self.access_layer.object_store().clone(),
-            compress_type: manifest_compress_type(mito_config.compress_manifest),
-            checkpoint_distance: mito_config.manifest_checkpoint_distance,
-            remove_file_options: RemoveFileOptions {
-                keep_count: mito_config.experimental_manifest_keep_removed_file_count,
-                keep_ttl: mito_config.experimental_manifest_keep_removed_file_ttl,
-            },
-        };
+        let mut manager = region.manifest_ctx.manifest_manager.write().await;
+        let cnt = deleted_files.len();
+        manager.clear_deleted_files(deleted_files);
+        debug!(
+            "Updated region_id={} region manifest to clear {cnt} deleted files",
+            region.region_id(),
+        );
 
-        RegionManifestManager::open(
-            region_manifest_options,
-            Default::default(),
-            Default::default(),
-        )
-        .await?
-        .context(EmptyRegionDirSnafu {
-            region_id,
-            region_dir: &region_dir_from_table_dir(table_dir, region_id, path_type),
-        })
+        Ok(())
     }
 
     /// Get all the removed files in delta manifest files and their expel times.
@@ -443,14 +402,8 @@ impl LocalGcWorker {
     ///
     pub async fn get_removed_files_expel_times(
         &self,
-        region_id: RegionId,
+        region_manifest: &Arc<RegionManifest>,
     ) -> Result<BTreeMap<Timestamp, HashSet<FileId>>> {
-        let region_manifest = self
-            .manifest_mgrs
-            .get(&region_id)
-            .context(RegionNotFoundSnafu { region_id })?
-            .manifest();
-
         let mut ret = BTreeMap::new();
         for files in &region_manifest.removed_files.removed_files {
             let expel_time = Timestamp::new_millisecond(files.removed_at);
@@ -491,6 +444,32 @@ impl LocalGcWorker {
         }
 
         Ok(listers)
+    }
+
+    /// List all files in the region directory.
+    /// Returns a vector of all file entries found.
+    /// This might take a long time if there are many files in the region directory.
+    async fn list_from_object_store(&self, region: &MitoRegionRef) -> Result<Vec<Entry>> {
+        let start = tokio::time::Instant::now();
+        let region_id = region.region_id();
+        let manifest = region.manifest_ctx.manifest().await;
+        let current_files = &manifest.files;
+        let concurrency = (current_files.len() / Self::CONCURRENCY_LIST_PER_FILES)
+            .max(1)
+            .min(self.opt.max_concurrent_lister_per_gc_job);
+
+        let listers = self.partition_region_files(region_id, concurrency).await?;
+        let lister_cnt = listers.len();
+
+        // Step 2: Concurrently list all files in the region directory
+        let all_entries = self.list_region_files_concurrent(listers).await?;
+        let cnt = all_entries.len();
+        info!(
+            "gc: full listing mode cost {} secs using {lister_cnt} lister for {cnt} files in region {}.",
+            start.elapsed().as_secs_f64(),
+            region_id
+        );
+        Ok(all_entries)
     }
 
     /// Concurrently list all files in the region directory using the provided listers.
@@ -621,18 +600,22 @@ impl LocalGcWorker {
     pub async fn list_to_be_deleted_files(
         &self,
         region_id: RegionId,
-        in_used: HashSet<FileId>,
+        in_used: &HashSet<FileId>,
         recently_removed_files: BTreeMap<Timestamp, HashSet<FileId>>,
-        concurrency: usize,
+        all_entries: Vec<Entry>,
     ) -> Result<Vec<FileId>> {
-        let start = tokio::time::Instant::now();
         let now = chrono::Utc::now();
-        let may_linger_until = now
-            - chrono::Duration::from_std(self.opt.lingering_time).with_context(|_| {
-                DurationOutOfRangeSnafu {
-                    input: self.opt.lingering_time,
-                }
-            })?;
+        let may_linger_until = self
+            .opt
+            .lingering_time
+            .map(|lingering_time| {
+                chrono::Duration::from_std(lingering_time)
+                    .with_context(|_| DurationOutOfRangeSnafu {
+                        input: lingering_time,
+                    })
+                    .map(|t| now - t)
+            })
+            .transpose()?;
 
         let unknown_file_may_linger_until = now
             - chrono::Duration::from_std(self.opt.unknown_file_lingering_time).with_context(
@@ -642,9 +625,15 @@ impl LocalGcWorker {
             )?;
 
         // files that may linger, which means they are not in use but may still be kept for a while
-        let threshold = Timestamp::new_millisecond(may_linger_until.timestamp_millis());
+        let threshold =
+            may_linger_until.map(|until| Timestamp::new_millisecond(until.timestamp_millis()));
         let mut recently_removed_files = recently_removed_files;
-        let may_linger_files = recently_removed_files.split_off(&threshold);
+        let may_linger_files = match threshold {
+            Some(threshold) => recently_removed_files.split_off(&threshold),
+            None => BTreeMap::new(),
+        };
+        debug!("may_linger_files: {:?}", may_linger_files);
+
         let may_linger_filenames = may_linger_files.values().flatten().collect::<HashSet<_>>();
 
         let eligible_for_removal = recently_removed_files
@@ -669,8 +658,7 @@ impl LocalGcWorker {
                 .collect();
 
             info!(
-                "gc: fast mode (no full listing) cost {} secs for region {}, found {} files to delete from manifest",
-                start.elapsed().as_secs_f64(),
+                "gc: fast mode (no full listing) for region {}, found {} files to delete from manifest",
                 region_id,
                 files_to_delete.len()
             );
@@ -678,15 +666,7 @@ impl LocalGcWorker {
             return Ok(files_to_delete);
         }
 
-        // Full file listing mode: perform expensive list operations to find orphan files
-        // Step 1: Create partitioned listers for concurrent processing
-        let listers = self.partition_region_files(region_id, concurrency).await?;
-        let lister_cnt = listers.len();
-
-        // Step 2: Concurrently list all files in the region directory
-        let all_entries = self.list_region_files_concurrent(listers).await?;
-
-        let cnt = all_entries.len();
+        // Full file listing mode: get the full list of files from object store
 
         // Step 3: Filter files to determine which ones can be deleted
         let (all_unused_files_ready_for_delete, all_in_exist_linger_files) = self
@@ -698,12 +678,6 @@ impl LocalGcWorker {
                 unknown_file_may_linger_until,
             );
 
-        info!(
-            "gc: full listing mode cost {} secs using {lister_cnt} lister for {cnt} files in region {}, found {} unused files to delete",
-            start.elapsed().as_secs_f64(),
-            region_id,
-            all_unused_files_ready_for_delete.len()
-        );
         debug!("All in exist linger files: {:?}", all_in_exist_linger_files);
 
         Ok(all_unused_files_ready_for_delete)

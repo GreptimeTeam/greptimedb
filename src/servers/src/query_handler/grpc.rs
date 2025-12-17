@@ -12,21 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
-use arrow_flight::FlightData;
 use async_trait::async_trait;
 use common_base::AffectedRows;
 use common_error::ext::{BoxedError, ErrorExt};
-use common_grpc::flight::FlightDecoder;
+use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
+use futures::Stream;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use table::TableRef;
-use table::table_name::TableName;
 
 use crate::error::{self, Result};
+use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
 
 pub type GrpcQueryHandlerRef<E> = Arc<dyn GrpcQueryHandler<Error = E> + Send + Sync>;
 pub type ServerGrpcQueryHandlerRef = GrpcQueryHandlerRef<error::Error>;
@@ -45,12 +46,16 @@ pub trait GrpcQueryHandler {
 
     async fn put_record_batch(
         &self,
-        table_name: &TableName,
+        request: PutRecordBatchRequest,
         table_ref: &mut Option<TableRef>,
-        decoder: &mut FlightDecoder,
-        flight_data: FlightData,
         ctx: QueryContextRef,
     ) -> std::result::Result<AffectedRows, Self::Error>;
+
+    fn handle_put_record_batch_stream(
+        &self,
+        stream: PutRecordBatchRequestStream,
+        ctx: QueryContextRef,
+    ) -> Pin<Box<dyn Stream<Item = std::result::Result<DoPutResponse, Self::Error>> + Send>>;
 }
 
 pub struct ServerGrpcQueryHandlerAdapter<E>(GrpcQueryHandlerRef<E>);
@@ -78,16 +83,31 @@ where
 
     async fn put_record_batch(
         &self,
-        table_name: &TableName,
+        request: PutRecordBatchRequest,
         table_ref: &mut Option<TableRef>,
-        decoder: &mut FlightDecoder,
-        data: FlightData,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
         self.0
-            .put_record_batch(table_name, table_ref, decoder, data, ctx)
+            .put_record_batch(request, table_ref, ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcRequestSnafu)
+    }
+
+    fn handle_put_record_batch_stream(
+        &self,
+        stream: PutRecordBatchRequestStream,
+        ctx: QueryContextRef,
+    ) -> Pin<Box<dyn Stream<Item = Result<DoPutResponse>> + Send>> {
+        use futures_util::StreamExt;
+        Box::pin(
+            self.0
+                .handle_put_record_batch_stream(stream, ctx)
+                .map(|result| {
+                    result
+                        .map_err(|e| BoxedError::new(e))
+                        .context(error::ExecuteGrpcRequestSnafu)
+                }),
+        )
     }
 }

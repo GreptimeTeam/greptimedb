@@ -94,7 +94,7 @@ impl TableInfoValue {
         }
     }
 
-    pub(crate) fn update(&self, new_table_info: RawTableInfo) -> Self {
+    pub fn update(&self, new_table_info: RawTableInfo) -> Self {
         Self {
             table_info: new_table_info,
             version: self.version + 1,

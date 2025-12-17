@@ -21,7 +21,7 @@ use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use serde::Serialize;
 use snafu::ResultExt;
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::RegionId;
 
 use crate::procedure::region_migration::{PersistentContext, RegionMigrationTriggerReason};
 
@@ -37,35 +37,34 @@ pub const EVENTS_TABLE_DST_NODE_ID_COLUMN_NAME: &str = "region_migration_dst_nod
 pub const EVENTS_TABLE_DST_PEER_ADDR_COLUMN_NAME: &str = "region_migration_dst_peer_addr";
 
 /// RegionMigrationEvent is the event of region migration.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub(crate) struct RegionMigrationEvent {
-    #[serde(skip)]
-    region_id: RegionId,
-    #[serde(skip)]
-    table_id: TableId,
-    #[serde(skip)]
-    region_number: u32,
-    #[serde(skip)]
+    // The region ids of the region migration.
+    region_ids: Vec<RegionId>,
+    // The trigger reason of the region migration.
     trigger_reason: RegionMigrationTriggerReason,
-    #[serde(skip)]
+    // The source node id of the region migration.
     src_node_id: u64,
-    #[serde(skip)]
+    // The source peer address of the region migration.
     src_peer_addr: String,
-    #[serde(skip)]
+    // The destination node id of the region migration.
     dst_node_id: u64,
-    #[serde(skip)]
+    // The destination peer address of the region migration.
     dst_peer_addr: String,
+    // The timeout of the region migration.
+    timeout: Duration,
+}
 
-    // The following fields will be serialized as the json payload.
+#[derive(Debug, Serialize)]
+struct Payload {
+    #[serde(with = "humantime_serde")]
     timeout: Duration,
 }
 
 impl RegionMigrationEvent {
     pub fn from_persistent_ctx(ctx: &PersistentContext) -> Self {
         Self {
-            region_id: ctx.region_id,
-            table_id: ctx.region_id.table_id(),
-            region_number: ctx.region_id.region_number(),
+            region_ids: ctx.region_ids.clone(),
             trigger_reason: ctx.trigger_reason,
             src_node_id: ctx.from_peer.id,
             src_peer_addr: ctx.from_peer.addr.clone(),
@@ -134,23 +133,31 @@ impl Event for RegionMigrationEvent {
         ]
     }
 
-    fn extra_row(&self) -> Result<Row> {
-        Ok(Row {
-            values: vec![
-                ValueData::U64Value(self.region_id.as_u64()).into(),
-                ValueData::U32Value(self.table_id).into(),
-                ValueData::U32Value(self.region_number).into(),
-                ValueData::StringValue(self.trigger_reason.to_string()).into(),
-                ValueData::U64Value(self.src_node_id).into(),
-                ValueData::StringValue(self.src_peer_addr.clone()).into(),
-                ValueData::U64Value(self.dst_node_id).into(),
-                ValueData::StringValue(self.dst_peer_addr.clone()).into(),
-            ],
-        })
+    fn extra_rows(&self) -> Result<Vec<Row>> {
+        let mut extra_rows = Vec::with_capacity(self.region_ids.len());
+        for region_id in &self.region_ids {
+            extra_rows.push(Row {
+                values: vec![
+                    ValueData::U64Value(region_id.as_u64()).into(),
+                    ValueData::U32Value(region_id.table_id()).into(),
+                    ValueData::U32Value(region_id.region_number()).into(),
+                    ValueData::StringValue(self.trigger_reason.to_string()).into(),
+                    ValueData::U64Value(self.src_node_id).into(),
+                    ValueData::StringValue(self.src_peer_addr.clone()).into(),
+                    ValueData::U64Value(self.dst_node_id).into(),
+                    ValueData::StringValue(self.dst_peer_addr.clone()).into(),
+                ],
+            });
+        }
+
+        Ok(extra_rows)
     }
 
     fn json_payload(&self) -> Result<String> {
-        serde_json::to_string(self).context(SerializeEventSnafu)
+        serde_json::to_string(&Payload {
+            timeout: self.timeout,
+        })
+        .context(SerializeEventSnafu)
     }
 
     fn as_any(&self) -> &dyn Any {

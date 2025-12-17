@@ -294,6 +294,7 @@ mod tests {
             region_manifest: RegionManifestInfo::Mito {
                 manifest_version: 1,
                 flushed_entry_id: 100,
+                file_removed_cnt: 0,
             },
             written_bytes,
             data_topic_latest_entry_id: 200,

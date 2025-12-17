@@ -18,7 +18,7 @@ pub mod protocol_ctx;
 pub mod session_config;
 pub mod table_name;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -34,6 +34,9 @@ use context::{ConfigurationVariables, QueryContextBuilder};
 use derive_more::Debug;
 
 use crate::context::{Channel, ConnInfo, QueryContextRef};
+
+/// Maximum number of warnings to store per session (similar to MySQL's max_error_count)
+const MAX_WARNINGS: usize = 64;
 
 /// Session for persistent connection such as MySQL, PostgreSQL etc.
 #[derive(Debug)]
@@ -58,6 +61,8 @@ pub(crate) struct MutableInner {
     read_preference: ReadPreference,
     #[debug(skip)]
     pub(crate) cursors: HashMap<String, Arc<RecordBatchStreamCursor>>,
+    /// Warning messages for MySQL SHOW WARNINGS support
+    warnings: VecDeque<String>,
 }
 
 impl Default for MutableInner {
@@ -69,6 +74,7 @@ impl Default for MutableInner {
             query_timeout: None,
             read_preference: ReadPreference::Leader,
             cursors: HashMap::with_capacity(0),
+            warnings: VecDeque::new(),
         }
     }
 }
@@ -155,5 +161,36 @@ impl Session {
 
     pub fn process_id(&self) -> u32 {
         self.process_id
+    }
+
+    pub fn warnings_count(&self) -> usize {
+        self.mutable_inner.read().unwrap().warnings.len()
+    }
+
+    pub fn warnings(&self) -> Vec<String> {
+        self.mutable_inner
+            .read()
+            .unwrap()
+            .warnings
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Add a warning message. If the limit is reached, discard the oldest warning.
+    pub fn add_warning(&self, warning: String) {
+        let mut inner = self.mutable_inner.write().unwrap();
+        if inner.warnings.len() >= MAX_WARNINGS {
+            inner.warnings.pop_front();
+        }
+        inner.warnings.push_back(warning);
+    }
+
+    pub fn clear_warnings(&self) {
+        let mut inner = self.mutable_inner.write().unwrap();
+        if inner.warnings.is_empty() {
+            return;
+        }
+        inner.warnings.clear();
     }
 }

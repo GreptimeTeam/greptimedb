@@ -76,6 +76,8 @@ pub struct SstInfo {
     pub time_range: FileTimeRange,
     /// File size in bytes.
     pub file_size: u64,
+    /// Maximum uncompressed row group size in bytes. 0 if unknown.
+    pub max_row_group_uncompressed_size: u64,
     /// Number of rows.
     pub num_rows: usize,
     /// Number of row groups
@@ -117,7 +119,7 @@ mod tests {
     use crate::config::IndexConfig;
     use crate::read::{BatchBuilder, BatchReader, FlatSource};
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
-    use crate::sst::file::{FileHandle, FileMeta, RegionFileId};
+    use crate::sst::file::{FileHandle, FileMeta, RegionFileId, RegionIndexId};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierBuilder;
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
@@ -144,7 +146,11 @@ mod tests {
 
     impl FilePathProvider for FixedPathProvider {
         fn build_index_file_path(&self, _file_id: RegionFileId) -> String {
-            location::index_file_path(FILE_DIR, self.region_file_id, PathType::Bare)
+            location::index_file_path_legacy(FILE_DIR, self.region_file_id, PathType::Bare)
+        }
+
+        fn build_index_file_path_with_version(&self, index_id: RegionIndexId) -> String {
+            location::index_file_path(FILE_DIR, index_id, PathType::Bare)
         }
 
         fn build_sst_file_path(&self, _file_id: RegionFileId) -> String {
@@ -156,7 +162,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl IndexerBuilder for NoopIndexBuilder {
-        async fn build(&self, _file_id: FileId) -> Indexer {
+        async fn build(&self, _file_id: FileId, _index_version: u64) -> Indexer {
             Indexer::default()
         }
     }
@@ -711,6 +717,7 @@ mod tests {
             metadata: metadata.clone(),
             row_group_size,
             puffin_manager,
+            write_cache_enabled: false,
             intermediate_manager,
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {
@@ -766,9 +773,11 @@ mod tests {
                 time_range: info.time_range,
                 level: 0,
                 file_size: info.file_size,
+                max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
                 available_indexes: info.index_metadata.build_available_indexes(),
+                indexes: info.index_metadata.build_indexes(),
                 index_file_size: info.index_metadata.file_size,
-                index_file_id: None,
+                index_version: 0,
                 num_row_groups: info.num_row_groups,
                 num_rows: info.num_rows as u64,
                 sequence: None,
@@ -1089,6 +1098,7 @@ mod tests {
             metadata: metadata.clone(),
             row_group_size,
             puffin_manager,
+            write_cache_enabled: false,
             intermediate_manager,
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {

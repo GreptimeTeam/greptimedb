@@ -41,11 +41,9 @@ use crate::error::{
     EmptyRegionDirSnafu, InvalidPartitionExprSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
-use crate::manifest::storage::manifest_compress_type;
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::metrics;
 use crate::read::{FlatSource, Source};
-use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
@@ -162,31 +160,16 @@ pub async fn open_compaction_region(
     };
 
     let manifest_manager = {
-        let region_manifest_options = RegionManifestOptions {
-            manifest_dir: new_manifest_dir(&region_dir_from_table_dir(
-                &req.table_dir,
-                req.region_id,
-                req.path_type,
-            )),
-            object_store: object_store.clone(),
-            compress_type: manifest_compress_type(mito_config.compress_manifest),
-            checkpoint_distance: mito_config.manifest_checkpoint_distance,
-            remove_file_options: RemoveFileOptions {
-                keep_count: mito_config.experimental_manifest_keep_removed_file_count,
-                keep_ttl: mito_config.experimental_manifest_keep_removed_file_ttl,
-            },
-        };
+        let region_dir = region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type);
+        let region_manifest_options =
+            RegionManifestOptions::new(mito_config, &region_dir, object_store);
 
-        RegionManifestManager::open(
-            region_manifest_options,
-            Default::default(),
-            Default::default(),
-        )
-        .await?
-        .context(EmptyRegionDirSnafu {
-            region_id: req.region_id,
-            region_dir: &region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type),
-        })?
+        RegionManifestManager::open(region_manifest_options, &Default::default())
+            .await?
+            .with_context(|| EmptyRegionDirSnafu {
+                region_id: req.region_id,
+                region_dir: region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type),
+            })?
     };
 
     let manifest = manifest_manager.manifest();
@@ -413,9 +396,11 @@ impl DefaultCompactor {
                 time_range: sst_info.time_range,
                 level: output.output_level,
                 file_size: sst_info.file_size,
+                max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
                 available_indexes: sst_info.index_metadata.build_available_indexes(),
+                indexes: sst_info.index_metadata.build_indexes(),
                 index_file_size: sst_info.index_metadata.file_size,
-                index_file_id: None,
+                index_version: 0,
                 num_rows: sst_info.num_rows as u64,
                 num_row_groups: sst_info.num_row_groups,
                 sequence: max_sequence,
@@ -517,7 +502,7 @@ impl Compactor for DefaultCompactor {
         // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
         compaction_region
             .manifest_ctx
-            .update_manifest(RegionLeaderState::Writable, action_list)
+            .update_manifest(RegionLeaderState::Writable, action_list, false)
             .await?;
 
         Ok(edit)

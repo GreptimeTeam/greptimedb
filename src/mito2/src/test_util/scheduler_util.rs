@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use common_base::Plugins;
 use common_datasource::compression::CompressionType;
+use common_memory_manager::OnExhaustedPolicy;
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use object_store::ObjectStore;
 use object_store::services::Fs;
@@ -28,6 +29,7 @@ use tokio::sync::mpsc::Sender;
 use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::cache::CacheManager;
 use crate::compaction::CompactionScheduler;
+use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
 use crate::config::MitoConfig;
 use crate::error::Result;
 use crate::flush::FlushScheduler;
@@ -100,6 +102,8 @@ impl SchedulerEnv {
             Arc::new(MitoConfig::default()),
             WorkerListener::default(),
             Plugins::new(),
+            Arc::new(new_compaction_memory_manager(0)),
+            OnExhaustedPolicy::default(),
         )
     }
 
@@ -132,10 +136,10 @@ impl SchedulerEnv {
                     compress_type: CompressionType::Uncompressed,
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
+                    manifest_cache: None,
                 },
-                Default::default(),
-                Default::default(),
                 FormatType::PrimaryKey,
+                &Default::default(),
             )
             .await
             .unwrap(),

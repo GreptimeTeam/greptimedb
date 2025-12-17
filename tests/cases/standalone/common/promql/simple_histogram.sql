@@ -32,9 +32,11 @@ tql eval (3000, 3000, '1s') histogram_quantile(1.01, histogram_bucket);
 tql eval (3000, 3000, '1s') histogram_quantile(NaN, histogram_bucket);
 
 -- Quantile value in lowest bucket, which is positive.
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') histogram_quantile(0, histogram_bucket{s="positive"});
 
 -- Quantile value in lowest bucket, which is negative.
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') histogram_quantile(0, histogram_bucket{s="negative"});
 
 -- Quantile value in highest bucket.
@@ -57,6 +59,7 @@ tql eval (3000, 3000, '1s') label_replace(histogram_quantile(0.8, histogram_buck
 -- More realistic with rates.
 -- This case doesn't contains value because other point are not inserted.
 -- quantile with rate is covered in other cases
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') histogram_quantile(0.2, rate(histogram_bucket[5m]));
 
 drop table histogram_bucket;
@@ -122,16 +125,22 @@ insert into histogram2_bucket values
     (2700000, "+Inf", 30);
 
 -- Want results exactly in the middle of the bucket.
+-- SQLNESS SORT_RESULT 3 1
 tql eval (420, 420, '1s') histogram_quantile(0.166, histogram2_bucket);
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (420, 420, '1s') histogram_quantile(0.5, histogram2_bucket);
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (420, 420, '1s') histogram_quantile(0.833, histogram2_bucket);
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (2820, 2820, '1s') histogram_quantile(0.166, rate(histogram2_bucket[15m]));
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (2820, 2820, '1s') histogram_quantile(0.5, rate(histogram2_bucket[15m]));
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (2820, 2820, '1s') histogram_quantile(0.833, rate(histogram2_bucket[15m]));
 
 drop table histogram2_bucket;
@@ -160,6 +169,7 @@ insert into histogram3_bucket values
     (3005000, "5", "a", 20),
     (3005000, "+Inf", "a", 30);
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3005, '3s') histogram_quantile(0.5, sum by(le, s) (rate(histogram3_bucket[5m])));
 
 drop table histogram3_bucket;
@@ -184,10 +194,12 @@ insert into histogram4_bucket values
     -- INF here is missing
 ;
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (2900, 3000, '100s') histogram_quantile(0.9, histogram4_bucket);
 
 drop table histogram4_bucket;
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, fff) (rate(greptime_servers_postgres_query_elapsed_bucket{instance=~"xxx"}[1m])));
 
 -- test case where table exists but doesn't have 'le' column should raise error
@@ -199,8 +211,44 @@ CREATE TABLE greptime_servers_postgres_query_elapsed_no_le (
     PRIMARY KEY (pod, instance)
 );
 
--- should return empty result instead of error when 'le' column is missing
+-- should return empty result instead of error when 'le' column is missin
+-- SQLNESS SORT_RESULT 3 1
 tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, le) (rate(greptime_servers_postgres_query_elapsed_no_le{instance=~"xxx"}[1m])));
+
+-- SQLNESS SORT_RESULT 3 1
 tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, fbf) (rate(greptime_servers_postgres_query_elapsed_no_le{instance=~"xxx"}[1m])));
 
 drop table greptime_servers_postgres_query_elapsed_no_le;
+
+-- test case with some missing buckets
+create table histogram5_bucket (
+    ts timestamp time index,
+    le string,
+    s string,
+    val double,
+    primary key (s, le),
+);
+
+insert into histogram5_bucket values
+    (3000000, "0.1", "a", 0),
+    -- (3000000, "1", "a", 0),
+    -- (3000000, "5", "a", 0),
+    -- (3000000, "+Inf", "a", 0),
+    (3005000, "0.1", "a", 50),
+    (3005000, "1", "a", 70),
+    (3005000, "5", "a", 110),
+    (3005000, "+Inf", "a", 120),
+    (3010000, "0.1", "a", 10),
+    -- (3010000, "1", "a", 20),
+    -- (3010000, "5", "a", 20),
+    (3010000, "+Inf", "a", 30),
+    (3015000, "0.1", "a", 10),
+    (3015000, "1", "a", 10),
+    (3015000, "3", "a", 20), --
+    (3015000, "5", "a", 30),
+    (3015000, "+Inf", "a", 50);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3015, '3s') histogram_quantile(0.5, histogram5_bucket);
+
+drop table histogram5_bucket;

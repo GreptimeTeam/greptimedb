@@ -36,7 +36,7 @@ use crate::puffin_manager::file_accessor::PuffinFileAccessor;
 use crate::puffin_manager::fs_puffin_manager::PuffinMetadataCacheRef;
 use crate::puffin_manager::fs_puffin_manager::dir_meta::DirMetadata;
 use crate::puffin_manager::stager::{BoxWriter, DirWriterProviderRef, Stager};
-use crate::puffin_manager::{BlobGuard, GuardWithMetadata, PuffinReader};
+use crate::puffin_manager::{BlobGuard, DirMetrics, GuardWithMetadata, PuffinReader};
 
 /// `FsPuffinReader` is a `PuffinReader` that provides fs readers for puffin files.
 pub struct FsPuffinReader<S, F>
@@ -130,10 +130,10 @@ where
         Ok(GuardWithMetadata::new(blob, blob_metadata))
     }
 
-    async fn dir(&self, key: &str) -> Result<GuardWithMetadata<Self::Dir>> {
+    async fn dir(&self, key: &str) -> Result<(GuardWithMetadata<Self::Dir>, DirMetrics)> {
         let mut file = self.puffin_reader().await?;
         let blob_metadata = self.get_blob_metadata(key, &mut file).await?;
-        let dir = self
+        let (dir, metrics) = self
             .stager
             .get_dir(
                 &self.handle,
@@ -153,7 +153,7 @@ where
             )
             .await?;
 
-        Ok(GuardWithMetadata::new(dir, blob_metadata))
+        Ok((GuardWithMetadata::new(dir, blob_metadata), metrics))
     }
 }
 

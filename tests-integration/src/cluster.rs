@@ -30,13 +30,11 @@ use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManagerBuilder,
 use catalog::process_manager::ProcessManager;
 use client::Client;
 use client::client_manager::NodeClients;
+use cmd::frontend::create_heartbeat_task;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::DatanodeId;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
-use common_meta::heartbeat::handler::HandlerGroupExecutor;
-use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
-use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
@@ -44,13 +42,12 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
-use common_stat::ResourceStatImpl;
 use common_test_util::temp_dir::create_temp_dir;
+use common_time::util::DefaultSystemTimer;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
 use frontend::frontend::{Frontend, FrontendOptions};
-use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::Instance as FeInstance;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
@@ -58,14 +55,15 @@ use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::discovery;
+use meta_srv::gc::GcSchedulerOptions;
 use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
+use mito2::gc::GcConfig;
 use object_store::config::ObjectStoreConfig;
 use rand::Rng;
 use servers::grpc::GrpcOptions;
 use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
-use servers::heartbeat_options::HeartbeatOptions;
 use servers::server::ServerHandlers;
 use tempfile::TempDir;
 use tonic::codec::CompressionEncoding;
@@ -102,6 +100,8 @@ pub struct GreptimeDbClusterBuilder {
     datanodes: Option<u32>,
     datanode_wal_config: DatanodeWalConfig,
     metasrv_wal_config: MetasrvWalConfig,
+    datanode_gc_config: GcConfig,
+    metasrv_gc_config: GcSchedulerOptions,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
 }
@@ -133,6 +133,8 @@ impl GreptimeDbClusterBuilder {
             datanodes: None,
             datanode_wal_config: DatanodeWalConfig::default(),
             metasrv_wal_config: MetasrvWalConfig::default(),
+            datanode_gc_config: GcConfig::default(),
+            metasrv_gc_config: GcSchedulerOptions::default(),
             shared_home_dir: None,
             meta_selector: None,
         }
@@ -165,6 +167,17 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_metasrv_wal_config(mut self, metasrv_wal_config: MetasrvWalConfig) -> Self {
         self.metasrv_wal_config = metasrv_wal_config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_datanode_gc_config(mut self, datanode_gc_config: GcConfig) -> Self {
+        self.datanode_gc_config = datanode_gc_config;
+        self
+    }
+
+    pub fn with_metasrv_gc_config(mut self, metasrv_gc_config: GcSchedulerOptions) -> Self {
+        self.metasrv_gc_config = metasrv_gc_config;
         self
     }
 
@@ -204,6 +217,7 @@ impl GreptimeDbClusterBuilder {
                 server_addr: "127.0.0.1:3002".to_string(),
                 ..Default::default()
             },
+            gc: self.metasrv_gc_config.clone(),
             ..Default::default()
         };
 
@@ -278,6 +292,7 @@ impl GreptimeDbClusterBuilder {
                     vec![],
                     home_dir,
                     self.datanode_wal_config.clone(),
+                    self.datanode_gc_config.clone(),
                 )
             } else {
                 let (opts, guard) = create_tmp_dir_and_datanode_opts(
@@ -285,6 +300,7 @@ impl GreptimeDbClusterBuilder {
                     self.store_providers.clone().unwrap_or_default(),
                     &format!("{}-dn-{}", self.cluster_name, datanode_id),
                     self.datanode_wal_config.clone(),
+                    self.datanode_gc_config.clone(),
                 );
                 guards.push(guard);
 
@@ -319,6 +335,7 @@ impl GreptimeDbClusterBuilder {
     ) {
         for _ in 0..100 {
             let alive_datanodes = discovery::utils::alive_datanodes(
+                &DefaultSystemTimer,
                 meta_peer_client.as_ref(),
                 Duration::from_secs(u64::MAX),
                 None,
@@ -405,23 +422,7 @@ impl GreptimeDbClusterBuilder {
         )
         .build();
 
-        let handlers_executor = HandlerGroupExecutor::new(vec![
-            Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateCacheHandler::new(cache_registry.clone())),
-        ]);
-
         let fe_opts = self.build_frontend_options();
-
-        let mut resource_stat = ResourceStatImpl::default();
-        resource_stat.start_collect_cpu_usage();
-
-        let heartbeat_task = HeartbeatTask::new(
-            &fe_opts,
-            meta_client.clone(),
-            HeartbeatOptions::default(),
-            Arc::new(handlers_executor),
-            Arc::new(resource_stat),
-        );
 
         let instance = FrontendBuilder::new(
             fe_opts.clone(),
@@ -429,13 +430,15 @@ impl GreptimeDbClusterBuilder {
             cache_registry.clone(),
             catalog_manager,
             datanode_clients,
-            meta_client,
+            meta_client.clone(),
             Arc::new(ProcessManager::new(fe_opts.grpc.server_addr.clone(), None)),
         )
         .with_local_cache_invalidator(cache_registry)
         .try_build()
         .await
         .unwrap();
+
+        let heartbeat_task = create_heartbeat_task(&fe_opts, meta_client, &instance);
 
         let instance = Arc::new(instance);
 
@@ -452,7 +455,6 @@ impl GreptimeDbClusterBuilder {
             instance,
             servers,
             heartbeat_task: Some(heartbeat_task),
-            export_metrics_task: None,
         }
     }
 

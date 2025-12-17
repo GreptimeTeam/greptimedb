@@ -28,7 +28,6 @@ use mito2::config::MitoConfig;
 pub(crate) use object_store::config::ObjectStoreConfig;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
-use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
@@ -82,7 +81,6 @@ pub struct DatanodeOptions {
     pub region_engine: Vec<RegionEngineConfig>,
     pub logging: LoggingOptions,
     pub enable_telemetry: bool,
-    pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
@@ -138,7 +136,6 @@ impl Default for DatanodeOptions {
             logging: LoggingOptions::default(),
             heartbeat: HeartbeatOptions::datanode_default(),
             enable_telemetry: true,
-            export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
