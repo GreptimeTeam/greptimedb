@@ -1404,6 +1404,7 @@ cert_path = ""
 key_path = ""
 ca_cert_path = ""
 watch = false
+skip_path_filter = false
 
 [mysql]
 enable = true
@@ -1418,6 +1419,7 @@ cert_path = ""
 key_path = ""
 ca_cert_path = ""
 watch = false
+skip_path_filter = false
 
 [postgres]
 enable = true
@@ -1431,6 +1433,7 @@ cert_path = ""
 key_path = ""
 ca_cert_path = ""
 watch = false
+skip_path_filter = false
 
 [opentsdb]
 enable = true

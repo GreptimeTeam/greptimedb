@@ -76,6 +76,9 @@ key_path = ""
 ## For now, gRPC tls config does not support auto reload.
 watch = false
 
+## Skip path matching filter for reloading TLS config.
+skip_path_filter = false
+
 ## The runtime options.
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.

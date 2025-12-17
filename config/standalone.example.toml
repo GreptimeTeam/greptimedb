@@ -94,6 +94,9 @@ key_path = ""
 ## For now, gRPC tls config does not support auto reload.
 watch = false
 
+## Skip path matching filter for reloading TLS config.
+skip_path_filter = false
+
 ## MySQL server options.
 [mysql]
 ## Whether to enable.
@@ -129,6 +132,9 @@ key_path = ""
 ## Watch for Certificate and key file change and auto reload
 watch = false
 
+## Skip path matching filter for reloading TLS config.
+skip_path_filter = false
+
 ## PostgresSQL server options.
 [postgres]
 ## Whether to enable
@@ -156,6 +162,9 @@ key_path = ""
 
 ## Watch for Certificate and key file change and auto reload
 watch = false
+
+## Skip path matching filter for reloading TLS config.
+skip_path_filter = false
 
 ## OpenTSDB protocol options.
 [opentsdb]

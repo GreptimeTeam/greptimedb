@@ -96,6 +96,9 @@ key_path = ""
 ## For now, gRPC tls config does not support auto reload.
 watch = false
 
+## Skip path matching filter for reloading TLS config.
+skip_path_filter = false
+
 ## The internal gRPC server options. Internal gRPC port for nodes inside cluster to access frontend.
 [internal_grpc]
 ## The address to bind the gRPC server.
@@ -131,6 +134,8 @@ key_path = ""
 ## For now, gRPC tls config does not support auto reload.
 watch = false
 
+## Skip path matching filter for reloading TLS config.
+skip_path_filter = false
 
 ## MySQL server options.
 [mysql]
@@ -168,6 +173,9 @@ key_path = ""
 ## Watch for Certificate and key file change and auto reload
 watch = false
 
+## Skip path matching filter for reloading TLS config.
+skip_path_filter = false
+
 ## PostgresSQL server options.
 [postgres]
 ## Whether to enable
@@ -195,6 +203,9 @@ key_path = ""
 
 ## Watch for Certificate and key file change and auto reload
 watch = false
+
+## Skip path matching filter for reloading TLS config.
+skip_path_filter = false
 
 ## OpenTSDB protocol options.
 [opentsdb]
