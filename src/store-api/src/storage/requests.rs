@@ -14,11 +14,66 @@
 
 use std::fmt::{Display, Formatter};
 
+use common_error::ext::BoxedError;
 use common_recordbatch::OrderOption;
 use datafusion_expr::expr::Expr;
+// Re-export vector types from datatypes to avoid duplication
+pub use datatypes::schema::{VectorDistanceMetric, VectorIndexEngineType};
 use strum::Display;
 
-use crate::storage::SequenceNumber;
+use crate::storage::{ColumnId, SequenceNumber};
+
+/// A hint for KNN vector search.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorSearchRequest {
+    /// Column ID of the vector column to search.
+    pub column_id: ColumnId,
+    /// The query vector to search for.
+    pub query_vector: Vec<f32>,
+    /// Number of nearest neighbors to return.
+    pub k: usize,
+    /// Distance metric to use (matches the index metric).
+    pub metric: VectorDistanceMetric,
+}
+
+/// Search results from vector index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorSearchMatches {
+    /// Keys (row offsets in the index).
+    pub keys: Vec<u64>,
+    /// Distances from the query vector.
+    pub distances: Vec<f32>,
+}
+
+/// Trait for vector index engines (HNSW implementations).
+///
+/// This trait defines the interface for pluggable vector index engines.
+/// Implementations (e.g., UsearchEngine) are provided by storage engines like mito2.
+pub trait VectorIndexEngine: Send + Sync {
+    /// Adds a vector with the given key.
+    fn add(&mut self, key: u64, vector: &[f32]) -> Result<(), BoxedError>;
+
+    /// Searches for k nearest neighbors.
+    fn search(&self, query: &[f32], k: usize) -> Result<VectorSearchMatches, BoxedError>;
+
+    /// Returns the serialized length.
+    fn serialized_length(&self) -> usize;
+
+    /// Serializes the index to a buffer.
+    fn save_to_buffer(&self, buffer: &mut [u8]) -> Result<(), BoxedError>;
+
+    /// Reserves capacity for vectors.
+    fn reserve(&mut self, capacity: usize) -> Result<(), BoxedError>;
+
+    /// Returns current size (number of vectors).
+    fn size(&self) -> usize;
+
+    /// Returns current capacity.
+    fn capacity(&self) -> usize;
+
+    /// Returns memory usage in bytes.
+    fn memory_usage(&self) -> usize;
+}
 
 /// A hint on how to select rows from a time-series.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display)]
@@ -38,7 +93,7 @@ pub enum TimeSeriesDistribution {
     PerSeries,
 }
 
-#[derive(Default, Clone, Debug, PartialEq, Eq)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct ScanRequest {
     /// Indices of columns to read, `None` to read all columns. This indices is
     /// based on table schema.
@@ -66,6 +121,9 @@ pub struct ScanRequest {
     pub sst_min_sequence: Option<SequenceNumber>,
     /// Optional hint for the distribution of time-series data.
     pub distribution: Option<TimeSeriesDistribution>,
+    /// Optional hint for KNN vector search. When set, the scan should use
+    /// vector index to find the k nearest neighbors.
+    pub vector_search: Option<VectorSearchRequest>,
 }
 
 impl Display for ScanRequest {
@@ -137,6 +195,16 @@ impl Display for ScanRequest {
         }
         if let Some(distribution) = &self.distribution {
             write!(f, "{}distribution: {}", delimiter.as_str(), distribution)?;
+        }
+        if let Some(vector_search) = &self.vector_search {
+            write!(
+                f,
+                "{}vector_search: column_id={}, k={}, metric={}",
+                delimiter.as_str(),
+                vector_search.column_id,
+                vector_search.k,
+                vector_search.metric
+            )?;
         }
         write!(f, " }}")
     }

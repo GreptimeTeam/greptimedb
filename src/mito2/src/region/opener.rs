@@ -636,54 +636,6 @@ pub fn get_object_store(
     }
 }
 
-/// A loader for loading metadata from a region dir.
-#[derive(Debug, Clone)]
-pub struct RegionMetadataLoader {
-    config: Arc<MitoConfig>,
-    object_store_manager: ObjectStoreManagerRef,
-}
-
-impl RegionMetadataLoader {
-    /// Creates a new `RegionOpenerBuilder`.
-    pub fn new(config: Arc<MitoConfig>, object_store_manager: ObjectStoreManagerRef) -> Self {
-        Self {
-            config,
-            object_store_manager,
-        }
-    }
-
-    /// Loads the metadata of the region from the region dir.
-    pub async fn load(
-        &self,
-        region_dir: &str,
-        region_options: &RegionOptions,
-    ) -> Result<Option<RegionMetadataRef>> {
-        let manifest = self
-            .load_manifest(region_dir, &region_options.storage)
-            .await?;
-        Ok(manifest.map(|m| m.metadata.clone()))
-    }
-
-    /// Loads the manifest of the region from the region dir.
-    pub async fn load_manifest(
-        &self,
-        region_dir: &str,
-        storage: &Option<String>,
-    ) -> Result<Option<Arc<RegionManifest>>> {
-        let object_store = get_object_store(storage, &self.object_store_manager)?;
-        let region_manifest_options =
-            RegionManifestOptions::new(&self.config, region_dir, &object_store);
-        let Some(manifest_manager) =
-            RegionManifestManager::open(region_manifest_options, &Default::default()).await?
-        else {
-            return Ok(None);
-        };
-
-        let manifest = manifest_manager.manifest();
-        Ok(Some(manifest))
-    }
-}
-
 /// Checks whether the recovered region has the same schema as region to create.
 pub(crate) fn check_recovered_region(
     recovered: &RegionMetadata,

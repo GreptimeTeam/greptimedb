@@ -32,6 +32,7 @@ use datatypes::arrow::array::BinaryArray;
 use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::index::IndexValuesCodec;
 use mito_codec::row_converter::CompositeValues;
+use object_store::ObjectStore;
 use puffin_manager::SstPuffinManager;
 use smallvec::{SmallVec, smallvec};
 use snafu::{OptionExt, ResultExt};
@@ -42,7 +43,7 @@ use strum::IntoStaticStr;
 use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, RegionFilePathFactory};
-use crate::cache::file_cache::{FileType, IndexKey};
+use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::{UploadTracker, WriteCacheRef};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{
@@ -75,6 +76,30 @@ use crate::worker::WorkerListener;
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
 pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";
 pub(crate) const TYPE_BLOOM_FILTER_INDEX: &str = "bloom_filter_index";
+
+/// Triggers background download of an index file to the local cache.
+pub(crate) fn trigger_index_background_download(
+    file_cache: Option<&FileCacheRef>,
+    file_id: &RegionIndexId,
+    file_size_hint: Option<u64>,
+    path_factory: &RegionFilePathFactory,
+    object_store: &ObjectStore,
+) {
+    if let (Some(file_cache), Some(file_size)) = (file_cache, file_size_hint) {
+        let index_key = IndexKey::new(
+            file_id.region_id(),
+            file_id.file_id(),
+            FileType::Puffin(file_id.version),
+        );
+        let remote_path = path_factory.build_index_file_path(file_id.file_id);
+        file_cache.maybe_download_background(
+            index_key,
+            remote_path,
+            object_store.clone(),
+            file_size,
+        );
+    }
+}
 
 /// Output of the index creation.
 #[derive(Debug, Clone, Default)]
@@ -1794,6 +1819,7 @@ mod tests {
                 ReadableSize::mb(10),
                 None,
                 None,
+                true, // enable_background_worker
                 factory,
                 intm_manager,
                 ReadableSize::mb(10),

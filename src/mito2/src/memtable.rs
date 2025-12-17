@@ -55,10 +55,8 @@ pub mod time_partition;
 pub mod time_series;
 pub(crate) mod version;
 
-#[cfg(any(test, feature = "test"))]
-pub use bulk::part::BulkPart;
 pub use bulk::part::{
-    BulkPartEncoder, BulkPartMeta, UnorderedPart, record_batch_estimated_size,
+    BulkPart, BulkPartEncoder, BulkPartMeta, UnorderedPart, record_batch_estimated_size,
     sort_primary_key_record_batch,
 };
 #[cfg(any(test, feature = "test"))]

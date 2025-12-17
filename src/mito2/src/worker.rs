@@ -19,6 +19,7 @@ mod handle_bulk_insert;
 mod handle_catchup;
 mod handle_close;
 mod handle_compaction;
+mod handle_copy_region;
 mod handle_create;
 mod handle_drop;
 mod handle_enter_staging;
@@ -37,7 +38,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_base::Plugins;
-use common_base::readable_size::ReadableSize;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_runtime::JoinHandle;
@@ -480,10 +480,10 @@ pub async fn write_cache_from_config(
         config.write_cache_size,
         config.write_cache_ttl,
         Some(config.index_cache_percent),
+        config.enable_refill_cache_on_read,
         puffin_manager_factory,
         intermediate_manager,
-        // TODO(yingwen): Enable manifest cache after removing read cache.
-        ReadableSize(0),
+        config.manifest_cache_size,
     )
     .await?;
     Ok(Some(Arc::new(cache)))
@@ -1039,6 +1039,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::RemapManifests(req) => {
                     self.handle_remap_manifests_request(req);
                 }
+                WorkerRequest::CopyRegionFrom(req) => {
+                    self.handle_copy_region_from_request(req);
+                }
             }
         }
 
@@ -1154,6 +1157,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::EnterStaging(req) => self.handle_enter_staging_result(req).await,
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
+            BackgroundNotify::CopyRegionFromFinished(req) => {
+                self.handle_copy_region_from_finished(req)
+            }
         }
     }
 

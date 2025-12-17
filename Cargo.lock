@@ -212,7 +212,7 @@ checksum = "d301b3b94cb4b2f23d7917810addbbaff90738e0ca2be692bd027e70d7e0330c"
 
 [[package]]
 name = "api"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "arrow-schema",
  "common-base",
@@ -733,7 +733,7 @@ dependencies = [
 
 [[package]]
 name = "auth"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "async-trait",
@@ -1383,7 +1383,7 @@ dependencies = [
 
 [[package]]
 name = "cache"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "catalog",
  "common-error",
@@ -1418,7 +1418,7 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "catalog"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "arrow",
@@ -1763,7 +1763,7 @@ checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 
 [[package]]
 name = "cli"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1816,7 +1816,7 @@ dependencies = [
 
 [[package]]
 name = "client"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "arc-swap",
@@ -1849,7 +1849,7 @@ dependencies = [
  "snafu 0.8.6",
  "store-api",
  "substrait 0.37.3",
- "substrait 1.0.0-beta.2",
+ "substrait 1.0.0-beta.3",
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",
@@ -1889,7 +1889,7 @@ dependencies = [
 
 [[package]]
 name = "cmd"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "async-trait",
  "auth",
@@ -1978,6 +1978,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "codespan-reporting"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
+dependencies = [
+ "serde",
+ "termcolor",
+ "unicode-width 0.2.1",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2012,7 +2023,7 @@ checksum = "55b672471b4e9f9e95499ea597ff64941a309b2cdbffcc46f2cc5e2d971fd335"
 
 [[package]]
 name = "common-base"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "anymap2",
  "async-trait",
@@ -2036,14 +2047,14 @@ dependencies = [
 
 [[package]]
 name = "common-catalog"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "const_format",
 ]
 
 [[package]]
 name = "common-config"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "common-base",
  "common-error",
@@ -2068,7 +2079,7 @@ dependencies = [
 
 [[package]]
 name = "common-datasource"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -2103,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "common-decimal"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "bigdecimal 0.4.8",
  "common-error",
@@ -2116,7 +2127,7 @@ dependencies = [
 
 [[package]]
 name = "common-error"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "common-macro",
  "http 1.3.1",
@@ -2127,7 +2138,7 @@ dependencies = [
 
 [[package]]
 name = "common-event-recorder"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "async-trait",
@@ -2149,7 +2160,7 @@ dependencies = [
 
 [[package]]
 name = "common-frontend"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "async-trait",
@@ -2171,7 +2182,7 @@ dependencies = [
 
 [[package]]
 name = "common-function"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "ahash 0.8.12",
  "api",
@@ -2231,7 +2242,7 @@ dependencies = [
 
 [[package]]
 name = "common-greptimedb-telemetry"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "async-trait",
  "common-runtime",
@@ -2248,7 +2259,7 @@ dependencies = [
 
 [[package]]
 name = "common-grpc"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "arrow-flight",
@@ -2283,7 +2294,7 @@ dependencies = [
 
 [[package]]
 name = "common-grpc-expr"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "common-base",
@@ -2303,7 +2314,7 @@ dependencies = [
 
 [[package]]
 name = "common-macro"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "greptime-proto",
  "once_cell",
@@ -2314,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "common-mem-prof"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "anyhow",
  "common-error",
@@ -2330,7 +2341,7 @@ dependencies = [
 
 [[package]]
 name = "common-memory-manager"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "common-error",
  "common-macro",
@@ -2343,7 +2354,7 @@ dependencies = [
 
 [[package]]
 name = "common-meta"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "anymap2",
  "api",
@@ -2415,7 +2426,7 @@ dependencies = [
 
 [[package]]
 name = "common-options"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "common-grpc",
  "humantime-serde",
@@ -2424,11 +2435,11 @@ dependencies = [
 
 [[package]]
 name = "common-plugins"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 
 [[package]]
 name = "common-pprof"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "common-error",
  "common-macro",
@@ -2440,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "common-procedure"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "async-stream",
@@ -2469,7 +2480,7 @@ dependencies = [
 
 [[package]]
 name = "common-procedure-test"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "async-trait",
  "common-procedure",
@@ -2479,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "common-query"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "async-trait",
@@ -2505,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "common-recordbatch"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "arc-swap",
  "common-base",
@@ -2529,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "common-runtime"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "async-trait",
  "clap 4.5.40",
@@ -2558,7 +2569,7 @@ dependencies = [
 
 [[package]]
 name = "common-session"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "serde",
  "strum 0.27.1",
@@ -2566,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "common-sql"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "common-base",
  "common-decimal",
@@ -2584,7 +2595,7 @@ dependencies = [
 
 [[package]]
 name = "common-stat"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "common-base",
  "common-runtime",
@@ -2599,7 +2610,7 @@ dependencies = [
 
 [[package]]
 name = "common-telemetry"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "backtrace",
  "common-base",
@@ -2628,7 +2639,7 @@ dependencies = [
 
 [[package]]
 name = "common-test-util"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "client",
  "common-grpc",
@@ -2641,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "common-time"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "arrow",
  "chrono",
@@ -2659,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "common-version"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "build-data",
  "cargo-manifest",
@@ -2670,7 +2681,7 @@ dependencies = [
 
 [[package]]
 name = "common-wal"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "common-base",
  "common-error",
@@ -2693,7 +2704,7 @@ dependencies = [
 
 [[package]]
 name = "common-workload"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "common-telemetry",
  "serde",
@@ -3167,6 +3178,68 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0369ee1ad671834580515889b80f2ea915f23b8be8d0daa4bbaf2ac5c7590835"
 dependencies = [
  "cipher",
+]
+
+[[package]]
+name = "cxx"
+version = "1.0.190"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7620f6cfc4dcca21f2b085b7a890e16c60fd66f560cd69ee60594908dc72ab1"
+dependencies = [
+ "cc",
+ "cxx-build",
+ "cxxbridge-cmd",
+ "cxxbridge-flags",
+ "cxxbridge-macro",
+ "foldhash 0.2.0",
+ "link-cplusplus",
+]
+
+[[package]]
+name = "cxx-build"
+version = "1.0.190"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a9bc1a22964ff6a355fbec24cf68266a0ed28f8b84c0864c386474ea3d0e479"
+dependencies = [
+ "cc",
+ "codespan-reporting 0.13.1",
+ "indexmap 2.11.4",
+ "proc-macro2",
+ "quote",
+ "scratch",
+ "syn 2.0.106",
+]
+
+[[package]]
+name = "cxxbridge-cmd"
+version = "1.0.190"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f29a879d35f7906e3c9b77d7a1005a6a0787d330c09dfe4ffb5f617728cb44"
+dependencies = [
+ "clap 4.5.40",
+ "codespan-reporting 0.13.1",
+ "indexmap 2.11.4",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
+]
+
+[[package]]
+name = "cxxbridge-flags"
+version = "1.0.190"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d67109015f93f683e364085aa6489a5b2118b4a40058482101d699936a7836d6"
+
+[[package]]
+name = "cxxbridge-macro"
+version = "1.0.190"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d187e019e7b05a1f3e69a8396b70800ee867aa9fc2ab972761173ccee03742df"
+dependencies = [
+ "indexmap 2.11.4",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
 ]
 
 [[package]]
@@ -3939,7 +4012,7 @@ dependencies = [
 
 [[package]]
 name = "datanode"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "arrow-flight",
@@ -4003,7 +4076,7 @@ dependencies = [
 
 [[package]]
 name = "datatypes"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -4677,7 +4750,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "file-engine"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "async-trait",
@@ -4809,7 +4882,7 @@ checksum = "8bf7cc16383c4b8d58b9905a8509f02926ce3058053c056376248d958c9df1e8"
 
 [[package]]
 name = "flow"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "arrow",
@@ -4878,7 +4951,7 @@ dependencies = [
  "sql",
  "store-api",
  "strum 0.27.1",
- "substrait 1.0.0-beta.2",
+ "substrait 1.0.0-beta.3",
  "table",
  "tokio",
  "tonic 0.13.1",
@@ -4917,6 +4990,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4933,7 +5012,7 @@ checksum = "28dd6caf6059519a65843af8fe2a3ae298b14b80179855aeb4adc2c1934ee619"
 
 [[package]]
 name = "frontend"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "arc-swap",
@@ -5516,7 +5595,7 @@ checksum = "5971ac85611da7067dbfcabef3c70ebb5606018acd9e2a3903a0da507521e0d5"
 dependencies = [
  "allocator-api2",
  "equivalent",
- "foldhash",
+ "foldhash 0.1.5",
 ]
 
 [[package]]
@@ -6148,7 +6227,7 @@ dependencies = [
 
 [[package]]
 name = "index"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "async-trait",
  "asynchronous-codec",
@@ -6161,6 +6240,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "criterion 0.4.0",
+ "datatypes",
  "fastbloom",
  "fst",
  "futures",
@@ -6169,6 +6249,7 @@ dependencies = [
  "jieba-rs",
  "lazy_static",
  "mockall",
+ "nalgebra",
  "pin-project",
  "prost 0.13.5",
  "puffin",
@@ -6186,6 +6267,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "usearch",
  "uuid",
 ]
 
@@ -7018,6 +7100,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "link-cplusplus"
+version = "1.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f78c730aaa7d0b9336a299029ea49f9ee53b0ed06e9202e8cb7db9bae7b8c82"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "linked-hash-map"
 version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7077,7 +7168,7 @@ checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 
 [[package]]
 name = "log-query"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "chrono",
  "common-error",
@@ -7089,7 +7180,7 @@ dependencies = [
 
 [[package]]
 name = "log-store"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -7332,12 +7423,6 @@ dependencies = [
 
 [[package]]
 name = "md5"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
-
-[[package]]
-name = "md5"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae960838283323069879657ca3de837e9f7bbb4c7bf6ea7f1b290d5e9476d2e0"
@@ -7396,7 +7481,7 @@ dependencies = [
 
 [[package]]
 name = "meta-client"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "async-trait",
@@ -7424,7 +7509,7 @@ dependencies = [
 
 [[package]]
 name = "meta-srv"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "async-trait",
@@ -7524,7 +7609,7 @@ dependencies = [
 
 [[package]]
 name = "metric-engine"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "aquamarine",
@@ -7621,7 +7706,7 @@ dependencies = [
 
 [[package]]
 name = "mito-codec"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "bytes",
@@ -7646,7 +7731,7 @@ dependencies = [
 
 [[package]]
 name = "mito2"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "aquamarine",
@@ -8386,7 +8471,7 @@ dependencies = [
 
 [[package]]
 name = "object-store"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -8399,7 +8484,6 @@ dependencies = [
  "futures",
  "humantime-serde",
  "lazy_static",
- "md5 0.7.0",
  "moka",
  "opendal",
  "prometheus",
@@ -8672,7 +8756,7 @@ dependencies = [
 
 [[package]]
 name = "operator"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "ahash 0.8.12",
  "api",
@@ -8732,7 +8816,7 @@ dependencies = [
  "sql",
  "sqlparser",
  "store-api",
- "substrait 1.0.0-beta.2",
+ "substrait 1.0.0-beta.3",
  "table",
  "tokio",
  "tokio-util",
@@ -9018,7 +9102,7 @@ dependencies = [
 
 [[package]]
 name = "partition"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "async-trait",
@@ -9246,7 +9330,7 @@ dependencies = [
  "futures",
  "hex",
  "lazy-regex",
- "md5 0.8.0",
+ "md5",
  "postgres-types",
  "rand 0.9.1",
  "ring",
@@ -9375,7 +9459,7 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "pipeline"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "ahash 0.8.12",
  "api",
@@ -9531,7 +9615,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "auth",
  "catalog",
@@ -9833,7 +9917,7 @@ dependencies = [
 
 [[package]]
 name = "promql"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "ahash 0.8.12",
  "async-trait",
@@ -10116,7 +10200,7 @@ dependencies = [
 
 [[package]]
 name = "puffin"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "async-compression 0.4.19",
  "async-trait",
@@ -10158,7 +10242,7 @@ dependencies = [
 
 [[package]]
 name = "query"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "ahash 0.8.12",
  "api",
@@ -10225,7 +10309,7 @@ dependencies = [
  "sql",
  "sqlparser",
  "store-api",
- "substrait 1.0.0-beta.2",
+ "substrait 1.0.0-beta.3",
  "table",
  "tokio",
  "tokio-stream",
@@ -11298,6 +11382,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "scratch"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68f2ec51b097e4c1a75b681a8bec621909b5e91f15bb7b840c4f2f7b01148b2"
+
+[[package]]
 name = "scrypt"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11561,7 +11651,7 @@ dependencies = [
 
 [[package]]
 name = "servers"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "ahash 0.8.12",
  "api",
@@ -11689,7 +11779,7 @@ dependencies = [
 
 [[package]]
 name = "session"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "ahash 0.8.12",
  "api",
@@ -12023,7 +12113,7 @@ dependencies = [
 
 [[package]]
 name = "sql"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "arrow-buffer",
@@ -12083,7 +12173,7 @@ dependencies = [
 
 [[package]]
 name = "sqlness-runner"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "async-trait",
  "clap 4.5.40",
@@ -12360,7 +12450,7 @@ dependencies = [
 
 [[package]]
 name = "standalone"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "async-trait",
  "catalog",
@@ -12401,7 +12491,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "store-api"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "aquamarine",
@@ -12614,7 +12704,7 @@ dependencies = [
 
 [[package]]
 name = "substrait"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -12737,7 +12827,7 @@ dependencies = [
 
 [[package]]
 name = "table"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "async-trait",
@@ -13006,7 +13096,7 @@ checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 
 [[package]]
 name = "tests-fuzz"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "arbitrary",
  "async-trait",
@@ -13050,7 +13140,7 @@ dependencies = [
 
 [[package]]
 name = "tests-integration"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "api",
  "arrow-flight",
@@ -13125,7 +13215,7 @@ dependencies = [
  "sqlx",
  "standalone",
  "store-api",
- "substrait 1.0.0-beta.2",
+ "substrait 1.0.0-beta.3",
  "table",
  "tempfile",
  "time",
@@ -14151,6 +14241,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
+name = "usearch"
+version = "2.21.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2cc9fc5f872a3a4f9081d5f42624d788231b763e1846c829b9968a3755ac884d"
+dependencies = [
+ "cxx",
+ "cxx-build",
+]
+
+[[package]]
 name = "utf8-ranges"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14289,7 +14389,7 @@ dependencies = [
  "ciborium",
  "cidr",
  "clap 4.5.40",
- "codespan-reporting",
+ "codespan-reporting 0.12.0",
  "community-id",
  "convert_case 0.7.1",
  "crc",

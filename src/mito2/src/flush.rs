@@ -774,7 +774,12 @@ fn memtable_flat_sources(
             let iter = only_range.build_record_batch_iter(None)?;
             // Dedup according to append mode and merge mode.
             // Even single range may have duplicate rows.
-            let iter = maybe_dedup_one(options, field_column_start, iter);
+            let iter = maybe_dedup_one(
+                options.append_mode,
+                options.merge_mode(),
+                field_column_start,
+                iter,
+            );
             flat_sources.sources.push(FlatSource::Iter(iter));
         };
     } else {
@@ -842,17 +847,18 @@ fn merge_and_dedup(
     Ok(maybe_dedup)
 }
 
-fn maybe_dedup_one(
-    options: &RegionOptions,
+pub fn maybe_dedup_one(
+    append_mode: bool,
+    merge_mode: MergeMode,
     field_column_start: usize,
     input_iter: BoxedRecordBatchIterator,
 ) -> BoxedRecordBatchIterator {
-    if options.append_mode {
+    if append_mode {
         // No dedup in append mode
         input_iter
     } else {
         // Dedup according to merge mode.
-        match options.merge_mode() {
+        match merge_mode {
             MergeMode::LastRow => {
                 Box::new(FlatDedupIterator::new(input_iter, FlatLastRow::new(false)))
             }

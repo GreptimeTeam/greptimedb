@@ -41,6 +41,8 @@ use snafu::{Location, ResultExt};
 use crate::error::{CatalogSnafu, Result};
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 
+mod function_alias;
+
 pub struct DfContextProviderAdapter {
     engine_state: Arc<QueryEngineState>,
     session_state: SessionState,
@@ -147,7 +149,17 @@ impl ContextProvider for DfContextProviderAdapter {
 
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
         self.engine_state.scalar_function(name).map_or_else(
-            || self.session_state.scalar_functions().get(name).cloned(),
+            || {
+                self.session_state
+                    .scalar_functions()
+                    .get(name)
+                    .cloned()
+                    .or_else(|| {
+                        function_alias::resolve_scalar(name).and_then(|name| {
+                            self.session_state.scalar_functions().get(name).cloned()
+                        })
+                    })
+            },
             |func| {
                 Some(Arc::new(func.provide(FunctionContext {
                     query_ctx: self.query_ctx.clone(),
@@ -159,7 +171,17 @@ impl ContextProvider for DfContextProviderAdapter {
 
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
         self.engine_state.aggr_function(name).map_or_else(
-            || self.session_state.aggregate_functions().get(name).cloned(),
+            || {
+                self.session_state
+                    .aggregate_functions()
+                    .get(name)
+                    .cloned()
+                    .or_else(|| {
+                        function_alias::resolve_aggregate(name).and_then(|name| {
+                            self.session_state.aggregate_functions().get(name).cloned()
+                        })
+                    })
+            },
             |func| Some(Arc::new(func)),
         )
     }
@@ -193,12 +215,14 @@ impl ContextProvider for DfContextProviderAdapter {
     fn udf_names(&self) -> Vec<String> {
         let mut names = self.engine_state.scalar_names();
         names.extend(self.session_state.scalar_functions().keys().cloned());
+        names.extend(function_alias::scalar_alias_names().map(|name| name.to_string()));
         names
     }
 
     fn udaf_names(&self) -> Vec<String> {
         let mut names = self.engine_state.aggr_names();
         names.extend(self.session_state.aggregate_functions().keys().cloned());
+        names.extend(function_alias::aggregate_alias_names().map(|name| name.to_string()));
         names
     }
 
@@ -233,9 +257,14 @@ impl ContextProvider for DfContextProviderAdapter {
                 .table_functions()
                 .get(name)
                 .cloned()
-                .ok_or_else(|| {
-                    DataFusionError::Plan(format!("table function '{name}' not found"))
-                })?;
+                .or_else(|| {
+                    function_alias::resolve_scalar(name)
+                        .and_then(|alias| self.session_state.table_functions().get(alias).cloned())
+                });
+
+            let tbl_func = tbl_func.ok_or_else(|| {
+                DataFusionError::Plan(format!("table function '{name}' not found"))
+            })?;
             let provider = tbl_func.create_table_provider(&args)?;
 
             Ok(provider_as_source(provider))

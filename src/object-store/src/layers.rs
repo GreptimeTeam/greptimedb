@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod lru_cache;
 #[cfg(feature = "testing")]
 pub mod mock;
 
-pub use lru_cache::*;
 pub use opendal::layers::*;
 pub use prometheus::build_prometheus_metrics_layer;
 

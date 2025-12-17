@@ -222,6 +222,29 @@ pub fn validate_column_skipping_index_create_option(key: &str) -> bool {
     .contains(&key)
 }
 
+/// Valid options for VECTOR INDEX:
+/// - engine: Vector index engine (usearch)
+/// - metric: Distance metric (l2sq, cosine, inner_product)
+/// - connectivity: HNSW M parameter
+/// - expansion_add: ef_construction parameter
+/// - expansion_search: ef_search parameter
+pub const COLUMN_VECTOR_INDEX_OPT_KEY_ENGINE: &str = "engine";
+pub const COLUMN_VECTOR_INDEX_OPT_KEY_METRIC: &str = "metric";
+pub const COLUMN_VECTOR_INDEX_OPT_KEY_CONNECTIVITY: &str = "connectivity";
+pub const COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_ADD: &str = "expansion_add";
+pub const COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_SEARCH: &str = "expansion_search";
+
+pub fn validate_column_vector_index_create_option(key: &str) -> bool {
+    [
+        COLUMN_VECTOR_INDEX_OPT_KEY_ENGINE,
+        COLUMN_VECTOR_INDEX_OPT_KEY_METRIC,
+        COLUMN_VECTOR_INDEX_OPT_KEY_CONNECTIVITY,
+        COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_ADD,
+        COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_SEARCH,
+    ]
+    .contains(&key)
+}
+
 /// Convert an [`IntervalMonthDayNano`] to a [`Duration`].
 #[cfg(feature = "enterprise")]
 pub fn convert_month_day_nano_to_duration(

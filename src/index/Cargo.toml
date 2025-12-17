@@ -17,6 +17,7 @@ common-error.workspace = true
 common-macro.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
+datatypes.workspace = true
 fastbloom = "0.8"
 fst.workspace = true
 futures.workspace = true
@@ -25,6 +26,7 @@ itertools.workspace = true
 jieba-rs = "0.8"
 lazy_static.workspace = true
 mockall.workspace = true
+nalgebra.workspace = true
 pin-project.workspace = true
 prost.workspace = true
 puffin.workspace = true
@@ -39,6 +41,7 @@ tantivy = { version = "0.24", features = ["zstd-compression"] }
 tantivy-jieba = "0.16"
 tokio.workspace = true
 tokio-util.workspace = true
+usearch = { version = "2.21", default-features = false, features = ["fp16lib"] }
 uuid.workspace = true
 
 [dev-dependencies]
