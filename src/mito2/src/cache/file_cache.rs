@@ -727,7 +727,7 @@ impl fmt::Display for FileType {
 
 impl FileType {
     /// Parses the file type from string.
-    pub fn parse(s: &str) -> Option<FileType> {
+    pub(crate) fn parse(s: &str) -> Option<FileType> {
         match s {
             "parquet" => Some(FileType::Parquet),
             "puffin" => Some(FileType::Puffin(0)),
