@@ -185,6 +185,40 @@ pub struct ExportCommand {
     /// if oss is set, this is required
     #[clap(long)]
     oss_access_key_secret: Option<String>,
+
+    /// if export data to gcs
+    #[clap(long)]
+    gcs: bool,
+
+    /// The gcs bucket name
+    /// if gcs is set, this is required
+    #[clap(long)]
+    gcs_bucket: Option<String>,
+
+    /// The gcs root path
+    /// if gcs is set, this is required
+    #[clap(long)]
+    gcs_root: Option<String>,
+
+    /// The gcs endpoint
+    /// if gcs is set, this is required
+    #[clap(long)]
+    gcs_endpoint: Option<String>,
+
+    /// The gcs credential
+    /// if gcs is set, this is required
+    #[clap(long)]
+    gcs_credential: Option<String>,
+
+    /// The gcs predefined_acl
+    /// if gcs is set, this is required
+    #[clap(long, alias = "gcs-acl")]
+    gcs_predefined_acl: Option<String>,
+
+    /// The gcs default_storage_class
+    /// if gcs is set, this is required
+    #[clap(long, alias = "gcs-class")]
+    gcs_default_storage_class: Option<String>,
 }
 
 impl ExportCommand {
