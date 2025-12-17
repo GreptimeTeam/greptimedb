@@ -40,6 +40,7 @@
 | `grpc.tls.cert_path` | String | Unset | Certificate file path. |
 | `grpc.tls.key_path` | String | Unset | Private key file path. |
 | `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
+| `grpc.tls.skip_path_filter` | Bool | `false` | Skip path matching filter for reloading TLS config. |
 | `mysql` | -- | -- | MySQL server options. |
 | `mysql.enable` | Bool | `true` | Whether to enable. |
 | `mysql.addr` | String | `127.0.0.1:4002` | The addr to bind the MySQL server. |
@@ -51,6 +52,7 @@
 | `mysql.tls.cert_path` | String | Unset | Certificate file path. |
 | `mysql.tls.key_path` | String | Unset | Private key file path. |
 | `mysql.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload |
+| `mysql.tls.skip_path_filter` | Bool | `false` | Skip path matching filter for reloading TLS config. |
 | `postgres` | -- | -- | PostgresSQL server options. |
 | `postgres.enable` | Bool | `true` | Whether to enable |
 | `postgres.addr` | String | `127.0.0.1:4003` | The addr to bind the PostgresSQL server. |
@@ -61,6 +63,7 @@
 | `postgres.tls.cert_path` | String | Unset | Certificate file path. |
 | `postgres.tls.key_path` | String | Unset | Private key file path. |
 | `postgres.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload |
+| `postgres.tls.skip_path_filter` | Bool | `false` | Skip path matching filter for reloading TLS config. |
 | `opentsdb` | -- | -- | OpenTSDB protocol options. |
 | `opentsdb.enable` | Bool | `true` | Whether to enable OpenTSDB put in HTTP API. |
 | `influxdb` | -- | -- | InfluxDB protocol options. |
@@ -252,6 +255,7 @@
 | `grpc.tls.cert_path` | String | Unset | Certificate file path. |
 | `grpc.tls.key_path` | String | Unset | Private key file path. |
 | `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
+| `grpc.tls.skip_path_filter` | Bool | `false` | Skip path matching filter for reloading TLS config. |
 | `internal_grpc` | -- | -- | The internal gRPC server options. Internal gRPC port for nodes inside cluster to access frontend. |
 | `internal_grpc.bind_addr` | String | `127.0.0.1:4010` | The address to bind the gRPC server. |
 | `internal_grpc.server_addr` | String | `127.0.0.1:4010` | The address advertised to the metasrv, and used for connections from outside the host.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `grpc.bind_addr`. |
@@ -262,6 +266,7 @@
 | `internal_grpc.tls.cert_path` | String | Unset | Certificate file path. |
 | `internal_grpc.tls.key_path` | String | Unset | Private key file path. |
 | `internal_grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
+| `internal_grpc.tls.skip_path_filter` | Bool | `false` | Skip path matching filter for reloading TLS config. |
 | `mysql` | -- | -- | MySQL server options. |
 | `mysql.enable` | Bool | `true` | Whether to enable. |
 | `mysql.addr` | String | `127.0.0.1:4002` | The addr to bind the MySQL server. |
@@ -273,6 +278,7 @@
 | `mysql.tls.cert_path` | String | Unset | Certificate file path. |
 | `mysql.tls.key_path` | String | Unset | Private key file path. |
 | `mysql.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload |
+| `mysql.tls.skip_path_filter` | Bool | `false` | Skip path matching filter for reloading TLS config. |
 | `postgres` | -- | -- | PostgresSQL server options. |
 | `postgres.enable` | Bool | `true` | Whether to enable |
 | `postgres.addr` | String | `127.0.0.1:4003` | The addr to bind the PostgresSQL server. |
@@ -283,6 +289,7 @@
 | `postgres.tls.cert_path` | String | Unset | Certificate file path. |
 | `postgres.tls.key_path` | String | Unset | Private key file path. |
 | `postgres.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload |
+| `postgres.tls.skip_path_filter` | Bool | `false` | Skip path matching filter for reloading TLS config. |
 | `opentsdb` | -- | -- | OpenTSDB protocol options. |
 | `opentsdb.enable` | Bool | `true` | Whether to enable OpenTSDB put in HTTP API. |
 | `influxdb` | -- | -- | InfluxDB protocol options. |
@@ -448,6 +455,7 @@
 | `grpc.tls.cert_path` | String | Unset | Certificate file path. |
 | `grpc.tls.key_path` | String | Unset | Private key file path. |
 | `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
+| `grpc.tls.skip_path_filter` | Bool | `false` | Skip path matching filter for reloading TLS config. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
