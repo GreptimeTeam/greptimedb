@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arbitrary::{Arbitrary, Unstructured};
-use common_meta::distributed_time_constants;
+use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_telemetry::info;
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
@@ -252,10 +252,7 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     recover_pod_failure(ctx.kube.clone(), &ctx.namespace, &chaos_name).await?;
     wait_for_all_datanode_online(ctx.greptime.clone(), Duration::from_secs(60)).await;
 
-    tokio::time::sleep(Duration::from_secs(
-        distributed_time_constants::REGION_LEASE_SECS,
-    ))
-    .await;
+    tokio::time::sleep(default_distributed_time_constants().region_lease).await;
     // Validates value rows
     info!("Validates num of rows");
 

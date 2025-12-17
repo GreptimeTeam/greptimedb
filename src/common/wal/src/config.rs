@@ -189,6 +189,8 @@ mod tests {
                     client_cert_path: None,
                     client_key_path: None,
                 }),
+                connect_timeout: Duration::from_secs(3),
+                timeout: Duration::from_secs(3),
             },
             kafka_topic: KafkaTopicConfig {
                 num_topics: 32,
@@ -221,6 +223,8 @@ mod tests {
                     client_cert_path: None,
                     client_key_path: None,
                 }),
+                connect_timeout: Duration::from_secs(3),
+                timeout: Duration::from_secs(3),
             },
             max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),

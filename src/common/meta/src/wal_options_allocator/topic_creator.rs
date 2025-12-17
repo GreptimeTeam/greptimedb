@@ -14,8 +14,7 @@
 
 use common_telemetry::{debug, error, info};
 use common_wal::config::kafka::common::{
-    KafkaConnectionConfig, KafkaTopicConfig, DEFAULT_BACKOFF_CONFIG, DEFAULT_CONNECT_TIMEOUT,
-    DEFAULT_KEEP_ALIVE_CONFIG,
+    KafkaConnectionConfig, KafkaTopicConfig, DEFAULT_BACKOFF_CONFIG,
 };
 use rskafka::client::error::Error as RsKafkaError;
 use rskafka::client::error::ProtocolError::TopicAlreadyExists;
@@ -211,8 +210,8 @@ pub async fn build_kafka_client(connection: &KafkaConnectionConfig) -> Result<Cl
     // Builds an kafka controller client for creating topics.
     let mut builder = ClientBuilder::new(connection.broker_endpoints.clone())
         .backoff_config(DEFAULT_BACKOFF_CONFIG)
-        .connect_timeout(Some(DEFAULT_CONNECT_TIMEOUT))
-        .keepalive_config(DEFAULT_KEEP_ALIVE_CONFIG);
+        .connect_timeout(Some(connection.connect_timeout))
+        .timeout(Some(connection.timeout));
     if let Some(sasl) = &connection.sasl {
         builder = builder.sasl_config(sasl.config.clone().into_sasl_config());
     };

@@ -16,7 +16,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rskafka::client::{Credentials, KeepaliveConfig, SaslConfig};
+use rskafka::client::{Credentials, SaslConfig};
 use rskafka::BackoffConfig;
 use rustls::{ClientConfig, RootCertStore};
 use serde::{Deserialize, Serialize};
@@ -34,16 +34,6 @@ pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
     // otherwise the client will block the worker loop for a long time.
     deadline: Some(Duration::from_secs(3)),
 };
-
-/// The default keep-alive config for kafka client.
-pub const DEFAULT_KEEP_ALIVE_CONFIG: KeepaliveConfig = KeepaliveConfig {
-    time: Some(Duration::from_secs(10)),
-    interval: Some(Duration::from_secs(7)),
-    retries: Some(3),
-};
-
-/// The default connect timeout for kafka client.
-pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default interval for auto WAL pruning.
 pub const DEFAULT_AUTO_PRUNE_INTERVAL: Duration = Duration::ZERO;
@@ -171,6 +161,12 @@ pub struct KafkaConnectionConfig {
     pub sasl: Option<KafkaClientSasl>,
     /// Client TLS config
     pub tls: Option<KafkaClientTls>,
+    /// The connect timeout for kafka client.
+    #[serde(with = "humantime_serde")]
+    pub connect_timeout: Duration,
+    /// The timeout for kafka client.
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
 }
 
 impl Default for KafkaConnectionConfig {
@@ -179,6 +175,8 @@ impl Default for KafkaConnectionConfig {
             broker_endpoints: vec![BROKER_ENDPOINT.to_string()],
             sasl: None,
             tls: None,
+            connect_timeout: Duration::from_secs(3),
+            timeout: Duration::from_secs(3),
         }
     }
 }

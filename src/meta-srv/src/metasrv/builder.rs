@@ -27,7 +27,7 @@ use common_meta::ddl::{
     DdlContext, NoopRegionFailureDetectorControl, RegionFailureDetectorControllerRef,
 };
 use common_meta::ddl_manager::DdlManager;
-use common_meta::distributed_time_constants;
+use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::key::flow::flow_state::FlowStateManager;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::runtime_switch::{RuntimeSwitchManager, RuntimeSwitchManagerRef};
@@ -220,8 +220,12 @@ impl MetasrvBuilder {
 
         let selector_ctx = SelectorContext {
             server_addr: options.grpc.server_addr.clone(),
-            datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
-            flownode_lease_secs: distributed_time_constants::FLOWNODE_LEASE_SECS,
+            datanode_lease_secs: default_distributed_time_constants()
+                .datanode_lease
+                .as_secs(),
+            flownode_lease_secs: default_distributed_time_constants()
+                .flownode_lease
+                .as_secs(),
             kv_backend: kv_backend.clone(),
             meta_peer_client: meta_peer_client.clone(),
             table_id: None,
@@ -438,7 +442,7 @@ impl MetasrvBuilder {
             Some(handler_group_builder) => handler_group_builder,
             None => {
                 let region_lease_handler = RegionLeaseHandler::new(
-                    distributed_time_constants::REGION_LEASE_SECS,
+                    default_distributed_time_constants().region_lease.as_secs(),
                     table_metadata_manager.clone(),
                     memory_region_keeper.clone(),
                     customized_region_lease_renewer,

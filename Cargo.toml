@@ -188,8 +188,8 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "multipart",
 ] }
-# Branch: feat/keepalive-port
-rskafka = { git = "https://github.com/WenyXu/rskafka.git", rev = "40150bad95fddd39a772dc132ee9e92f8f91fe38", features = [
+# Branch: feat/request-timeout-port
+rskafka = { git = "https://github.com/WenyXu/rskafka.git", rev = "9494304ae3947b07e660b5d08549ad4a39c84a26", features = [
     "transport-tls",
 ] }
 rstest = "0.25"

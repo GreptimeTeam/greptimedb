@@ -23,6 +23,7 @@ pub mod prom_query_gateway;
 pub mod region_server;
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use api::v1::health_check_server::{HealthCheck, HealthCheckServer};
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
@@ -72,6 +73,12 @@ pub struct GrpcOptions {
     pub runtime_size: usize,
     #[serde(default = "Default::default")]
     pub tls: TlsOption,
+    /// The HTTP/2 keep-alive interval.
+    #[serde(with = "humantime_serde")]
+    pub http2_keep_alive_interval: Duration,
+    /// The HTTP/2 keep-alive timeout.
+    #[serde(with = "humantime_serde")]
+    pub http2_keep_alive_timeout: Duration,
 }
 
 impl GrpcOptions {
@@ -129,6 +136,8 @@ impl Default for GrpcOptions {
             flight_compression: FlightCompression::ArrowIpc,
             runtime_size: 8,
             tls: TlsOption::default(),
+            http2_keep_alive_interval: Duration::from_secs(10),
+            http2_keep_alive_timeout: Duration::from_secs(3),
         }
     }
 }

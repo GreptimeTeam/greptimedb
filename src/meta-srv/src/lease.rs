@@ -21,7 +21,7 @@ use std::task::{Context, Poll};
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use common_error::ext::BoxedError;
 use common_meta::cluster::{NodeInfo, NodeInfoKey, Role as ClusterRole};
-use common_meta::distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS;
+use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::kv_backend::{KvBackend, ResettableKvBackendRef};
 use common_meta::peer::{Peer, PeerLookupService};
 use common_meta::rpc::store::RangeRequest;
@@ -312,7 +312,9 @@ impl PeerLookupService for MetaPeerLookupService {
         lookup_frontends(
             &self.meta_peer_client,
             // TODO(zyy17): How to get the heartbeat interval of the frontend if it uses a custom heartbeat interval?
-            FRONTEND_HEARTBEAT_INTERVAL_MILLIS,
+            default_distributed_time_constants()
+                .frontend_heartbeat_interval
+                .as_secs(),
         )
         .await
         .map_err(BoxedError::new)

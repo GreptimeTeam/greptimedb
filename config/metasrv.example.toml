@@ -55,6 +55,13 @@ allow_region_failover_on_local_wal = false
 ## Max allowed idle time before removing node info from metasrv memory.
 node_max_idle_time = "24hours"
 
+## Base heartbeat interval for calculating distributed time constants.
+## The frontend heartbeat interval is 6 times of the base heartbeat interval.
+## The flownode/datanode heartbeat interval is 1 times of the base heartbeat interval.
+## e.g., If the base heartbeat interval is 3s, the frontend heartbeat interval is 18s, the flownode/datanode heartbeat interval is 3s.
+## If you change this value, you need to change the heartbeat interval of the flownode/frontend/datanode accordingly.
+#+ heartbeat_interval = "3s"
+
 ## Whether to enable greptimedb telemetry. Enabled by default.
 #+ enable_telemetry = true
 
@@ -93,6 +100,16 @@ ca_cert_path = ""
 ## Watch for certificate file changes and auto reload
 watch = false
 
+## The backend client options.
+## Currently, only applicable when using etcd as the metadata store.
+#+ [backend_client]
+## The keep alive timeout for backend client.
+#+ keep_alive_timeout = "3s"
+## The keep alive interval for backend client.
+#+ keep_alive_interval = "10s"
+## The connect timeout for backend client.
+#+ connect_timeout = "3s"
+
 ## The gRPC server options.
 [grpc]
 ## The address to bind the gRPC server.
@@ -107,6 +124,10 @@ runtime_size = 8
 max_recv_message_size = "512MB"
 ## The maximum send message size for gRPC server.
 max_send_message_size = "512MB"
+## The server side HTTP/2 keep-alive interval
+#+ http2_keep_alive_interval = "10s"
+## The server side HTTP/2 keep-alive timeout.
+#+ http2_keep_alive_timeout = "3s"
 
 ## The HTTP server options.
 [http]

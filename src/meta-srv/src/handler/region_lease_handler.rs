@@ -124,7 +124,7 @@ mod test {
     use std::sync::Arc;
 
     use common_meta::datanode::{RegionManifestInfo, RegionStat, Stat};
-    use common_meta::distributed_time_constants;
+    use common_meta::distributed_time_constants::default_distributed_time_constants;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::key::TableMetadataManager;
@@ -223,7 +223,7 @@ mod test {
         let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
 
         let handler = RegionLeaseHandler::new(
-            distributed_time_constants::REGION_LEASE_SECS,
+            default_distributed_time_constants().region_lease.as_secs() as u64,
             table_metadata_manager.clone(),
             opening_region_keeper.clone(),
             None,
@@ -253,7 +253,7 @@ mod test {
 
         assert_eq!(
             acc.region_lease.as_ref().unwrap().lease_seconds,
-            distributed_time_constants::REGION_LEASE_SECS
+            default_distributed_time_constants().region_lease.as_secs()
         );
 
         assert_region_lease(
@@ -287,7 +287,7 @@ mod test {
 
         assert_eq!(
             acc.region_lease.as_ref().unwrap().lease_seconds,
-            distributed_time_constants::REGION_LEASE_SECS
+            default_distributed_time_constants().region_lease.as_secs()
         );
 
         assert_region_lease(
@@ -366,7 +366,7 @@ mod test {
         });
 
         let handler = RegionLeaseHandler::new(
-            distributed_time_constants::REGION_LEASE_SECS,
+            default_distributed_time_constants().region_lease.as_secs(),
             table_metadata_manager.clone(),
             Default::default(),
             None,

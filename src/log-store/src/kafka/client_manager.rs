@@ -15,9 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_wal::config::kafka::common::{
-    DEFAULT_BACKOFF_CONFIG, DEFAULT_CONNECT_TIMEOUT, DEFAULT_KEEP_ALIVE_CONFIG,
-};
+use common_wal::config::kafka::common::DEFAULT_BACKOFF_CONFIG;
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use dashmap::DashMap;
 use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
@@ -80,8 +78,8 @@ impl ClientManager {
         // Sets backoff config for the top-level kafka client and all clients constructed by it.
         let mut builder = ClientBuilder::new(config.connection.broker_endpoints.clone())
             .backoff_config(DEFAULT_BACKOFF_CONFIG)
-            .connect_timeout(Some(DEFAULT_CONNECT_TIMEOUT))
-            .keepalive_config(DEFAULT_KEEP_ALIVE_CONFIG);
+            .connect_timeout(Some(config.connection.connect_timeout))
+            .timeout(Some(config.connection.timeout));
         if let Some(sasl) = &config.connection.sasl {
             builder = builder.sasl_config(sasl.config.clone().into_sasl_config());
         };
