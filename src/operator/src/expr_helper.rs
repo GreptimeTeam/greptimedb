@@ -216,6 +216,11 @@ pub fn create_to_expr(
             .context(UnrecognizedTableOptionSnafu)?,
     );
 
+    let mut table_options = table_options;
+    if table_options.contains_key("compaction.type") {
+        table_options.insert("compaction.override".to_string(), "true".to_string());
+    }
+
     let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
 
     let expr = CreateTableExpr {

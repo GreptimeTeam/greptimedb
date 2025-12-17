@@ -62,7 +62,7 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
 use crate::read::{BoxedBatchReader, BoxedRecordBatchStream};
-use crate::region::options::MergeMode;
+use crate::region::options::{MergeMode, RegionOptions};
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequestWithTime};
@@ -311,9 +311,24 @@ impl CompactionScheduler {
         request: CompactionRequest,
         options: compact_request::Options,
     ) -> Result<()> {
+        let region_id = request.region_id();
+        let (dynamic_compaction_opts, ttl) = find_dynamic_options(
+            region_id.table_id(),
+            &request.current_version.options,
+            &request.schema_metadata_manager,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            warn!(e; "Failed to find dynamic options for region: {}", region_id);
+            (
+                request.current_version.options.compaction.clone(),
+                request.current_version.options.ttl.unwrap_or_default(),
+            )
+        });
+
         let picker = new_picker(
             &options,
-            &request.current_version.options.compaction,
+            &dynamic_compaction_opts,
             request.current_version.options.append_mode,
             Some(self.engine_config.max_background_compactions),
         );
@@ -328,20 +343,9 @@ impl CompactionScheduler {
             cache_manager,
             manifest_ctx,
             listener,
-            schema_metadata_manager,
+            schema_metadata_manager: _,
             max_parallelism,
         } = request;
-
-        let ttl = find_ttl(
-            region_id.table_id(),
-            current_version.options.ttl,
-            &schema_metadata_manager,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            warn!(e; "Failed to get ttl for region: {}", region_id);
-            TimeToLive::default()
-        });
 
         debug!(
             "Pick compaction strategy {:?} for region: {}, ttl: {:?}",
@@ -351,7 +355,10 @@ impl CompactionScheduler {
         let compaction_region = CompactionRegion {
             region_id,
             current_version: current_version.clone(),
-            region_options: current_version.options.clone(),
+            region_options: RegionOptions {
+                compaction: dynamic_compaction_opts.clone(),
+                ..current_version.options.clone()
+            },
             engine_config: engine_config.clone(),
             region_metadata: current_version.metadata.clone(),
             cache_manager: cache_manager.clone(),
@@ -382,7 +389,7 @@ impl CompactionScheduler {
 
         // If specified to run compaction remotely, we schedule the compaction job remotely.
         // It will fall back to local compaction if there is no remote job scheduler.
-        let waiters = if current_version.options.compaction.remote_compaction() {
+        let waiters = if dynamic_compaction_opts.remote_compaction() {
             if let Some(remote_job_scheduler) = &self.plugins.get::<RemoteJobSchedulerRef>() {
                 let remote_compaction_job = CompactionJob {
                     compaction_region: compaction_region.clone(),
@@ -411,7 +418,7 @@ impl CompactionScheduler {
                         return Ok(());
                     }
                     Err(e) => {
-                        if !current_version.options.compaction.fallback_to_local() {
+                        if !dynamic_compaction_opts.fallback_to_local() {
                             error!(e; "Failed to schedule remote compaction job for region {}", region_id);
                             return RemoteCompactionSnafu {
                                 region_id,
@@ -494,29 +501,65 @@ impl Drop for CompactionScheduler {
     }
 }
 
-/// Finds TTL of table by first examine table options then database options.
-async fn find_ttl(
+/// Finds compaction options and TTL together with a single metadata fetch to reduce RTT.
+async fn find_dynamic_options(
     table_id: TableId,
-    table_ttl: Option<TimeToLive>,
+    region_options: &crate::region::options::RegionOptions,
     schema_metadata_manager: &SchemaMetadataManagerRef,
-) -> Result<TimeToLive> {
-    // If table TTL is set, we use it.
-    if let Some(table_ttl) = table_ttl {
-        return Ok(table_ttl);
+) -> Result<(crate::region::options::CompactionOptions, TimeToLive)> {
+    if region_options.compaction_override && region_options.ttl.is_some() {
+        return Ok((
+            region_options.compaction.clone(),
+            region_options.ttl.unwrap(),
+        ));
     }
 
-    let ttl = tokio::time::timeout(
+    let db_options = tokio::time::timeout(
         crate::config::FETCH_OPTION_TIMEOUT,
         schema_metadata_manager.get_schema_options_by_table_id(table_id),
     )
     .await
     .context(TimeoutSnafu)?
-    .context(GetSchemaMetadataSnafu)?
-    .and_then(|options| options.ttl)
-    .unwrap_or_default()
-    .into();
+    .context(GetSchemaMetadataSnafu)?;
 
-    Ok(ttl)
+    let ttl = if region_options.ttl.is_some() {
+        region_options.ttl.unwrap()
+    } else {
+        db_options
+            .as_ref()
+            .and_then(|options| options.ttl)
+            .unwrap_or_default()
+            .into()
+    };
+
+    let compaction = if !region_options.compaction_override {
+        if let Some(schema_opts) = db_options {
+            let map: HashMap<String, String> = schema_opts
+                .extra_options
+                .iter()
+                .filter_map(|(k, v)| {
+                    if k.starts_with("compaction.") {
+                        Some((k.clone(), v.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if map.is_empty() {
+                region_options.compaction.clone()
+            } else {
+                crate::region::options::RegionOptions::try_from(&map)
+                    .map(|o| o.compaction)
+                    .unwrap_or_else(|_| region_options.compaction.clone())
+            }
+        } else {
+            region_options.compaction.clone()
+        }
+    } else {
+        region_options.compaction.clone()
+    };
+
+    Ok((compaction, ttl))
 }
 
 /// Status of running and pending region compaction tasks.
@@ -807,6 +850,8 @@ struct PendingCompaction {
 mod tests {
     use api::v1::region::StrictWindow;
     use common_datasource::compression::CompressionType;
+    use common_meta::key::schema_name::SchemaNameValue;
+    use common_time::DatabaseTimeToLive;
     use tokio::sync::{Barrier, oneshot};
 
     use super::*;
@@ -817,6 +862,80 @@ mod tests {
     use crate::test_util::mock_schema_metadata_manager;
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::version_util::{VersionControlBuilder, apply_edit};
+
+    #[tokio::test]
+    async fn test_find_compaction_options_db_level() {
+        let env = SchedulerEnv::new().await;
+        let builder = VersionControlBuilder::new();
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+        let region_id = builder.region_id();
+        let table_id = region_id.table_id();
+        // Register table without ttl but with db-level compaction options
+        let mut schema_value = SchemaNameValue {
+            ttl: Some(DatabaseTimeToLive::default()),
+            ..Default::default()
+        };
+        schema_value
+            .extra_options
+            .insert("compaction.type".to_string(), "twcs".to_string());
+        schema_value
+            .extra_options
+            .insert("compaction.twcs.time_window".to_string(), "2h".to_string());
+        schema_metadata_manager
+            .register_region_table_info(
+                table_id,
+                "t",
+                "c",
+                "s",
+                Some(schema_value),
+                kv_backend.clone(),
+            )
+            .await;
+
+        let version_control = Arc::new(builder.build());
+        let region_opts = version_control.current().version.options.clone();
+        let (opts, _) = find_dynamic_options(table_id, &region_opts, &schema_metadata_manager)
+            .await
+            .unwrap();
+        match opts {
+            crate::region::options::CompactionOptions::Twcs(t) => {
+                assert_eq!(t.time_window_seconds(), Some(2 * 3600));
+            }
+        }
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let (otx, _orx) = oneshot::channel();
+        let request = scheduler
+            .region_status
+            .entry(region_id)
+            .or_insert_with(|| {
+                crate::compaction::CompactionStatus::new(
+                    region_id,
+                    version_control.clone(),
+                    env.access_layer.clone(),
+                )
+            })
+            .new_compaction_request(
+                scheduler.request_sender.clone(),
+                OptionOutputTx::new(Some(OutputTx::new(otx))),
+                scheduler.engine_config.clone(),
+                scheduler.cache_manager.clone(),
+                &manifest_ctx,
+                scheduler.listener.clone(),
+                schema_metadata_manager.clone(),
+                1,
+            );
+        scheduler
+            .schedule_compaction_request(
+                request,
+                compact_request::Options::Regular(Default::default()),
+            )
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn test_schedule_empty() {

@@ -121,6 +121,9 @@ impl StatementExecutor {
         // Because it will be used directly while compaction.
         if let Some(schema_options) = schema_options {
             for (key, value) in schema_options.extra_options.iter() {
+                if key.starts_with("compaction.") {
+                    continue;
+                }
                 create_expr
                     .table_options
                     .entry(key.clone())
