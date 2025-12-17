@@ -109,7 +109,7 @@ impl<M: MemoryMetrics> MemoryManager<M> {
                     permits <= quota.limit_permits,
                     MemoryLimitExceededSnafu {
                         requested_bytes: bytes,
-                        limit_bytes: quota.permits_to_bytes(quota.limit_permits),
+                        limit_bytes: self.limit_bytes()
                     }
                 );
 
