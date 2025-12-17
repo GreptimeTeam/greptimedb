@@ -20,7 +20,7 @@ use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::KvBackendRef;
 use meta_srv::bootstrap::create_etcd_client;
-use meta_srv::metasrv::{BackendImpl, BackendOptions};
+use meta_srv::metasrv::{BackendClientOptions, BackendImpl};
 
 use crate::error::{EmptyStoreAddrsSnafu, UnsupportedMemoryBackendSnafu};
 
@@ -67,9 +67,10 @@ impl StoreConfig {
         } else {
             let kvbackend = match self.backend {
                 BackendImpl::EtcdStore => {
-                    let etcd_client = create_etcd_client(store_addrs, &BackendOptions::default())
-                        .await
-                        .map_err(BoxedError::new)?;
+                    let etcd_client =
+                        create_etcd_client(store_addrs, &BackendClientOptions::default())
+                            .await
+                            .map_err(BoxedError::new)?;
                     Ok(EtcdStore::with_etcd_client(etcd_client, max_txn_ops))
                 }
                 #[cfg(feature = "pg_kvbackend")]

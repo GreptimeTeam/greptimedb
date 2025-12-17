@@ -100,9 +100,9 @@ ca_cert_path = ""
 ## Watch for certificate file changes and auto reload
 watch = false
 
-## The backend options.
+## The backend client options.
 ## Currently, only applicable when using etcd as the metadata store.
-#+ [backend_options]
+#+ [backend_client]
 ## The keep alive timeout for backend client.
 #+ keep_alive_timeout = "3s"
 ## The keep alive interval for backend client.

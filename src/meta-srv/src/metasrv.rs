@@ -100,7 +100,7 @@ pub enum BackendImpl {
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 #[serde(default)]
-pub struct BackendOptions {
+pub struct BackendClientOptions {
     #[serde(with = "humantime_serde")]
     pub keep_alive_timeout: Duration,
     #[serde(with = "humantime_serde")]
@@ -109,7 +109,7 @@ pub struct BackendOptions {
     pub connect_timeout: Duration,
 }
 
-impl Default for BackendOptions {
+impl Default for BackendClientOptions {
     fn default() -> Self {
         Self {
             keep_alive_interval: Duration::from_secs(10),
@@ -134,10 +134,10 @@ pub struct MetasrvOptions {
     /// Only applicable when using PostgreSQL or MySQL as the metadata store
     #[serde(default)]
     pub backend_tls: Option<TlsOption>,
-    /// The backend options.
+    /// The backend client options.
     /// Currently, only applicable when using etcd as the metadata store.
     #[serde(default)]
-    pub backend_options: BackendOptions,
+    pub backend_client: BackendClientOptions,
     /// The type of selector.
     pub selector: SelectorType,
     /// Whether to use the memory store.
@@ -244,7 +244,7 @@ impl fmt::Debug for MetasrvOptions {
             .field("tracing", &self.tracing)
             .field("backend", &self.backend)
             .field("heartbeat_interval", &self.heartbeat_interval)
-            .field("backend_options", &self.backend_options);
+            .field("backend_client", &self.backend_client);
 
         #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
         debug_struct.field("meta_table_name", &self.meta_table_name);
@@ -307,7 +307,7 @@ impl Default for MetasrvOptions {
             meta_election_lock_id: common_meta::kv_backend::DEFAULT_META_ELECTION_LOCK_ID,
             node_max_idle_time: Duration::from_secs(24 * 60 * 60),
             event_recorder: EventRecorderOptions::default(),
-            backend_options: BackendOptions::default(),
+            backend_client: BackendClientOptions::default(),
         }
     }
 }

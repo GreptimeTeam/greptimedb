@@ -71,7 +71,7 @@ use crate::election::rds::postgres::PgElection;
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{
-    BackendImpl, BackendOptions, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
+    BackendClientOptions, BackendImpl, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
 };
 use crate::node_excluder::NodeExcluderRef;
 use crate::selector::lease_based::LeaseBasedSelector;
@@ -294,7 +294,7 @@ pub async fn metasrv_builder(
         (Some(kv_backend), _) => (kv_backend, None),
         (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
         (None, BackendImpl::EtcdStore) => {
-            let etcd_client = create_etcd_client(&opts.store_addrs, &opts.backend_options).await?;
+            let etcd_client = create_etcd_client(&opts.store_addrs, &opts.backend_client).await?;
             let kv_backend = EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
             let election = EtcdElection::with_etcd_client(
                 &opts.grpc.server_addr,
@@ -444,7 +444,7 @@ pub async fn metasrv_builder(
 
 pub async fn create_etcd_client(
     store_addrs: &[String],
-    options: &BackendOptions,
+    options: &BackendClientOptions,
 ) -> Result<Client> {
     let etcd_endpoints = store_addrs
         .iter()
