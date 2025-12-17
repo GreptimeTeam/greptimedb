@@ -17,9 +17,12 @@ use std::sync::Arc;
 use snafu::ensure;
 use tokio::sync::{Semaphore, TryAcquireError};
 
-use crate::error::{MemoryLimitExceededSnafu, MemorySemaphoreClosedSnafu, Result};
+use crate::error::{
+    MemoryAcquireTimeoutSnafu, MemoryLimitExceededSnafu, MemorySemaphoreClosedSnafu, Result,
+};
 use crate::granularity::PermitGranularity;
 use crate::guard::MemoryGuard;
+use crate::policy::OnExhaustedPolicy;
 
 /// Trait for recording memory usage metrics.
 pub trait MemoryMetrics: Clone + Send + Sync + 'static {
@@ -143,6 +146,45 @@ impl<M: MemoryMetrics> MemoryManager<M> {
                     }
                 }
             }
+        }
+    }
+
+    /// Acquires memory based on the given policy.
+    ///
+    /// - For `OnExhaustedPolicy::Wait`: Waits up to the timeout duration for memory to become available
+    /// - For `OnExhaustedPolicy::Fail`: Returns immediately if memory is not available
+    ///
+    /// # Errors
+    /// - `MemoryLimitExceeded`: Requested bytes exceed the total limit (both policies), or memory is currently exhausted (Fail policy only)
+    /// - `MemoryAcquireTimeout`: Timeout elapsed while waiting for memory (Wait policy only)
+    /// - `MemorySemaphoreClosed`: The internal semaphore is unexpectedly closed (rare, indicates system issue)
+    pub async fn acquire_with_policy(
+        &self,
+        bytes: u64,
+        policy: OnExhaustedPolicy,
+    ) -> Result<MemoryGuard<M>> {
+        match policy {
+            OnExhaustedPolicy::Wait { timeout } => {
+                match tokio::time::timeout(timeout, self.acquire(bytes)).await {
+                    Ok(Ok(guard)) => Ok(guard),
+                    Ok(Err(e)) => Err(e),
+                    Err(_elapsed) => {
+                        // Timeout elapsed while waiting
+                        MemoryAcquireTimeoutSnafu {
+                            requested_bytes: bytes,
+                            waited: timeout,
+                        }
+                        .fail()
+                    }
+                }
+            }
+            OnExhaustedPolicy::Fail => self.try_acquire(bytes).ok_or_else(|| {
+                MemoryLimitExceededSnafu {
+                    requested_bytes: bytes,
+                    limit_bytes: self.limit_bytes(),
+                }
+                .build()
+            }),
         }
     }
 }

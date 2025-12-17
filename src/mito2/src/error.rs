@@ -1042,20 +1042,8 @@ pub enum Error {
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
 
-    #[snafu(display(
-        "Compaction memory limit exceeded for region {region_id}: required {required_bytes} bytes, limit {limit_bytes} bytes (policy: {policy})",
-    ))]
+    #[snafu(display("Compaction memory exhausted for region {region_id} (policy: {policy})",))]
     CompactionMemoryExhausted {
-        region_id: RegionId,
-        required_bytes: u64,
-        limit_bytes: u64,
-        policy: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to acquire memory for region {region_id} (policy: {policy})"))]
-    MemoryAcquireFailed {
         region_id: RegionId,
         policy: String,
         #[snafu(source)]
@@ -1359,9 +1347,7 @@ impl ErrorExt for Error {
 
             ManualCompactionOverride {} => StatusCode::Cancelled,
 
-            CompactionMemoryExhausted { .. } => StatusCode::RuntimeResourcesExhausted,
-
-            MemoryAcquireFailed { source, .. } => source.status_code(),
+            CompactionMemoryExhausted { source, .. } => source.status_code(),
 
             IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
 
