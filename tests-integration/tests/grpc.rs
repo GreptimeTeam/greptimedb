@@ -955,6 +955,7 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         Some(server_cert_path),
         Some(server_key_path),
         false,
+        false,
     );
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,

@@ -80,6 +80,10 @@ pub struct StoreConfig {
     /// Enable watching TLS certificate files for changes
     #[clap(long = "backend-tls-watch")]
     pub backend_tls_watch: bool,
+
+    /// Skip path filter for TLS certificate files
+    #[clap(long = "backend-tls-skip-path-filter")]
+    pub backend_tls_skip_path_filter: bool,
 }
 
 impl StoreConfig {
@@ -91,6 +95,7 @@ impl StoreConfig {
                 key_path: self.backend_tls_key_path.clone(),
                 ca_cert_path: self.backend_tls_ca_cert_path.clone(),
                 watch: self.backend_tls_watch,
+                skip_path_filter: self.backend_tls_skip_path_filter,
             })
         } else {
             None
