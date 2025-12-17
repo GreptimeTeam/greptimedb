@@ -37,27 +37,24 @@ use crate::error::{FileWatchSnafu, InvalidPathSnafu, Result};
 pub struct FileWatcherConfig {
     /// Whether to include Remove events in addition to Modify and Create.
     pub include_remove_events: bool,
-    /// Whether to match the exact file name when checking if the event is relevant.
-    /// Default is true.
-    /// If set to false, the watcher will reload when the notify event is triggered.
-    pub match_file_name: bool,
+    /// Whether to skip filtering events to exact file paths.
+    /// Default is false (only events matching watched file paths trigger the callback).
+    /// If set to true, the callback is triggered on any event in the watched directories.
+    pub skip_path_filter: bool,
 }
 
 impl FileWatcherConfig {
     pub fn new() -> Self {
-        Self {
-            include_remove_events: false,
-            match_file_name: true,
-        }
+        Default::default()
     }
 
-    pub fn enable_remove_events(mut self) -> Self {
+    pub fn include_remove_events(mut self) -> Self {
         self.include_remove_events = true;
         self
     }
 
-    pub fn disable_file_name_match(mut self) -> Self {
-        self.match_file_name = false;
+    pub fn skip_path_filter(mut self) -> Self {
+        self.skip_path_filter = true;
         self
     }
 }
@@ -170,7 +167,7 @@ impl FileWatcherBuilder {
                         }
 
                         // Check if any of the event paths match our watched files
-                        if config.match_file_name
+                        if !config.skip_path_filter
                             && !event.paths.iter().any(|p| watched_files.contains(p))
                         {
                             continue;
