@@ -30,7 +30,7 @@ use common_telemetry::{error, info, warn};
 use notify::{EventKind, RecursiveMode, Watcher};
 use snafu::ResultExt;
 
-use crate::error::{CanonicalizePathSnafu, FileWatchSnafu, InvalidPathSnafu, Result};
+use crate::error::{FileWatchSnafu, InvalidPathSnafu, Result};
 
 /// Configuration for the file watcher behavior.
 #[derive(Debug, Clone, Default)]
@@ -93,11 +93,8 @@ impl FileWatcherBuilder {
                 path: path.display().to_string(),
             }
         );
-        // Canonicalize the path for reliable comparison with event paths
-        let canonical = path.canonicalize().context(CanonicalizePathSnafu {
-            path: path.display().to_string(),
-        })?;
-        self.file_paths.push(canonical);
+
+        self.file_paths.push(path.to_path_buf());
         Ok(self)
     }
 
@@ -166,18 +163,10 @@ impl FileWatcherBuilder {
                         }
 
                         // Check if any of the event paths match our watched files
-                        let is_watched_file = event.paths.iter().any(|event_path| {
-                            // Try to canonicalize the event path for comparison
-                            // If the file was deleted, canonicalize will fail, so we also
-                            // compare the raw path
-                            if let Ok(canonical) = event_path.canonicalize()
-                                && watched_files.contains(&canonical)
-                            {
-                                return true;
-                            }
-                            // For deleted files, compare using the raw path
-                            watched_files.contains(event_path)
-                        });
+                        let is_watched_file = event
+                            .paths
+                            .iter()
+                            .any(|event_path| watched_files.contains(event_path));
 
                         if !is_watched_file {
                             continue;
