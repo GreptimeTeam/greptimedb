@@ -100,7 +100,7 @@ pub enum BackendImpl {
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 #[serde(default)]
-pub struct EtcdOptions {
+pub struct BackendOptions {
     #[serde(with = "humantime_serde")]
     pub keep_alive_timeout: Duration,
     #[serde(with = "humantime_serde")]
@@ -109,7 +109,7 @@ pub struct EtcdOptions {
     pub connect_timeout: Duration,
 }
 
-impl Default for EtcdOptions {
+impl Default for BackendOptions {
     fn default() -> Self {
         Self {
             keep_alive_interval: Duration::from_secs(10),
@@ -134,6 +134,10 @@ pub struct MetasrvOptions {
     /// Only applicable when using PostgreSQL or MySQL as the metadata store
     #[serde(default)]
     pub backend_tls: Option<TlsOption>,
+    /// The backend options.
+    /// Currently, only applicable when using etcd as the metadata store.
+    #[serde(default)]
+    pub backend_options: BackendOptions,
     /// The type of selector.
     pub selector: SelectorType,
     /// Whether to use the memory store.
@@ -199,9 +203,6 @@ pub struct MetasrvOptions {
     pub memory: MemoryOptions,
     /// The datastore for kv metadata.
     pub backend: BackendImpl,
-    /// The etcd options.
-    /// Only applicable when using etcd as the metadata store.
-    pub etcd: EtcdOptions,
     #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
     /// Table name of rds kv backend.
     pub meta_table_name: String,
@@ -243,7 +244,7 @@ impl fmt::Debug for MetasrvOptions {
             .field("tracing", &self.tracing)
             .field("backend", &self.backend)
             .field("heartbeat_interval", &self.heartbeat_interval)
-            .field("etcd", &self.etcd);
+            .field("backend_options", &self.backend_options);
 
         #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
         debug_struct.field("meta_table_name", &self.meta_table_name);
@@ -306,7 +307,7 @@ impl Default for MetasrvOptions {
             meta_election_lock_id: common_meta::kv_backend::DEFAULT_META_ELECTION_LOCK_ID,
             node_max_idle_time: Duration::from_secs(24 * 60 * 60),
             event_recorder: EventRecorderOptions::default(),
-            etcd: EtcdOptions::default(),
+            backend_options: BackendOptions::default(),
         }
     }
 }

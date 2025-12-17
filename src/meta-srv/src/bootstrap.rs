@@ -71,7 +71,7 @@ use crate::election::rds::postgres::PgElection;
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{
-    BackendImpl, EtcdOptions, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
+    BackendImpl, BackendOptions, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
 };
 use crate::node_excluder::NodeExcluderRef;
 use crate::selector::lease_based::LeaseBasedSelector;
@@ -294,7 +294,7 @@ pub async fn metasrv_builder(
         (Some(kv_backend), _) => (kv_backend, None),
         (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
         (None, BackendImpl::EtcdStore) => {
-            let etcd_client = create_etcd_client(&opts.store_addrs, &opts.etcd).await?;
+            let etcd_client = create_etcd_client(&opts.store_addrs, &opts.backend_options).await?;
             let kv_backend = EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
             let election = EtcdElection::with_etcd_client(
                 &opts.grpc.server_addr,
@@ -444,7 +444,7 @@ pub async fn metasrv_builder(
 
 pub async fn create_etcd_client(
     store_addrs: &[String],
-    etcd_options: &EtcdOptions,
+    options: &BackendOptions,
 ) -> Result<Client> {
     let etcd_endpoints = store_addrs
         .iter()
@@ -453,11 +453,8 @@ pub async fn create_etcd_client(
         .collect::<Vec<_>>();
     let options = ConnectOptions::new()
         .with_keep_alive_while_idle(true)
-        .with_keep_alive(
-            etcd_options.keep_alive_interval,
-            etcd_options.keep_alive_timeout,
-        )
-        .with_connect_timeout(etcd_options.connect_timeout);
+        .with_keep_alive(options.keep_alive_interval, options.keep_alive_timeout)
+        .with_connect_timeout(options.connect_timeout);
     Client::connect(&etcd_endpoints, Some(options))
         .await
         .context(error::ConnectEtcdSnafu)

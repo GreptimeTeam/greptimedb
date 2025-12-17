@@ -15,6 +15,31 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
+pub const BASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
+
+/// The lease seconds of metasrv leader.
+pub const META_LEASE_SECS: u64 = 5;
+
+/// The keep-alive interval of the Postgres connection.
+pub const POSTGRES_KEEP_ALIVE_SECS: u64 = 30;
+
+/// In a lease, there are two opportunities for renewal.
+pub const META_KEEP_ALIVE_INTERVAL_SECS: u64 = META_LEASE_SECS / 2;
+
+/// The timeout of the heartbeat request.
+pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1);
+
+/// The keep-alive interval of the heartbeat channel.
+pub const HEARTBEAT_CHANNEL_KEEP_ALIVE_INTERVAL_SECS: Duration =
+    Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1);
+
+/// The keep-alive timeout of the heartbeat channel.
+pub const HEARTBEAT_CHANNEL_KEEP_ALIVE_TIMEOUT_SECS: Duration =
+    Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1);
+
+/// The default mailbox round-trip timeout.
+pub const MAILBOX_RTT_SECS: u64 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// The distributed time constants.
 pub struct DistributedTimeConstants {
@@ -48,7 +73,7 @@ impl DistributedTimeConstants {
 
 impl Default for DistributedTimeConstants {
     fn default() -> Self {
-        Self::from_heartbeat_interval(Duration::from_secs(3))
+        Self::from_heartbeat_interval(BASE_HEARTBEAT_INTERVAL)
     }
 }
 
@@ -71,28 +96,3 @@ pub fn init_distributed_time_constants(base_heartbeat_interval: Duration) {
         distributed_time_constants
     );
 }
-
-pub const BASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
-
-/// The lease seconds of metasrv leader.
-pub const META_LEASE_SECS: u64 = 5;
-
-/// The keep-alive interval of the Postgres connection.
-pub const POSTGRES_KEEP_ALIVE_SECS: u64 = 30;
-
-/// In a lease, there are two opportunities for renewal.
-pub const META_KEEP_ALIVE_INTERVAL_SECS: u64 = META_LEASE_SECS / 2;
-
-/// The timeout of the heartbeat request.
-pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1);
-
-/// The keep-alive interval of the heartbeat channel.
-pub const HEARTBEAT_CHANNEL_KEEP_ALIVE_INTERVAL_SECS: Duration =
-    Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1);
-
-/// The keep-alive timeout of the heartbeat channel.
-pub const HEARTBEAT_CHANNEL_KEEP_ALIVE_TIMEOUT_SECS: Duration =
-    Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS + 1);
-
-/// The default mailbox round-trip timeout.
-pub const MAILBOX_RTT_SECS: u64 = 1;

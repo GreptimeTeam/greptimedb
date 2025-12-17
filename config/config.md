@@ -346,10 +346,10 @@
 | `backend_tls.key_path` | String | `""` | Path to client private key file (for client authentication)<br/>Like "/path/to/client.key" |
 | `backend_tls.ca_cert_path` | String | `""` | Path to CA certificate file (for server certificate verification)<br/>Required when using custom CAs or self-signed certificates<br/>Leave empty to use system root certificates only<br/>Like "/path/to/ca.crt" |
 | `backend_tls.watch` | Bool | `false` | Watch for certificate file changes and auto reload |
-| `etcd` | -- | -- | The etcd options.<br/>Only applicable when using etcd as the metadata store. |
-| `etcd.keep_alive_timeout` | String | `3s` | The keep alive timeout for etcd client. |
-| `etcd.keep_alive_interval` | String | `10s` | The keep alive interval for etcd client. |
-| `etcd.connect_timeout` | String | `3s` | The connect timeout for etcd client. |
+| `backend_options` | -- | -- | The backend options.<br/>Currently, only applicable when using etcd as the metadata store. |
+| `backend_options.keep_alive_timeout` | String | `3s` | The keep alive timeout for backend client. |
+| `backend_options.keep_alive_interval` | String | `10s` | The keep alive interval for backend client. |
+| `backend_options.connect_timeout` | String | `3s` | The connect timeout for backend client. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:3002` | The address to bind the gRPC server. |
 | `grpc.server_addr` | String | `127.0.0.1:3002` | The communication server address for the frontend and datanode to connect to metasrv.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `bind_addr`. |
