@@ -64,18 +64,18 @@ const REPO_CONFIGS: Record<string, RepoConfig> = {
         throw new Error(`Invalid semantic version format: ${version}`);
       }
 
-      // 如果有预发布标识，抛出错误让人工判断
+      // If there is a pre-release identifier, throw an error for manual determination
       if (parsedVersion.prerelease && parsedVersion.prerelease.length > 0) {
         throw new Error(
-          `预发布版本 "${version}" 需要人工判断使用哪个 workflow。\n` +
-          `请根据具体情况选择:\n` +
-          `  - bump-version.yml (用于 major.minor 格式，如 ${parsedVersion.major}.${parsedVersion.minor})\n` +
-          `  - bump-patch-version.yml (用于patch版本，如 ${parsedVersion.major}.${parsedVersion.minor}.${parsedVersion.patch})\n` +
-          `考虑因素包括: 这是第一个预发布版本吗？是否接近正式 release？`
+          `Pre-release version "${version}" requires manual determination of which workflow to use.\n` +
+          `Please choose based on the specific situation:\n` +
+          `  - bump-version.yml (for major.minor format, such as ${parsedVersion.major}.${parsedVersion.minor})\n` +
+          `  - bump-patch-version.yml (for patch version, such as ${parsedVersion.major}.${parsedVersion.minor}.${parsedVersion.patch})\n` +
+          `Considerations include: Is this the first pre-release version? Is it close to the official release?`
         );
       }
 
-      // 正式版本的原有逻辑
+      // Original logic for official versions
       if (parsedVersion.patch === 0) {
         return ['bump-version.yml', `${parsedVersion.major}.${parsedVersion.minor}`];
       }
