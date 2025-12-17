@@ -49,7 +49,6 @@ use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
 use crate::instance::Instance;
 use crate::instance::region_query::FrontendRegionQueryHandler;
-use crate::limiter::Limiter;
 
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
@@ -248,14 +247,6 @@ impl FrontendBuilder {
             self.options.event_recorder.ttl,
         ))));
 
-        // Create the limiter if the max_in_flight_write_bytes is set.
-        let limiter = self
-            .options
-            .max_in_flight_write_bytes
-            .map(|max_in_flight_write_bytes| {
-                Arc::new(Limiter::new(max_in_flight_write_bytes.as_bytes() as usize))
-            });
-
         Ok(Instance {
             catalog_manager: self.catalog_manager,
             pipeline_operator,
@@ -266,7 +257,6 @@ impl FrontendBuilder {
             deleter,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
             event_recorder: Some(event_recorder),
-            limiter,
             process_manager,
             otlp_metrics_table_legacy_cache: DashMap::new(),
             slow_query_options: self.options.slow_query.clone(),

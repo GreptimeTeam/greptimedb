@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use common_base::readable_size::ReadableSize;
 use common_config::config::Configurable;
 use common_event_recorder::EventRecorderOptions;
 use common_options::datanode::DatanodeClientOptions;
@@ -63,7 +62,6 @@ pub struct FrontendOptions {
     pub user_provider: Option<String>,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
-    pub max_in_flight_write_bytes: Option<ReadableSize>,
     pub slow_query: SlowQueryOptions,
     pub memory: MemoryOptions,
     /// The event recorder options.
@@ -93,7 +91,6 @@ impl Default for FrontendOptions {
             user_provider: None,
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
-            max_in_flight_write_bytes: None,
             slow_query: SlowQueryOptions::default(),
             memory: MemoryOptions::default(),
             event_recorder: EventRecorderOptions::default(),

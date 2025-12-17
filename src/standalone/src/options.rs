@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, KvBackendConfig};
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
@@ -57,7 +56,6 @@ pub struct StandaloneOptions {
     pub tracing: TracingOptions,
     pub init_regions_in_background: bool,
     pub init_regions_parallelism: usize,
-    pub max_in_flight_write_bytes: Option<ReadableSize>,
     pub slow_query: SlowQueryOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
@@ -91,7 +89,6 @@ impl Default for StandaloneOptions {
             tracing: TracingOptions::default(),
             init_regions_in_background: false,
             init_regions_parallelism: 16,
-            max_in_flight_write_bytes: None,
             slow_query: SlowQueryOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
@@ -131,7 +128,6 @@ impl StandaloneOptions {
             meta_client: None,
             logging: cloned_opts.logging,
             user_provider: cloned_opts.user_provider,
-            max_in_flight_write_bytes: cloned_opts.max_in_flight_write_bytes,
             slow_query: cloned_opts.slow_query,
             ..Default::default()
         }

@@ -71,12 +71,6 @@ impl GrpcQueryHandler for Instance {
             .check_permission(ctx.current_user(), PermissionReq::GrpcRequest(&request))
             .context(PermissionSnafu)?;
 
-        let _guard = if let Some(limiter) = &self.limiter {
-            Some(limiter.limit_request(&request).await?)
-        } else {
-            None
-        };
-
         let output = match request {
             Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
             Request::RowInserts(requests) => {

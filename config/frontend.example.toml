@@ -6,10 +6,6 @@ default_timezone = "UTC"
 ## @toml2docs:none-default
 default_column_prefix = "greptime"
 
-## The maximum in-flight write bytes.
-## @toml2docs:none-default
-#+ max_in_flight_write_bytes = "500MB"
-
 ## The runtime options.
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.
