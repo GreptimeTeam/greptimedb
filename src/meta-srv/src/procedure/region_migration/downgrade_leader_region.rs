@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_error::ext::BoxedError;
-use common_meta::distributed_time_constants::REGION_LEASE_SECS;
+use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::instruction::{
     DowngradeRegion, DowngradeRegionReply, DowngradeRegionsReply, Instruction, InstructionReply,
 };
@@ -64,7 +64,7 @@ impl State for DowngradeLeaderRegion {
         let now = Instant::now();
         // Ensures the `leader_region_lease_deadline` must exist after recovering.
         ctx.volatile_ctx
-            .set_leader_region_lease_deadline(Duration::from_secs(REGION_LEASE_SECS));
+            .set_leader_region_lease_deadline(default_distributed_time_constants().region_lease);
 
         match self.downgrade_region_with_retry(ctx).await {
             Ok(_) => {
@@ -277,14 +277,14 @@ impl DowngradeLeaderRegion {
         if let Some(last_connection_at) = last_connection_at {
             let now = current_time_millis();
             let elapsed = now - last_connection_at;
-            let region_lease = Duration::from_secs(REGION_LEASE_SECS);
+            let region_lease = default_distributed_time_constants().region_lease;
 
             // It's safe to update the region leader lease deadline here because:
             // 1. The old region leader has already been marked as downgraded in metadata,
             //    which means any attempts to renew its lease will be rejected.
             // 2. The pusher disconnect time record only gets removed when the datanode (from_peer)
             //    establishes a new heartbeat connection stream.
-            if elapsed >= (REGION_LEASE_SECS * 1000) as i64 {
+            if elapsed >= (region_lease.as_secs() * 1000) as i64 {
                 ctx.volatile_ctx.reset_leader_region_lease_deadline();
                 info!(
                     "Datanode {}({}) has been disconnected for longer than the region lease period ({:?}), reset leader region lease deadline to None, region: {:?}",
@@ -697,7 +697,8 @@ mod tests {
         let procedure_ctx = new_procedure_context();
         let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
         let elapsed = timer.elapsed().as_secs();
-        assert!(elapsed < REGION_LEASE_SECS / 2);
+        let region_lease = default_distributed_time_constants().region_lease.as_secs();
+        assert!(elapsed < region_lease / 2);
         assert_eq!(
             ctx.volatile_ctx
                 .leader_region_last_entry_ids

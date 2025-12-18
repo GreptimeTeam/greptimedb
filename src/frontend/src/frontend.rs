@@ -142,7 +142,6 @@ impl Frontend {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
 
     use api::v1::meta::heartbeat_server::HeartbeatServer;
     use api::v1::meta::mailbox_message::Payload;
@@ -157,7 +156,7 @@ mod tests {
     use common_error::from_header_to_err_code_msg;
     use common_error::status_code::StatusCode;
     use common_grpc::channel_manager::ChannelManager;
-    use common_meta::distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS;
+    use common_meta::distributed_time_constants::default_distributed_time_constants;
     use common_meta::heartbeat::handler::HandlerGroupExecutor;
     use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
     use common_meta::heartbeat::handler::suspend::SuspendHandler;
@@ -409,7 +408,9 @@ mod tests {
         let meta_client = create_meta_client(&meta_client_options, server.clone()).await;
         let frontend = create_frontend(&options, meta_client).await?;
 
-        tokio::time::sleep(Duration::from_millis(FRONTEND_HEARTBEAT_INTERVAL_MILLIS)).await;
+        let frontend_heartbeat_interval =
+            default_distributed_time_constants().frontend_heartbeat_interval;
+        tokio::time::sleep(frontend_heartbeat_interval).await;
         // initial state: not suspend:
         assert!(!frontend.instance.is_suspended());
         verify_suspend_state_by_http(&frontend, Ok(r#"[{"records":{"schema":{"column_schemas":[{"name":"Int64(1)","data_type":"Int64"}]},"rows":[[1]],"total_rows":1}}]"#)).await;
@@ -426,7 +427,7 @@ mod tests {
 
         // make heartbeat server returned "suspend" instruction,
         server.suspend.store(true, Ordering::Relaxed);
-        tokio::time::sleep(Duration::from_millis(FRONTEND_HEARTBEAT_INTERVAL_MILLIS)).await;
+        tokio::time::sleep(frontend_heartbeat_interval).await;
         // ... then the frontend is suspended:
         assert!(frontend.instance.is_suspended());
         verify_suspend_state_by_http(
@@ -442,7 +443,7 @@ mod tests {
 
         // make heartbeat server NOT returned "suspend" instruction,
         server.suspend.store(false, Ordering::Relaxed);
-        tokio::time::sleep(Duration::from_millis(FRONTEND_HEARTBEAT_INTERVAL_MILLIS)).await;
+        tokio::time::sleep(frontend_heartbeat_interval).await;
         // ... then frontend's suspend state is cleared:
         assert!(!frontend.instance.is_suspended());
         verify_suspend_state_by_http(&frontend, Ok(r#"[{"records":{"schema":{"column_schemas":[{"name":"Int64(1)","data_type":"Int64"}]},"rows":[[1]],"total_rows":1}}]"#)).await;

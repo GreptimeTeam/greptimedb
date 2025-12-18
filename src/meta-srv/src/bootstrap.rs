@@ -14,7 +14,6 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use api::v1::meta::cluster_server::ClusterServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
@@ -59,11 +58,6 @@ use crate::service::admin;
 use crate::service::admin::admin_axum_router;
 use crate::utils::etcd::create_etcd_client_with_tls;
 use crate::{Result, error};
-
-/// The default keep-alive interval for gRPC.
-const DEFAULT_GRPC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
-/// The default keep-alive timeout for gRPC.
-const DEFAULT_GRPC_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct MetasrvInstance {
     metasrv: Arc<Metasrv>,
@@ -255,8 +249,8 @@ pub fn router(metasrv: Arc<Metasrv>) -> Router {
         // for admin services
         .accept_http1(true)
         // For quick network failures detection.
-        .http2_keepalive_interval(Some(DEFAULT_GRPC_KEEP_ALIVE_INTERVAL))
-        .http2_keepalive_timeout(Some(DEFAULT_GRPC_KEEP_ALIVE_TIMEOUT));
+        .http2_keepalive_interval(Some(metasrv.options().grpc.http2_keep_alive_interval))
+        .http2_keepalive_timeout(Some(metasrv.options().grpc.http2_keep_alive_timeout));
     let router = add_compressed_service!(router, HeartbeatServer::from_arc(metasrv.clone()));
     let router = add_compressed_service!(router, StoreServer::from_arc(metasrv.clone()));
     let router = add_compressed_service!(router, ClusterServer::from_arc(metasrv.clone()));
@@ -273,8 +267,12 @@ pub async fn metasrv_builder(
         (Some(kv_backend), _) => (kv_backend, None),
         (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
         (None, BackendImpl::EtcdStore) => {
-            let etcd_client =
-                create_etcd_client_with_tls(&opts.store_addrs, opts.backend_tls.as_ref()).await?;
+            let etcd_client = create_etcd_client_with_tls(
+                &opts.store_addrs,
+                &opts.backend_client,
+                opts.backend_tls.as_ref(),
+            )
+            .await?;
             let kv_backend = EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
             let election = EtcdElection::with_etcd_client(
                 &opts.grpc.server_addr,

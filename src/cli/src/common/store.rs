@@ -19,7 +19,7 @@ use common_error::ext::BoxedError;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
-use meta_srv::metasrv::BackendImpl;
+use meta_srv::metasrv::{BackendClientOptions, BackendImpl};
 use meta_srv::utils::etcd::create_etcd_client_with_tls;
 use servers::tls::{TlsMode, TlsOption};
 
@@ -112,9 +112,13 @@ impl StoreConfig {
             let kvbackend = match self.backend {
                 BackendImpl::EtcdStore => {
                     let tls_config = self.tls_config();
-                    let etcd_client = create_etcd_client_with_tls(store_addrs, tls_config.as_ref())
-                        .await
-                        .map_err(BoxedError::new)?;
+                    let etcd_client = create_etcd_client_with_tls(
+                        store_addrs,
+                        &BackendClientOptions::default(),
+                        tls_config.as_ref(),
+                    )
+                    .await
+                    .map_err(BoxedError::new)?;
                     Ok(EtcdStore::with_etcd_client(etcd_client, max_txn_ops))
                 }
                 #[cfg(feature = "pg_kvbackend")]

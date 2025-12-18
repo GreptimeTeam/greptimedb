@@ -29,7 +29,7 @@ use common_meta::ddl::{
     DdlContext, NoopRegionFailureDetectorControl, RegionFailureDetectorControllerRef,
 };
 use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef};
-use common_meta::distributed_time_constants::{self};
+use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::flow::flow_state::FlowStateManager;
@@ -513,7 +513,7 @@ impl MetasrvBuilder {
             Some(handler_group_builder) => handler_group_builder,
             None => {
                 let region_lease_handler = RegionLeaseHandler::new(
-                    distributed_time_constants::REGION_LEASE_SECS,
+                    default_distributed_time_constants().region_lease.as_secs(),
                     table_metadata_manager.clone(),
                     memory_region_keeper.clone(),
                     customized_region_lease_renewer,
