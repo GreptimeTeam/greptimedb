@@ -7183,7 +7183,7 @@ pub async fn test_http_memory_limit(store_type: StorageType) {
         "Medium request (~700 bytes) should succeed within aligned 1KB limit"
     );
 
-    // Test 2: Large write request should be rejected (exceeds 500 bytes)
+    // Test 2: Large write request should be rejected (exceeds effective aligned limit of 1024 bytes)
     // Generate a large INSERT with many rows
     let large_values: Vec<String> = (0..50)
         .map(|i| format!("('host{}', {}.5, {})", i, i, i * 1000))
