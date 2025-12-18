@@ -68,12 +68,7 @@ impl SortField {
     }
 
     pub fn estimated_size(&self) -> usize {
-        match &self.data_type {
-            ConcreteDataType::Dictionary(dict_type) => {
-                Self::estimated_size_by_type(dict_type.value_type())
-            }
-            data_type => Self::estimated_size_by_type(data_type),
-        }
+        Self::estimated_size_by_type(self.encode_data_type())
     }
 
     fn estimated_size_by_type(data_type: &ConcreteDataType) -> usize {
@@ -108,12 +103,7 @@ impl SortField {
         serializer: &mut Serializer<&mut Vec<u8>>,
         value: &ValueRef,
     ) -> Result<()> {
-        match self.data_type() {
-            ConcreteDataType::Dictionary(dict_type) => {
-                Self::serialize_by_type(dict_type.value_type(), serializer, value)
-            }
-            data_type => Self::serialize_by_type(data_type, serializer, value),
-        }
+        Self::serialize_by_type(self.encode_data_type(), serializer, value)
     }
 
     fn serialize_by_type(
@@ -204,12 +194,7 @@ impl SortField {
 
     /// Deserialize a value from the deserializer.
     pub fn deserialize<B: Buf>(&self, deserializer: &mut Deserializer<B>) -> Result<Value> {
-        match &self.data_type {
-            ConcreteDataType::Dictionary(dict_type) => {
-                Self::deserialize_by_type(dict_type.value_type(), deserializer)
-            }
-            data_type => Self::deserialize_by_type(data_type, deserializer),
-        }
+        Self::deserialize_by_type(self.encode_data_type(), deserializer)
     }
 
     fn deserialize_by_type<B: Buf>(
@@ -311,12 +296,7 @@ impl SortField {
             return Ok(1);
         }
 
-        match &self.data_type {
-            ConcreteDataType::Dictionary(dict_type) => {
-                Self::skip_deserialize_by_type(dict_type.value_type(), bytes, deserializer)
-            }
-            data_type => Self::skip_deserialize_by_type(data_type, bytes, deserializer),
-        }
+        Self::skip_deserialize_by_type(self.encode_data_type(), bytes, deserializer)
     }
 
     fn skip_deserialize_by_type(
