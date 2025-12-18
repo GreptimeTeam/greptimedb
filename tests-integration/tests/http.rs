@@ -1387,6 +1387,7 @@ init_regions_parallelism = 16
 addr = "127.0.0.1:4000"
 timeout = "0s"
 body_limit = "64MiB"
+memory_exhausted_policy = "wait"
 prom_validation_mode = "strict"
 cors_allowed_origins = []
 enable_cors = true
@@ -1396,6 +1397,7 @@ bind_addr = "127.0.0.1:4001"
 server_addr = "127.0.0.1:4001"
 max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
+memory_exhausted_policy = "wait"
 flight_compression = "arrow_ipc"
 runtime_size = 8
 
