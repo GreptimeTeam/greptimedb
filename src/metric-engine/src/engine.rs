@@ -43,10 +43,10 @@ pub(crate) use state::MetricEngineState;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
-    BatchResponses, CopyRegionFromRequest, CopyRegionFromResponse, RegionEngine,
-    RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
-    RemapManifestsResponse, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
-    SettableRegionRoleState, SyncManifestResponse,
+    BatchResponses, RegionEngine, RegionRole, RegionScannerRef, RegionStatistic,
+    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    SetRegionRoleStateSuccess, SettableRegionRoleState, SyncRegionFromRequest,
+    SyncRegionFromResponse,
 };
 use store_api::region_request::{
     BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
@@ -354,12 +354,30 @@ impl RegionEngine for MetricEngine {
     async fn sync_region(
         &self,
         region_id: RegionId,
-        manifest_info: RegionManifestInfo,
-    ) -> Result<SyncManifestResponse, BoxedError> {
-        self.inner
-            .sync_region(region_id, manifest_info)
-            .await
-            .map_err(BoxedError::new)
+        request: SyncRegionFromRequest,
+    ) -> Result<SyncRegionFromResponse, BoxedError> {
+        match request {
+            SyncRegionFromRequest::FromManifest(manifest_info) => self
+                .inner
+                .sync_region_from_manifest(region_id, manifest_info)
+                .await
+                .map_err(BoxedError::new),
+            SyncRegionFromRequest::FromRegion {
+                source_region_id,
+                parallelism,
+            } => {
+                if self.inner.is_physical_region(region_id) {
+                    self.inner
+                        .sync_region_from_region(region_id, source_region_id, parallelism)
+                        .await
+                        .map_err(BoxedError::new)
+                } else {
+                    Err(BoxedError::new(
+                        error::UnsupportedSyncRegionFromRequestSnafu { region_id }.build(),
+                    ))
+                }
+            }
+        }
     }
 
     async fn remap_manifests(
@@ -374,14 +392,6 @@ impl RegionEngine for MetricEngine {
                 UnsupportedRemapManifestsRequestSnafu { region_id }.build(),
             ))
         }
-    }
-
-    async fn copy_region_from(
-        &self,
-        _region_id: RegionId,
-        _request: CopyRegionFromRequest,
-    ) -> Result<CopyRegionFromResponse, BoxedError> {
-        todo!()
     }
 
     async fn set_region_role_state_gracefully(

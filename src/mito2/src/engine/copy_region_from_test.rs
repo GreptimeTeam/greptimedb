@@ -20,7 +20,7 @@ use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use object_store::layers::mock::{Error as MockError, ErrorKind, MockLayerBuilder};
-use store_api::region_engine::{CopyRegionFromRequest, RegionEngine, RegionRole};
+use store_api::region_engine::{MitoCopyRegionFromRequest, RegionEngine, RegionRole};
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
 use store_api::storage::RegionId;
 
@@ -89,7 +89,7 @@ async fn test_engine_copy_region_from_with_format(flat_format: bool, with_index:
     let resp = engine
         .copy_region_from(
             target_region_id,
-            CopyRegionFromRequest {
+            MitoCopyRegionFromRequest {
                 source_region_id,
                 parallelism: 1,
             },
@@ -126,7 +126,7 @@ async fn test_engine_copy_region_from_with_format(flat_format: bool, with_index:
     let resp2 = engine
         .copy_region_from(
             target_region_id,
-            CopyRegionFromRequest {
+            MitoCopyRegionFromRequest {
                 source_region_id,
                 parallelism: 1,
             },
@@ -207,7 +207,7 @@ async fn test_engine_copy_region_failure_with_format(flat_format: bool) {
     let err = engine
         .copy_region_from(
             target_region_id,
-            CopyRegionFromRequest {
+            MitoCopyRegionFromRequest {
                 source_region_id,
                 parallelism: 1,
             },
@@ -225,7 +225,6 @@ async fn test_engine_copy_region_failure_with_format(flat_format: bool) {
     let source_region_dir = format!("{}/data/test/1_0000000001", env.data_home().display());
     assert_file_num_in_dir(&source_region_dir, 1);
     assert_file_num_in_dir(&format!("{}/index", source_region_dir), 1);
-
     assert_eq!(
         source_region_files,
         collect_filename_in_dir(&source_region_dir)
@@ -298,7 +297,7 @@ async fn test_engine_copy_region_invalid_args_with_format(flat_format: bool) {
     let err = engine
         .copy_region_from(
             region_id,
-            CopyRegionFromRequest {
+            MitoCopyRegionFromRequest {
                 source_region_id: RegionId::new(2, 1),
                 parallelism: 1,
             },
@@ -309,7 +308,7 @@ async fn test_engine_copy_region_invalid_args_with_format(flat_format: bool) {
     let err = engine
         .copy_region_from(
             region_id,
-            CopyRegionFromRequest {
+            MitoCopyRegionFromRequest {
                 source_region_id: RegionId::new(1, 1),
                 parallelism: 1,
             },
@@ -347,7 +346,7 @@ async fn test_engine_copy_region_unexpected_state_with_format(flat_format: bool)
     let err = engine
         .copy_region_from(
             region_id,
-            CopyRegionFromRequest {
+            MitoCopyRegionFromRequest {
                 source_region_id: RegionId::new(1, 2),
                 parallelism: 1,
             },

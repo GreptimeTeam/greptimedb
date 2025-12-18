@@ -637,9 +637,64 @@ impl RegionStatistic {
     }
 }
 
-/// The response of syncing the manifest.
+/// Request to sync the region from a manifest or a region.
+#[derive(Debug, Clone)]
+pub enum SyncRegionFromRequest {
+    /// Syncs the region using manifest information.
+    /// Used in leader-follower manifest sync scenarios.
+    FromManifest(RegionManifestInfo),
+    /// Syncs the region from another region.
+    ///
+    /// Used by the metric engine to sync logical regions from a source physical region
+    /// to a target physical region. This copies metadata region SST files and transforms
+    /// logical region entries to use the target's region number.
+    FromRegion {
+        /// The [`RegionId`] of the source region.
+        source_region_id: RegionId,
+        /// The parallelism of the sync operation.
+        parallelism: usize,
+    },
+}
+
+impl From<RegionManifestInfo> for SyncRegionFromRequest {
+    fn from(manifest_info: RegionManifestInfo) -> Self {
+        SyncRegionFromRequest::FromManifest(manifest_info)
+    }
+}
+
+impl SyncRegionFromRequest {
+    /// Creates a new request from a manifest info.
+    pub fn from_manifest(manifest_info: RegionManifestInfo) -> Self {
+        SyncRegionFromRequest::FromManifest(manifest_info)
+    }
+
+    /// Creates a new request from a region.
+    pub fn from_region(source_region_id: RegionId, parallelism: usize) -> Self {
+        SyncRegionFromRequest::FromRegion {
+            source_region_id,
+            parallelism,
+        }
+    }
+
+    /// Returns true if the request is from a manifest.
+    pub fn is_from_manifest(&self) -> bool {
+        matches!(self, SyncRegionFromRequest::FromManifest { .. })
+    }
+
+    /// Converts the request to a region manifest info.
+    ///
+    /// Returns None if the request is not from a manifest.
+    pub fn into_region_manifest_info(self) -> Option<RegionManifestInfo> {
+        match self {
+            SyncRegionFromRequest::FromManifest(manifest_info) => Some(manifest_info),
+            SyncRegionFromRequest::FromRegion { .. } => None,
+        }
+    }
+}
+
+/// The response of syncing the region.
 #[derive(Debug)]
-pub enum SyncManifestResponse {
+pub enum SyncRegionFromResponse {
     NotSupported,
     Mito {
         /// Indicates if the data region was synced.
@@ -656,35 +711,30 @@ pub enum SyncManifestResponse {
     },
 }
 
-impl SyncManifestResponse {
+impl SyncRegionFromResponse {
     /// Returns true if data region is synced.
     pub fn is_data_synced(&self) -> bool {
         match self {
-            SyncManifestResponse::NotSupported => false,
-            SyncManifestResponse::Mito { synced } => *synced,
-            SyncManifestResponse::Metric { data_synced, .. } => *data_synced,
+            SyncRegionFromResponse::NotSupported => false,
+            SyncRegionFromResponse::Mito { synced } => *synced,
+            SyncRegionFromResponse::Metric { data_synced, .. } => *data_synced,
         }
-    }
-
-    /// Returns true if the engine is supported the sync operation.
-    pub fn is_supported(&self) -> bool {
-        matches!(self, SyncManifestResponse::NotSupported)
     }
 
     /// Returns true if the engine is a mito2 engine.
     pub fn is_mito(&self) -> bool {
-        matches!(self, SyncManifestResponse::Mito { .. })
+        matches!(self, SyncRegionFromResponse::Mito { .. })
     }
 
     /// Returns true if the engine is a metric engine.
     pub fn is_metric(&self) -> bool {
-        matches!(self, SyncManifestResponse::Metric { .. })
+        matches!(self, SyncRegionFromResponse::Metric { .. })
     }
 
     /// Returns the new opened logical region ids.
     pub fn new_opened_logical_region_ids(self) -> Option<Vec<RegionId>> {
         match self {
-            SyncManifestResponse::Metric {
+            SyncRegionFromResponse::Metric {
                 new_opened_logical_region_ids,
                 ..
             } => Some(new_opened_logical_region_ids),
@@ -715,7 +765,7 @@ pub struct RemapManifestsResponse {
 
 /// Request to copy files from a source region to a target region.
 #[derive(Debug, Clone)]
-pub struct CopyRegionFromRequest {
+pub struct MitoCopyRegionFromRequest {
     /// The [`RegionId`] of the source region.
     pub source_region_id: RegionId,
     /// The parallelism of the copy operation.
@@ -726,37 +776,6 @@ pub struct CopyRegionFromRequest {
 pub struct MitoCopyRegionFromResponse {
     /// The file ids that were copied from the source region to the target region.
     pub copied_file_ids: Vec<FileId>,
-}
-
-#[derive(Debug, Clone)]
-pub struct MetricCopyRegionFromResponse {
-    /// The logical regions that were newly opened after the copy operation.
-    pub new_opened_logical_region_ids: Vec<RegionId>,
-}
-
-/// Response to copy region from a source region to a target region.
-#[derive(Debug, Clone)]
-pub enum CopyRegionFromResponse {
-    Mito(MitoCopyRegionFromResponse),
-    Metric(MetricCopyRegionFromResponse),
-}
-
-impl CopyRegionFromResponse {
-    /// Converts the response to a mito2 response.
-    pub fn into_mito(self) -> Option<MitoCopyRegionFromResponse> {
-        match self {
-            CopyRegionFromResponse::Mito(response) => Some(response),
-            CopyRegionFromResponse::Metric(_) => None,
-        }
-    }
-
-    /// Converts the response to a metric response.
-    pub fn into_metric(self) -> Option<MetricCopyRegionFromResponse> {
-        match self {
-            CopyRegionFromResponse::Metric(response) => Some(response),
-            CopyRegionFromResponse::Mito(_) => None,
-        }
-    }
 }
 
 #[async_trait]
@@ -880,21 +899,14 @@ pub trait RegionEngine: Send + Sync {
     async fn sync_region(
         &self,
         region_id: RegionId,
-        manifest_info: RegionManifestInfo,
-    ) -> Result<SyncManifestResponse, BoxedError>;
+        request: SyncRegionFromRequest,
+    ) -> Result<SyncRegionFromResponse, BoxedError>;
 
     /// Remaps manifests from old regions to new regions.
     async fn remap_manifests(
         &self,
         request: RemapManifestsRequest,
     ) -> Result<RemapManifestsResponse, BoxedError>;
-
-    /// Copies region from a source region to a target region.
-    async fn copy_region_from(
-        &self,
-        region_id: RegionId,
-        request: CopyRegionFromRequest,
-    ) -> Result<CopyRegionFromResponse, BoxedError>;
 
     /// Sets region role state gracefully.
     ///

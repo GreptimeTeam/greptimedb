@@ -25,6 +25,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use common_base::readable_size::ReadableSize;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
+use common_telemetry::{debug, info, warn};
 use datafusion::prelude::{col, lit};
 use futures_util::TryStreamExt;
 use futures_util::stream::BoxStream;
@@ -400,14 +401,8 @@ impl MetadataRegion {
             .await
             .context(CacheGetSnafu)?;
 
-        let range = region_metadata.key_values.range(prefix.to_string()..);
         let mut result = HashMap::new();
-        for (k, v) in range {
-            if !k.starts_with(prefix) {
-                break;
-            }
-            result.insert(k.clone(), v.clone());
-        }
+        get_all_with_prefix(&region_metadata, prefix, &mut result);
         Ok(result)
     }
 
@@ -557,6 +552,109 @@ impl MetadataRegion {
         self.cache.invalidate(&metadata_region_id).await;
 
         Ok(())
+    }
+
+    /// Updates logical region metadata so that any entries previously referencing
+    /// `source_region_id` are modified to reference the data region of `physical_region_id`.
+    ///
+    /// This method should be called after copying files from `source_region_id`
+    /// into the target region. It scans the metadata for the target physical
+    /// region, finds logical regions with the same region number as the source,
+    /// and reinserts region and column entries updated to use the target's
+    /// region number.
+    pub async fn transform_logical_region_metadata(
+        &self,
+        physical_region_id: RegionId,
+        source_region_id: RegionId,
+    ) -> Result<()> {
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let logical_regions = self
+            .logical_regions(data_region_id)
+            .await?
+            .into_iter()
+            .filter(|r| r.region_number() == source_region_id.region_number())
+            .collect::<Vec<_>>();
+        if logical_regions.is_empty() {
+            info!(
+                "No logical regions found from source region {}, physical region id: {}",
+                source_region_id, physical_region_id,
+            );
+            return Ok(());
+        }
+
+        let metadata = self.load_all(metadata_region_id).await?;
+        let mut output = HashMap::new();
+        for logical_region_id in &logical_regions {
+            let prefix = MetadataRegion::concat_column_key_prefix(*logical_region_id);
+            get_all_with_prefix(&metadata, &prefix, &mut output);
+        }
+
+        if output.is_empty() {
+            warn!(
+                "No logical regions metadata found from source region {}, physical region id: {}",
+                source_region_id, physical_region_id
+            );
+            return Ok(());
+        }
+
+        let mut transform_output = HashMap::with_capacity(output.len() + logical_regions.len());
+        for (k, v) in output.into_iter() {
+            let (src_logical_region_id, column_name) = Self::parse_column_key(&k)?.unwrap();
+            // Change the region number to the data region number.
+            let new_key = MetadataRegion::concat_column_key(
+                RegionId::new(
+                    src_logical_region_id.table_id(),
+                    data_region_id.region_number(),
+                ),
+                &column_name,
+            );
+            transform_output.insert(new_key, v);
+        }
+        for src_logical_region_id in &logical_regions {
+            let new_key = MetadataRegion::concat_region_key(RegionId::new(
+                src_logical_region_id.table_id(),
+                data_region_id.region_number(),
+            ));
+            transform_output.insert(new_key, String::new());
+        }
+        debug!(
+            "Transform logical regions metadata to physical region {}, source region: {}, transformed metadata: {}",
+            data_region_id,
+            source_region_id,
+            transform_output.len(),
+        );
+
+        let put_request = MetadataRegion::build_put_request_from_iter(transform_output.into_iter());
+        self.mito
+            .handle_request(
+                metadata_region_id,
+                store_api::region_request::RegionRequest::Put(put_request),
+            )
+            .await
+            .context(MitoWriteOperationSnafu)?;
+        info!(
+            "Transformed {} logical regions metadata to physical region {}, source region: {}",
+            logical_regions.len(),
+            data_region_id,
+            source_region_id
+        );
+        self.cache.invalidate(&metadata_region_id).await;
+        Ok(())
+    }
+}
+
+fn get_all_with_prefix(
+    region_metadata: &RegionMetadataCacheEntry,
+    prefix: &str,
+    result: &mut HashMap<String, String>,
+) {
+    let range = region_metadata.key_values.range(prefix.to_string()..);
+    for (k, v) in range {
+        if !k.starts_with(prefix) {
+            break;
+        }
+        result.insert(k.clone(), v.clone());
     }
 }
 

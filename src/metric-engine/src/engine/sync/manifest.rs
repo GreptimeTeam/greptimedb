@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use common_telemetry::info;
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::region_engine::{RegionEngine, RegionManifestInfo, SyncManifestResponse};
+use store_api::region_engine::{RegionEngine, RegionManifestInfo, SyncRegionFromResponse};
 use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;
@@ -26,11 +26,17 @@ use crate::error::{
 use crate::utils;
 
 impl MetricEngineInner {
-    pub async fn sync_region(
+    /// Syncs the region from the given manifest information (leader-follower scenario).
+    ///
+    /// This operation:
+    /// 1. Syncs the metadata region manifest to the target version.
+    /// 2. Syncs the data region manifest to the target version.
+    /// 3. Recovers states and returns newly opened logical regions (if metadata was synced)
+    pub async fn sync_region_from_manifest(
         &self,
         region_id: RegionId,
         manifest_info: RegionManifestInfo,
-    ) -> Result<SyncManifestResponse> {
+    ) -> Result<SyncRegionFromResponse> {
         ensure!(
             manifest_info.is_metric(),
             MetricManifestInfoSnafu { region_id }
@@ -48,7 +54,7 @@ impl MetricEngineInner {
             RegionManifestInfo::mito(metadata_manifest_version, metadata_flushed_entry_id, 0);
         let metadata_synced = self
             .mito
-            .sync_region(metadata_region_id, metadata_region_manifest)
+            .sync_region(metadata_region_id, metadata_region_manifest.into())
             .await
             .context(MitoSyncOperationSnafu)?
             .is_data_synced();
@@ -61,13 +67,13 @@ impl MetricEngineInner {
 
         let data_synced = self
             .mito
-            .sync_region(data_region_id, data_region_manifest)
+            .sync_region(data_region_id, data_region_manifest.into())
             .await
             .context(MitoSyncOperationSnafu)?
             .is_data_synced();
 
         if !metadata_synced {
-            return Ok(SyncManifestResponse::Metric {
+            return Ok(SyncRegionFromResponse::Metric {
                 metadata_synced,
                 data_synced,
                 new_opened_logical_region_ids: vec![],
@@ -97,7 +103,7 @@ impl MetricEngineInner {
             new_opened_logical_region_ids
         );
 
-        Ok(SyncManifestResponse::Metric {
+        Ok(SyncRegionFromResponse::Metric {
             metadata_synced,
             data_synced,
             new_opened_logical_region_ids,
@@ -147,7 +153,10 @@ mod tests {
             .unwrap();
 
         let response = follower_metric
-            .sync_region(physical_region_id, RegionManifestInfo::metric(1, 0, 1, 0))
+            .sync_region(
+                physical_region_id,
+                RegionManifestInfo::metric(1, 0, 1, 0).into(),
+            )
             .await
             .unwrap();
         assert!(response.is_metric());
@@ -156,7 +165,10 @@ mod tests {
 
         // Sync again, no new logical region should be opened
         let response = follower_metric
-            .sync_region(physical_region_id, RegionManifestInfo::metric(1, 0, 1, 0))
+            .sync_region(
+                physical_region_id,
+                RegionManifestInfo::metric(1, 0, 1, 0).into(),
+            )
             .await
             .unwrap();
         assert!(response.is_metric());
@@ -228,7 +240,10 @@ mod tests {
 
         // Sync the follower engine
         let response = follower_metric
-            .sync_region(physical_region_id, RegionManifestInfo::metric(2, 0, 2, 0))
+            .sync_region(
+                physical_region_id,
+                RegionManifestInfo::metric(2, 0, 2, 0).into(),
+            )
             .await
             .unwrap();
         assert!(response.is_metric());

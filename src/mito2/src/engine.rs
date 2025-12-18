@@ -87,6 +87,7 @@ use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
+use common_meta::error::UnexpectedSnafu;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::{MemoryPermit, QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
@@ -105,10 +106,10 @@ use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
 };
 use store_api::region_engine::{
-    BatchResponses, CopyRegionFromRequest, CopyRegionFromResponse, MitoCopyRegionFromResponse,
-    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
-    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
-    SettableRegionRoleState, SyncManifestResponse,
+    BatchResponses, MitoCopyRegionFromRequest, MitoCopyRegionFromResponse, RegionEngine,
+    RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
+    RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
+    SyncRegionFromRequest, SyncRegionFromResponse,
 };
 use store_api::region_request::{
     AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
@@ -122,8 +123,8 @@ use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::MitoConfig;
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
-    self, InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu,
-    Result, SerdeJsonSnafu, SerializeColumnMetadataSnafu, SerializeManifestSnafu,
+    InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
+    SerdeJsonSnafu, SerializeColumnMetadataSnafu, SerializeManifestSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
@@ -430,7 +431,7 @@ impl MitoEngine {
     pub async fn copy_region_from(
         &self,
         region_id: RegionId,
-        request: CopyRegionFromRequest,
+        request: MitoCopyRegionFromRequest,
     ) -> Result<MitoCopyRegionFromResponse> {
         self.inner.copy_region_from(region_id, request).await
     }
@@ -639,8 +640,7 @@ impl MitoEngine {
 ///
 /// Only adding or removing files to region is considered valid now.
 fn is_valid_region_edit(edit: &RegionEdit) -> bool {
-    !edit.files_to_add.is_empty()
-        && edit.files_to_remove.is_empty()
+    (!edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty())
         && matches!(
             edit,
             RegionEdit {
@@ -1073,7 +1073,7 @@ impl EngineInner {
     async fn copy_region_from(
         &self,
         region_id: RegionId,
-        request: CopyRegionFromRequest,
+        request: MitoCopyRegionFromRequest,
     ) -> Result<MitoCopyRegionFromResponse> {
         let (request, receiver) =
             WorkerRequest::try_from_copy_region_from_request(region_id, request)?;
@@ -1247,15 +1247,21 @@ impl RegionEngine for MitoEngine {
     async fn sync_region(
         &self,
         region_id: RegionId,
-        manifest_info: RegionManifestInfo,
-    ) -> Result<SyncManifestResponse, BoxedError> {
+        request: SyncRegionFromRequest,
+    ) -> Result<SyncRegionFromResponse, BoxedError> {
+        let manifest_info = request
+            .into_region_manifest_info()
+            .context(UnexpectedSnafu {
+                err_msg: "Expected a manifest info request",
+            })
+            .map_err(BoxedError::new)?;
         let (_, synced) = self
             .inner
             .sync_region(region_id, manifest_info)
             .await
             .map_err(BoxedError::new)?;
 
-        Ok(SyncManifestResponse::Mito { synced })
+        Ok(SyncRegionFromResponse::Mito { synced })
     }
 
     async fn remap_manifests(
@@ -1266,19 +1272,6 @@ impl RegionEngine for MitoEngine {
             .remap_manifests(request)
             .await
             .map_err(BoxedError::new)
-    }
-
-    async fn copy_region_from(
-        &self,
-        _region_id: RegionId,
-        _request: CopyRegionFromRequest,
-    ) -> Result<CopyRegionFromResponse, BoxedError> {
-        Err(BoxedError::new(
-            error::UnsupportedOperationSnafu {
-                err_msg: "copy_region_from is not supported",
-            }
-            .build(),
-        ))
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
