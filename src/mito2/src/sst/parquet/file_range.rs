@@ -259,28 +259,10 @@ pub(crate) type FileRangeContextRef = Arc<FileRangeContext>;
 
 impl FileRangeContext {
     /// Creates a new [FileRangeContext].
-    pub(crate) fn new(
-        reader_builder: RowGroupReaderBuilder,
-        filters: Vec<SimpleFilterContext>,
-        dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>,
-        read_format: ReadFormat,
-        skip_fields: bool,
-        prune_schema: Arc<Schema>,
-        codec: Arc<dyn PrimaryKeyCodec>,
-        pre_filter_mode: PreFilterMode,
-    ) -> Self {
+    pub(crate) fn new(reader_builder: RowGroupReaderBuilder, base: RangeBase) -> Self {
         Self {
             reader_builder,
-            base: RangeBase {
-                filters,
-                dyn_filters,
-                read_format,
-                skip_fields,
-                prune_schema,
-                codec,
-                compat_batch: None,
-                pre_filter_mode,
-            },
+            base,
         }
     }
 

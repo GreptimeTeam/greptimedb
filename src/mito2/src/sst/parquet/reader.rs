@@ -62,7 +62,7 @@ use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
 };
 use crate::sst::parquet::file_range::{
-    FileRangeContext, FileRangeContextRef, PreFilterMode, row_group_contains_delete,
+    FileRangeContext, FileRangeContextRef, PreFilterMode, RangeBase, row_group_contains_delete,
 };
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
@@ -386,13 +386,16 @@ impl ParquetReaderBuilder {
 
         let context = FileRangeContext::new(
             reader_builder,
-            filters,
-            dyn_filters,
-            read_format,
-            skip_fields,
-            prune_schema,
-            codec,
-            self.pre_filter_mode,
+            RangeBase {
+                filters,
+                dyn_filters,
+                read_format,
+                skip_fields,
+                prune_schema,
+                codec,
+                compat_batch: None,
+                pre_filter_mode: self.pre_filter_mode,
+            },
         );
 
         metrics.build_cost += start.elapsed();
