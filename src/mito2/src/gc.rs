@@ -38,6 +38,7 @@ use tokio_stream::StreamExt;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
+use crate::cache::file_cache::FileType;
 use crate::config::MitoConfig;
 use crate::error::{
     DurationOutOfRangeSnafu, JoinSnafu, OpenDalSnafu, Result, TooManyGcJobsSnafu, UnexpectedSnafu,
@@ -47,6 +48,38 @@ use crate::metrics::{GC_DELETE_FILE_CNT, GC_ORPHANED_INDEX_FILES, GC_SKIPPED_UNP
 use crate::region::{MitoRegionRef, RegionRoleState};
 use crate::sst::file::{RegionFileId, RegionIndexId, delete_files, delete_index};
 use crate::sst::location::{self};
+
+/// Helper function to determine if a file should be deleted based on common logic
+/// shared between Parquet and Puffin file types.
+fn should_delete_file(
+    is_in_manifest: bool,
+    is_in_tmp_ref: bool,
+    is_linger: bool,
+    is_eligible_for_delete: bool,
+    entry: &Entry,
+    unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let is_known = is_linger || is_eligible_for_delete;
+
+    let is_unknown_linger_time_exceeded = || {
+        // if the file's expel time is unknown(because not appear in delta manifest), we keep it for a while
+        // using it's last modified time
+        // notice unknown files use a different lingering time
+        entry
+            .metadata()
+            .last_modified()
+            .map(|t| t < unknown_file_may_linger_until)
+            .unwrap_or(false)
+    };
+
+    !is_in_manifest
+        && !is_in_tmp_ref
+        && if is_known {
+            is_eligible_for_delete
+        } else {
+            is_unknown_linger_time_exceeded()
+        }
+}
 
 #[cfg(test)]
 mod worker_test;
@@ -613,32 +646,22 @@ impl LocalGcWorker {
             };
 
             let should_delete = match file_type {
-                crate::cache::file_cache::FileType::Parquet => {
+                FileType::Parquet => {
                     let is_in_manifest = in_manifest.contains_key(&file_id);
                     let is_in_tmp_ref = in_tmp_ref.contains_key(&file_id);
                     let is_linger = may_linger_files.contains_key(&file_id);
                     let is_eligible_for_delete = eligible_for_delete.contains_key(&file_id);
-                    let is_known = is_linger || is_eligible_for_delete;
 
-                    let is_unknown_linger_time_exceeded = || {
-                        // if the file's expel time is unknown(because not appear in delta manifest), we keep it for a while
-                        // using it's last modified time
-                        // notice unknown files use a different lingering time
-                        entry
-                            .metadata()
-                            .last_modified()
-                            .map(|t| t < unknown_file_may_linger_until)
-                            .unwrap_or(false)
-                    };
-                    !is_in_manifest
-                        && !is_in_tmp_ref
-                        && if is_known {
-                            is_eligible_for_delete
-                        } else {
-                            is_unknown_linger_time_exceeded()
-                        }
+                    should_delete_file(
+                        is_in_manifest,
+                        is_in_tmp_ref,
+                        is_linger,
+                        is_eligible_for_delete,
+                        &entry,
+                        unknown_file_may_linger_until,
+                    )
                 }
-                crate::cache::file_cache::FileType::Puffin(version) => {
+                FileType::Puffin(version) => {
                     // notice need to check both file id and version
                     let is_in_manifest = in_manifest
                         .get(&file_id)
@@ -656,35 +679,26 @@ impl LocalGcWorker {
                         .get(&file_id)
                         .map(|files| files.contains(&&RemovedFile::Index(file_id, version)))
                         .unwrap_or(false);
-                    let is_known = is_linger || is_eligible_for_delete;
-                    let is_unknown_linger_time_exceeded = || {
-                        // if the file's expel time is unknown(because not appear in delta manifest), we keep it for a while
-                        // using it's last modified time
-                        // notice unknown files use a different lingering time
-                        entry
-                            .metadata()
-                            .last_modified()
-                            .map(|t| t < unknown_file_may_linger_until)
-                            .unwrap_or(false)
-                    };
-                    !is_in_manifest
-                        && !is_in_tmp_ref
-                        && if is_known {
-                            is_eligible_for_delete
-                        } else {
-                            is_unknown_linger_time_exceeded()
-                        }
+
+                    should_delete_file(
+                        is_in_manifest,
+                        is_in_tmp_ref,
+                        is_linger,
+                        is_eligible_for_delete,
+                        &entry,
+                        unknown_file_may_linger_until,
+                    )
                 }
             };
 
             if should_delete {
                 let removed_file = match file_type {
-                    crate::cache::file_cache::FileType::Parquet => {
+                    FileType::Parquet => {
                         // notice this cause we don't track index version for parquet files
                         // since entries comes from listing, we can't get index version from path
                         RemovedFile::File(file_id, None)
                     }
-                    crate::cache::file_cache::FileType::Puffin(version) => {
+                    FileType::Puffin(version) => {
                         GC_ORPHANED_INDEX_FILES.inc();
                         RemovedFile::Index(file_id, version)
                     }
