@@ -94,8 +94,10 @@ key_path = ""
 ## For now, gRPC tls config does not support auto reload.
 watch = false
 
-## Skip path matching filter for reloading TLS config.
-skip_path_filter = false
+## Enable filename matching for reloading TLS config.
+## By default, the callback is triggered on any event in the watched directories.
+## If set to true, the callback is triggered only when the filename of the watched file matches the event path.
+enable_filename_match = false
 
 ## MySQL server options.
 [mysql]
@@ -132,8 +134,10 @@ key_path = ""
 ## Watch for Certificate and key file change and auto reload
 watch = false
 
-## Skip path matching filter for reloading TLS config.
-skip_path_filter = false
+## Enable filename matching for reloading TLS config.
+## By default, the callback is triggered on any event in the watched directories.
+## If set to true, the callback is triggered only when the filename of the watched file matches the event path.
+enable_filename_match = false
 
 ## PostgresSQL server options.
 [postgres]
@@ -163,8 +167,10 @@ key_path = ""
 ## Watch for Certificate and key file change and auto reload
 watch = false
 
-## Skip path matching filter for reloading TLS config.
-skip_path_filter = false
+## Enable filename matching for reloading TLS config.
+## By default, the callback is triggered on any event in the watched directories.
+## If set to true, the callback is triggered only when the filename of the watched file matches the event path.
+enable_filename_match = false
 
 ## OpenTSDB protocol options.
 [opentsdb]

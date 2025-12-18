@@ -279,7 +279,7 @@ async fn test_server_secure_require_client_plain() -> Result<()> {
         key_path: "tests/ssl/server-rsa.key".to_owned(),
         ca_cert_path: String::new(),
         watch: false,
-        skip_path_filter: false,
+        enable_filename_match: false,
     };
     let server_port = start_test_server(server_tls).await?;
     let r = create_plain_connection(server_port, false).await;
@@ -297,7 +297,7 @@ async fn test_server_secure_require_client_plain_with_pkcs8_priv_key() -> Result
         key_path: "tests/ssl/server-pkcs8.key".to_owned(),
         ca_cert_path: String::new(),
         watch: false,
-        skip_path_filter: false,
+        enable_filename_match: false,
     };
     let server_port = start_test_server(server_tls).await?;
     let r = create_plain_connection(server_port, false).await;
@@ -535,7 +535,7 @@ async fn do_simple_query_with_secure_server(
         },
         ca_cert_path: String::new(),
         watch: false,
-        skip_path_filter: false,
+        enable_filename_match: false,
     };
 
     do_simple_query(server_tls, client_tls).await

@@ -83,7 +83,7 @@ pub struct StoreConfig {
 
     /// Skip path filter for TLS certificate files
     #[clap(long = "backend-tls-skip-path-filter")]
-    pub backend_tls_skip_path_filter: bool,
+    pub backend_tls_enable_filename_match: bool,
 }
 
 impl StoreConfig {
@@ -95,7 +95,7 @@ impl StoreConfig {
                 key_path: self.backend_tls_key_path.clone(),
                 ca_cert_path: self.backend_tls_ca_cert_path.clone(),
                 watch: self.backend_tls_watch,
-                skip_path_filter: self.backend_tls_skip_path_filter,
+                enable_filename_match: self.backend_tls_enable_filename_match,
             })
         } else {
             None

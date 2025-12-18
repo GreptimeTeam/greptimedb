@@ -64,7 +64,7 @@ pub struct TlsOption {
     #[serde(default)]
     pub watch: bool,
     #[serde(default)]
-    pub skip_path_filter: bool,
+    pub enable_filename_match: bool,
 }
 
 impl TlsOption {
@@ -73,7 +73,7 @@ impl TlsOption {
         cert_path: Option<String>,
         key_path: Option<String>,
         watch: bool,
-        skip_path_filter: bool,
+        enable_filename_match: bool,
     ) -> Self {
         let mut tls_option = TlsOption::default();
 
@@ -91,7 +91,7 @@ impl TlsOption {
 
         tls_option.watch = watch;
 
-        tls_option.skip_path_filter = skip_path_filter;
+        tls_option.enable_filename_match = enable_filename_match;
 
         tls_option
     }
@@ -244,7 +244,7 @@ mod tests {
             key_path: String::new(),
             ca_cert_path: String::new(),
             watch: false,
-            skip_path_filter: false,
+            enable_filename_match: false,
         };
         assert!(tls.validate().is_ok());
     }
@@ -257,7 +257,7 @@ mod tests {
             key_path: "/path/to/key".to_string(),
             ca_cert_path: String::new(),
             watch: false,
-            skip_path_filter: false,
+            enable_filename_match: false,
         };
         let err = tls.validate().unwrap_err();
         assert!(err.to_string().contains("cert_path"));
@@ -271,7 +271,7 @@ mod tests {
             key_path: String::new(),
             ca_cert_path: String::new(),
             watch: false,
-            skip_path_filter: false,
+            enable_filename_match: false,
         };
         let err = tls.validate().unwrap_err();
         assert!(err.to_string().contains("key_path"));
@@ -285,7 +285,7 @@ mod tests {
             key_path: "/path/to/key".to_string(),
             ca_cert_path: String::new(),
             watch: false,
-            skip_path_filter: false,
+            enable_filename_match: false,
         };
         assert!(tls.validate().is_ok());
     }
@@ -298,7 +298,7 @@ mod tests {
             key_path: "/path/to/key".to_string(),
             ca_cert_path: String::new(),
             watch: false,
-            skip_path_filter: false,
+            enable_filename_match: false,
         };
         let err = tls.validate().unwrap_err();
         assert!(err.to_string().contains("ca_cert_path"));
@@ -312,7 +312,7 @@ mod tests {
             key_path: "/path/to/key".to_string(),
             ca_cert_path: String::new(),
             watch: false,
-            skip_path_filter: false,
+            enable_filename_match: false,
         };
         let err = tls.validate().unwrap_err();
         assert!(err.to_string().contains("ca_cert_path"));
@@ -326,7 +326,7 @@ mod tests {
             key_path: "/path/to/key".to_string(),
             ca_cert_path: "/path/to/ca".to_string(),
             watch: false,
-            skip_path_filter: false,
+            enable_filename_match: false,
         };
         assert!(tls.validate().is_ok());
     }
@@ -339,7 +339,7 @@ mod tests {
             key_path: "/path/to/key".to_string(),
             ca_cert_path: "/path/to/ca".to_string(),
             watch: false,
-            skip_path_filter: false,
+            enable_filename_match: false,
         };
         assert!(tls.validate().is_ok());
     }
@@ -352,7 +352,7 @@ mod tests {
             key_path: "/path/to/key".to_string(),
             ca_cert_path: String::new(),
             watch: false,
-            skip_path_filter: false,
+            enable_filename_match: false,
         };
         assert!(tls.validate().is_ok());
     }
@@ -377,7 +377,7 @@ mod tests {
                 key_path: "/path/to/key_path".to_string(),
                 ca_cert_path: String::new(),
                 watch: false,
-                skip_path_filter: false,
+                enable_filename_match: false,
             },
             TlsOption::new(
                 Some(Disable),
@@ -541,7 +541,7 @@ mod tests {
                 .expect("failed to convert path to string"),
             ca_cert_path: String::new(),
             watch: true,
-            skip_path_filter: false,
+            enable_filename_match: false,
         };
 
         let server_config = Arc::new(
