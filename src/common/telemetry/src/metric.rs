@@ -71,6 +71,7 @@ pub fn convert_metric_to_write_request(
                         timestamp,
                     }],
                     exemplars: vec![],
+                    histograms: vec![],
                 }),
                 MetricType::GAUGE => timeseries.push(TimeSeries {
                     labels: convert_label(m.get_label(), mf_name, None),
@@ -79,6 +80,7 @@ pub fn convert_metric_to_write_request(
                         timestamp,
                     }],
                     exemplars: vec![],
+                    histograms: vec![],
                 }),
                 MetricType::HISTOGRAM => {
                     let h = m.get_histogram();
@@ -97,6 +99,7 @@ pub fn convert_metric_to_write_request(
                                 timestamp,
                             }],
                             exemplars: vec![],
+                            histograms: vec![],
                         });
                         if upper_bound.is_sign_positive() && upper_bound.is_infinite() {
                             inf_seen = true;
@@ -114,6 +117,7 @@ pub fn convert_metric_to_write_request(
                                 timestamp,
                             }],
                             exemplars: vec![],
+                            histograms: vec![],
                         });
                     }
                     timeseries.push(TimeSeries {
@@ -127,6 +131,7 @@ pub fn convert_metric_to_write_request(
                             timestamp,
                         }],
                         exemplars: vec![],
+                        histograms: vec![],
                     });
                     timeseries.push(TimeSeries {
                         labels: convert_label(
@@ -139,6 +144,7 @@ pub fn convert_metric_to_write_request(
                             timestamp,
                         }],
                         exemplars: vec![],
+                        histograms: vec![],
                     });
                 }
                 MetricType::SUMMARY => {
@@ -155,6 +161,7 @@ pub fn convert_metric_to_write_request(
                                 timestamp,
                             }],
                             exemplars: vec![],
+                            histograms: vec![],
                         });
                     }
                     timeseries.push(TimeSeries {
@@ -168,6 +175,7 @@ pub fn convert_metric_to_write_request(
                             timestamp,
                         }],
                         exemplars: vec![],
+                        histograms: vec![],
                     });
                     timeseries.push(TimeSeries {
                         labels: convert_label(
@@ -180,6 +188,7 @@ pub fn convert_metric_to_write_request(
                             timestamp,
                         }],
                         exemplars: vec![],
+                        histograms: vec![],
                     });
                 }
                 MetricType::UNTYPED => {
