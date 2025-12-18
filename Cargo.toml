@@ -143,7 +143,7 @@ derive_builder = "0.20"
 derive_more = { version = "2.1", features = ["full"] }
 dotenv = "0.15"
 either = "1.15"
-etcd-client = { git = "https://github.com/GreptimeTeam/etcd-client", rev = "f62df834f0cffda355eba96691fe1a9a332b75a7", features = [
+etcd-client = { version = "0.16.1", features = [
     "tls",
     "tls-roots",
 ] }
