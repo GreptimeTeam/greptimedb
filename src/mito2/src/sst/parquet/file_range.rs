@@ -140,13 +140,10 @@ impl FileRange {
 
         let pred = Predicate::new(vec![]).with_dyn_filters(self.context.base.dyn_filters.clone());
 
-        let prune_res = pred
-            .prune_with_stats(&stats, prune_schema.arrow_schema())
-            .get(0)
+        pred.prune_with_stats(&stats, prune_schema.arrow_schema())
+            .first()
             .cloned()
-            .unwrap_or(false);
-
-        prune_res
+            .unwrap_or(true) // unexpected, not skip just in case
     }
 
     /// Returns a reader to read the [FileRange].
@@ -295,11 +292,6 @@ impl FileRangeContext {
     /// Returns filters pushed down.
     pub(crate) fn filters(&self) -> &[SimpleFilterContext] {
         &self.base.filters
-    }
-
-    /// Returns dynamic filter physical exprs.
-    pub(crate) fn dyn_filters(&self) -> &[DynamicFilterPhysicalExpr] {
-        &self.base.dyn_filters
     }
 
     /// Returns the format helper.
