@@ -439,6 +439,16 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
     name: &str,
     user_provider: Option<UserProviderRef>,
 ) -> (Router, TestGuard) {
+    setup_test_http_app_with_frontend_and_custom_options(store_type, name, user_provider, None)
+        .await
+}
+
+pub async fn setup_test_http_app_with_frontend_and_custom_options(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
+    http_opts: Option<HttpOptions>,
+) -> (Router, TestGuard) {
     let plugins = Plugins::new();
     if let Some(user_provider) = user_provider.clone() {
         plugins.insert::<UserProviderRef>(user_provider.clone());
@@ -449,10 +459,10 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 
     create_test_table(instance.fe_instance(), "demo").await;
 
-    let http_opts = HttpOptions {
+    let http_opts = http_opts.unwrap_or_else(|| HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
         ..Default::default()
-    };
+    });
 
     let mut http_server = HttpServerBuilder::new(http_opts);
 

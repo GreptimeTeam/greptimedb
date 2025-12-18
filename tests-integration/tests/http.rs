@@ -143,6 +143,7 @@ macro_rules! http_tests {
                 test_jaeger_query_api_for_trace_v1,
 
                 test_influxdb_write,
+                test_http_memory_limit,
             );
         )*
     };
@@ -3316,7 +3317,7 @@ processors:
         events = del(.events)
         base_host = del(.host)
         base_timestamp = del(.timestamp)
-        
+
         # Map each event to a complete row object
         map_values(array!(events)) -> |event| {
             {
@@ -7113,4 +7114,140 @@ fn compress_vec_with_gzip(data: Vec<u8>) -> Vec<u8> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&data).unwrap();
     encoder.finish().unwrap()
+}
+
+pub async fn test_http_memory_limit(store_type: StorageType) {
+    use common_base::readable_size::ReadableSize;
+    use tests_integration::test_util::setup_test_http_app_with_frontend_and_custom_options;
+
+    common_telemetry::init_default_ut_logging();
+
+    // Create HTTP server with memory limit:
+    // 500 bytes configured, but MemoryManager uses 1KB granularity (PermitGranularity::Kilobyte),
+    // so actual limit is ceil(500 / 1024) * 1024 = 1024 bytes
+    let http_opts = servers::http::HttpOptions {
+        addr: format!("127.0.0.1:{}", common_test_util::ports::get_port()),
+        max_total_body_memory: ReadableSize(500),
+        ..Default::default()
+    };
+
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_custom_options(
+        store_type,
+        "test_http_memory_limit",
+        None,
+        Some(http_opts),
+    )
+    .await;
+
+    let client = TestClient::new(app).await;
+
+    // Create table first
+    let res = client
+        .get("/v1/sql?sql=CREATE TABLE test_mem_limit(host STRING, cpu DOUBLE, ts TIMESTAMP TIME INDEX)")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Test 1: Small POST request should succeed (uses actual memory limiting path)
+    // Note: GET requests have no body, so they bypass body memory limiting entirely.
+    let small_insert = "INSERT INTO test_mem_limit VALUES ('host1', 1.0, 0)";
+    let res = client
+        .post("/v1/sql")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("sql={}", small_insert))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "Small POST should succeed");
+
+    // Test 1B: Medium request in the 500-1024 byte range should also succeed
+    // (due to 1KB granularity alignment)
+    let medium_values: Vec<String> = (0..8)
+        .map(|i| format!("('host{}', {}.5, {})", i, i, i * 1000))
+        .collect();
+    let medium_insert = format!(
+        "INSERT INTO test_mem_limit VALUES {}",
+        medium_values.join(", ")
+    );
+
+    let res = client
+        .post("/v1/sql")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("sql={}", medium_insert))
+        .send()
+        .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "Medium request (~700 bytes) should succeed within aligned 1KB limit"
+    );
+
+    // Test 2: Large write request should be rejected (exceeds 500 bytes)
+    // Generate a large INSERT with many rows
+    let large_values: Vec<String> = (0..50)
+        .map(|i| format!("('host{}', {}.5, {})", i, i, i * 1000))
+        .collect();
+    let large_insert = format!(
+        "INSERT INTO test_mem_limit VALUES {}",
+        large_values.join(", ")
+    );
+
+    let res = client
+        .post("/v1/sql")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("sql={}", large_insert))
+        .send()
+        .await;
+
+    assert_eq!(
+        res.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "Large write should be rejected with 429"
+    );
+
+    let error_body = res.text().await;
+    assert!(
+        error_body.contains("memory limit") || error_body.contains("Memory limit"),
+        "Error message should mention memory limit, got: {}",
+        error_body
+    );
+
+    // Test 3A: Small InfluxDB write should succeed
+    let small_influx = "test_influx,host=host1 cpu=1.5 1000000000";
+    let res = client
+        .post("/v1/influxdb/write?db=public")
+        .body(small_influx)
+        .send()
+        .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::NO_CONTENT,
+        "Small InfluxDB write should succeed"
+    );
+
+    // Test 3B: Large InfluxDB write should be rejected
+    let large_influx_body = (0..100)
+        .map(|i| {
+            format!(
+                "test_influx,host=host{} cpu={}.5 {}",
+                i,
+                i,
+                (i as i64) * 1000000000
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let res = client
+        .post("/v1/influxdb/write?db=public")
+        .body(large_influx_body)
+        .send()
+        .await;
+
+    assert_eq!(
+        res.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "Large InfluxDB write should be rejected"
+    );
+
+    guard.remove_all().await;
 }

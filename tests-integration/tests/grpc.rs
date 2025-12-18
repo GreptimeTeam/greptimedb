@@ -1021,6 +1021,9 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
 }
 
 pub async fn test_grpc_memory_limit(store_type: StorageType) {
+    // Create gRPC server with memory limit:
+    // 200 bytes configured, but MemoryManager uses 1KB granularity (PermitGranularity::Kilobyte),
+    // so actual limit is ceil(200 / 1024) * 1024 = 1024 bytes
     let config = GrpcServerConfig {
         max_recv_message_size: 1024 * 1024,
         max_send_message_size: 1024 * 1024,
@@ -1124,6 +1127,51 @@ pub async fn test_grpc_memory_limit(store_type: StorageType) {
         .await;
     assert!(result.is_ok());
 
+    // Test that medium request in the 200-1024 byte range should also succeed
+    // (due to 1KB granularity alignment)
+    let medium_rows: Vec<Row> = (0..5)
+        .map(|i| Row {
+            values: vec![
+                Value {
+                    value_data: Some(ValueData::StringValue(format!("host{}", i))),
+                },
+                Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(2000 + i)),
+                },
+                Value {
+                    value_data: Some(ValueData::F64Value(i as f64 * 2.5)),
+                },
+            ],
+        })
+        .collect();
+
+    let medium_row_insert = RowInsertRequest {
+        table_name: table_name.to_owned(),
+        rows: Some(api::v1::Rows {
+            schema: column_schemas
+                .iter()
+                .map(|c| api::v1::ColumnSchema {
+                    column_name: c.name.clone(),
+                    datatype: c.data_type,
+                    semantic_type: c.semantic_type,
+                    datatype_extension: None,
+                    options: None,
+                })
+                .collect(),
+            rows: medium_rows,
+        }),
+    };
+
+    let result = db
+        .row_inserts(RowInsertRequests {
+            inserts: vec![medium_row_insert],
+        })
+        .await;
+    assert!(
+        result.is_ok(),
+        "Medium request (~500 bytes) should succeed within aligned 1KB limit"
+    );
+
     // Test that large request exceeds limit
     let large_rows: Vec<Row> = (0..100)
         .map(|i| Row {
@@ -1167,7 +1215,7 @@ pub async fn test_grpc_memory_limit(store_type: StorageType) {
     let err = result.unwrap_err();
     let err_msg = err.to_string();
     assert!(
-        err_msg.contains("Too many concurrent"),
+        err_msg.contains("Memory limit exceeded"),
         "Expected memory limit error, got: {}",
         err_msg
     );
