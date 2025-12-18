@@ -21,15 +21,18 @@ use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
 use common_telemetry::error;
+use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datatypes::arrow::array::{ArrayRef, BooleanArray};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::schema::Schema;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::file::metadata::ParquetMetaData;
 use snafu::{OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::storage::{ColumnId, TimeSeriesRowSelector};
+use table::predicate::Predicate;
 
 use crate::error::{
     ComputeArrowSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu, RecordBatchSnafu,
@@ -46,6 +49,7 @@ use crate::sst::parquet::reader::{
     FlatRowGroupReader, MaybeFilter, RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext,
 };
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
+use crate::sst::parquet::stats::RowGroupPruningStats;
 
 /// Checks if a row group contains delete operations by examining the min value of op_type column.
 ///
@@ -114,12 +118,46 @@ impl FileRange {
         row_selection.row_count() == rows_in_group as usize
     }
 
+    /// Performs pruning before reading the [FileRange].
+    /// Returns false if the entire range is pruned and can be skipped.
+    fn in_dynamic_filter_range(&self) -> bool {
+        if self.context.base.dyn_filters.is_empty() {
+            return true;
+        }
+        let curr_row_group = self
+            .context
+            .reader_builder
+            .parquet_metadata()
+            .row_group(self.row_group_idx);
+        let read_format = self.context.read_format();
+        let prune_schema = &self.context.base.prune_schema;
+        let stats = RowGroupPruningStats::new(
+            std::slice::from_ref(curr_row_group),
+            read_format,
+            None, // TODO(discord9): check if need expected metadata
+            self.context.base.skip_fields,
+        );
+
+        let pred = Predicate::new(vec![]).with_dyn_filters(self.context.base.dyn_filters.clone());
+
+        let prune_res = pred
+            .prune_with_stats(&stats, prune_schema.arrow_schema())
+            .get(0)
+            .cloned()
+            .unwrap_or(false);
+
+        prune_res
+    }
+
     /// Returns a reader to read the [FileRange].
     pub(crate) async fn reader(
         &self,
         selector: Option<TimeSeriesRowSelector>,
         fetch_metrics: Option<&ParquetFetchMetrics>,
-    ) -> Result<PruneReader> {
+    ) -> Result<Option<PruneReader>> {
+        if !self.in_dynamic_filter_range() {
+            return Ok(None);
+        }
         let parquet_reader = self
             .context
             .reader_builder
@@ -170,7 +208,7 @@ impl FileRange {
             )
         };
 
-        Ok(prune_reader)
+        Ok(Some(prune_reader))
     }
 
     /// Creates a flat reader that returns RecordBatch.
@@ -227,7 +265,10 @@ impl FileRangeContext {
     pub(crate) fn new(
         reader_builder: RowGroupReaderBuilder,
         filters: Vec<SimpleFilterContext>,
+        dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>,
         read_format: ReadFormat,
+        skip_fields: bool,
+        prune_schema: Arc<Schema>,
         codec: Arc<dyn PrimaryKeyCodec>,
         pre_filter_mode: PreFilterMode,
     ) -> Self {
@@ -235,7 +276,10 @@ impl FileRangeContext {
             reader_builder,
             base: RangeBase {
                 filters,
+                dyn_filters,
                 read_format,
+                skip_fields,
+                prune_schema,
                 codec,
                 compat_batch: None,
                 pre_filter_mode,
@@ -251,6 +295,11 @@ impl FileRangeContext {
     /// Returns filters pushed down.
     pub(crate) fn filters(&self) -> &[SimpleFilterContext] {
         &self.base.filters
+    }
+
+    /// Returns dynamic filter physical exprs.
+    pub(crate) fn dyn_filters(&self) -> &[DynamicFilterPhysicalExpr] {
+        &self.base.dyn_filters
     }
 
     /// Returns the format helper.
@@ -323,8 +372,12 @@ pub enum PreFilterMode {
 pub(crate) struct RangeBase {
     /// Filters pushed down.
     pub(crate) filters: Vec<SimpleFilterContext>,
+    /// Dynamic filter physical exprs.
+    pub(crate) dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>,
     /// Helper to read the SST.
     pub(crate) read_format: ReadFormat,
+    pub(crate) skip_fields: bool,
+    pub(crate) prune_schema: Arc<Schema>,
     /// Decoder for primary keys
     pub(crate) codec: Arc<dyn PrimaryKeyCodec>,
     /// Optional helper to compat batches.

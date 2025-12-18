@@ -1181,7 +1181,10 @@ pub fn build_file_range_scan_stream(
         };
         for range in ranges {
             let build_reader_start = Instant::now();
-            let reader = range.reader(stream_ctx.input.series_row_selector, fetch_metrics.as_deref()).await?;
+            let Some(reader) = range.reader(stream_ctx.input.series_row_selector, fetch_metrics.as_deref()).await?
+            else{
+                continue;
+            };
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
             let compat_batch = range.compat_batch();

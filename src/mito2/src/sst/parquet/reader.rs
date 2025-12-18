@@ -342,6 +342,14 @@ impl ParquetReaderBuilder {
             );
         }
 
+        let skip_fields = self.compute_skip_fields(&parquet_meta);
+
+        let prune_schema = self
+            .expected_metadata
+            .as_ref()
+            .map(|meta| meta.schema.clone())
+            .unwrap_or_else(|| region_meta.schema.clone());
+
         let reader_builder = RowGroupReaderBuilder {
             file_handle: self.file_handle.clone(),
             file_path,
@@ -368,12 +376,21 @@ impl ParquetReaderBuilder {
             vec![]
         };
 
+        let dyn_filters = if let Some(predicate) = &self.predicate {
+            predicate.dyn_filters()
+        } else {
+            Arc::new(vec![])
+        };
+
         let codec = build_primary_key_codec(read_format.metadata());
 
         let context = FileRangeContext::new(
             reader_builder,
             filters,
+            dyn_filters,
             read_format,
+            skip_fields,
+            prune_schema,
             codec,
             self.pre_filter_mode,
         );

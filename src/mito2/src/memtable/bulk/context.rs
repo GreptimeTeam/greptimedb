@@ -74,7 +74,7 @@ impl BulkIterContext {
             .collect();
 
         let read_format = ReadFormat::new(
-            region_metadata,
+            region_metadata.clone(),
             projection,
             true,
             None,
@@ -85,7 +85,10 @@ impl BulkIterContext {
         Ok(Self {
             base: RangeBase {
                 filters: simple_filters,
+                dyn_filters: Arc::new(vec![]), // TODO(discord9): pass dynamic filters
                 read_format,
+                skip_fields: false,
+                prune_schema: region_metadata.schema.clone(),
                 codec,
                 // we don't need to compat batch since all batch in memtable have the same schema.
                 compat_batch: None,
