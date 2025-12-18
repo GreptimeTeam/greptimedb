@@ -491,6 +491,7 @@ impl<'a> FlownodeServiceBuilder<'a> {
             max_recv_message_size: opts.grpc.max_recv_message_size.as_bytes() as usize,
             max_send_message_size: opts.grpc.max_send_message_size.as_bytes() as usize,
             max_total_message_memory: opts.grpc.max_total_message_memory.as_bytes() as usize,
+            memory_exhausted_policy: opts.grpc.memory_exhausted_policy,
             tls: opts.grpc.tls.clone(),
             max_connection_age: opts.grpc.max_connection_age,
         };

@@ -37,6 +37,12 @@ pub struct MemoryManager<M: MemoryMetrics> {
     quota: Option<MemoryQuota<M>>,
 }
 
+impl<M: MemoryMetrics + Default> Default for MemoryManager<M> {
+    fn default() -> Self {
+        Self::new(0, M::default())
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct MemoryQuota<M: MemoryMetrics> {
     pub(crate) semaphore: Arc<Semaphore>,

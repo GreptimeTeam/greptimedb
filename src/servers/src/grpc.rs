@@ -33,6 +33,7 @@ use common_base::readable_size::ReadableSize;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
+use common_memory_manager::OnExhaustedPolicy;
 use common_telemetry::{error, info, warn};
 use futures::FutureExt;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsServiceServer;
@@ -49,10 +50,10 @@ use tonic::{Request, Response, Status};
 use tonic_reflection::server::v1::{ServerReflection, ServerReflectionServer};
 
 use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
+use crate::grpc::memory_limit::GrpcMemoryLimitState;
 use crate::metrics::MetricsMiddlewareLayer;
 use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
-use crate::request_limiter::RequestMemoryLimiter;
 use crate::server::Server;
 use crate::tls::TlsOption;
 
@@ -71,6 +72,10 @@ pub struct GrpcOptions {
     pub max_send_message_size: ReadableSize,
     /// Maximum total memory for all concurrent gRPC request messages. 0 disables the limit.
     pub max_total_message_memory: ReadableSize,
+    /// Policy when memory quota is exhausted.
+    /// Supports: "wait", "wait(<duration>)", "fail"
+    /// Default: "wait" (10s timeout)
+    pub memory_exhausted_policy: OnExhaustedPolicy,
     /// Compression mode in Arrow Flight service.
     pub flight_compression: FlightCompression,
     pub runtime_size: usize,
@@ -121,6 +126,7 @@ impl GrpcOptions {
             max_recv_message_size: self.max_recv_message_size.as_bytes() as usize,
             max_send_message_size: self.max_send_message_size.as_bytes() as usize,
             max_total_message_memory: self.max_total_message_memory.as_bytes() as usize,
+            memory_exhausted_policy: self.memory_exhausted_policy,
             tls: self.tls.clone(),
             max_connection_age: self.max_connection_age,
         }
@@ -140,6 +146,7 @@ impl Default for GrpcOptions {
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
             max_total_message_memory: ReadableSize(0),
+            memory_exhausted_policy: OnExhaustedPolicy::default(),
             flight_compression: FlightCompression::ArrowIpc,
             runtime_size: 8,
             tls: TlsOption::default(),
@@ -160,6 +167,7 @@ impl GrpcOptions {
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
             max_total_message_memory: ReadableSize(0),
+            memory_exhausted_policy: OnExhaustedPolicy::default(),
             flight_compression: FlightCompression::ArrowIpc,
             runtime_size: 8,
             tls: TlsOption::default(),
@@ -224,7 +232,7 @@ pub struct GrpcServer {
     bind_addr: Option<SocketAddr>,
     name: Option<String>,
     config: GrpcServerConfig,
-    memory_limiter: RequestMemoryLimiter,
+    memory_limit_state: GrpcMemoryLimitState,
 }
 
 /// Grpc Server configuration
@@ -236,6 +244,8 @@ pub struct GrpcServerConfig {
     pub max_send_message_size: usize,
     /// Maximum total memory for all concurrent gRPC request messages. 0 disables the limit.
     pub max_total_message_memory: usize,
+    /// Memory exhausted policy
+    pub memory_exhausted_policy: OnExhaustedPolicy,
     pub tls: TlsOption,
     /// Maximum time that a channel may exist.
     /// Useful when the server wants to control the reconnection of its clients.
@@ -249,6 +259,7 @@ impl Default for GrpcServerConfig {
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE.as_bytes() as usize,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE.as_bytes() as usize,
             max_total_message_memory: 0,
+            memory_exhausted_policy: OnExhaustedPolicy::default(),
             tls: TlsOption::default(),
             max_connection_age: None,
         }
@@ -289,9 +300,8 @@ impl GrpcServer {
         Ok(())
     }
 
-    /// Get the memory limiter for monitoring current memory usage
-    pub fn memory_limiter(&self) -> &RequestMemoryLimiter {
-        &self.memory_limiter
+    pub fn memory_limit_state(&self) -> &GrpcMemoryLimitState {
+        &self.memory_limit_state
     }
 }
 

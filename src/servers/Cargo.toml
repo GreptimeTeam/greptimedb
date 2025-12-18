@@ -41,6 +41,7 @@ common-frontend.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true
 common-mem-prof = { workspace = true, optional = true }
+common-memory-manager.workspace = true
 common-meta.workspace = true
 common-plugins.workspace = true
 common-pprof = { workspace = true, optional = true }

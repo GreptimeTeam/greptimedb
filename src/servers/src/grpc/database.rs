@@ -21,13 +21,13 @@ use common_query::OutputData;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
 use prost::Message;
+use snafu::ResultExt;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
+use crate::grpc::memory_limit::GrpcMemoryLimitState;
 use crate::grpc::{TonicResult, cancellation};
-use crate::hint_headers;
-use crate::metrics::{METRIC_GRPC_MEMORY_USAGE_BYTES, METRIC_GRPC_REQUESTS_REJECTED_TOTAL};
-use crate::request_limiter::RequestMemoryLimiter;
+use crate::{error, hint_headers};
 
 pub(crate) struct DatabaseService {
     handler: GreptimeRequestHandler,
@@ -52,25 +52,18 @@ impl GreptimeDatabase for DatabaseService {
             remote_addr, hints
         );
 
-        let _guard = request
-            .extensions()
-            .get::<RequestMemoryLimiter>()
-            .filter(|limiter| limiter.is_enabled())
-            .and_then(|limiter| {
-                let message_size = request.get_ref().encoded_len();
-                limiter
-                    .try_acquire(message_size)
-                    .map(|guard| {
-                        guard.inspect(|g| {
-                            METRIC_GRPC_MEMORY_USAGE_BYTES.set(g.current_usage() as i64);
-                        })
-                    })
-                    .inspect_err(|_| {
-                        METRIC_GRPC_REQUESTS_REJECTED_TOTAL.inc();
-                    })
-                    .transpose()
-            })
-            .transpose()?;
+        let _guard = if let Some(state) = request.extensions().get::<GrpcMemoryLimitState>() {
+            let message_size = request.get_ref().encoded_len() as u64;
+            Some(
+                state
+                    .manager
+                    .acquire_with_policy(message_size, state.policy)
+                    .await
+                    .context(error::GrpcMemoryLimitExceededSnafu)?,
+            )
+        } else {
+            None
+        };
 
         let handler = self.handler.clone();
         let request_future = async move {
@@ -119,7 +112,7 @@ impl GreptimeDatabase for DatabaseService {
             remote_addr, hints
         );
 
-        let limiter = request.extensions().get::<RequestMemoryLimiter>().cloned();
+        let state = request.extensions().get::<GrpcMemoryLimitState>().cloned();
 
         let handler = self.handler.clone();
         let request_future = async move {
@@ -129,24 +122,18 @@ impl GreptimeDatabase for DatabaseService {
             while let Some(request) = stream.next().await {
                 let request = request?;
 
-                let _guard = limiter
-                    .as_ref()
-                    .filter(|limiter| limiter.is_enabled())
-                    .and_then(|limiter| {
-                        let message_size = request.encoded_len();
-                        limiter
-                            .try_acquire(message_size)
-                            .map(|guard| {
-                                guard.inspect(|g| {
-                                    METRIC_GRPC_MEMORY_USAGE_BYTES.set(g.current_usage() as i64);
-                                })
-                            })
-                            .inspect_err(|_| {
-                                METRIC_GRPC_REQUESTS_REJECTED_TOTAL.inc();
-                            })
-                            .transpose()
-                    })
-                    .transpose()?;
+                let _guard = if let Some(ref state) = state {
+                    let message_size = request.encoded_len() as u64;
+                    Some(
+                        state
+                            .manager
+                            .acquire_with_policy(message_size, state.policy)
+                            .await
+                            .context(error::GrpcMemoryLimitExceededSnafu)?,
+                    )
+                } else {
+                    None
+                };
                 let output = handler.handle_request(request, hints.clone()).await?;
                 match output.data {
                     OutputData::AffectedRows(rows) => affected_rows += rows,

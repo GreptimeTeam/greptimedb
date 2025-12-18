@@ -14,20 +14,28 @@
 
 use std::task::{Context, Poll};
 
+use common_memory_manager::{MemoryManager, OnExhaustedPolicy};
 use futures::future::BoxFuture;
 use tonic::server::NamedService;
 use tower::{Layer, Service};
 
-use crate::request_limiter::RequestMemoryLimiter;
+use crate::memory_metrics::GrpcMemoryMetrics;
+
+/// State containing MemoryManager and policy for gRPC
+#[derive(Clone)]
+pub struct GrpcMemoryLimitState {
+    pub manager: MemoryManager<GrpcMemoryMetrics>,
+    pub policy: OnExhaustedPolicy,
+}
 
 #[derive(Clone)]
 pub struct MemoryLimiterExtensionLayer {
-    limiter: RequestMemoryLimiter,
+    state: GrpcMemoryLimitState,
 }
 
 impl MemoryLimiterExtensionLayer {
-    pub fn new(limiter: RequestMemoryLimiter) -> Self {
-        Self { limiter }
+    pub fn new(state: GrpcMemoryLimitState) -> Self {
+        Self { state }
     }
 }
 
@@ -37,7 +45,7 @@ impl<S> Layer<S> for MemoryLimiterExtensionLayer {
     fn layer(&self, service: S) -> Self::Service {
         MemoryLimiterExtensionService {
             inner: service,
-            limiter: self.limiter.clone(),
+            state: self.state.clone(),
         }
     }
 }
@@ -45,7 +53,7 @@ impl<S> Layer<S> for MemoryLimiterExtensionLayer {
 #[derive(Clone)]
 pub struct MemoryLimiterExtensionService<S> {
     inner: S,
-    limiter: RequestMemoryLimiter,
+    state: GrpcMemoryLimitState,
 }
 
 impl<S: NamedService> NamedService for MemoryLimiterExtensionService<S> {
@@ -66,7 +74,7 @@ where
     }
 
     fn call(&mut self, mut req: http::Request<ReqBody>) -> Self::Future {
-        req.extensions_mut().insert(self.limiter.clone());
+        req.extensions_mut().insert(self.state.clone());
         Box::pin(self.inner.call(req))
     }
 }

@@ -35,6 +35,10 @@ body_limit = "64MB"
 ## Set to 0 to disable the limit. Default: "0" (unlimited)
 ## @toml2docs:none-default
 #+ max_total_body_memory = "1GB"
+## Policy when memory quota is exhausted.
+## Supports: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"
+## @toml2docs:none-default
+#+ memory_exhausted_policy = "wait"
 ## HTTP CORS support, it's turned on by default
 ## This allows browser to access http APIs without CORS restrictions
 enable_cors = true
@@ -62,6 +66,10 @@ runtime_size = 8
 ## Set to 0 to disable the limit. Default: "0" (unlimited)
 ## @toml2docs:none-default
 #+ max_total_message_memory = "1GB"
+## Policy when memory quota is exhausted.
+## Supports: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"
+## @toml2docs:none-default
+#+ memory_exhausted_policy = "wait"
 ## Compression mode for frontend side Arrow IPC service. Available options:
 ## - `none`: disable all compression
 ## - `transport`: only enable gRPC transport compression (zstd)

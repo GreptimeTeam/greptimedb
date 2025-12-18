@@ -25,6 +25,7 @@ use auth::user_provider_from_option;
 use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputData};
 use common_catalog::consts::MITO_ENGINE;
 use common_grpc::channel_manager::ClientTlsOption;
+use common_memory_manager::OnExhaustedPolicy;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_runtime::Runtime;
@@ -960,6 +961,7 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
         max_total_message_memory: 1024 * 1024 * 1024,
+        memory_exhausted_policy: OnExhaustedPolicy::default(),
         tls,
         max_connection_age: None,
     };
@@ -1004,6 +1006,7 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
             max_recv_message_size: 1024,
             max_send_message_size: 1024,
             max_total_message_memory: 1024 * 1024 * 1024,
+            memory_exhausted_policy: OnExhaustedPolicy::default(),
             tls,
             max_connection_age: None,
         };
@@ -1022,6 +1025,7 @@ pub async fn test_grpc_memory_limit(store_type: StorageType) {
         max_recv_message_size: 1024 * 1024,
         max_send_message_size: 1024 * 1024,
         max_total_message_memory: 200,
+        memory_exhausted_policy: OnExhaustedPolicy::Fail,
         tls: Default::default(),
         max_connection_age: None,
     };
