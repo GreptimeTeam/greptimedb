@@ -179,7 +179,7 @@ pub const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
 pub const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
 pub const SCHEMA_NAME_KEY_PREFIX: &str = "__schema_name";
 pub const TABLE_ROUTE_PREFIX: &str = "__table_route";
-pub const TABLE_PART_PREFIX: &str = "__table_part";
+pub const TABLE_REPART_PREFIX: &str = "__table_repart";
 pub const NODE_ADDRESS_PREFIX: &str = "__node_address";
 pub const KAFKA_TOPIC_KEY_PREFIX: &str = "__topic_name/kafka";
 // The legacy topic key prefix is used to store the topic name in previous versions.
@@ -291,8 +291,8 @@ lazy_static! {
 }
 
 lazy_static! {
-    pub(crate) static ref TABLE_PART_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{TABLE_PART_PREFIX}/([0-9]+)$")).unwrap();
+    pub(crate) static ref TABLE_REPART_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{TABLE_REPART_PREFIX}/([0-9]+)$")).unwrap();
 }
 
 lazy_static! {

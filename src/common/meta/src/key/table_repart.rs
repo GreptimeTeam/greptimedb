@@ -23,8 +23,8 @@ use table::metadata::TableId;
 use crate::error::{InvalidMetadataSnafu, Result, SerdeJsonSnafu};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
-    DeserializedValueWithBytes, MetadataKey, MetadataValue, TABLE_PART_KEY_PATTERN,
-    TABLE_PART_PREFIX,
+    DeserializedValueWithBytes, MetadataKey, MetadataValue, TABLE_REPART_KEY_PATTERN,
+    TABLE_REPART_PREFIX,
 };
 use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::Txn;
@@ -36,7 +36,7 @@ use crate::rpc::store::BatchGetRequest;
 /// For example, after repartition, a destination region may still hold files from a source region; this mapping should be updated once repartition is done.
 /// The GC scheduler uses this information to clean up those files (and removes this mapping if all files from the source region are cleaned).
 ///
-/// The layout: `__table_part/{table_id}`.
+/// The layout: `__table_repart/{table_id}`.
 #[derive(Debug, PartialEq)]
 pub struct TableRepartKey {
     /// The unique identifier of the table whose re-partition information is stored in this key.
@@ -50,7 +50,7 @@ impl TableRepartKey {
 
     /// Returns the range prefix of the table partition key.
     pub fn range_prefix() -> Vec<u8> {
-        format!("{}/", TABLE_PART_PREFIX).into_bytes()
+        format!("{}/", TABLE_REPART_PREFIX).into_bytes()
     }
 }
 
@@ -69,7 +69,7 @@ impl MetadataKey<'_, TableRepartKey> for TableRepartKey {
             }
             .build()
         })?;
-        let captures = TABLE_PART_KEY_PATTERN
+        let captures = TABLE_REPART_KEY_PATTERN
             .captures(key)
             .context(InvalidMetadataSnafu {
                 err_msg: format!("Invalid TableRepartKey '{key}'"),
@@ -82,7 +82,7 @@ impl MetadataKey<'_, TableRepartKey> for TableRepartKey {
 
 impl Display for TableRepartKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", TABLE_PART_PREFIX, self.table_id)
+        write!(f, "{}/{}", TABLE_REPART_PREFIX, self.table_id)
     }
 }
 
@@ -145,7 +145,7 @@ impl TableRepartManager {
     }
 
     /// Builds a create table repart transaction,
-    /// it expected the `__table_part/{table_id}` wasn't occupied.
+    /// it expected the `__table_repart/{table_id}` wasn't occupied.
     pub fn build_create_txn(
         &self,
         table_id: TableId,
@@ -277,18 +277,18 @@ impl TableRepartManager {
         let table_id = src.table_id();
 
         // Get current table repart with raw bytes for CAS operation
-        let current_table_part = self
+        let current_table_repart = self
             .get_with_raw_bytes(table_id)
             .await?
             .context(crate::error::TablePartitionNotFoundSnafu { table_id })?;
 
         // Clone the current repart value and update mappings
-        let mut new_table_repart_value = current_table_part.inner.clone();
+        let mut new_table_repart_value = current_table_repart.inner.clone();
         new_table_repart_value.update_mappings(src, dst);
 
         // Execute atomic update
         let (txn, _) =
-            self.build_update_txn(table_id, &current_table_part, &new_table_repart_value)?;
+            self.build_update_txn(table_id, &current_table_repart, &new_table_repart_value)?;
 
         let result = self.kv_backend.txn(txn).await?;
 
@@ -311,18 +311,18 @@ impl TableRepartManager {
         let table_id = src.table_id();
 
         // Get current table repart with raw bytes for CAS operation
-        let current_table_part = self
+        let current_table_repart = self
             .get_with_raw_bytes(table_id)
             .await?
             .context(crate::error::TablePartitionNotFoundSnafu { table_id })?;
 
         // Clone the current repart value and remove mappings
-        let mut new_table_repart_value = current_table_part.inner.clone();
+        let mut new_table_repart_value = current_table_repart.inner.clone();
         new_table_repart_value.remove_mappings(src, dsts);
 
         // Execute atomic update
         let (txn, _) =
-            self.build_update_txn(table_id, &current_table_part, &new_table_repart_value)?;
+            self.build_update_txn(table_id, &current_table_repart, &new_table_repart_value)?;
 
         let result = self.kv_backend.txn(txn).await?;
 
@@ -363,19 +363,19 @@ mod tests {
     fn test_table_repart_key_serialization() {
         let key = TableRepartKey::new(42);
         let raw_key = key.to_bytes();
-        assert_eq!(raw_key, b"__table_part/42");
+        assert_eq!(raw_key, b"__table_repart/42");
     }
 
     #[test]
     fn test_table_repart_key_deserialization() {
         let expected = TableRepartKey::new(42);
-        let key = TableRepartKey::from_bytes(b"__table_part/42").unwrap();
+        let key = TableRepartKey::from_bytes(b"__table_repart/42").unwrap();
         assert_eq!(key, expected);
     }
 
     #[test]
     fn test_table_repart_key_deserialization_invalid_utf8() {
-        let result = TableRepartKey::from_bytes(b"__table_part/\xff");
+        let result = TableRepartKey::from_bytes(b"__table_repart/\xff");
         assert!(result.is_err());
         assert!(
             result
