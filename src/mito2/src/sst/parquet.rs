@@ -96,16 +96,22 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::{OpType, SemanticType};
+    use common_function::function::FunctionRef;
+    use common_function::function_factory::ScalarFunctionFactory;
+    use common_function::scalars::matches::MatchesFunction;
+    use common_function::scalars::matches_term::MatchesTermFunction;
     use common_time::Timestamp;
     use datafusion_common::{Column, ScalarValue};
+    use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{BinaryExpr, Expr, Literal, Operator, col, lit};
     use datatypes::arrow;
     use datatypes::arrow::array::{
-        ArrayRef, BinaryDictionaryBuilder, RecordBatch, StringDictionaryBuilder,
+        ArrayRef, BinaryDictionaryBuilder, RecordBatch, StringArray, StringDictionaryBuilder,
         TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{FulltextAnalyzer, FulltextBackend, FulltextOptions};
     use parquet::arrow::AsyncArrowWriter;
     use parquet::basic::{Compression, Encoding, ZstdLevel};
     use parquet::file::metadata::KeyValue;
@@ -125,6 +131,7 @@ mod tests {
     use crate::sst::file::{FileHandle, FileMeta, RegionFileId, RegionIndexId};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierBuilder;
+    use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::{IndexBuildType, Indexer, IndexerBuilder, IndexerBuilderImpl};
     use crate::sst::parquet::format::PrimaryKeyWriteFormat;
@@ -1548,8 +1555,6 @@ mod tests {
     /// Creates region metadata for testing fulltext indexes.
     /// Schema: tag_0, text_bloom, text_tantivy, field_0, ts
     fn fulltext_region_metadata() -> RegionMetadata {
-        use datatypes::schema::{FulltextAnalyzer, FulltextBackend, FulltextOptions};
-
         let mut builder = RegionMetadataBuilder::new(REGION_ID);
         builder
             .push_column_metadata(ColumnMetadata {
@@ -1627,8 +1632,6 @@ mod tests {
         start: usize,
         end: usize,
     ) -> RecordBatch {
-        use datatypes::arrow::array::StringArray;
-
         assert!(end >= start);
         let metadata = Arc::new(fulltext_region_metadata());
         let flat_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
@@ -1681,15 +1684,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_flat_read_with_fulltext_index() {
-        use common_function::function::FunctionRef;
-        use common_function::function_factory::ScalarFunctionFactory;
-        use common_function::scalars::matches::MatchesFunction;
-        use common_function::scalars::matches_term::MatchesTermFunction;
-        use datafusion_expr::Literal;
-        use datafusion_expr::expr::ScalarFunction;
-
-        use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
-
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let file_path = RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare);
