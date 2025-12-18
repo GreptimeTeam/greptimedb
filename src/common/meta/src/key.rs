@@ -106,7 +106,7 @@ mod schema_metadata_manager;
 pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
-pub mod table_part;
+pub mod table_repart;
 pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
