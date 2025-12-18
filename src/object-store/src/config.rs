@@ -16,7 +16,6 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_base::secrets::{ExposeSecret, SecretString};
-use common_telemetry::tracing::warn;
 use opendal::services::{Azblob, Gcs, Oss, S3};
 use serde::{Deserialize, Serialize};
 
@@ -118,23 +117,25 @@ pub struct S3Connection {
     /// By default, opendal will send API to https://s3.us-east-1.amazonaws.com/bucket_name
     /// Enabled, opendal will send API to https://bucket_name.s3.us-east-1.amazonaws.com
     pub enable_virtual_host_style: bool,
+    /// Disable EC2 metadata service.
+    /// By default, opendal will use EC2 metadata service to load credentials from the instance metadata,
+    /// when access key id and secret access key are not provided.
+    /// If enabled, opendal will *NOT* use EC2 metadata service.
+    pub disable_ec2_metadata: bool,
 }
 
 impl From<&S3Connection> for S3 {
     fn from(connection: &S3Connection) -> Self {
         let root = util::normalize_dir(&connection.root);
 
-        let mut builder = S3::default().root(&root).bucket(&connection.bucket);
+        let mut builder = S3::default()
+            .root(&root)
+            .bucket(&connection.bucket)
+            .access_key_id(connection.access_key_id.expose_secret())
+            .secret_access_key(connection.secret_access_key.expose_secret());
 
-        if !connection.access_key_id.expose_secret().is_empty()
-            && !connection.secret_access_key.expose_secret().is_empty()
-        {
-            builder = builder
-                .access_key_id(connection.access_key_id.expose_secret())
-                .secret_access_key(connection.secret_access_key.expose_secret());
-        } else {
-            warn!("No access key id or secret access key provided, using anonymous access");
-            builder = builder.allow_anonymous().disable_ec2_metadata();
+        if connection.disable_ec2_metadata {
+            builder = builder.disable_ec2_metadata();
         }
 
         if let Some(endpoint) = &connection.endpoint {
