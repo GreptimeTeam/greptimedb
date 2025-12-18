@@ -1404,7 +1404,6 @@ cert_path = ""
 key_path = ""
 ca_cert_path = ""
 watch = false
-enable_filename_match = false
 
 [mysql]
 enable = true
@@ -1419,7 +1418,6 @@ cert_path = ""
 key_path = ""
 ca_cert_path = ""
 watch = false
-enable_filename_match = false
 
 [postgres]
 enable = true
@@ -1433,7 +1431,6 @@ cert_path = ""
 key_path = ""
 ca_cert_path = ""
 watch = false
-enable_filename_match = false
 
 [opentsdb]
 enable = true

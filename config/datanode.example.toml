@@ -76,11 +76,6 @@ key_path = ""
 ## For now, gRPC tls config does not support auto reload.
 watch = false
 
-## Enable filename matching for reloading TLS config.
-## By default, the callback is triggered on any event in the watched directories.
-## If set to true, the callback is triggered only when the filename of the watched file matches the event path.
-enable_filename_match = false
-
 ## The runtime options.
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.

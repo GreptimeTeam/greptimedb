@@ -266,7 +266,6 @@ async fn test_server_required_secure_client_plain() -> Result<()> {
         key_path: "tests/ssl/server-rsa.key".to_owned(),
         ca_cert_path: String::new(),
         watch: false,
-        enable_filename_match: false,
     };
 
     let client_tls = false;
@@ -307,7 +306,6 @@ async fn test_server_required_secure_client_plain_with_pkcs8_priv_key() -> Resul
         key_path: "tests/ssl/server-pkcs8.key".to_owned(),
         ca_cert_path: String::new(),
         watch: false,
-        enable_filename_match: false,
     };
 
     let client_tls = false;
@@ -613,7 +611,6 @@ async fn do_test_query_all_datatypes_with_secure_server(
         },
         ca_cert_path: String::new(),
         watch: false,
-        enable_filename_match: false,
     };
 
     do_test_query_all_datatypes(server_tls, client_tls).await

@@ -194,7 +194,6 @@ fn test_load_metasrv_example_config() {
                 key_path: String::new(),
                 ca_cert_path: String::new(),
                 watch: false,
-                enable_filename_match: false,
             }),
             meta_schema_name: Some("greptime_schema".to_string()),
             ..Default::default()

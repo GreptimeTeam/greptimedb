@@ -37,9 +37,6 @@ use crate::error::{FileWatchSnafu, InvalidPathSnafu, Result};
 pub struct FileWatcherConfig {
     /// Whether to include Remove events in addition to Modify and Create.
     pub include_remove_events: bool,
-    /// Whether to enable filename match for the watched files.
-    /// If set to true, the callback is triggered only when the filename of the watched file matches the event path.
-    pub enable_filename_match: bool,
 }
 
 impl FileWatcherConfig {
@@ -49,11 +46,6 @@ impl FileWatcherConfig {
 
     pub fn include_remove_events(mut self) -> Self {
         self.include_remove_events = true;
-        self
-    }
-
-    pub fn enable_filename_match(mut self) -> Self {
-        self.enable_filename_match = true;
         self
     }
 }
@@ -144,7 +136,6 @@ impl FileWatcherBuilder {
         }
 
         let config = self.config;
-        let watched_files: HashSet<PathBuf> = self.file_paths.iter().cloned().collect();
 
         info!(
             "Spawning file watcher for paths: {:?} (watching parent directories)",
@@ -165,14 +156,7 @@ impl FileWatcherBuilder {
                             continue;
                         }
 
-                        // Check if any of the event paths match our watched files
-                        if config.enable_filename_match
-                            && !event.paths.iter().any(|p| watched_files.contains(p))
-                        {
-                            continue;
-                        }
-
-                        info!(?event.kind, ?event.paths, "Detected file change");
+                        info!(?event.kind, ?event.paths, "Detected folder change");
                         callback();
                     }
                     Err(err) => {
@@ -309,7 +293,7 @@ mod tests {
         FileWatcherBuilder::new()
             .watch_path(&watched_file)
             .unwrap()
-            .config(FileWatcherConfig::new().enable_filename_match())
+            .config(FileWatcherConfig::new())
             .spawn(move || {
                 counter_clone.fetch_add(1, Ordering::SeqCst);
             })

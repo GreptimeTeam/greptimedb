@@ -63,8 +63,6 @@ pub struct TlsOption {
     pub ca_cert_path: String,
     #[serde(default)]
     pub watch: bool,
-    #[serde(default)]
-    pub enable_filename_match: bool,
 }
 
 impl TlsOption {
@@ -73,7 +71,6 @@ impl TlsOption {
         cert_path: Option<String>,
         key_path: Option<String>,
         watch: bool,
-        enable_filename_match: bool,
     ) -> Self {
         let mut tls_option = TlsOption::default();
 
@@ -90,8 +87,6 @@ impl TlsOption {
         };
 
         tls_option.watch = watch;
-
-        tls_option.enable_filename_match = enable_filename_match;
 
         tls_option
     }
@@ -214,10 +209,6 @@ impl TlsConfigLoader<Arc<ServerConfig>> for TlsOption {
     fn watch_enabled(&self) -> bool {
         self.mode != TlsMode::Disable && self.watch
     }
-
-    fn enable_filename_match(&self) -> bool {
-        self.enable_filename_match
-    }
 }
 
 /// Type alias for server-side reloadable TLS config
@@ -248,7 +239,6 @@ mod tests {
             key_path: String::new(),
             ca_cert_path: String::new(),
             watch: false,
-            enable_filename_match: false,
         };
         assert!(tls.validate().is_ok());
     }
@@ -261,7 +251,6 @@ mod tests {
             key_path: "/path/to/key".to_string(),
             ca_cert_path: String::new(),
             watch: false,
-            enable_filename_match: false,
         };
         let err = tls.validate().unwrap_err();
         assert!(err.to_string().contains("cert_path"));
@@ -275,7 +264,6 @@ mod tests {
             key_path: String::new(),
             ca_cert_path: String::new(),
             watch: false,
-            enable_filename_match: false,
         };
         let err = tls.validate().unwrap_err();
         assert!(err.to_string().contains("key_path"));
@@ -289,7 +277,6 @@ mod tests {
             key_path: "/path/to/key".to_string(),
             ca_cert_path: String::new(),
             watch: false,
-            enable_filename_match: false,
         };
         assert!(tls.validate().is_ok());
     }
@@ -302,7 +289,6 @@ mod tests {
             key_path: "/path/to/key".to_string(),
             ca_cert_path: String::new(),
             watch: false,
-            enable_filename_match: false,
         };
         let err = tls.validate().unwrap_err();
         assert!(err.to_string().contains("ca_cert_path"));
@@ -316,7 +302,6 @@ mod tests {
             key_path: "/path/to/key".to_string(),
             ca_cert_path: String::new(),
             watch: false,
-            enable_filename_match: false,
         };
         let err = tls.validate().unwrap_err();
         assert!(err.to_string().contains("ca_cert_path"));
@@ -330,7 +315,6 @@ mod tests {
             key_path: "/path/to/key".to_string(),
             ca_cert_path: "/path/to/ca".to_string(),
             watch: false,
-            enable_filename_match: false,
         };
         assert!(tls.validate().is_ok());
     }
@@ -343,7 +327,6 @@ mod tests {
             key_path: "/path/to/key".to_string(),
             ca_cert_path: "/path/to/ca".to_string(),
             watch: false,
-            enable_filename_match: false,
         };
         assert!(tls.validate().is_ok());
     }
@@ -356,7 +339,6 @@ mod tests {
             key_path: "/path/to/key".to_string(),
             ca_cert_path: String::new(),
             watch: false,
-            enable_filename_match: false,
         };
         assert!(tls.validate().is_ok());
     }
@@ -365,14 +347,14 @@ mod tests {
     fn test_new_tls_option() {
         assert_eq!(
             TlsOption::default(),
-            TlsOption::new(None, None, None, false, false)
+            TlsOption::new(None, None, None, false)
         );
         assert_eq!(
             TlsOption {
                 mode: Disable,
                 ..Default::default()
             },
-            TlsOption::new(Some(Disable), None, None, false, false)
+            TlsOption::new(Some(Disable), None, None, false)
         );
         assert_eq!(
             TlsOption {
@@ -381,13 +363,11 @@ mod tests {
                 key_path: "/path/to/key_path".to_string(),
                 ca_cert_path: String::new(),
                 watch: false,
-                enable_filename_match: false,
             },
             TlsOption::new(
                 Some(Disable),
                 Some("/path/to/cert_path".to_string()),
                 Some("/path/to/key_path".to_string()),
-                false,
                 false,
             )
         );
@@ -545,7 +525,6 @@ mod tests {
                 .expect("failed to convert path to string"),
             ca_cert_path: String::new(),
             watch: true,
-            enable_filename_match: false,
         };
 
         let server_config = Arc::new(

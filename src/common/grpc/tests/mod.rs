@@ -32,7 +32,6 @@ async fn test_mtls_config() {
         client_cert_path: Some("tests/tls/wrong_client.pem".to_string()),
         client_key_path: Some("tests/tls/wrong_client.key".to_string()),
         watch: false,
-        enable_filename_match: false,
     });
 
     let re = load_client_tls_config(config.client_tls.clone());
@@ -45,7 +44,6 @@ async fn test_mtls_config() {
         client_cert_path: Some("tests/tls/client.pem".to_string()),
         client_key_path: Some("tests/tls/corrupted".to_string()),
         watch: false,
-        enable_filename_match: false,
     });
 
     let tls_config = load_client_tls_config(config.client_tls.clone()).unwrap();
@@ -61,7 +59,6 @@ async fn test_mtls_config() {
         client_cert_path: Some("tests/tls/client.pem".to_string()),
         client_key_path: Some("tests/tls/client.key".to_string()),
         watch: false,
-        enable_filename_match: false,
     });
 
     let tls_config = load_client_tls_config(config.client_tls.clone()).unwrap();
@@ -102,7 +99,6 @@ async fn test_reloadable_client_tls_config() {
                 .expect("failed to convert path to string"),
         ),
         watch: true,
-        enable_filename_match: false,
     };
 
     let reloadable_config = load_client_tls_config(Some(client_tls_option))
@@ -154,7 +150,6 @@ async fn test_channel_manager_with_reloadable_tls() {
         client_cert_path: Some("tests/tls/client.pem".to_string()),
         client_key_path: Some("tests/tls/client.key".to_string()),
         watch: false,
-        enable_filename_match: false,
     };
 
     let reloadable_config = load_client_tls_config(Some(client_tls_option))

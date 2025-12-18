@@ -265,7 +265,6 @@ impl StartCommand {
             self.tls_cert_path.clone(),
             self.tls_key_path.clone(),
             self.tls_watch,
-            false,
         );
 
         if let Some(addr) = &self.http_addr {
