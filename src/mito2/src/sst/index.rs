@@ -1071,7 +1071,13 @@ pub(crate) fn decode_primary_keys_with_counts(
 
         // New key, decodes it.
         let pk_bytes = pk_values_array.value(current_key as usize);
+        common_telemetry::info!("decode sparse pk: {:?}", pk_bytes);
         let decoded_value = codec.decoder().decode(pk_bytes).context(DecodeSnafu)?;
+        common_telemetry::info!(
+            "decode sparse pk: {:?} to values: {:?}",
+            pk_bytes,
+            decoded_value
+        );
 
         result.push((decoded_value, 1));
         prev_key = Some(current_key);
