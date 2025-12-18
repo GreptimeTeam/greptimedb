@@ -319,6 +319,10 @@ impl TlsConfigLoader<ClientTlsConfig> for ClientTlsOption {
     fn watch_enabled(&self) -> bool {
         self.enabled && self.watch
     }
+
+    fn enable_filename_match(&self) -> bool {
+        self.enable_filename_match
+    }
 }
 
 /// Type alias for client-side reloadable TLS config
@@ -358,6 +362,8 @@ pub struct ClientTlsOption {
     pub client_key_path: Option<String>,
     #[serde(default)]
     pub watch: bool,
+    #[serde(default)]
+    pub enable_filename_match: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -678,6 +684,7 @@ mod tests {
                 client_cert_path: Some("some_cert_path".to_string()),
                 client_key_path: Some("some_key_path".to_string()),
                 watch: false,
+                enable_filename_match: false,
             });
 
         assert_eq!(
@@ -700,6 +707,7 @@ mod tests {
                     client_cert_path: Some("some_cert_path".to_string()),
                     client_key_path: Some("some_key_path".to_string()),
                     watch: false,
+                    enable_filename_match: false,
                 }),
                 max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
                 max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,

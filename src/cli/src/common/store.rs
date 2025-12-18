@@ -82,7 +82,7 @@ pub struct StoreConfig {
     pub backend_tls_watch: bool,
 
     /// Skip path filter for TLS certificate files
-    #[clap(long = "backend-tls-skip-path-filter")]
+    #[clap(long = "backend-tls-enable-filename-match")]
     pub backend_tls_enable_filename_match: bool,
 }
 

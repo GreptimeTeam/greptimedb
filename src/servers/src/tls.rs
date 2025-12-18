@@ -214,6 +214,10 @@ impl TlsConfigLoader<Arc<ServerConfig>> for TlsOption {
     fn watch_enabled(&self) -> bool {
         self.mode != TlsMode::Disable && self.watch
     }
+
+    fn enable_filename_match(&self) -> bool {
+        self.enable_filename_match
+    }
 }
 
 /// Type alias for server-side reloadable TLS config

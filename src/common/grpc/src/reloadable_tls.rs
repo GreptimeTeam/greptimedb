@@ -35,6 +35,9 @@ pub trait TlsConfigLoader<T> {
 
     /// Check if watching is enabled
     fn watch_enabled(&self) -> bool;
+
+    /// Check if filename matching is enabled
+    fn enable_filename_match(&self) -> bool;
 }
 
 /// A mutable container for TLS config
@@ -127,10 +130,15 @@ where
 
     let tls_config_for_watcher = tls_config.clone();
 
+    let mut config = FileWatcherConfig::new();
+    if tls_config.get_tls_option().enable_filename_match() {
+        config = config.enable_filename_match();
+    }
+
     FileWatcherBuilder::new()
         .watch_paths(&watch_paths)
         .context(FileWatchSnafu)?
-        .config(FileWatcherConfig::new())
+        .config(config)
         .spawn(move || {
             if let Err(err) = tls_config_for_watcher.reload() {
                 error!("Failed to reload TLS config: {}", err);

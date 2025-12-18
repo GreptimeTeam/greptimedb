@@ -974,6 +974,7 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         client_cert_path: Some(client_cert_path),
         client_key_path: Some(client_key_path),
         watch: false,
+        enable_filename_match: false,
     };
     {
         let grpc_client =
