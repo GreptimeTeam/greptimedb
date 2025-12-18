@@ -1586,6 +1586,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "endpoint =",
         "region =",
         "enable_virtual_host_style =",
+        "disable_ec2_metadata =",
         "cache_path =",
         "cache_capacity =",
         "memory_pool_size =",

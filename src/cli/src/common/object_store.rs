@@ -255,6 +255,8 @@ wrap_with_clap_prefix! {
         region: Option<String>,
         #[doc = "Enable virtual host style for the object store."]
         enable_virtual_host_style: bool = Default::default(),
+        #[doc = "Disable EC2 metadata service for the object store."]
+        disable_ec2_metadata: bool = Default::default(),
     }
 }
 
