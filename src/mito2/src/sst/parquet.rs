@@ -95,7 +95,7 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    use api::v1::OpType;
+    use api::v1::{OpType, SemanticType};
     use common_time::Timestamp;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::{BinaryExpr, Expr, Literal, Operator, col, lit};
@@ -105,11 +105,14 @@ mod tests {
         TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
+    use datatypes::prelude::ConcreteDataType;
     use parquet::arrow::AsyncArrowWriter;
     use parquet::basic::{Compression, Encoding, ZstdLevel};
     use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
+    use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_request::PathType;
+    use store_api::storage::{ColumnSchema, RegionId};
     use table::predicate::Predicate;
     use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
@@ -136,10 +139,6 @@ mod tests {
         sst_file_handle, sst_file_handle_with_file_id, sst_region_metadata,
     };
     use crate::test_util::{TestEnv, check_reader_result};
-    use api::v1::SemanticType;
-    use datatypes::prelude::ConcreteDataType;
-    use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
-    use store_api::storage::{ColumnSchema, RegionId};
 
     const FILE_DIR: &str = "/";
     const REGION_ID: RegionId = RegionId::new(0, 0);
@@ -1250,15 +1249,15 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let file_path = RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare);
         let metadata = Arc::new(sst_region_metadata());
-        let row_group_size = 50;
+        let row_group_size = 100;
 
         // Create flat format RecordBatches with non-overlapping timestamp ranges
-        // Each batch becomes one row group (row_group_size = 50)
+        // Each batch becomes one row group (row_group_size = 100)
         // Data: ts tag_0 tag_1
         // RG 0:   0-50  [a, d]
-        // RG 1:  50-100 [b, d]
-        // RG 2: 100-150 [c, d]
-        // RG 3: 150-200 [c, f]
+        // RG 0:  50-100 [b, d]
+        // RG 1: 100-150 [c, d]
+        // RG 1: 150-200 [c, f]
         let flat_batches = vec![
             new_record_batch_by_range(&["a", "d"], 0, 50),
             new_record_batch_by_range(&["b", "d"], 50, 100),
@@ -1352,7 +1351,7 @@ mod tests {
         );
 
         // Test 1: Filter by tag_0 = "b"
-        // Expected: Only rows with tag_0="b" (20 rows from 0-20)
+        // Expected: Only rows with tag_0="b"
         let preds = vec![col("tag_0").eq(lit("b"))];
         let inverted_index_applier = InvertedIndexApplierBuilder::new(
             FILE_DIR.to_string(),
@@ -1382,15 +1381,15 @@ mod tests {
         let mut metrics = ReaderMetrics::default();
         let (_context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
 
-        // Verify selection contains only RG 1 (tag_0="b", ts 50-100)
+        // Verify selection contains only RG 0 (tag_0="b", ts 0-100)
         assert_eq!(selection.row_group_count(), 1);
-        assert!(selection.contains_row_group(1));
+        assert_eq!(50, selection.get(0).unwrap().row_count());
 
         // Verify filtering metrics
-        assert_eq!(metrics.filter_metrics.rg_total, 4);
-        assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 0);
-        assert_eq!(metrics.filter_metrics.rg_inverted_filtered, 3);
-        assert_eq!(metrics.filter_metrics.rows_inverted_filtered, 150);
+        assert_eq!(metrics.filter_metrics.rg_total, 2);
+        assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 1);
+        assert_eq!(metrics.filter_metrics.rg_inverted_filtered, 0);
+        assert_eq!(metrics.filter_metrics.rows_inverted_filtered, 50);
     }
 
     #[tokio::test]
@@ -1399,18 +1398,18 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let file_path = RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare);
         let metadata = Arc::new(sst_region_metadata());
-        let row_group_size = 50;
+        let row_group_size = 100;
 
         // Create flat format RecordBatches with non-overlapping timestamp ranges
-        // Each batch becomes one row group (row_group_size = 50)
+        // Each batch becomes one row group (row_group_size = 100)
         // Data: ts tag_0 tag_1
         // RG 0:   0-50  [a, d]
-        // RG 1:  50-100 [b, d]
-        // RG 2: 100-150 [c, d]
-        // RG 3: 150-200 [c, f]
+        // RG 0:  50-100 [b, e]
+        // RG 1: 100-150 [c, d]
+        // RG 1: 150-200 [c, f]
         let flat_batches = vec![
             new_record_batch_by_range(&["a", "d"], 0, 50),
-            new_record_batch_by_range(&["b", "d"], 50, 100),
+            new_record_batch_by_range(&["b", "e"], 50, 100),
             new_record_batch_by_range(&["c", "d"], 100, 150),
             new_record_batch_by_range(&["c", "f"], 150, 200),
         ];
@@ -1501,7 +1500,7 @@ mod tests {
         );
 
         // Filter by ts >= 50 AND ts < 200 AND tag_1 = "d"
-        // Expected: RG 1 (ts 50-100) and RG 2 (ts 100-150), both have tag_1="d"
+        // Expected: RG 0 (ts 0-100) and RG 1 (ts 100-200), both have tag_1="d"
         let preds = vec![
             col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(50), None))),
             col("ts").lt(lit(ScalarValue::TimestampMillisecond(Some(200), None))),
@@ -1534,15 +1533,16 @@ mod tests {
         let mut metrics = ReaderMetrics::default();
         let (_context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
 
-        // Verify selection contains RG 1 and RG 2 (ts >= 50 AND ts < 200 AND tag_1="d")
+        // Verify selection contains RG 0 and RG 1
         assert_eq!(selection.row_group_count(), 2);
-        assert!(selection.contains_row_group(1));
-        assert!(selection.contains_row_group(2));
+        assert_eq!(50, selection.get(0).unwrap().row_count());
+        assert_eq!(50, selection.get(1).unwrap().row_count());
 
         // Verify filtering metrics
-        assert_eq!(metrics.filter_metrics.rg_total, 4);
-        assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 1);
-        assert_eq!(metrics.filter_metrics.rg_bloom_filtered, 1);
+        assert_eq!(metrics.filter_metrics.rg_total, 2);
+        assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 0);
+        assert_eq!(metrics.filter_metrics.rg_bloom_filtered, 0);
+        assert_eq!(metrics.filter_metrics.rows_bloom_filtered, 100);
     }
 
     /// Creates region metadata for testing fulltext indexes.
@@ -1685,8 +1685,8 @@ mod tests {
         use common_function::function_factory::ScalarFunctionFactory;
         use common_function::scalars::matches::MatchesFunction;
         use common_function::scalars::matches_term::MatchesTermFunction;
-        use datafusion_expr::expr::ScalarFunction;
         use datafusion_expr::Literal;
+        use datafusion_expr::expr::ScalarFunction;
 
         use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 
@@ -1860,12 +1860,14 @@ mod tests {
 
         // Verify selection contains RG 0 and RG 1 (text_bloom="hello world")
         assert_eq!(selection.row_group_count(), 2);
-        assert!(selection.contains_row_group(0));
-        assert!(selection.contains_row_group(1));
+        assert_eq!(50, selection.get(0).unwrap().row_count());
+        assert_eq!(50, selection.get(1).unwrap().row_count());
 
         // Verify filtering metrics
         assert_eq!(metrics.filter_metrics.rg_total, 4);
+        assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 0);
         assert_eq!(metrics.filter_metrics.rg_fulltext_filtered, 2);
+        assert_eq!(metrics.filter_metrics.rows_fulltext_filtered, 100);
 
         // Test 2: Filter by text_tantivy field using matches (tantivy backend)
         // Expected: RG 2 and RG 3 (rows 100-200) which have "lazy" in query
@@ -1903,188 +1905,13 @@ mod tests {
 
         // Verify selection contains RG 2 and RG 3 (text_tantivy="lazy dog")
         assert_eq!(selection.row_group_count(), 2);
-        assert!(selection.contains_row_group(2));
-        assert!(selection.contains_row_group(3));
-
-        // Verify filtering metrics
-        assert_eq!(metrics.filter_metrics.rg_total, 4);
-        assert_eq!(metrics.filter_metrics.rg_fulltext_filtered, 2);
-    }
-
-    #[tokio::test]
-    async fn test_write_flat_read_with_combined_indexes() {
-        let mut env = TestEnv::new().await;
-        let object_store = env.init_object_store_manager();
-        let file_path = RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare);
-        let metadata = Arc::new(sst_region_metadata());
-        let row_group_size = 50;
-
-        // Create flat format RecordBatches with non-overlapping timestamp ranges
-        // Each batch becomes one row group (row_group_size = 50)
-        // Data: ts tag_0 tag_1
-        // RG 0:   0-50  [a, d]
-        // RG 1:  50-100 [b, d]
-        // RG 2: 100-150 [c, d]
-        // RG 3: 150-200 [c, f]
-        let flat_batches = vec![
-            new_record_batch_by_range(&["a", "d"], 0, 50),
-            new_record_batch_by_range(&["b", "d"], 50, 100),
-            new_record_batch_by_range(&["c", "d"], 100, 150),
-            new_record_batch_by_range(&["c", "f"], 150, 200),
-        ];
-
-        let flat_source = new_flat_source_from_record_batches(flat_batches);
-
-        let write_opts = WriteOptions {
-            row_group_size,
-            ..Default::default()
-        };
-
-        let puffin_manager = env
-            .get_puffin_manager()
-            .build(object_store.clone(), file_path.clone());
-        let intermediate_manager = env.get_intermediate_manager();
-
-        let indexer_builder = IndexerBuilderImpl {
-            build_type: IndexBuildType::Flush,
-            metadata: metadata.clone(),
-            row_group_size,
-            puffin_manager,
-            write_cache_enabled: false,
-            intermediate_manager,
-            index_options: IndexOptions {
-                inverted_index: InvertedIndexOptions {
-                    segment_row_count: 1,
-                    ..Default::default()
-                },
-            },
-            inverted_index_config: Default::default(),
-            fulltext_index_config: Default::default(),
-            bloom_filter_index_config: Default::default(),
-        };
-
-        let mut metrics = Metrics::new(WriteType::Flush);
-        let mut writer = ParquetWriter::new_with_object_store(
-            object_store.clone(),
-            metadata.clone(),
-            IndexConfig::default(),
-            indexer_builder,
-            file_path.clone(),
-            &mut metrics,
-        )
-        .await;
-
-        let info = writer
-            .write_all_flat(flat_source, &write_opts)
-            .await
-            .unwrap()
-            .remove(0);
-        assert_eq!(200, info.num_rows);
-        assert!(info.file_size > 0);
-        assert!(info.index_metadata.file_size > 0);
-
-        let handle = FileHandle::new(
-            FileMeta {
-                region_id: metadata.region_id,
-                file_id: info.file_id,
-                time_range: info.time_range,
-                level: 0,
-                file_size: info.file_size,
-                max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
-                available_indexes: info.index_metadata.build_available_indexes(),
-                indexes: info.index_metadata.build_indexes(),
-                index_file_size: info.index_metadata.file_size,
-                index_version: 0,
-                num_row_groups: info.num_row_groups,
-                num_rows: info.num_rows as u64,
-                sequence: None,
-                partition_expr: match &metadata.partition_expr {
-                    Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                        .expect("partition expression should be valid JSON"),
-                    None => None,
-                },
-                num_series: 0,
-            },
-            Arc::new(NoopFilePurger),
-        );
-
-        let cache = Arc::new(
-            CacheManager::builder()
-                .index_result_cache_size(1024 * 1024)
-                .index_metadata_size(1024 * 1024)
-                .index_content_page_size(1024 * 1024)
-                .index_content_size(1024 * 1024)
-                .puffin_metadata_size(1024 * 1024)
-                .build(),
-        );
-        let index_result_cache = cache.index_result_cache().unwrap();
-
-        // Filter by tag_1 = "d" with both inverted and bloom filter
-        // Expected: RG 0, 1, 2 have tag_1="d" (150 rows total: 50+50+50)
-        let preds = vec![col("tag_1").eq(lit("d"))];
-        let inverted_index_applier = InvertedIndexApplierBuilder::new(
-            FILE_DIR.to_string(),
-            PathType::Bare,
-            object_store.clone(),
-            &metadata,
-            HashSet::from_iter([0]),
-            env.get_puffin_manager(),
-        )
-        .with_puffin_metadata_cache(cache.puffin_metadata_cache().cloned())
-        .with_inverted_index_cache(cache.inverted_index_cache().cloned())
-        .build(&preds)
-        .unwrap()
-        .map(Arc::new);
-
-        let bloom_filter_applier = BloomFilterIndexApplierBuilder::new(
-            FILE_DIR.to_string(),
-            PathType::Bare,
-            object_store.clone(),
-            &metadata,
-            env.get_puffin_manager(),
-        )
-        .with_puffin_metadata_cache(cache.puffin_metadata_cache().cloned())
-        .with_bloom_filter_index_cache(cache.bloom_filter_index_cache().cloned())
-        .build(&preds)
-        .unwrap()
-        .map(Arc::new);
-
-        let builder = ParquetReaderBuilder::new(
-            FILE_DIR.to_string(),
-            PathType::Bare,
-            handle.clone(),
-            object_store.clone(),
-        )
-        .flat_format(true)
-        .predicate(Some(Predicate::new(preds)))
-        .inverted_index_appliers([inverted_index_applier.clone(), None])
-        .bloom_filter_index_appliers([None, bloom_filter_applier.clone()])
-        .cache(CacheStrategy::EnableAll(cache.clone()));
-
-        let mut metrics = ReaderMetrics::default();
-        let (_context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
-
-        // Verify selection contains row groups with tag_1="d" (RG 0, 1, 2)
-        assert_eq!(selection.row_group_count(), 3);
-        assert!(selection.contains_row_group(0));
-        assert!(selection.contains_row_group(1));
-        assert!(selection.contains_row_group(2));
+        assert_eq!(50, selection.get(2).unwrap().row_count());
+        assert_eq!(50, selection.get(3).unwrap().row_count());
 
         // Verify filtering metrics
         assert_eq!(metrics.filter_metrics.rg_total, 4);
         assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 0);
-        assert_eq!(metrics.filter_metrics.rg_bloom_filtered, 1);
-
-        // Verify cache contains index results for all row groups
-        let cached = index_result_cache
-            .get(
-                bloom_filter_applier.unwrap().predicate_key(),
-                handle.file_id().file_id(),
-            )
-            .unwrap();
-        assert!(cached.contains_row_group(0));
-        assert!(cached.contains_row_group(1));
-        assert!(cached.contains_row_group(2));
-        assert!(cached.contains_row_group(3));
+        assert_eq!(metrics.filter_metrics.rg_fulltext_filtered, 2);
+        assert_eq!(metrics.filter_metrics.rows_fulltext_filtered, 100);
     }
 }

@@ -57,6 +57,16 @@ impl SortField {
         &self.data_type
     }
 
+    /// Returns the physical data type to encode of the field.
+    ///
+    /// For example, a dictionary field will be encoded as its value type.
+    pub fn encode_data_type(&self) -> &ConcreteDataType {
+        match &self.data_type {
+            ConcreteDataType::Dictionary(dict_type) => dict_type.value_type(),
+            _ => &self.data_type,
+        }
+    }
+
     pub fn estimated_size(&self) -> usize {
         match &self.data_type {
             ConcreteDataType::Dictionary(dict_type) => {
