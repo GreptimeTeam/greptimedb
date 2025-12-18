@@ -75,7 +75,7 @@ impl Predicate {
     pub fn with_dyn_filters(self, dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>) -> Self {
         Self {
             exprs: self.exprs,
-            dyn_filters: dyn_filters,
+            dyn_filters,
         }
     }
 
