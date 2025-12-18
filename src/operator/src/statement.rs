@@ -52,6 +52,7 @@ use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
 use humantime::format_duration;
 use itertools::Itertools;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
@@ -644,11 +645,20 @@ impl StatementExecutor {
             })?
             .unit();
 
+        let start_column = ColumnSchema::new(
+            "range_start",
+            ConcreteDataType::timestamp_datatype(time_unit),
+            false,
+        );
+        let end_column = ColumnSchema::new(
+            "range_end",
+            ConcreteDataType::timestamp_datatype(time_unit),
+            false,
+        );
         let mut time_ranges = Vec::with_capacity(sql_values_time_range.len());
         for (start, end) in sql_values_time_range {
             let start = common_sql::convert::sql_value_to_value(
-                "range_start",
-                &ConcreteDataType::timestamp_datatype(time_unit),
+                &start_column,
                 start,
                 Some(&query_ctx.timezone()),
                 None,
@@ -667,8 +677,7 @@ impl StatementExecutor {
             })?;
 
             let end = common_sql::convert::sql_value_to_value(
-                "range_end",
-                &ConcreteDataType::timestamp_datatype(time_unit),
+                &end_column,
                 end,
                 Some(&query_ctx.timezone()),
                 None,

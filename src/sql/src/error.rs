@@ -215,6 +215,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid JSON structure setting, reason: {reason}"))]
+    InvalidJsonStructureSetting {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to serialize column default constraint"))]
     SerializeColumnDefaultConstraint {
         #[snafu(implicit)]
@@ -374,6 +381,7 @@ impl ErrorExt for Error {
 
             InvalidColumnOption { .. }
             | InvalidExprAsOptionValue { .. }
+            | InvalidJsonStructureSetting { .. }
             | InvalidDatabaseName { .. }
             | InvalidDatabaseOption { .. }
             | ColumnTypeMismatch { .. }

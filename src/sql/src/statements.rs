@@ -40,6 +40,7 @@ use api::v1::SemanticType;
 use common_sql::default_constraint::parse_column_default_constraint;
 use common_time::timezone::Timezone;
 use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+use datatypes::json::JsonStructureSettings;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::json_type::JsonNativeType;
@@ -281,8 +282,17 @@ pub fn sql_data_type_to_concrete_data_type(
             }
         },
         SqlDataType::JSON => {
-            let format = if column_extensions.json_datatype_options.is_some() {
-                JsonFormat::Native(Box::new(JsonNativeType::Null))
+            let format = if let Some(x) = column_extensions.build_json_structure_settings()? {
+                if let Some(fields) = match x {
+                    JsonStructureSettings::Structured(fields) => fields,
+                    JsonStructureSettings::UnstructuredRaw => None,
+                    JsonStructureSettings::PartialUnstructuredByKey { fields, .. } => fields,
+                } {
+                    let datatype = &ConcreteDataType::Struct(fields);
+                    JsonFormat::Native(Box::new(datatype.into()))
+                } else {
+                    JsonFormat::Native(Box::new(JsonNativeType::Null))
+                }
             } else {
                 JsonFormat::Jsonb
             };
