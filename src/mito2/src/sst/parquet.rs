@@ -112,6 +112,7 @@ mod tests {
     use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{FulltextAnalyzer, FulltextBackend, FulltextOptions};
+    use object_store::ObjectStore;
     use parquet::arrow::AsyncArrowWriter;
     use parquet::basic::{Compression, Encoding, ZstdLevel};
     use parquet::file::metadata::KeyValue;
@@ -1124,6 +1125,107 @@ mod tests {
         RecordBatch::try_new(flat_schema, columns).unwrap()
     }
 
+    /// Helper function to create IndexerBuilderImpl for tests.
+    fn create_test_indexer_builder(
+        env: &TestEnv,
+        object_store: ObjectStore,
+        file_path: RegionFilePathFactory,
+        metadata: Arc<RegionMetadata>,
+        row_group_size: usize,
+    ) -> IndexerBuilderImpl {
+        let puffin_manager = env.get_puffin_manager().build(object_store, file_path);
+        let intermediate_manager = env.get_intermediate_manager();
+
+        IndexerBuilderImpl {
+            build_type: IndexBuildType::Flush,
+            metadata,
+            row_group_size,
+            puffin_manager,
+            write_cache_enabled: false,
+            intermediate_manager,
+            index_options: IndexOptions {
+                inverted_index: InvertedIndexOptions {
+                    segment_row_count: 1,
+                    ..Default::default()
+                },
+            },
+            inverted_index_config: Default::default(),
+            fulltext_index_config: Default::default(),
+            bloom_filter_index_config: Default::default(),
+        }
+    }
+
+    /// Helper function to write flat SST and return SstInfo.
+    async fn write_flat_sst(
+        object_store: ObjectStore,
+        metadata: Arc<RegionMetadata>,
+        indexer_builder: IndexerBuilderImpl,
+        file_path: RegionFilePathFactory,
+        flat_source: FlatSource,
+        write_opts: &WriteOptions,
+    ) -> SstInfo {
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store,
+            metadata,
+            IndexConfig::default(),
+            indexer_builder,
+            file_path,
+            &mut metrics,
+        )
+        .await;
+
+        writer
+            .write_all_flat(flat_source, write_opts)
+            .await
+            .unwrap()
+            .remove(0)
+    }
+
+    /// Helper function to create FileHandle from SstInfo.
+    fn create_file_handle_from_sst_info(
+        info: &SstInfo,
+        metadata: &Arc<RegionMetadata>,
+    ) -> FileHandle {
+        FileHandle::new(
+            FileMeta {
+                region_id: metadata.region_id,
+                file_id: info.file_id,
+                time_range: info.time_range,
+                level: 0,
+                file_size: info.file_size,
+                max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+                available_indexes: info.index_metadata.build_available_indexes(),
+                indexes: info.index_metadata.build_indexes(),
+                index_file_size: info.index_metadata.file_size,
+                index_version: 0,
+                num_row_groups: info.num_row_groups,
+                num_rows: info.num_rows as u64,
+                sequence: None,
+                partition_expr: match &metadata.partition_expr {
+                    Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
+                        .expect("partition expression should be valid JSON"),
+                    None => None,
+                },
+                num_series: 0,
+            },
+            Arc::new(NoopFilePurger),
+        )
+    }
+
+    /// Helper function to create test cache with standard settings.
+    fn create_test_cache() -> Arc<CacheManager> {
+        Arc::new(
+            CacheManager::builder()
+                .index_result_cache_size(1024 * 1024)
+                .index_metadata_size(1024 * 1024)
+                .index_content_page_size(1024 * 1024)
+                .index_content_size(1024 * 1024)
+                .puffin_metadata_size(1024 * 1024)
+                .build(),
+        )
+    }
+
     #[tokio::test]
     async fn test_write_flat_with_index() {
         let mut env = TestEnv::new().await;
@@ -1328,83 +1430,30 @@ mod tests {
             ..Default::default()
         };
 
-        let puffin_manager = env
-            .get_puffin_manager()
-            .build(object_store.clone(), file_path.clone());
-        let intermediate_manager = env.get_intermediate_manager();
-
-        let indexer_builder = IndexerBuilderImpl {
-            build_type: IndexBuildType::Flush,
-            metadata: metadata.clone(),
+        let indexer_builder = create_test_indexer_builder(
+            &env,
+            object_store.clone(),
+            file_path.clone(),
+            metadata.clone(),
             row_group_size,
-            puffin_manager,
-            write_cache_enabled: false,
-            intermediate_manager,
-            index_options: IndexOptions {
-                inverted_index: InvertedIndexOptions {
-                    segment_row_count: 1,
-                    ..Default::default()
-                },
-            },
-            inverted_index_config: Default::default(),
-            fulltext_index_config: Default::default(),
-            bloom_filter_index_config: Default::default(),
-        };
+        );
 
-        let mut metrics = Metrics::new(WriteType::Flush);
-        let mut writer = ParquetWriter::new_with_object_store(
+        let info = write_flat_sst(
             object_store.clone(),
             metadata.clone(),
-            IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
-            &mut metrics,
+            flat_source,
+            &write_opts,
         )
         .await;
-
-        let info = writer
-            .write_all_flat(flat_source, &write_opts)
-            .await
-            .unwrap()
-            .remove(0);
         assert_eq!(200, info.num_rows);
         assert!(info.file_size > 0);
         assert!(info.index_metadata.file_size > 0);
 
-        let handle = FileHandle::new(
-            FileMeta {
-                region_id: metadata.region_id,
-                file_id: info.file_id,
-                time_range: info.time_range,
-                level: 0,
-                file_size: info.file_size,
-                max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
-                available_indexes: info.index_metadata.build_available_indexes(),
-                indexes: info.index_metadata.build_indexes(),
-                index_file_size: info.index_metadata.file_size,
-                index_version: 0,
-                num_row_groups: info.num_row_groups,
-                num_rows: info.num_rows as u64,
-                sequence: None,
-                partition_expr: match &metadata.partition_expr {
-                    Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                        .expect("partition expression should be valid JSON"),
-                    None => None,
-                },
-                num_series: 0,
-            },
-            Arc::new(NoopFilePurger),
-        );
+        let handle = create_file_handle_from_sst_info(&info, &metadata);
 
-        let cache = Arc::new(
-            CacheManager::builder()
-                .index_result_cache_size(1024 * 1024)
-                .index_metadata_size(1024 * 1024)
-                .index_content_page_size(1024 * 1024)
-                .index_content_size(1024 * 1024)
-                .puffin_metadata_size(1024 * 1024)
-                .build(),
-        );
+        let cache = create_test_cache();
 
         // Test 1: Filter by tag_0 = "b"
         // Expected: Only rows with tag_0="b"
@@ -1477,83 +1526,30 @@ mod tests {
             ..Default::default()
         };
 
-        let puffin_manager = env
-            .get_puffin_manager()
-            .build(object_store.clone(), file_path.clone());
-        let intermediate_manager = env.get_intermediate_manager();
-
-        let indexer_builder = IndexerBuilderImpl {
-            build_type: IndexBuildType::Flush,
-            metadata: metadata.clone(),
+        let indexer_builder = create_test_indexer_builder(
+            &env,
+            object_store.clone(),
+            file_path.clone(),
+            metadata.clone(),
             row_group_size,
-            puffin_manager,
-            write_cache_enabled: false,
-            intermediate_manager,
-            index_options: IndexOptions {
-                inverted_index: InvertedIndexOptions {
-                    segment_row_count: 1,
-                    ..Default::default()
-                },
-            },
-            inverted_index_config: Default::default(),
-            fulltext_index_config: Default::default(),
-            bloom_filter_index_config: Default::default(),
-        };
+        );
 
-        let mut metrics = Metrics::new(WriteType::Flush);
-        let mut writer = ParquetWriter::new_with_object_store(
+        let info = write_flat_sst(
             object_store.clone(),
             metadata.clone(),
-            IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
-            &mut metrics,
+            flat_source,
+            &write_opts,
         )
         .await;
-
-        let info = writer
-            .write_all_flat(flat_source, &write_opts)
-            .await
-            .unwrap()
-            .remove(0);
         assert_eq!(200, info.num_rows);
         assert!(info.file_size > 0);
         assert!(info.index_metadata.file_size > 0);
 
-        let handle = FileHandle::new(
-            FileMeta {
-                region_id: metadata.region_id,
-                file_id: info.file_id,
-                time_range: info.time_range,
-                level: 0,
-                file_size: info.file_size,
-                max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
-                available_indexes: info.index_metadata.build_available_indexes(),
-                indexes: info.index_metadata.build_indexes(),
-                index_file_size: info.index_metadata.file_size,
-                index_version: 0,
-                num_row_groups: info.num_row_groups,
-                num_rows: info.num_rows as u64,
-                sequence: None,
-                partition_expr: match &metadata.partition_expr {
-                    Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                        .expect("partition expression should be valid JSON"),
-                    None => None,
-                },
-                num_series: 0,
-            },
-            Arc::new(NoopFilePurger),
-        );
+        let handle = create_file_handle_from_sst_info(&info, &metadata);
 
-        let cache = Arc::new(
-            CacheManager::builder()
-                .index_result_cache_size(1024 * 1024)
-                .index_metadata_size(1024 * 1024)
-                .index_content_page_size(1024 * 1024)
-                .index_content_size(1024 * 1024)
-                .puffin_metadata_size(1024 * 1024)
-                .build(),
-        );
+        let cache = create_test_cache();
 
         // Filter by ts >= 50 AND ts < 200 AND tag_1 = "d"
         // Expected: RG 0 (ts 0-100) and RG 1 (ts 100-200), both have tag_1="d"
@@ -1634,83 +1630,30 @@ mod tests {
             ..Default::default()
         };
 
-        let puffin_manager = env
-            .get_puffin_manager()
-            .build(object_store.clone(), file_path.clone());
-        let intermediate_manager = env.get_intermediate_manager();
-
-        let indexer_builder = IndexerBuilderImpl {
-            build_type: IndexBuildType::Flush,
-            metadata: metadata.clone(),
+        let indexer_builder = create_test_indexer_builder(
+            &env,
+            object_store.clone(),
+            file_path.clone(),
+            metadata.clone(),
             row_group_size,
-            puffin_manager,
-            write_cache_enabled: false,
-            intermediate_manager,
-            index_options: IndexOptions {
-                inverted_index: InvertedIndexOptions {
-                    segment_row_count: 1,
-                    ..Default::default()
-                },
-            },
-            inverted_index_config: Default::default(),
-            fulltext_index_config: Default::default(),
-            bloom_filter_index_config: Default::default(),
-        };
+        );
 
-        let mut metrics = Metrics::new(WriteType::Flush);
-        let mut writer = ParquetWriter::new_with_object_store(
+        let info = write_flat_sst(
             object_store.clone(),
             metadata.clone(),
-            IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
-            &mut metrics,
+            flat_source,
+            &write_opts,
         )
         .await;
-
-        let info = writer
-            .write_all_flat(flat_source, &write_opts)
-            .await
-            .unwrap()
-            .remove(0);
         assert_eq!(200, info.num_rows);
         assert!(info.file_size > 0);
         assert!(info.index_metadata.file_size > 0);
 
-        let handle = FileHandle::new(
-            FileMeta {
-                region_id: metadata.region_id,
-                file_id: info.file_id,
-                time_range: info.time_range,
-                level: 0,
-                file_size: info.file_size,
-                max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
-                available_indexes: info.index_metadata.build_available_indexes(),
-                indexes: info.index_metadata.build_indexes(),
-                index_file_size: info.index_metadata.file_size,
-                index_version: 0,
-                num_row_groups: info.num_row_groups,
-                num_rows: info.num_rows as u64,
-                sequence: None,
-                partition_expr: match &metadata.partition_expr {
-                    Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                        .expect("partition expression should be valid JSON"),
-                    None => None,
-                },
-                num_series: 0,
-            },
-            Arc::new(NoopFilePurger),
-        );
+        let handle = create_file_handle_from_sst_info(&info, &metadata);
 
-        let cache = Arc::new(
-            CacheManager::builder()
-                .index_result_cache_size(1024 * 1024)
-                .index_metadata_size(1024 * 1024)
-                .index_content_page_size(1024 * 1024)
-                .index_content_size(1024 * 1024)
-                .puffin_metadata_size(1024 * 1024)
-                .build(),
-        );
+        let cache = create_test_cache();
 
         // Test 1: Filter by tag_0 = "b"
         // Expected: Only rows with tag_0="b"
@@ -1787,83 +1730,30 @@ mod tests {
             ..Default::default()
         };
 
-        let puffin_manager = env
-            .get_puffin_manager()
-            .build(object_store.clone(), file_path.clone());
-        let intermediate_manager = env.get_intermediate_manager();
-
-        let indexer_builder = IndexerBuilderImpl {
-            build_type: IndexBuildType::Flush,
-            metadata: metadata.clone(),
+        let indexer_builder = create_test_indexer_builder(
+            &env,
+            object_store.clone(),
+            file_path.clone(),
+            metadata.clone(),
             row_group_size,
-            puffin_manager,
-            write_cache_enabled: false,
-            intermediate_manager,
-            index_options: IndexOptions {
-                inverted_index: InvertedIndexOptions {
-                    segment_row_count: 1,
-                    ..Default::default()
-                },
-            },
-            inverted_index_config: Default::default(),
-            fulltext_index_config: Default::default(),
-            bloom_filter_index_config: Default::default(),
-        };
+        );
 
-        let mut metrics = Metrics::new(WriteType::Flush);
-        let mut writer = ParquetWriter::new_with_object_store(
+        let info = write_flat_sst(
             object_store.clone(),
             metadata.clone(),
-            IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
-            &mut metrics,
+            flat_source,
+            &write_opts,
         )
         .await;
-
-        let info = writer
-            .write_all_flat(flat_source, &write_opts)
-            .await
-            .unwrap()
-            .remove(0);
         assert_eq!(200, info.num_rows);
         assert!(info.file_size > 0);
         assert!(info.index_metadata.file_size > 0);
 
-        let handle = FileHandle::new(
-            FileMeta {
-                region_id: metadata.region_id,
-                file_id: info.file_id,
-                time_range: info.time_range,
-                level: 0,
-                file_size: info.file_size,
-                max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
-                available_indexes: info.index_metadata.build_available_indexes(),
-                indexes: info.index_metadata.build_indexes(),
-                index_file_size: info.index_metadata.file_size,
-                index_version: 0,
-                num_row_groups: info.num_row_groups,
-                num_rows: info.num_rows as u64,
-                sequence: None,
-                partition_expr: match &metadata.partition_expr {
-                    Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                        .expect("partition expression should be valid JSON"),
-                    None => None,
-                },
-                num_series: 0,
-            },
-            Arc::new(NoopFilePurger),
-        );
+        let handle = create_file_handle_from_sst_info(&info, &metadata);
 
-        let cache = Arc::new(
-            CacheManager::builder()
-                .index_result_cache_size(1024 * 1024)
-                .index_metadata_size(1024 * 1024)
-                .index_content_page_size(1024 * 1024)
-                .index_content_size(1024 * 1024)
-                .puffin_metadata_size(1024 * 1024)
-                .build(),
-        );
+        let cache = create_test_cache();
 
         // Filter by ts >= 50 AND ts < 200 AND tag_1 = "d"
         // Expected: RG 0 (ts 0-100) and RG 1 (ts 100-200), both have tag_1="d"
@@ -2068,45 +1958,23 @@ mod tests {
             ..Default::default()
         };
 
-        let puffin_manager = env
-            .get_puffin_manager()
-            .build(object_store.clone(), file_path.clone());
-        let intermediate_manager = env.get_intermediate_manager();
-
-        let indexer_builder = IndexerBuilderImpl {
-            build_type: IndexBuildType::Flush,
-            metadata: metadata.clone(),
+        let indexer_builder = create_test_indexer_builder(
+            &env,
+            object_store.clone(),
+            file_path.clone(),
+            metadata.clone(),
             row_group_size,
-            puffin_manager,
-            write_cache_enabled: false,
-            intermediate_manager,
-            index_options: IndexOptions {
-                inverted_index: InvertedIndexOptions {
-                    segment_row_count: 1,
-                    ..Default::default()
-                },
-            },
-            inverted_index_config: Default::default(),
-            fulltext_index_config: Default::default(),
-            bloom_filter_index_config: Default::default(),
-        };
+        );
 
-        let mut metrics = Metrics::new(WriteType::Flush);
-        let mut writer = ParquetWriter::new_with_object_store(
+        let mut info = write_flat_sst(
             object_store.clone(),
             metadata.clone(),
-            IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
-            &mut metrics,
+            flat_source,
+            &write_opts,
         )
         .await;
-
-        let mut info = writer
-            .write_all_flat(flat_source, &write_opts)
-            .await
-            .unwrap()
-            .remove(0);
         assert_eq!(200, info.num_rows);
         assert!(info.file_size > 0);
         assert!(info.index_metadata.file_size > 0);
@@ -2126,40 +1994,9 @@ mod tests {
             info.time_range
         );
 
-        let handle = FileHandle::new(
-            FileMeta {
-                region_id: metadata.region_id,
-                file_id: info.file_id,
-                time_range: info.time_range,
-                level: 0,
-                file_size: info.file_size,
-                max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
-                available_indexes: info.index_metadata.build_available_indexes(),
-                indexes: info.index_metadata.build_indexes(),
-                index_file_size: info.index_metadata.file_size,
-                index_version: 0,
-                num_row_groups: info.num_row_groups,
-                num_rows: info.num_rows as u64,
-                sequence: None,
-                partition_expr: match &metadata.partition_expr {
-                    Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                        .expect("partition expression should be valid JSON"),
-                    None => None,
-                },
-                num_series: 0,
-            },
-            Arc::new(NoopFilePurger),
-        );
+        let handle = create_file_handle_from_sst_info(&info, &metadata);
 
-        let cache = Arc::new(
-            CacheManager::builder()
-                .index_result_cache_size(1024 * 1024)
-                .index_metadata_size(1024 * 1024)
-                .index_content_page_size(1024 * 1024)
-                .index_content_size(1024 * 1024)
-                .puffin_metadata_size(1024 * 1024)
-                .build(),
-        );
+        let cache = create_test_cache();
 
         // Helper functions to create fulltext function expressions
         let matches_func = || {
