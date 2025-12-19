@@ -402,7 +402,10 @@ impl MetadataRegion {
             .context(CacheGetSnafu)?;
 
         let mut result = HashMap::new();
-        get_all_with_prefix(&region_metadata, prefix, &mut result);
+        get_all_with_prefix(&region_metadata, prefix, |k, v| {
+            result.insert(k.to_string(), v.to_string());
+            Ok(())
+        })?;
         Ok(result)
     }
 
@@ -584,10 +587,29 @@ impl MetadataRegion {
         }
 
         let metadata = self.load_all(metadata_region_id).await?;
-        let mut output = HashMap::new();
+        let mut output = Vec::new();
         for logical_region_id in &logical_regions {
             let prefix = MetadataRegion::concat_column_key_prefix(*logical_region_id);
-            get_all_with_prefix(&metadata, &prefix, &mut output);
+            get_all_with_prefix(&metadata, &prefix, |k, v| {
+                // Safety: we have checked the prefix
+                let (src_logical_region_id, column_name) = Self::parse_column_key(k)?.unwrap();
+                // Change the region number to the data region number.
+                let new_key = MetadataRegion::concat_column_key(
+                    RegionId::new(
+                        src_logical_region_id.table_id(),
+                        data_region_id.region_number(),
+                    ),
+                    &column_name,
+                );
+                output.push((new_key, v.to_string()));
+                Ok(())
+            })?;
+
+            let new_key = MetadataRegion::concat_region_key(RegionId::new(
+                logical_region_id.table_id(),
+                data_region_id.region_number(),
+            ));
+            output.push((new_key, String::new()));
         }
 
         if output.is_empty() {
@@ -598,34 +620,14 @@ impl MetadataRegion {
             return Ok(());
         }
 
-        let mut transform_output = HashMap::with_capacity(output.len() + logical_regions.len());
-        for (k, v) in output.into_iter() {
-            let (src_logical_region_id, column_name) = Self::parse_column_key(&k)?.unwrap();
-            // Change the region number to the data region number.
-            let new_key = MetadataRegion::concat_column_key(
-                RegionId::new(
-                    src_logical_region_id.table_id(),
-                    data_region_id.region_number(),
-                ),
-                &column_name,
-            );
-            transform_output.insert(new_key, v);
-        }
-        for src_logical_region_id in &logical_regions {
-            let new_key = MetadataRegion::concat_region_key(RegionId::new(
-                src_logical_region_id.table_id(),
-                data_region_id.region_number(),
-            ));
-            transform_output.insert(new_key, String::new());
-        }
         debug!(
             "Transform logical regions metadata to physical region {}, source region: {}, transformed metadata: {}",
             data_region_id,
             source_region_id,
-            transform_output.len(),
+            output.len(),
         );
 
-        let put_request = MetadataRegion::build_put_request_from_iter(transform_output.into_iter());
+        let put_request = MetadataRegion::build_put_request_from_iter(output.into_iter());
         self.mito
             .handle_request(
                 metadata_region_id,
@@ -647,15 +649,16 @@ impl MetadataRegion {
 fn get_all_with_prefix(
     region_metadata: &RegionMetadataCacheEntry,
     prefix: &str,
-    result: &mut HashMap<String, String>,
-) {
+    mut callback: impl FnMut(&str, &str) -> Result<()>,
+) -> Result<()> {
     let range = region_metadata.key_values.range(prefix.to_string()..);
     for (k, v) in range {
         if !k.starts_with(prefix) {
             break;
         }
-        result.insert(k.clone(), v.clone());
+        callback(k, v)?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
