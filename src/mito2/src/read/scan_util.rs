@@ -1181,8 +1181,7 @@ pub fn build_file_range_scan_stream(
         };
         for range in ranges {
             let build_reader_start = Instant::now();
-            let Some(reader) = range.reader(stream_ctx.input.series_row_selector, fetch_metrics.as_deref()).await?
-            else{
+            let Some(reader) = range.reader(stream_ctx.input.series_row_selector, fetch_metrics.as_deref()).await? else {
                 continue;
             };
             let build_cost = build_reader_start.elapsed();

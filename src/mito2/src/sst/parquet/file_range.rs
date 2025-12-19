@@ -119,6 +119,8 @@ impl FileRange {
     }
 
     /// Performs pruning before reading the [FileRange].
+    /// It use latest dynamic filters with row group statistics to prune the range.
+    ///
     /// Returns false if the entire range is pruned and can be skipped.
     fn in_dynamic_filter_range(&self) -> bool {
         if self.context.base.dyn_filters.is_empty() {
@@ -138,6 +140,7 @@ impl FileRange {
             self.compute_skip_fields(),
         );
 
+        // not costly to create a predicate here since dynamic filters are wrapped in Arc
         let pred = Predicate::new(vec![]).with_dyn_filters(self.context.base.dyn_filters.clone());
 
         pred.prune_with_stats(&stats, prune_schema.arrow_schema())

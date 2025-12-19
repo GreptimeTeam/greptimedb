@@ -375,7 +375,7 @@ impl ParquetReaderBuilder {
         };
 
         let dyn_filters = if let Some(predicate) = &self.predicate {
-            predicate.dyn_filters()
+            predicate.dyn_filters().clone()
         } else {
             Arc::new(vec![])
         };
