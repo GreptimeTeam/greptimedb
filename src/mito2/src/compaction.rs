@@ -848,6 +848,8 @@ struct PendingCompaction {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use api::v1::region::StrictWindow;
     use common_datasource::compression::CompressionType;
     use common_meta::key::schema_name::SchemaNameValue;
@@ -935,6 +937,89 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_find_compaction_options_priority() {
+        fn schema_value_with_twcs(time_window: &str) -> SchemaNameValue {
+            let mut schema_value = SchemaNameValue {
+                ttl: Some(DatabaseTimeToLive::default()),
+                ..Default::default()
+            };
+            schema_value
+                .extra_options
+                .insert("compaction.type".to_string(), "twcs".to_string());
+            schema_value.extra_options.insert(
+                "compaction.twcs.time_window".to_string(),
+                time_window.to_string(),
+            );
+            schema_value
+        }
+
+        let cases = [
+            (
+                "db options set and table override set",
+                Some(schema_value_with_twcs("2h")),
+                true,
+                Some(Duration::from_secs(5 * 3600)),
+                Some(5 * 3600),
+            ),
+            (
+                "db options set and table override not set",
+                Some(schema_value_with_twcs("2h")),
+                false,
+                None,
+                Some(2 * 3600),
+            ),
+            (
+                "db options not set and table override set",
+                None,
+                true,
+                Some(Duration::from_secs(4 * 3600)),
+                Some(4 * 3600),
+            ),
+            (
+                "db options not set and table override not set",
+                None,
+                false,
+                None,
+                None,
+            ),
+        ];
+
+        for (case_name, schema_value, override_set, table_window, expected_window) in cases {
+            let builder = VersionControlBuilder::new();
+            let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+            let table_id = builder.region_id().table_id();
+            schema_metadata_manager
+                .register_region_table_info(
+                    table_id,
+                    "t",
+                    "c",
+                    "s",
+                    schema_value,
+                    kv_backend.clone(),
+                )
+                .await;
+
+            let version_control = Arc::new(builder.build());
+            let mut region_opts = version_control.current().version.options.clone();
+            region_opts.compaction_override = override_set;
+            if let Some(window) = table_window {
+                let crate::region::options::CompactionOptions::Twcs(twcs) =
+                    &mut region_opts.compaction;
+                twcs.time_window = Some(window);
+            }
+
+            let (opts, _) = find_dynamic_options(table_id, &region_opts, &schema_metadata_manager)
+                .await
+                .unwrap();
+            match opts {
+                crate::region::options::CompactionOptions::Twcs(t) => {
+                    assert_eq!(t.time_window_seconds(), expected_window, "{case_name}");
+                }
+            }
+        }
     }
 
     #[tokio::test]

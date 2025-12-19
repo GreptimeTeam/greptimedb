@@ -526,6 +526,7 @@ mod tests {
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 ..Default::default()
             }),
+            compaction_override: true,
             ..Default::default()
         };
         assert_eq!(expect, options);
@@ -653,7 +654,7 @@ mod tests {
                 remote_compaction: false,
                 fallback_to_local: true,
             }),
-            compaction_override: false,
+            compaction_override: true,
             storage: Some("S3".to_string()),
             append_mode: false,
             wal_options,
