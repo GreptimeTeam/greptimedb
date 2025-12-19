@@ -30,7 +30,7 @@ use common_telemetry::{error, info, warn};
 use notify::{EventKind, RecursiveMode, Watcher};
 use snafu::ResultExt;
 
-use crate::error::{CanonicalizePathSnafu, FileWatchSnafu, InvalidPathSnafu, Result};
+use crate::error::{FileWatchSnafu, InvalidPathSnafu, Result};
 
 /// Configuration for the file watcher behavior.
 #[derive(Debug, Clone, Default)]
@@ -41,15 +41,10 @@ pub struct FileWatcherConfig {
 
 impl FileWatcherConfig {
     pub fn new() -> Self {
-        Self::default()
+        Default::default()
     }
 
-    pub fn with_modify_and_create(mut self) -> Self {
-        self.include_remove_events = false;
-        self
-    }
-
-    pub fn with_remove_events(mut self) -> Self {
+    pub fn include_remove_events(mut self) -> Self {
         self.include_remove_events = true;
         self
     }
@@ -93,11 +88,8 @@ impl FileWatcherBuilder {
                 path: path.display().to_string(),
             }
         );
-        // Canonicalize the path for reliable comparison with event paths
-        let canonical = path.canonicalize().context(CanonicalizePathSnafu {
-            path: path.display().to_string(),
-        })?;
-        self.file_paths.push(canonical);
+
+        self.file_paths.push(path.to_path_buf());
         Ok(self)
     }
 
@@ -144,7 +136,6 @@ impl FileWatcherBuilder {
         }
 
         let config = self.config;
-        let watched_files: HashSet<PathBuf> = self.file_paths.iter().cloned().collect();
 
         info!(
             "Spawning file watcher for paths: {:?} (watching parent directories)",
@@ -165,25 +156,7 @@ impl FileWatcherBuilder {
                             continue;
                         }
 
-                        // Check if any of the event paths match our watched files
-                        let is_watched_file = event.paths.iter().any(|event_path| {
-                            // Try to canonicalize the event path for comparison
-                            // If the file was deleted, canonicalize will fail, so we also
-                            // compare the raw path
-                            if let Ok(canonical) = event_path.canonicalize()
-                                && watched_files.contains(&canonical)
-                            {
-                                return true;
-                            }
-                            // For deleted files, compare using the raw path
-                            watched_files.contains(event_path)
-                        });
-
-                        if !is_watched_file {
-                            continue;
-                        }
-
-                        info!(?event.kind, ?event.paths, "Detected file change");
+                        info!(?event.kind, ?event.paths, "Detected folder change");
                         callback();
                     }
                     Err(err) => {
@@ -299,57 +272,6 @@ mod tests {
         assert!(
             counter.load(Ordering::SeqCst) >= 1,
             "Watcher should have detected file recreation"
-        );
-    }
-
-    #[test]
-    fn test_file_watcher_ignores_other_files() {
-        common_telemetry::init_default_ut_logging();
-
-        let dir = create_temp_dir("test_file_watcher_other");
-        let watched_file = dir.path().join("watched.txt");
-        let other_file = dir.path().join("other.txt");
-
-        // Create both files
-        std::fs::write(&watched_file, "watched content").unwrap();
-        std::fs::write(&other_file, "other content").unwrap();
-
-        let counter = Arc::new(AtomicUsize::new(0));
-        let counter_clone = counter.clone();
-
-        FileWatcherBuilder::new()
-            .watch_path(&watched_file)
-            .unwrap()
-            .config(FileWatcherConfig::new())
-            .spawn(move || {
-                counter_clone.fetch_add(1, Ordering::SeqCst);
-            })
-            .unwrap();
-
-        // Give watcher time to start
-        std::thread::sleep(Duration::from_millis(100));
-
-        // Modify the other file - should NOT trigger callback
-        std::fs::write(&other_file, "modified other content").unwrap();
-
-        // Wait for potential event
-        std::thread::sleep(Duration::from_millis(500));
-
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            0,
-            "Watcher should not have detected changes to other files"
-        );
-
-        // Now modify the watched file - SHOULD trigger callback
-        std::fs::write(&watched_file, "modified watched content").unwrap();
-
-        // Wait for the event to be processed
-        std::thread::sleep(Duration::from_millis(500));
-
-        assert!(
-            counter.load(Ordering::SeqCst) >= 1,
-            "Watcher should have detected change to watched file"
         );
     }
 }

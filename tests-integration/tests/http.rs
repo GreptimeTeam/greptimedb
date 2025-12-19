@@ -1397,6 +1397,8 @@ max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
 flight_compression = "arrow_ipc"
 runtime_size = 8
+http2_keep_alive_interval = "10s"
+http2_keep_alive_timeout = "3s"
 
 [grpc.tls]
 mode = "disable"
@@ -1586,6 +1588,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "endpoint =",
         "region =",
         "enable_virtual_host_style =",
+        "disable_ec2_metadata =",
         "cache_path =",
         "cache_capacity =",
         "memory_pool_size =",

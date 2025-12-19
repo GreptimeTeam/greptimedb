@@ -143,14 +143,14 @@ derive_builder = "0.20"
 derive_more = { version = "2.1", features = ["full"] }
 dotenv = "0.15"
 either = "1.15"
-etcd-client = { git = "https://github.com/GreptimeTeam/etcd-client", rev = "f62df834f0cffda355eba96691fe1a9a332b75a7", features = [
+etcd-client = { version = "0.16.1", features = [
     "tls",
     "tls-roots",
 ] }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "0423fa30203187c75e2937a668df1da699c8b96c" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "173efe5ec62722089db7c531c0b0d470a072b915" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"

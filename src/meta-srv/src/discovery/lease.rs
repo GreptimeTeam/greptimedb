@@ -102,7 +102,7 @@ mod tests {
     use api::v1::meta::heartbeat_request::NodeWorkloads;
     use api::v1::meta::{DatanodeWorkloads, FlownodeWorkloads};
     use common_meta::cluster::{FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus, Role};
-    use common_meta::distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS;
+    use common_meta::distributed_time_constants::default_distributed_time_constants;
     use common_meta::kv_backend::ResettableKvBackendRef;
     use common_meta::peer::{Peer, PeerDiscovery};
     use common_meta::rpc::store::PutRequest;
@@ -473,8 +473,10 @@ mod tests {
         let client = create_meta_peer_client();
         let in_memory = client.memory_backend();
 
+        let frontend_heartbeat_interval =
+            default_distributed_time_constants().frontend_heartbeat_interval;
         let last_activity_ts =
-            current_time_millis() - FRONTEND_HEARTBEAT_INTERVAL_MILLIS as i64 - 1000;
+            current_time_millis() - frontend_heartbeat_interval.as_millis() as i64 - 1000;
         let active_frontend_node = NodeInfo {
             peer: Peer {
                 id: 0,

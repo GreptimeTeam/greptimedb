@@ -59,15 +59,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to canonicalize path: {}", path))]
-    CanonicalizePath {
-        path: String,
-        #[snafu(source)]
-        error: std::io::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid path '{}': expected a file, not a directory", path))]
     InvalidPath {
         path: String,
@@ -82,8 +73,7 @@ impl ErrorExt for Error {
             Error::TomlFormat { .. }
             | Error::LoadLayeredConfig { .. }
             | Error::FileWatch { .. }
-            | Error::InvalidPath { .. }
-            | Error::CanonicalizePath { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidPath { .. } => StatusCode::InvalidArguments,
             Error::SerdeJson { .. } => StatusCode::Unexpected,
         }
     }

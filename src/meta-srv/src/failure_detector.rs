@@ -15,7 +15,6 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use common_meta::distributed_time_constants;
 use serde::{Deserialize, Serialize};
 
 const FIRST_HEARTBEAT_ESTIMATE_MILLIS: i64 = 1000;
@@ -79,9 +78,7 @@ impl Default for PhiAccrualFailureDetectorOptions {
         Self {
             threshold: 8_f32,
             min_std_deviation: Duration::from_millis(100),
-            acceptable_heartbeat_pause: Duration::from_secs(
-                distributed_time_constants::DATANODE_LEASE_SECS,
-            ),
+            acceptable_heartbeat_pause: Duration::from_secs(10),
         }
     }
 }

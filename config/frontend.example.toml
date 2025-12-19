@@ -131,7 +131,6 @@ key_path = ""
 ## For now, gRPC tls config does not support auto reload.
 watch = false
 
-
 ## MySQL server options.
 [mysql]
 ## Whether to enable.

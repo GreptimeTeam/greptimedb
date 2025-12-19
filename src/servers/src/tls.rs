@@ -362,13 +362,13 @@ mod tests {
                 cert_path: "/path/to/cert_path".to_string(),
                 key_path: "/path/to/key_path".to_string(),
                 ca_cert_path: String::new(),
-                watch: false
+                watch: false,
             },
             TlsOption::new(
                 Some(Disable),
                 Some("/path/to/cert_path".to_string()),
                 Some("/path/to/key_path".to_string()),
-                false
+                false,
             )
         );
     }

@@ -99,6 +99,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
                             error!("Client disconnected: broken pipe");
                             break;
                         }
+                        error!(err; "Sending heartbeat response error");
 
                         if tx.send(Err(err)).await.is_err() {
                             info!("ReceiverStream was dropped; shutting down");
