@@ -1412,7 +1412,7 @@ mod tests {
         };
         assert!(is_valid_region_edit(&edit));
 
-        // Invalid: "files_to_add" is empty
+        // Invalid: "files_to_add" and "files_to_remove" are both empty
         let edit = RegionEdit {
             files_to_add: vec![],
             files_to_remove: vec![],
@@ -1424,7 +1424,7 @@ mod tests {
         };
         assert!(!is_valid_region_edit(&edit));
 
-        // Invalid: "files_to_remove" is not empty
+        // Valid: "files_to_remove" is not empty
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![FileMeta::default()],
@@ -1434,7 +1434,7 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
         };
-        assert!(!is_valid_region_edit(&edit));
+        assert!(is_valid_region_edit(&edit));
 
         // Invalid: other fields are not all "None"s
         let edit = RegionEdit {
