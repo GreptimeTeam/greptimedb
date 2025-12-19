@@ -142,6 +142,7 @@ impl Frontend {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     use api::v1::meta::heartbeat_server::HeartbeatServer;
     use api::v1::meta::mailbox_message::Payload;
@@ -156,7 +157,6 @@ mod tests {
     use common_error::from_header_to_err_code_msg;
     use common_error::status_code::StatusCode;
     use common_grpc::channel_manager::ChannelManager;
-    use common_meta::distributed_time_constants::default_distributed_time_constants;
     use common_meta::heartbeat::handler::HandlerGroupExecutor;
     use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
     use common_meta::heartbeat::handler::suspend::SuspendHandler;
@@ -399,6 +399,10 @@ mod tests {
                 ..Default::default()
             },
             meta_client: Some(meta_client_options.clone()),
+            heartbeat: HeartbeatOptions {
+                interval: Duration::from_secs(1),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -408,8 +412,7 @@ mod tests {
         let meta_client = create_meta_client(&meta_client_options, server.clone()).await;
         let frontend = create_frontend(&options, meta_client).await?;
 
-        let frontend_heartbeat_interval =
-            default_distributed_time_constants().frontend_heartbeat_interval;
+        let frontend_heartbeat_interval = options.heartbeat.interval;
         tokio::time::sleep(frontend_heartbeat_interval).await;
         // initial state: not suspend:
         assert!(!frontend.instance.is_suspended());
