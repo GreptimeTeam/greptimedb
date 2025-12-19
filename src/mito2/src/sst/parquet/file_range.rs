@@ -31,6 +31,7 @@ use parquet::arrow::arrow_reader::RowSelection;
 use parquet::file::metadata::ParquetMetaData;
 use snafu::{OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, TimeSeriesRowSelector};
 use table::predicate::Predicate;
 
@@ -136,7 +137,7 @@ impl FileRange {
         let stats = RowGroupPruningStats::new(
             std::slice::from_ref(curr_row_group),
             read_format,
-            None, // TODO(discord9): check if need expected metadata
+            self.context.base.expected_metadata.clone(),
             self.compute_skip_fields(),
         );
 
@@ -231,7 +232,10 @@ impl FileRange {
     pub(crate) async fn flat_reader(
         &self,
         fetch_metrics: Option<&ParquetFetchMetrics>,
-    ) -> Result<FlatPruneReader> {
+    ) -> Result<Option<FlatPruneReader>> {
+        if !self.in_dynamic_filter_range() {
+            return Ok(None);
+        }
         let parquet_reader = self
             .context
             .reader_builder
@@ -252,7 +256,7 @@ impl FileRange {
             skip_fields,
         );
 
-        Ok(flat_prune_reader)
+        Ok(Some(flat_prune_reader))
     }
 
     /// Returns the helper to compat batches.
@@ -369,6 +373,7 @@ pub(crate) struct RangeBase {
     pub(crate) dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>,
     /// Helper to read the SST.
     pub(crate) read_format: ReadFormat,
+    pub(crate) expected_metadata: Option<RegionMetadataRef>,
     /// Schema used for pruning with dynamic filters.
     pub(crate) prune_schema: Arc<Schema>,
     /// Decoder for primary keys

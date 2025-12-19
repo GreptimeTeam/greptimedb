@@ -93,6 +93,7 @@ impl BulkIterContext {
                 dyn_filters,
                 read_format,
                 prune_schema: region_metadata.schema.clone(),
+                expected_metadata: Some(region_metadata),
                 codec,
                 // we don't need to compat batch since all batch in memtable have the same schema.
                 compat_batch: None,

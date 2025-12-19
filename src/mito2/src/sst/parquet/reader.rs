@@ -388,6 +388,7 @@ impl ParquetReaderBuilder {
                 filters,
                 dyn_filters,
                 read_format,
+                expected_metadata: self.expected_metadata.clone(),
                 prune_schema,
                 codec,
                 compat_batch: None,

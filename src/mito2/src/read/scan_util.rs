@@ -1241,7 +1241,7 @@ pub fn build_flat_file_range_scan_stream(
         };
         for range in ranges {
             let build_reader_start = Instant::now();
-            let mut reader = range.flat_reader(fetch_metrics.as_deref()).await?;
+            let Some(mut reader) = range.flat_reader(fetch_metrics.as_deref()).await? else{continue};
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
 
