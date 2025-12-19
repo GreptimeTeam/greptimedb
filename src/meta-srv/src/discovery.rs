@@ -16,13 +16,9 @@ pub mod lease;
 pub mod node_info;
 pub mod utils;
 
-use std::time::Duration;
-
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use common_error::ext::BoxedError;
-use common_meta::distributed_time_constants::{
-    DATANODE_LEASE_SECS, FLOWNODE_LEASE_SECS, FRONTEND_HEARTBEAT_INTERVAL_MILLIS,
-};
+use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::error::Result;
 use common_meta::peer::{Peer, PeerDiscovery, PeerResolver};
 use common_meta::{DatanodeId, FlownodeId};
@@ -38,7 +34,7 @@ impl PeerDiscovery for MetaPeerClient {
         utils::alive_frontends(
             &DefaultSystemTimer,
             self,
-            Duration::from_millis(FRONTEND_HEARTBEAT_INTERVAL_MILLIS),
+            default_distributed_time_constants().frontend_heartbeat_interval,
         )
         .await
         .map_err(BoxedError::new)
@@ -52,7 +48,7 @@ impl PeerDiscovery for MetaPeerClient {
         utils::alive_datanodes(
             &DefaultSystemTimer,
             self,
-            Duration::from_secs(DATANODE_LEASE_SECS),
+            default_distributed_time_constants().datanode_lease,
             filter,
         )
         .await
@@ -67,7 +63,7 @@ impl PeerDiscovery for MetaPeerClient {
         utils::alive_flownodes(
             &DefaultSystemTimer,
             self,
-            Duration::from_secs(FLOWNODE_LEASE_SECS),
+            default_distributed_time_constants().flownode_lease,
             filter,
         )
         .await

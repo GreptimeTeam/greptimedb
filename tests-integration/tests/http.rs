@@ -1397,6 +1397,8 @@ max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
 flight_compression = "arrow_ipc"
 runtime_size = 8
+http2_keep_alive_interval = "10s"
+http2_keep_alive_timeout = "3s"
 
 [grpc.tls]
 mode = "disable"

@@ -36,9 +36,6 @@ pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
     deadline: Some(Duration::from_secs(3)),
 };
 
-/// The default connect timeout for kafka client.
-pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// Default interval for auto WAL pruning.
 pub const DEFAULT_AUTO_PRUNE_INTERVAL: Duration = Duration::from_mins(30);
 /// Default limit for concurrent auto pruning tasks.
@@ -167,6 +164,12 @@ pub struct KafkaConnectionConfig {
     pub sasl: Option<KafkaClientSasl>,
     /// Client TLS config
     pub tls: Option<KafkaClientTls>,
+    /// The connect timeout for kafka client.
+    #[serde(with = "humantime_serde")]
+    pub connect_timeout: Duration,
+    /// The timeout for kafka client.
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
 }
 
 impl Default for KafkaConnectionConfig {
@@ -175,6 +178,8 @@ impl Default for KafkaConnectionConfig {
             broker_endpoints: vec![BROKER_ENDPOINT.to_string()],
             sasl: None,
             tls: None,
+            connect_timeout: Duration::from_secs(3),
+            timeout: Duration::from_secs(3),
         }
     }
 }

@@ -14,11 +14,10 @@
 
 use std::any::Any;
 use std::ops::Div;
-use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_meta::RegionIdent;
-use common_meta::distributed_time_constants::REGION_LEASE_SECS;
+use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
 use common_meta::key::datanode_table::RegionInfo;
 use common_procedure::{Context as ProcedureContext, Status};
@@ -32,9 +31,6 @@ use crate::handler::HeartbeatMailbox;
 use crate::procedure::region_migration::flush_leader_region::PreFlushRegion;
 use crate::procedure::region_migration::{Context, State};
 use crate::service::mailbox::Channel;
-
-/// Uses lease time of a region as the timeout of opening a candidate region.
-const OPEN_CANDIDATE_REGION_TIMEOUT: Duration = Duration::from_secs(REGION_LEASE_SECS);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OpenCandidateRegion;
@@ -157,7 +153,9 @@ impl OpenCandidateRegion {
                 .context(error::ExceededDeadlineSnafu {
                     operation: "Open candidate region",
                 })?;
-        let operation_timeout = operation_timeout.div(2).max(OPEN_CANDIDATE_REGION_TIMEOUT);
+        let operation_timeout = operation_timeout
+            .div(2)
+            .max(default_distributed_time_constants().region_lease);
         let ch = Channel::Datanode(candidate.id);
         let now = Instant::now();
         let receiver = ctx.mailbox.send(&ch, msg, operation_timeout).await?;

@@ -27,7 +27,7 @@ use common_event_recorder::EventRecorderOptions;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl_manager::DdlManagerRef;
-use common_meta::distributed_time_constants;
+use common_meta::distributed_time_constants::{self, default_distributed_time_constants};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
@@ -121,6 +121,27 @@ impl Default for StatsPersistenceOptions {
     }
 }
 
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct BackendClientOptions {
+    #[serde(with = "humantime_serde")]
+    pub keep_alive_timeout: Duration,
+    #[serde(with = "humantime_serde")]
+    pub keep_alive_interval: Duration,
+    #[serde(with = "humantime_serde")]
+    pub connect_timeout: Duration,
+}
+
+impl Default for BackendClientOptions {
+    fn default() -> Self {
+        Self {
+            keep_alive_interval: Duration::from_secs(10),
+            keep_alive_timeout: Duration::from_secs(3),
+            connect_timeout: Duration::from_secs(3),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetasrvOptions {
@@ -136,12 +157,22 @@ pub struct MetasrvOptions {
     /// Only applicable when using PostgreSQL or MySQL as the metadata store
     #[serde(default)]
     pub backend_tls: Option<TlsOption>,
+    /// The backend client options.
+    /// Currently, only applicable when using etcd as the metadata store.
+    #[serde(default)]
+    pub backend_client: BackendClientOptions,
     /// The type of selector.
     pub selector: SelectorType,
     /// Whether to use the memory store.
     pub use_memory_store: bool,
     /// Whether to enable region failover.
     pub enable_region_failover: bool,
+    /// The base heartbeat interval.
+    ///
+    /// This value is used to calculate the distributed time constants for components.
+    /// e.g., the region lease time is `heartbeat_interval * 3 + Duration::from_secs(1)`.
+    #[serde(with = "humantime_serde")]
+    pub heartbeat_interval: Duration,
     /// The delay before starting region failure detection.
     /// This delay helps prevent Metasrv from triggering unnecessary region failovers before all Datanodes are fully started.
     /// Especially useful when the cluster is not deployed with GreptimeDB Operator and maintenance mode is not enabled.
@@ -240,7 +271,9 @@ impl fmt::Debug for MetasrvOptions {
             .field("tracing", &self.tracing)
             .field("backend", &self.backend)
             .field("event_recorder", &self.event_recorder)
-            .field("stats_persistence", &self.stats_persistence);
+            .field("stats_persistence", &self.stats_persistence)
+            .field("heartbeat_interval", &self.heartbeat_interval)
+            .field("backend_client", &self.backend_client);
 
         #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
         debug_struct.field("meta_table_name", &self.meta_table_name);
@@ -270,6 +303,7 @@ impl Default for MetasrvOptions {
             selector: SelectorType::default(),
             use_memory_store: false,
             enable_region_failover: false,
+            heartbeat_interval: distributed_time_constants::BASE_HEARTBEAT_INTERVAL,
             region_failure_detector_initialization_delay: Duration::from_secs(10 * 60),
             allow_region_failover_on_local_wal: false,
             grpc: GrpcOptions {
@@ -307,6 +341,7 @@ impl Default for MetasrvOptions {
             event_recorder: EventRecorderOptions::default(),
             stats_persistence: StatsPersistenceOptions::default(),
             gc: GcSchedulerOptions::default(),
+            backend_client: BackendClientOptions::default(),
         }
     }
 }
@@ -747,7 +782,7 @@ impl Metasrv {
             &DefaultSystemTimer,
             self.meta_peer_client.as_ref(),
             peer_id,
-            Duration::from_secs(distributed_time_constants::DATANODE_LEASE_SECS),
+            default_distributed_time_constants().datanode_lease,
         )
         .await
     }

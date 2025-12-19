@@ -81,6 +81,12 @@ pub struct GrpcOptions {
     /// Default to `None`, means infinite.
     #[serde(with = "humantime_serde")]
     pub max_connection_age: Option<Duration>,
+    /// The HTTP/2 keep-alive interval.
+    #[serde(with = "humantime_serde")]
+    pub http2_keep_alive_interval: Duration,
+    /// The HTTP/2 keep-alive timeout.
+    #[serde(with = "humantime_serde")]
+    pub http2_keep_alive_timeout: Duration,
 }
 
 impl GrpcOptions {
@@ -144,6 +150,8 @@ impl Default for GrpcOptions {
             runtime_size: 8,
             tls: TlsOption::default(),
             max_connection_age: None,
+            http2_keep_alive_interval: Duration::from_secs(10),
+            http2_keep_alive_timeout: Duration::from_secs(3),
         }
     }
 }
@@ -164,6 +172,8 @@ impl GrpcOptions {
             runtime_size: 8,
             tls: TlsOption::default(),
             max_connection_age: None,
+            http2_keep_alive_interval: Duration::from_secs(10),
+            http2_keep_alive_timeout: Duration::from_secs(3),
         }
     }
 
