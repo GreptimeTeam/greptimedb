@@ -157,7 +157,7 @@ impl FileRange {
             PreFilterMode::SkipFieldsOnDelete => {
                 // Check if this specific row group contains delete op
                 row_group_contains_delete(
-                    &self.context.reader_builder.parquet_metadata(),
+                    self.context.reader_builder.parquet_metadata(),
                     self.row_group_idx,
                     self.context.reader_builder.file_path(),
                 )
