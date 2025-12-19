@@ -395,13 +395,13 @@ impl Iterator for RecordBatchRowIterator {
     type Item = PgWireResult<DataRow>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let mut encoder = DataRowEncoder::new(self.pg_schema.clone());
         if self.i < self.record_batch.num_rows() {
-            let mut encoder = DataRowEncoder::new(self.pg_schema.clone());
             if let Err(e) = self.encode_row(self.i, &mut encoder) {
                 return Some(Err(e));
             }
             self.i += 1;
-            Some(encoder.finish())
+            Some(Ok(encoder.take_row()))
         } else {
             None
         }
