@@ -163,8 +163,6 @@ pub struct MetasrvOptions {
     pub backend_client: BackendClientOptions,
     /// The type of selector.
     pub selector: SelectorType,
-    /// Whether to use the memory store.
-    pub use_memory_store: bool,
     /// Whether to enable region failover.
     pub enable_region_failover: bool,
     /// The base heartbeat interval.
@@ -250,7 +248,6 @@ impl fmt::Debug for MetasrvOptions {
             .field("store_addrs", &self.sanitize_store_addrs())
             .field("backend_tls", &self.backend_tls)
             .field("selector", &self.selector)
-            .field("use_memory_store", &self.use_memory_store)
             .field("enable_region_failover", &self.enable_region_failover)
             .field(
                 "allow_region_failover_on_local_wal",
@@ -301,7 +298,6 @@ impl Default for MetasrvOptions {
             store_addrs: vec!["127.0.0.1:2379".to_string()],
             backend_tls: None,
             selector: SelectorType::default(),
-            use_memory_store: false,
             enable_region_failover: false,
             heartbeat_interval: distributed_time_constants::BASE_HEARTBEAT_INTERVAL,
             region_failure_detector_initialization_delay: Duration::from_secs(10 * 60),

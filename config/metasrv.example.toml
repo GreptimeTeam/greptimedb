@@ -50,9 +50,6 @@ meta_election_lock_id = 1
 ## For details, please see "https://docs.greptime.com/developer-guide/metasrv/selector".
 selector = "round_robin"
 
-## Store data in memory.
-use_memory_store = false
-
 ## Whether to enable region failover.
 ## This feature is only available on GreptimeDB running on cluster mode and
 ## - Using Remote WAL

@@ -3,9 +3,6 @@ flush_stats_factor = 1
 ## Store server address default to etcd store.
 store_addrs = [{store_addrs | unescaped}]
 
-## Store data in memory.
-use_memory_store = false
-
 ## The datastore for meta server.
 backend = "EtcdStore"
 {{ endif }}
