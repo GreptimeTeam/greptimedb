@@ -514,6 +514,22 @@ impl Display for GcRegionsReply {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EnterStagingRegion {
+    pub region_id: RegionId,
+    pub partition_expr: String,
+}
+
+impl Display for EnterStagingRegion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "EnterStagingRegion(region_id={}, partition_expr={})",
+            self.region_id, self.partition_expr
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
 pub enum Instruction {
     /// Opens regions.
@@ -541,6 +557,8 @@ pub enum Instruction {
     GcRegions(GcRegions),
     /// Temporary suspend serving reads or writes
     Suspend,
+    /// Makes regions enter staging state.
+    EnterStagingRegions(Vec<EnterStagingRegion>),
 }
 
 impl Instruction {
@@ -594,6 +612,13 @@ impl Instruction {
     pub fn into_gc_regions(self) -> Option<GcRegions> {
         match self {
             Self::GcRegions(gc_regions) => Some(gc_regions),
+            _ => None,
+        }
+    }
+
+    pub fn into_enter_staging_regions(self) -> Option<Vec<EnterStagingRegion>> {
+        match self {
+            Self::EnterStagingRegions(enter_staging) => Some(enter_staging),
             _ => None,
         }
     }
@@ -691,6 +716,28 @@ where
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct EnterStagingRegionReply {
+    pub region_id: RegionId,
+    /// Returns true if the region is under the new region rule.
+    pub ready: bool,
+    /// Indicates whether the region exists.
+    pub exists: bool,
+    /// Return error if any during the operation.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct EnterStagingRegionsReply {
+    pub replies: Vec<EnterStagingRegionReply>,
+}
+
+impl EnterStagingRegionsReply {
+    pub fn new(replies: Vec<EnterStagingRegionReply>) -> Self {
+        Self { replies }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InstructionReply {
     #[serde(alias = "open_region")]
@@ -710,6 +757,7 @@ pub enum InstructionReply {
     FlushRegions(FlushRegionReply),
     GetFileRefs(GetFileRefsReply),
     GcRegions(GcRegionsReply),
+    EnterStagingRegions(EnterStagingRegionsReply),
 }
 
 impl Display for InstructionReply {
@@ -726,6 +774,13 @@ impl Display for InstructionReply {
             Self::FlushRegions(reply) => write!(f, "InstructionReply::FlushRegions({})", reply),
             Self::GetFileRefs(reply) => write!(f, "InstructionReply::GetFileRefs({})", reply),
             Self::GcRegions(reply) => write!(f, "InstructionReply::GcRegion({})", reply),
+            Self::EnterStagingRegions(reply) => {
+                write!(
+                    f,
+                    "InstructionReply::EnterStagingRegions({:?})",
+                    reply.replies
+                )
+            }
         }
     }
 }
@@ -764,6 +819,13 @@ impl InstructionReply {
         match self {
             Self::FlushRegions(reply) => reply,
             _ => panic!("Expected FlushRegions reply"),
+        }
+    }
+
+    pub fn expect_enter_staging_regions_reply(self) -> Vec<EnterStagingRegionReply> {
+        match self {
+            Self::EnterStagingRegions(reply) => reply.replies,
+            _ => panic!("Expected EnterStagingRegion reply"),
         }
     }
 }
