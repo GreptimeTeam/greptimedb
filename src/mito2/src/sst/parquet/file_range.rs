@@ -135,7 +135,7 @@ impl FileRange {
             std::slice::from_ref(curr_row_group),
             read_format,
             None, // TODO(discord9): check if need expected metadata
-            self.context.base.skip_fields,
+            self.compute_skip_fields(),
         );
 
         let pred = Predicate::new(vec![]).with_dyn_filters(self.context.base.dyn_filters.clone());
@@ -144,6 +144,22 @@ impl FileRange {
             .first()
             .cloned()
             .unwrap_or(true) // unexpected, not skip just in case
+    }
+
+    fn compute_skip_fields(&self) -> bool {
+        match self.context.base.pre_filter_mode {
+            PreFilterMode::All => false,
+            PreFilterMode::SkipFields => true,
+            PreFilterMode::SkipFieldsOnDelete => {
+                // Check if this specific row group contains delete op
+                row_group_contains_delete(
+                    &self.context.reader_builder.parquet_metadata(),
+                    self.row_group_idx,
+                    self.context.reader_builder.file_path(),
+                )
+                .unwrap_or(true)
+            }
+        }
     }
 
     /// Returns a reader to read the [FileRange].
@@ -350,7 +366,7 @@ pub(crate) struct RangeBase {
     pub(crate) dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>,
     /// Helper to read the SST.
     pub(crate) read_format: ReadFormat,
-    pub(crate) skip_fields: bool,
+    /// Schema used for pruning with dynamic filters.
     pub(crate) prune_schema: Arc<Schema>,
     /// Decoder for primary keys
     pub(crate) codec: Arc<dyn PrimaryKeyCodec>,

@@ -82,12 +82,16 @@ impl BulkIterContext {
             skip_auto_convert,
         )?;
 
+        let dyn_filters = predicate
+            .as_ref()
+            .map(|pred| pred.dyn_filters())
+            .unwrap_or_default();
+
         Ok(Self {
             base: RangeBase {
                 filters: simple_filters,
-                dyn_filters: Arc::new(vec![]), // TODO(discord9): pass dynamic filters
+                dyn_filters,
                 read_format,
-                skip_fields: false,
                 prune_schema: region_metadata.schema.clone(),
                 codec,
                 // we don't need to compat batch since all batch in memtable have the same schema.

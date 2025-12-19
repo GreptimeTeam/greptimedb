@@ -342,8 +342,6 @@ impl ParquetReaderBuilder {
             );
         }
 
-        let skip_fields = self.compute_skip_fields(&parquet_meta);
-
         let prune_schema = self
             .expected_metadata
             .as_ref()
@@ -390,7 +388,6 @@ impl ParquetReaderBuilder {
                 filters,
                 dyn_filters,
                 read_format,
-                skip_fields,
                 prune_schema,
                 codec,
                 compat_batch: None,
