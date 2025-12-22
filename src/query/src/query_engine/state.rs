@@ -209,8 +209,6 @@ impl QueryEngineState {
             .build();
 
         let df_context = SessionContext::new_with_state(session_state);
-
-        // Register MySQL-compatible function aliases
         register_function_aliases(&df_context);
 
         Self {
@@ -431,7 +429,7 @@ const SCALAR_FUNCTION_ALIASES: &[(&str, &str)] = &[
 const AGGREGATE_FUNCTION_ALIASES: &[(&str, &str)] =
     &[("stddev_pop", "std"), ("var_pop", "variance")];
 
-/// Register MySQL-compatible function aliases.
+/// Register function aliases.
 ///
 /// This function adds aliases like `ucase` -> `upper`, `lcase` -> `lower`, etc.
 /// to make GreptimeDB more compatible with MySQL syntax.
