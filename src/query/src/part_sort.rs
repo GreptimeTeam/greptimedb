@@ -3274,7 +3274,7 @@ mod test {
         let input_ranged_data = vec![
             (
                 PartitionRange {
-                    start: Timestamp::new(70, unit.into()),
+                    start: Timestamp::new(90, unit.into()),
                     end: Timestamp::new(100, unit.into()),
                     num_rows: 5,
                     identifier: 0,
@@ -3350,6 +3350,99 @@ mod test {
             Some(4),
             expected_output,
             Some(10), // Read through all groups because it can't detect boundaries due to data distribution
+        )
+        .await;
+    }
+
+    /// Test if two group of non overlapping ranges with limit works as expected.
+    /// Which is still output correct number of rows whether or not limit is reached in first group.
+    #[tokio::test]
+    async fn test_two_no_overlap_range_two_limit_output() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            false,
+        )]));
+
+        // Test case: Two non-overlapping groups with limit
+        // Group 1 (end=100): has data [90, 91, 92, 93, 94] - 5 rows
+        // Group 2 (end=80): has data [70, 71, 72, 73, 74] - 5 rows
+        // With limit=3, we should get [94, 93, 92] from group 1 (limit reached in first group)
+        // With limit=7, we should get [94, 93, 92, 91, 90, 74, 73] from both groups
+        let input_ranged_data = vec![
+            (
+                PartitionRange {
+                    start: Timestamp::new(85, unit.into()),
+                    end: Timestamp::new(100, unit.into()),
+                    num_rows: 5,
+                    identifier: 0,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![90, 91, 92, 93, 94])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+            (
+                PartitionRange {
+                    start: Timestamp::new(65, unit.into()),
+                    end: Timestamp::new(80, unit.into()),
+                    num_rows: 5,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![70, 71, 72, 73, 74])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+        ];
+
+        // Test case 1: Limit reached in first group
+        let expected_output_case1 = Some(
+            DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![94, 93, 92])])
+                .unwrap(),
+        );
+
+        run_test(
+            4005,
+            input_ranged_data.clone(),
+            schema.clone(),
+            SortOptions {
+                descending: true,
+                ..Default::default()
+            },
+            Some(3),
+            expected_output_case1,
+            Some(10), // Should read through first&second group and detect boundary
+        )
+        .await;
+
+        // Test case 2: Limit not reached in first group, need data from second group
+        let expected_output_case2 = Some(
+            DfRecordBatch::try_new(
+                schema.clone(),
+                vec![new_ts_array(unit, vec![94, 93, 92, 91, 90, 74, 73])],
+            )
+            .unwrap(),
+        );
+
+        run_test(
+            4006,
+            input_ranged_data,
+            schema.clone(),
+            SortOptions {
+                descending: true,
+                ..Default::default()
+            },
+            Some(7),
+            expected_output_case2,
+            Some(10), // Should read through both groups
         )
         .await;
     }
