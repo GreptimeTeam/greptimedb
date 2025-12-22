@@ -305,7 +305,7 @@ pub struct PutRecordBatchRequestStream {
     flight_data_stream: Streaming<FlightData>,
     catalog: String,
     schema_name: String,
-    memory_limiter: Option<ServerMemoryLimiter>,
+    limiter: Option<ServerMemoryLimiter>,
     // Client now lazily sends schema data so we cannot eagerly wait for it.
     // Instead, we need to decode while receiving record batches.
     state: StreamState,
@@ -328,13 +328,13 @@ impl PutRecordBatchRequestStream {
         flight_data_stream: Streaming<FlightData>,
         catalog: String,
         schema: String,
-        memory_limiter: Option<ServerMemoryLimiter>,
+        limiter: Option<ServerMemoryLimiter>,
     ) -> TonicResult<Self> {
         Ok(Self {
             flight_data_stream,
             catalog,
             schema_name: schema,
-            memory_limiter,
+            limiter,
             state: StreamState::Init,
         })
     }
@@ -392,7 +392,7 @@ impl Stream for PutRecordBatchRequestStream {
 
             match poll {
                 Some(Ok(flight_data)) => {
-                    let memory_limiter = self.memory_limiter.clone();
+                    let limiter = self.limiter.clone();
 
                     match &mut self.state {
                         StreamState::Init => {
@@ -478,7 +478,7 @@ impl Stream for PutRecordBatchRequestStream {
                                             request_id,
                                             schema_bytes,
                                             flight_data,
-                                            memory_limiter.as_ref(),
+                                            limiter.as_ref(),
                                         )
                                         .map_err(|e| Status::invalid_argument(e.to_string())),
                                     ));

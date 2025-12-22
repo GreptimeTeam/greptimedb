@@ -1241,8 +1241,8 @@ pub async fn test_grpc_memory_limit(store_type: StorageType) {
     let err = result.unwrap_err();
     let err_msg = err.to_string();
     assert!(
-        err_msg.contains("Memory limit exceeded") || err_msg.contains("RESOURCE_EXHAUSTED"),
-        "Expected memory limit error, got: {}",
+        err_msg.contains("Memory limit exceeded"),
+        "Expected 'Memory limit exceeded' error, got: {}",
         err_msg
     );
 

@@ -793,7 +793,7 @@ impl ErrorExt for Error {
 
             Suspended { .. } => StatusCode::Suspended,
 
-            MemoryLimitExceeded { .. } => StatusCode::RuntimeResourcesExhausted,
+            MemoryLimitExceeded { .. } => StatusCode::RateLimited,
         }
     }
 

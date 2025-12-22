@@ -1382,6 +1382,8 @@ providers = []"#,
     let expected_toml_str = format!(
         r#"
 enable_telemetry = true
+max_in_flight_write_bytes = "0KiB"
+write_bytes_exhausted_policy = "wait"
 init_regions_in_background = false
 init_regions_parallelism = 16
 
@@ -7216,8 +7218,8 @@ pub async fn test_http_memory_limit(store_type: StorageType) {
 
     let error_body = res.text().await;
     assert!(
-        error_body.contains("memory limit") || error_body.contains("Memory limit"),
-        "Error message should mention memory limit, got: {}",
+        error_body.contains("Request body memory limit exceeded"),
+        "Error message should be 'Request body memory limit exceeded', got: {}",
         error_body
     );
 
