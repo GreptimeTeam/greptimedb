@@ -6,6 +6,16 @@ default_timezone = "UTC"
 ## @toml2docs:none-default
 default_column_prefix = "greptime"
 
+## Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
+## Set to 0 to disable the limit. Default: "0" (unlimited)
+## @toml2docs:none-default
+#+ max_in_flight_write_bytes = "1GB"
+
+## Policy when write bytes quota is exhausted.
+## Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"
+## @toml2docs:none-default
+#+ write_bytes_exhausted_policy = "wait"
+
 ## Initialize all regions in the background during the startup.
 ## By default, it provides services after all regions have been initialized.
 init_regions_in_background = false
@@ -39,14 +49,6 @@ timeout = "0s"
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
 ## Set to 0 to disable limit.
 body_limit = "64MB"
-## Maximum total memory for all concurrent HTTP request bodies.
-## Set to 0 to disable the limit. Default: "0" (unlimited)
-## @toml2docs:none-default
-#+ max_total_body_memory = "1GB"
-## Policy when memory quota is exhausted.
-## Supports: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"
-## @toml2docs:none-default
-#+ memory_exhausted_policy = "wait"
 ## HTTP CORS support, it's turned on by default
 ## This allows browser to access http APIs without CORS restrictions
 enable_cors = true
@@ -67,14 +69,6 @@ prom_validation_mode = "strict"
 bind_addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
-## Maximum total memory for all concurrent gRPC request messages.
-## Set to 0 to disable the limit. Default: "0" (unlimited)
-## @toml2docs:none-default
-#+ max_total_message_memory = "1GB"
-## Policy when memory quota is exhausted.
-## Supports: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"
-## @toml2docs:none-default
-#+ memory_exhausted_policy = "wait"
 ## The maximum connection age for gRPC connection.
 ## The value can be a human-readable time string. For example: `10m` for ten minutes or `1h` for one hour.
 ## Refer to https://grpc.io/docs/guides/keepalive/ for more details.

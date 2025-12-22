@@ -21,13 +21,12 @@ use common_query::OutputData;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
 use prost::Message;
-use snafu::ResultExt;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
-use crate::grpc::memory_limit::GrpcMemoryLimitState;
 use crate::grpc::{TonicResult, cancellation};
-use crate::{error, hint_headers};
+use crate::hint_headers;
+use crate::request_memory_limiter::ServerMemoryLimiter;
 
 pub(crate) struct DatabaseService {
     handler: GreptimeRequestHandler,
@@ -52,15 +51,9 @@ impl GreptimeDatabase for DatabaseService {
             remote_addr, hints
         );
 
-        let _guard = if let Some(state) = request.extensions().get::<GrpcMemoryLimitState>() {
+        let _guard = if let Some(limiter) = request.extensions().get::<ServerMemoryLimiter>() {
             let message_size = request.get_ref().encoded_len() as u64;
-            Some(
-                state
-                    .manager
-                    .acquire_with_policy(message_size, state.policy)
-                    .await
-                    .context(error::GrpcMemoryLimitExceededSnafu)?,
-            )
+            Some(limiter.acquire(message_size).await?)
         } else {
             None
         };
@@ -112,7 +105,7 @@ impl GreptimeDatabase for DatabaseService {
             remote_addr, hints
         );
 
-        let state = request.extensions().get::<GrpcMemoryLimitState>().cloned();
+        let limiter = request.extensions().get::<ServerMemoryLimiter>().cloned();
 
         let handler = self.handler.clone();
         let request_future = async move {
@@ -122,15 +115,9 @@ impl GreptimeDatabase for DatabaseService {
             while let Some(request) = stream.next().await {
                 let request = request?;
 
-                let _guard = if let Some(ref state) = state {
+                let _guard = if let Some(limiter_ref) = &limiter {
                     let message_size = request.encoded_len() as u64;
-                    Some(
-                        state
-                            .manager
-                            .acquire_with_policy(message_size, state.policy)
-                            .await
-                            .context(error::GrpcMemoryLimitExceededSnafu)?,
-                    )
+                    Some(limiter_ref.acquire(message_size).await?)
                 } else {
                     None
                 };

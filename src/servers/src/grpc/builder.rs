@@ -24,7 +24,6 @@ use axum::extract::Request;
 use axum::response::IntoResponse;
 use axum::routing::Route;
 use common_grpc::error::{InvalidConfigFilePathSnafu, Result};
-use common_memory_manager::{MemoryManager, PermitGranularity};
 use common_runtime::Runtime;
 use common_telemetry::warn;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsServiceServer;
@@ -41,14 +40,13 @@ use crate::grpc::database::DatabaseService;
 use crate::grpc::flight::{FlightCraftRef, FlightCraftWrapper};
 use crate::grpc::frontend_grpc_handler::FrontendGrpcHandler;
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
-use crate::grpc::memory_limit::GrpcMemoryLimitState;
 use crate::grpc::prom_query_gateway::PrometheusGatewayService;
 use crate::grpc::region_server::{RegionServerHandlerRef, RegionServerRequestHandler};
 use crate::grpc::{GrpcServer, GrpcServerConfig};
-use crate::memory_metrics::GrpcMemoryMetrics;
 use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
+use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::tls::TlsOption;
 
 /// Add a gRPC service (`service`) to a `builder`([RoutesBuilder]).
@@ -72,7 +70,7 @@ macro_rules! add_service {
         use $crate::grpc::memory_limit::MemoryLimiterExtensionLayer;
         let service_with_limiter = $crate::tower::ServiceBuilder::new()
             .layer(MemoryLimiterExtensionLayer::new(
-                $builder.memory_limit_state().clone(),
+                $builder.memory_limiter().clone(),
             ))
             .service(service_builder);
 
@@ -94,22 +92,13 @@ pub struct GrpcServerBuilder {
             HeaderInterceptor,
         >,
     >,
-    memory_limit_state: GrpcMemoryLimitState,
+    memory_limiter: ServerMemoryLimiter,
 }
 
 impl GrpcServerBuilder {
     pub fn new(config: GrpcServerConfig, runtime: Runtime) -> Self {
-        // Use Kilobyte granularity for gRPC requests
-        let memory_manager = MemoryManager::with_granularity(
-            config.max_total_message_memory as u64,
-            PermitGranularity::Kilobyte,
-            GrpcMemoryMetrics,
-        );
-
-        let memory_limit_state = GrpcMemoryLimitState {
-            manager: memory_manager,
-            policy: config.memory_exhausted_policy,
-        };
+        // Create a default unlimited limiter (can be overridden with with_memory_limiter)
+        let memory_limiter = ServerMemoryLimiter::default();
 
         Self {
             name: None,
@@ -118,8 +107,14 @@ impl GrpcServerBuilder {
             routes_builder: RoutesBuilder::default(),
             tls_config: None,
             otel_arrow_service: None,
-            memory_limit_state,
+            memory_limiter,
         }
+    }
+
+    /// Set a global memory limiter for all server protocols.
+    pub fn with_memory_limiter(mut self, limiter: ServerMemoryLimiter) -> Self {
+        self.memory_limiter = limiter;
+        self
     }
 
     pub fn config(&self) -> &GrpcServerConfig {
@@ -130,8 +125,8 @@ impl GrpcServerBuilder {
         &self.runtime
     }
 
-    pub fn memory_limit_state(&self) -> &GrpcMemoryLimitState {
-        &self.memory_limit_state
+    pub fn memory_limiter(&self) -> &ServerMemoryLimiter {
+        &self.memory_limiter
     }
 
     pub fn name(self, name: Option<String>) -> Self {
@@ -251,7 +246,6 @@ impl GrpcServerBuilder {
             bind_addr: None,
             name: self.name,
             config: self.config,
-            memory_limit_state: self.memory_limit_state,
         }
     }
 }

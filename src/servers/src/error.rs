@@ -95,18 +95,11 @@ pub enum Error {
         error: tonic::transport::Error,
     },
 
-    #[snafu(display("gRPC memory limit exceeded"))]
-    GrpcMemoryLimitExceeded {
+    #[snafu(display("Request memory limit exceeded"))]
+    MemoryLimitExceeded {
         #[snafu(implicit)]
         location: Location,
         source: common_memory_manager::Error,
-    },
-
-    #[snafu(display("gRPC flight memory exhausted: requested {} bytes", requested_bytes))]
-    GrpcFlightMemoryExhausted {
-        requested_bytes: u64,
-        #[snafu(implicit)]
-        location: Location,
     },
 
     #[snafu(display("{} server is already started", server))]
@@ -800,9 +793,7 @@ impl ErrorExt for Error {
 
             Suspended { .. } => StatusCode::Suspended,
 
-            GrpcMemoryLimitExceeded { .. } | GrpcFlightMemoryExhausted { .. } => {
-                StatusCode::RuntimeResourcesExhausted
-            }
+            MemoryLimitExceeded { .. } => StatusCode::RuntimeResourcesExhausted,
         }
     }
 

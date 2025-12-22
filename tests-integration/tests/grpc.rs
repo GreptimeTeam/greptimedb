@@ -39,6 +39,7 @@ use servers::http::prometheus::{
     PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusJsonResponse,
     PrometheusResponse,
 };
+use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::Server;
 use servers::tls::{TlsMode, TlsOption};
 use tests_integration::test_util::{
@@ -145,8 +146,14 @@ pub async fn test_grpc_message_size_ok(store_type: StorageType) {
         max_send_message_size: 1024,
         ..Default::default()
     };
-    let (_db, fe_grpc_server) =
-        setup_grpc_server_with(store_type, "test_grpc_message_size_ok", None, Some(config)).await;
+    let (_db, fe_grpc_server) = setup_grpc_server_with(
+        store_type,
+        "test_grpc_message_size_ok",
+        None,
+        Some(config),
+        None,
+    )
+    .await;
     let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
@@ -165,8 +172,14 @@ pub async fn test_grpc_zstd_compression(store_type: StorageType) {
         max_send_message_size: 1024,
         ..Default::default()
     };
-    let (_db, fe_grpc_server) =
-        setup_grpc_server_with(store_type, "test_grpc_zstd_compression", None, Some(config)).await;
+    let (_db, fe_grpc_server) = setup_grpc_server_with(
+        store_type,
+        "test_grpc_zstd_compression",
+        None,
+        Some(config),
+        None,
+    )
+    .await;
     let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
@@ -189,6 +202,7 @@ pub async fn test_grpc_message_size_limit_send(store_type: StorageType) {
         "test_grpc_message_size_limit_send",
         None,
         Some(config),
+        None,
     )
     .await;
     let addr = fe_grpc_server.bind_addr().unwrap().to_string();
@@ -214,6 +228,7 @@ pub async fn test_grpc_message_size_limit_recv(store_type: StorageType) {
         "test_grpc_message_size_limit_recv",
         None,
         Some(config),
+        None,
     )
     .await;
     let addr = fe_grpc_server.bind_addr().unwrap().to_string();
@@ -887,7 +902,7 @@ pub async fn test_grpc_timezone(store_type: StorageType) {
         ..Default::default()
     };
     let (_db, fe_grpc_server) =
-        setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
+        setup_grpc_server_with(store_type, "auto_create_table", None, Some(config), None).await;
     let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
@@ -960,13 +975,11 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
-        max_total_message_memory: 1024 * 1024 * 1024,
-        memory_exhausted_policy: OnExhaustedPolicy::default(),
         tls,
         max_connection_age: None,
     };
     let (_db, fe_grpc_server) =
-        setup_grpc_server_with(store_type, "tls_create_table", None, Some(config)).await;
+        setup_grpc_server_with(store_type, "tls_create_table", None, Some(config), None).await;
     let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let mut client_tls = ClientTlsOption {
@@ -1005,8 +1018,6 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         let config = GrpcServerConfig {
             max_recv_message_size: 1024,
             max_send_message_size: 1024,
-            max_total_message_memory: 1024 * 1024 * 1024,
-            memory_exhausted_policy: OnExhaustedPolicy::default(),
             tls,
             max_connection_age: None,
         };
@@ -1021,19 +1032,26 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
 }
 
 pub async fn test_grpc_memory_limit(store_type: StorageType) {
-    // Create gRPC server with memory limit:
-    // 200 bytes configured, but MemoryManager uses 1KB granularity (PermitGranularity::Kilobyte),
-    // so actual limit is ceil(200 / 1024) * 1024 = 1024 bytes
     let config = GrpcServerConfig {
         max_recv_message_size: 1024 * 1024,
         max_send_message_size: 1024 * 1024,
-        max_total_message_memory: 200,
-        memory_exhausted_policy: OnExhaustedPolicy::Fail,
         tls: Default::default(),
         max_connection_age: None,
     };
-    let (_db, fe_grpc_server) =
-        setup_grpc_server_with(store_type, "test_grpc_memory_limit", None, Some(config)).await;
+
+    // Create memory limiter with 2KB limit and fail-fast policy.
+    // Note: MemoryManager uses 1KB granularity (PermitGranularity::Kilobyte),
+    // so 2KB = 2 permits. Small/medium requests should fit, large should fail.
+    let memory_limiter = ServerMemoryLimiter::new(2048, OnExhaustedPolicy::Fail);
+
+    let (_db, fe_grpc_server) = setup_grpc_server_with(
+        store_type,
+        "test_grpc_memory_limit",
+        None,
+        Some(config),
+        Some(memory_limiter),
+    )
+    .await;
     let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls([&addr]);
@@ -1172,12 +1190,17 @@ pub async fn test_grpc_memory_limit(store_type: StorageType) {
         "Medium request (~500 bytes) should succeed within aligned 1KB limit"
     );
 
-    // Test that large request exceeds limit
+    // Test that large request exceeds limit (> 1KB aligned limit)
+    // Create a very large string to ensure we definitely exceed 1KB
+    // Use 100 rows with very long strings (>50 chars each) = definitely >5KB total
     let large_rows: Vec<Row> = (0..100)
         .map(|i| Row {
             values: vec![
                 Value {
-                    value_data: Some(ValueData::StringValue(format!("host{}", i))),
+                    value_data: Some(ValueData::StringValue(format!(
+                        "this_is_a_very_long_hostname_string_designed_to_make_the_request_exceed_memory_limit_row_number_{}",
+                        i
+                    ))),
                 },
                 Value {
                     value_data: Some(ValueData::TimestampMillisecondValue(1000 + i)),
@@ -1211,11 +1234,14 @@ pub async fn test_grpc_memory_limit(store_type: StorageType) {
             inserts: vec![large_row_insert],
         })
         .await;
-    assert!(result.is_err());
+    assert!(
+        result.is_err(),
+        "Large request should exceed 1KB limit and fail"
+    );
     let err = result.unwrap_err();
     let err_msg = err.to_string();
     assert!(
-        err_msg.contains("Memory limit exceeded"),
+        err_msg.contains("Memory limit exceeded") || err_msg.contains("RESOURCE_EXHAUSTED"),
         "Expected memory limit error, got: {}",
         err_msg
     );

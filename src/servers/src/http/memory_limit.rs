@@ -17,20 +17,12 @@
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use common_memory_manager::{MemoryManager, OnExhaustedPolicy};
 use http::StatusCode;
 
-use crate::memory_metrics::HttpMemoryMetrics;
-
-/// State for memory limit middleware containing manager and policy
-#[derive(Clone)]
-pub struct HttpMemoryLimitState {
-    pub manager: MemoryManager<HttpMemoryMetrics>,
-    pub policy: OnExhaustedPolicy,
-}
+use crate::request_memory_limiter::ServerMemoryLimiter;
 
 pub async fn memory_limit_middleware(
-    State(limit_state): State<HttpMemoryLimitState>,
+    State(limiter): State<ServerMemoryLimiter>,
     req: Request,
     next: Next,
 ) -> Response {
@@ -41,11 +33,7 @@ pub async fn memory_limit_middleware(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
 
-    let _guard = match limit_state
-        .manager
-        .acquire_with_policy(content_length, limit_state.policy)
-        .await
-    {
+    let _guard = match limiter.acquire(content_length).await {
         Ok(guard) => guard,
         Err(e) => {
             return (

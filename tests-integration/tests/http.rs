@@ -32,6 +32,7 @@ use common_error::status_code::StatusCode as ErrorCode;
 use common_frontend::slow_query_event::{
     SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
 };
+use common_memory_manager::OnExhaustedPolicy;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use log_query::{Context, Limit, LogQuery, TimeFilter};
@@ -55,6 +56,7 @@ use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::test_helpers::{TestClient, TestResponse};
 use servers::prom_store::{self, mock_timeseries_new_label};
+use servers::request_memory_limiter::ServerMemoryLimiter;
 use table::table_name::TableName;
 use tests_integration::test_util::{
     StorageType, setup_test_http_app, setup_test_http_app_with_frontend,
@@ -1387,7 +1389,6 @@ init_regions_parallelism = 16
 addr = "127.0.0.1:4000"
 timeout = "0s"
 body_limit = "64MiB"
-memory_exhausted_policy = "wait"
 prom_validation_mode = "strict"
 cors_allowed_origins = []
 enable_cors = true
@@ -1397,7 +1398,6 @@ bind_addr = "127.0.0.1:4001"
 server_addr = "127.0.0.1:4001"
 max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
-memory_exhausted_policy = "wait"
 flight_compression = "arrow_ipc"
 runtime_size = 8
 
@@ -7119,25 +7119,26 @@ fn compress_vec_with_gzip(data: Vec<u8>) -> Vec<u8> {
 }
 
 pub async fn test_http_memory_limit(store_type: StorageType) {
-    use common_base::readable_size::ReadableSize;
     use tests_integration::test_util::setup_test_http_app_with_frontend_and_custom_options;
 
     common_telemetry::init_default_ut_logging();
 
-    // Create HTTP server with memory limit:
-    // 500 bytes configured, but MemoryManager uses 1KB granularity (PermitGranularity::Kilobyte),
-    // so actual limit is ceil(500 / 1024) * 1024 = 1024 bytes
     let http_opts = servers::http::HttpOptions {
         addr: format!("127.0.0.1:{}", common_test_util::ports::get_port()),
-        max_total_body_memory: ReadableSize(500),
         ..Default::default()
     };
+
+    // Create memory limiter with 2KB limit and fail-fast policy.
+    // Note: MemoryManager uses 1KB granularity (PermitGranularity::Kilobyte),
+    // so 2KB = 2 permits. Small/medium requests should fit, large should fail.
+    let memory_limiter = ServerMemoryLimiter::new(2048, OnExhaustedPolicy::Fail);
 
     let (app, mut guard) = setup_test_http_app_with_frontend_and_custom_options(
         store_type,
         "test_http_memory_limit",
         None,
         Some(http_opts),
+        Some(memory_limiter),
     )
     .await;
 
@@ -7183,10 +7184,17 @@ pub async fn test_http_memory_limit(store_type: StorageType) {
         "Medium request (~700 bytes) should succeed within aligned 1KB limit"
     );
 
-    // Test 2: Large write request should be rejected (exceeds effective aligned limit of 1024 bytes)
-    // Generate a large INSERT with many rows
-    let large_values: Vec<String> = (0..50)
-        .map(|i| format!("('host{}', {}.5, {})", i, i, i * 1000))
+    // Test 2: Large write request should be rejected (exceeds 2KB limit)
+    // Generate a large INSERT with many rows and long strings to definitely exceed 2KB
+    let large_values: Vec<String> = (0..100)
+        .map(|i| {
+            format!(
+                "('this_is_a_very_long_hostname_string_to_increase_body_size_row_{}', {}.5, {})",
+                i,
+                i,
+                i * 1000
+            )
+        })
         .collect();
     let large_insert = format!(
         "INSERT INTO test_mem_limit VALUES {}",

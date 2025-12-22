@@ -29,7 +29,6 @@ use axum::serve::ListenerExt;
 use axum::{Router, middleware, routing};
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
-use common_memory_manager::{MemoryManager, OnExhaustedPolicy, PermitGranularity};
 use common_recordbatch::RecordBatch;
 use common_telemetry::{debug, error, info};
 use common_time::Timestamp;
@@ -75,7 +74,6 @@ use crate::http::result::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::result::json_result::JsonResponse;
 use crate::http::result::null_result::NullResponse;
 use crate::interceptor::LogIngestInterceptorRef;
-use crate::memory_metrics::HttpMemoryMetrics;
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
@@ -85,6 +83,7 @@ use crate::query_handler::{
     OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef, PipelineHandlerRef,
     PromStoreProtocolHandlerRef,
 };
+use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::server::Server;
 
 pub mod authorize;
@@ -135,8 +134,7 @@ pub struct HttpServer {
     router: StdMutex<Router>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
-    memory_manager: MemoryManager<HttpMemoryMetrics>,
-    memory_exhausted_policy: OnExhaustedPolicy,
+    memory_limiter: ServerMemoryLimiter,
 
     // plugins
     plugins: Plugins,
@@ -158,14 +156,6 @@ pub struct HttpOptions {
     pub disable_dashboard: bool,
 
     pub body_limit: ReadableSize,
-
-    /// Maximum total memory for all concurrent HTTP request bodies. 0 disables the limit.
-    pub max_total_body_memory: ReadableSize,
-
-    /// Policy when memory quota is exhausted.
-    /// Supports: "wait", "wait(<duration>)", "fail"
-    /// Default: "wait" (10s timeout)
-    pub memory_exhausted_policy: OnExhaustedPolicy,
 
     /// Validation mode while decoding Prometheus remote write requests.
     pub prom_validation_mode: PromValidationMode,
@@ -211,8 +201,6 @@ impl Default for HttpOptions {
             timeout: Duration::from_secs(0),
             disable_dashboard: false,
             body_limit: DEFAULT_BODY_LIMIT,
-            max_total_body_memory: ReadableSize(0),
-            memory_exhausted_policy: OnExhaustedPolicy::default(),
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
             prom_validation_mode: PromValidationMode::Strict,
@@ -547,12 +535,12 @@ pub struct GreptimeOptionsConfigState {
     pub greptime_config_options: String,
 }
 
-#[derive(Default)]
 pub struct HttpServerBuilder {
     options: HttpOptions,
     plugins: Plugins,
     user_provider: Option<UserProviderRef>,
     router: Router,
+    memory_limiter: ServerMemoryLimiter,
 }
 
 impl HttpServerBuilder {
@@ -562,7 +550,14 @@ impl HttpServerBuilder {
             plugins: Plugins::default(),
             user_provider: None,
             router: Router::new(),
+            memory_limiter: ServerMemoryLimiter::default(),
         }
+    }
+
+    /// Set a global memory limiter for all server protocols.
+    pub fn with_memory_limiter(mut self, limiter: ServerMemoryLimiter) -> Self {
+        self.memory_limiter = limiter;
+        self
     }
 
     pub fn with_sql_handler(self, sql_handler: ServerSqlQueryHandlerRef) -> Self {
@@ -758,14 +753,6 @@ impl HttpServerBuilder {
     }
 
     pub fn build(self) -> HttpServer {
-        // Use Kilobyte granularity for HTTP requests
-        let memory_manager = MemoryManager::with_granularity(
-            self.options.max_total_body_memory.as_bytes(),
-            PermitGranularity::Kilobyte,
-            HttpMemoryMetrics,
-        );
-        let memory_exhausted_policy = self.options.memory_exhausted_policy;
-
         HttpServer {
             options: self.options,
             user_provider: self.user_provider,
@@ -773,8 +760,7 @@ impl HttpServerBuilder {
             plugins: self.plugins,
             router: StdMutex::new(self.router),
             bind_addr: None,
-            memory_manager,
-            memory_exhausted_policy,
+            memory_limiter: self.memory_limiter,
         }
     }
 }
@@ -901,10 +887,7 @@ impl HttpServer {
                     .option_layer(body_limit_layer)
                     // memory limit layer - must be before body is consumed
                     .layer(middleware::from_fn_with_state(
-                        memory_limit::HttpMemoryLimitState {
-                            manager: self.memory_manager.clone(),
-                            policy: self.memory_exhausted_policy,
-                        },
+                        self.memory_limiter.clone(),
                         memory_limit::memory_limit_middleware,
                     ))
                     // auth layer

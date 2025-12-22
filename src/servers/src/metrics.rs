@@ -299,37 +299,23 @@ lazy_static! {
         "servers handle bulk insert elapsed",
     ).unwrap();
 
-    // HTTP memory metrics
-    pub static ref HTTP_MEMORY_IN_USE: IntGauge = register_int_gauge!(
-        "greptime_servers_http_memory_in_use_bytes",
-        "bytes currently reserved for HTTP requests"
+    // Unified request memory metrics
+    /// Current memory in use by all concurrent requests (HTTP, gRPC, Flight).
+    pub static ref REQUEST_MEMORY_IN_USE: IntGauge = register_int_gauge!(
+        "greptime_servers_request_memory_in_use_bytes",
+        "bytes currently reserved for all concurrent request bodies and messages"
     ).unwrap();
 
-    pub static ref HTTP_MEMORY_LIMIT: IntGauge = register_int_gauge!(
-        "greptime_servers_http_memory_limit_bytes",
-        "maximum bytes allowed for HTTP requests"
+    /// Maximum configured memory for all concurrent requests.
+    pub static ref REQUEST_MEMORY_LIMIT: IntGauge = register_int_gauge!(
+        "greptime_servers_request_memory_limit_bytes",
+        "maximum bytes allowed for all concurrent request bodies and messages"
     ).unwrap();
 
-    pub static ref HTTP_MEMORY_REJECTED: IntCounterVec = register_int_counter_vec!(
-        "greptime_servers_http_memory_rejected_total",
-        "number of HTTP requests rejected due to memory limit",
-        &["reason"]
-    ).unwrap();
-
-    // gRPC memory metrics
-    pub static ref GRPC_MEMORY_IN_USE: IntGauge = register_int_gauge!(
-        "greptime_servers_grpc_memory_in_use_bytes",
-        "bytes currently reserved for gRPC requests"
-    ).unwrap();
-
-    pub static ref GRPC_MEMORY_LIMIT: IntGauge = register_int_gauge!(
-        "greptime_servers_grpc_memory_limit_bytes",
-        "maximum bytes allowed for gRPC requests"
-    ).unwrap();
-
-    pub static ref GRPC_MEMORY_REJECTED: IntCounterVec = register_int_counter_vec!(
-        "greptime_servers_grpc_memory_rejected_total",
-        "number of gRPC requests rejected due to memory limit",
+    /// Total number of rejected requests due to memory exhaustion.
+    pub static ref REQUEST_MEMORY_REJECTED: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_request_memory_rejected_total",
+        "number of requests rejected due to memory limit",
         &["reason"]
     ).unwrap();
 }
