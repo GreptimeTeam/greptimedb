@@ -1340,13 +1340,15 @@ mod test {
         }
     }
 
+    type InputRangeData = Vec<((i64, i64), Vec<Vec<i64>>)>; // (start, end) -> data batches
+
     /// Comprehensive test case structure that encapsulates all test parameters
     #[derive(Debug, Clone)]
     struct TestCase {
         #[allow(dead_code)]
         name: &'static str,
         unit: TimeUnit,
-        input_ranges: Vec<((i64, i64), Vec<Vec<i64>>)>, // (start, end) -> data batches
+        input_ranges: InputRangeData, // (start, end) -> data batches
         descending: bool,
         nulls_first: bool,
         limit: Option<usize>,
