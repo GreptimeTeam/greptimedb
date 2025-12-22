@@ -1282,33 +1282,30 @@ mod test {
                         .unwrap(),
                     )
                 }
-            } else {
-                if chain_windowed_sort {
-                    // if chain_windowed_sort is true, we expect a single output batch sorted across all ranges
-                    let mut sorted = output_data.into_iter().flatten().collect_vec();
-                    if descending {
-                        sorted.sort_by(|a, b| b.cmp(a));
-                    } else {
-                        sorted.sort();
-                    }
-
-                    Some(
-                        DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, sorted)])
-                            .unwrap(),
-                    )
+            } else if chain_windowed_sort {
+                // if chain_windowed_sort is true, we expect a single output batch sorted across all ranges
+                let mut sorted = output_data.into_iter().flatten().collect_vec();
+                if descending {
+                    sorted.sort_by(|a, b| b.cmp(a));
                 } else {
-                    let batches = output_data
-                        .into_iter()
-                        .map(|a| {
-                            DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, a)])
-                                .unwrap()
-                        })
-                        .collect_vec();
-                    if batches.is_empty() {
-                        None
-                    } else {
-                        Some(concat_batches(&schema, &batches).unwrap())
-                    }
+                    sorted.sort();
+                }
+
+                Some(
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, sorted)])
+                        .unwrap(),
+                )
+            } else {
+                let batches = output_data
+                    .into_iter()
+                    .map(|a| {
+                        DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, a)]).unwrap()
+                    })
+                    .collect_vec();
+                if batches.is_empty() {
+                    None
+                } else {
+                    Some(concat_batches(&schema, &batches).unwrap())
                 }
             };
 
