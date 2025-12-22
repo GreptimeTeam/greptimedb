@@ -1066,7 +1066,7 @@ impl HttpServer {
     /// Route Prometheus [HTTP API].
     ///
     /// [HTTP API]: https://prometheus.io/docs/prometheus/latest/querying/api/
-    fn route_prometheus<S>(prometheus_handler: PrometheusHandlerRef) -> Router<S> {
+    pub fn route_prometheus<S>(prometheus_handler: PrometheusHandlerRef) -> Router<S> {
         Router::new()
             .route(
                 "/format_query",
