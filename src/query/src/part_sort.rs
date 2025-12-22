@@ -50,7 +50,7 @@ use snafu::location;
 use store_api::region_engine::PartitionRange;
 
 use crate::error::Result;
-use crate::window_sort::{WindowedSortExec, check_partition_range_monotonicity};
+use crate::window_sort::check_partition_range_monotonicity;
 use crate::{array_iter_helper, downcast_ts_array};
 
 /// Get the primary end of a `PartitionRange` based on sort direction.
@@ -1079,6 +1079,7 @@ mod test {
         TimestampSecondArray,
     };
     use arrow_schema::{DataType, Field, Schema, SortOptions, TimeUnit};
+    use common_telemetry::{info, init_default_ut_logging};
     use common_time::Timestamp;
     use datafusion_physical_expr::expressions::Column;
     use futures::StreamExt;
@@ -1086,6 +1087,7 @@ mod test {
 
     use super::*;
     use crate::test_util::{MockInputExec, new_ts_array};
+    use crate::window_sort::WindowedSortExec;
 
     macro_rules! extract_ts_values_helper {
         ($t:ty, $unit:expr, $array:expr) => {
@@ -1111,6 +1113,7 @@ mod test {
     /// TODO(discord9): move this to fuzz test folder
     #[tokio::test]
     async fn fuzzy_test_driver() {
+        init_default_ut_logging();
         let mut rng = fastrand::Rng::new();
 
         for _ in 0..1000 {
@@ -1322,7 +1325,7 @@ mod test {
 
         for (case_id, _unit, input_ranged_data, schema, opt, limit, expected_output) in test_cases {
             // Wrap test execution to catch panics and print seed only on failure
-            println!(
+            info!(
                 "Fuzzy test with seed {}, chain_ws={}",
                 seed, chain_windowed_sort
             );
@@ -1501,6 +1504,7 @@ mod test {
     }
 
     #[allow(clippy::print_stdout)]
+    #[allow(clippy::too_many_arguments)]
     async fn run_test(
         case_id: usize,
         input_ranged_data: Vec<(PartitionRange, Vec<DfRecordBatch>)>,
