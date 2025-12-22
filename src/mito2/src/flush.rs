@@ -801,7 +801,8 @@ fn memtable_flat_sources(
             if last_iter_rows > min_flush_rows {
                 let maybe_dedup = merge_and_dedup(
                     &schema,
-                    options,
+                    options.append_mode,
+                    options.merge_mode(),
                     field_column_start,
                     std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges)),
                 )?;
@@ -813,7 +814,13 @@ fn memtable_flat_sources(
 
         // Handle remaining iters.
         if !input_iters.is_empty() {
-            let maybe_dedup = merge_and_dedup(&schema, options, field_column_start, input_iters)?;
+            let maybe_dedup = merge_and_dedup(
+                &schema,
+                options.append_mode,
+                options.merge_mode(),
+                field_column_start,
+                input_iters,
+            )?;
 
             flat_sources.sources.push(FlatSource::Iter(maybe_dedup));
         }
@@ -822,19 +829,20 @@ fn memtable_flat_sources(
     Ok(flat_sources)
 }
 
-fn merge_and_dedup(
+pub fn merge_and_dedup(
     schema: &SchemaRef,
-    options: &RegionOptions,
+    append_mode: bool,
+    merge_mode: MergeMode,
     field_column_start: usize,
     input_iters: Vec<BoxedRecordBatchIterator>,
 ) -> Result<BoxedRecordBatchIterator> {
     let merge_iter = FlatMergeIterator::new(schema.clone(), input_iters, DEFAULT_READ_BATCH_SIZE)?;
-    let maybe_dedup = if options.append_mode {
+    let maybe_dedup = if append_mode {
         // No dedup in append mode
         Box::new(merge_iter) as _
     } else {
         // Dedup according to merge mode.
-        match options.merge_mode() {
+        match merge_mode {
             MergeMode::LastRow => {
                 Box::new(FlatDedupIterator::new(merge_iter, FlatLastRow::new(false))) as _
             }
