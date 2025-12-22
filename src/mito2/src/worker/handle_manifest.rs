@@ -214,7 +214,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 impl<S> RegionWorkerLoop<S> {
     /// Handles region edit request.
-    pub(crate) async fn handle_region_edit(&mut self, request: RegionEditRequest) {
+    pub(crate) fn handle_region_edit(&mut self, request: RegionEditRequest) {
         let region_id = request.region_id;
         let Some(region) = self.regions.get_region(region_id) else {
             let _ = request.tx.send(RegionNotFoundSnafu { region_id }.fail());
@@ -246,8 +246,14 @@ impl<S> RegionWorkerLoop<S> {
             file.sequence = NonZeroU64::new(file_sequence);
         }
 
+        // Allow retrieving `is_staging` before spawn the edit region task.
+        let is_staging = region.is_staging();
         // Marks the region as editing.
-        if let Err(e) = region.set_editing() {
+        if let Err(e) = region.set_editing(if is_staging {
+            RegionLeaderState::Staging
+        } else {
+            RegionLeaderState::Writable
+        }) {
             let _ = sender.send(Err(e));
             return;
         }
@@ -258,7 +264,8 @@ impl<S> RegionWorkerLoop<S> {
         // Now the region is in editing state.
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
-            let result = edit_region(&region, edit.clone(), cache_manager, listener).await;
+            let result =
+                edit_region(&region, edit.clone(), cache_manager, listener, is_staging).await;
             let notify = WorkerRequest::Background {
                 region_id,
                 notify: BackgroundNotify::RegionEdit(RegionEditResult {
@@ -268,6 +275,7 @@ impl<S> RegionWorkerLoop<S> {
                     result,
                     // we always need to restore region state after region edit
                     update_region_state: true,
+                    is_staging,
                 }),
             };
 
@@ -299,10 +307,11 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
 
-        let need_compaction =
-            edit_result.result.is_ok() && !edit_result.edit.files_to_add.is_empty();
+        let need_compaction = edit_result.result.is_ok()
+            && !edit_result.edit.files_to_add.is_empty()
+            && !edit_result.is_staging;
 
-        if edit_result.result.is_ok() {
+        if edit_result.result.is_ok() && !edit_result.is_staging {
             // Applies the edit to the region.
             region.version_control.apply_edit(
                 Some(edit_result.edit),
@@ -312,8 +321,11 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         if edit_result.update_region_state {
-            // Sets the region as writable.
-            region.switch_state_to_writable(RegionLeaderState::Editing);
+            if edit_result.is_staging {
+                region.switch_state_to_staging(RegionLeaderState::Editing);
+            } else {
+                region.switch_state_to_writable(RegionLeaderState::Editing);
+            }
         }
 
         let _ = edit_result.sender.send(edit_result.result);
@@ -321,7 +333,7 @@ impl<S> RegionWorkerLoop<S> {
         if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id)
             && let Some(request) = edit_queue.dequeue()
         {
-            self.handle_region_edit(request).await;
+            self.handle_region_edit(request);
         }
 
         if need_compaction {
@@ -463,9 +475,9 @@ async fn edit_region(
     edit: RegionEdit,
     cache_manager: CacheManagerRef,
     listener: WorkerListener,
+    is_staging: bool,
 ) -> Result<()> {
     let region_id = region.region_id;
-    let is_staging = region.is_staging();
     if let Some(write_cache) = cache_manager.write_cache() {
         for file_meta in &edit.files_to_add {
             let write_cache = write_cache.clone();
@@ -530,7 +542,10 @@ async fn edit_region(
         }
     }
 
-    info!("Applying {edit:?} to region {}", region_id);
+    info!(
+        "Applying {edit:?} to region {}, is_staging: {}",
+        region_id, is_staging
+    );
 
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
     region

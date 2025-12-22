@@ -45,7 +45,7 @@ pub use utils::*;
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
     FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
-    RegionTruncatedSnafu, Result, UpdateManifestSnafu,
+    RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
 };
 use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
@@ -100,6 +100,16 @@ pub enum RegionLeaderState {
 pub enum RegionRoleState {
     Leader(RegionLeaderState),
     Follower,
+}
+
+impl RegionRoleState {
+    /// Converts the region role state to leader state if it is a leader state.
+    pub fn into_leader_state(self) -> Option<RegionLeaderState> {
+        match self {
+            RegionRoleState::Leader(leader_state) => Some(leader_state),
+            RegionRoleState::Follower => None,
+        }
+    }
 }
 
 /// Metadata and runtime status of a region.
@@ -322,11 +332,8 @@ impl MitoRegion {
 
     /// Sets the editing state.
     /// You should call this method in the worker loop.
-    pub(crate) fn set_editing(&self) -> Result<()> {
-        self.compare_exchange_state(
-            RegionLeaderState::Writable,
-            RegionRoleState::Leader(RegionLeaderState::Editing),
-        )
+    pub(crate) fn set_editing(&self, expect: RegionLeaderState) -> Result<()> {
+        self.compare_exchange_state(expect, RegionRoleState::Leader(RegionLeaderState::Editing))
     }
 
     /// Sets the staging state.
@@ -359,6 +366,7 @@ impl MitoRegion {
     /// You should call this method in the worker loop.
     /// Transitions from Staging to Writable state.
     pub fn exit_staging(&self) -> Result<()> {
+        *self.staging_partition_expr.lock().unwrap() = None;
         self.compare_exchange_state(
             RegionLeaderState::Staging,
             RegionRoleState::Leader(RegionLeaderState::Writable),
@@ -705,6 +713,20 @@ impl MitoRegion {
                 return Ok(());
             }
         };
+        let expect_change = merged_actions.actions.iter().any(|a| a.is_change());
+        let expect_edit = merged_actions.actions.iter().any(|a| a.is_edit());
+        ensure!(
+            expect_change,
+            UnexpectedSnafu {
+                reason: "expect a change action in merged actions"
+            }
+        );
+        ensure!(
+            expect_edit,
+            UnexpectedSnafu {
+                reason: "expect an edit action in merged actions"
+            }
+        );
 
         // Submit merged actions using the manifest manager's update method
         // Pass the `false` so it saves to normal directory, not staging
@@ -716,12 +738,17 @@ impl MitoRegion {
         );
 
         // Apply the merged changes to in-memory version control
-        let merged_edit = merged_actions.into_region_edit();
+        let (merged_change, merged_edit) = merged_actions.into_region_edit();
+        // Safety: we have already ensured that there is a change action in the merged actions.
+        let new_metadata = merged_change.as_ref().unwrap().metadata.clone();
+        self.version_control.alter_schema(new_metadata);
         self.version_control
             .apply_edit(Some(merged_edit), &[], self.file_purger.clone());
 
         // Clear all staging manifests and transit state
-        manager.store().clear_staging_manifests().await?;
+        if let Err(e) = manager.clear_staging_manifest_and_dir().await {
+            error!(e; "Failed to clear staging manifest dir for region {}", self.region_id);
+        }
         self.exit_staging()?;
 
         Ok(())

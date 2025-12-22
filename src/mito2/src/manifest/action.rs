@@ -45,6 +45,18 @@ pub enum RegionMetaAction {
     Truncate(RegionTruncate),
 }
 
+impl RegionMetaAction {
+    /// Returns true if the action is a change action.
+    pub fn is_change(&self) -> bool {
+        matches!(self, RegionMetaAction::Change(_))
+    }
+
+    /// Returns true if the action is an edit action.
+    pub fn is_edit(&self) -> bool {
+        matches!(self, RegionMetaAction::Edit(_))
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionChange {
     /// The metadata after changed.
@@ -438,7 +450,7 @@ impl RegionMetaActionList {
         Self { actions }
     }
 
-    pub fn into_region_edit(self) -> RegionEdit {
+    pub fn into_region_edit(self) -> (Option<RegionChange>, RegionEdit) {
         let mut edit = RegionEdit {
             files_to_add: Vec::new(),
             files_to_remove: Vec::new(),
@@ -448,31 +460,39 @@ impl RegionMetaActionList {
             flushed_sequence: None,
             committed_sequence: None,
         };
-
+        let mut region_change = None;
         for action in self.actions {
-            if let RegionMetaAction::Edit(region_edit) = action {
-                // Merge file adds/removes
-                edit.files_to_add.extend(region_edit.files_to_add);
-                edit.files_to_remove.extend(region_edit.files_to_remove);
-                // Max of flushed entry id / sequence
-                if let Some(eid) = region_edit.flushed_entry_id {
-                    edit.flushed_entry_id = Some(edit.flushed_entry_id.map_or(eid, |v| v.max(eid)));
+            match action {
+                RegionMetaAction::Change(change) => {
+                    region_change = Some(change);
                 }
-                if let Some(seq) = region_edit.flushed_sequence {
-                    edit.flushed_sequence = Some(edit.flushed_sequence.map_or(seq, |v| v.max(seq)));
+                RegionMetaAction::Edit(region_edit) => {
+                    // Merge file adds/removes
+                    edit.files_to_add.extend(region_edit.files_to_add);
+                    edit.files_to_remove.extend(region_edit.files_to_remove);
+                    // Max of flushed entry id / sequence
+                    if let Some(eid) = region_edit.flushed_entry_id {
+                        edit.flushed_entry_id =
+                            Some(edit.flushed_entry_id.map_or(eid, |v| v.max(eid)));
+                    }
+                    if let Some(seq) = region_edit.flushed_sequence {
+                        edit.flushed_sequence =
+                            Some(edit.flushed_sequence.map_or(seq, |v| v.max(seq)));
+                    }
+                    if let Some(seq) = region_edit.committed_sequence {
+                        edit.committed_sequence =
+                            Some(edit.committed_sequence.map_or(seq, |v| v.max(seq)));
+                    }
+                    // Prefer the latest non-none time window
+                    if region_edit.compaction_time_window.is_some() {
+                        edit.compaction_time_window = region_edit.compaction_time_window;
+                    }
                 }
-                if let Some(seq) = region_edit.committed_sequence {
-                    edit.committed_sequence =
-                        Some(edit.committed_sequence.map_or(seq, |v| v.max(seq)));
-                }
-                // Prefer the latest non-none time window
-                if region_edit.compaction_time_window.is_some() {
-                    edit.compaction_time_window = region_edit.compaction_time_window;
-                }
+                _ => {}
             }
         }
 
-        edit
+        (region_change, edit)
     }
 }
 

@@ -162,6 +162,7 @@ impl CompactionTaskImpl {
                 edit,
                 result: Ok(()),
                 update_region_state: false,
+                is_staging: false,
             }),
         })
         .await;
