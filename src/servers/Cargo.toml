@@ -87,7 +87,7 @@ operator.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
 pg_interval = "0.4"
-pgwire = { version = "0.36.3", default-features = false, features = [
+pgwire = { version = "0.37", default-features = false, features = [
     "server-api-ring",
     "pg-ext-types",
 ] }

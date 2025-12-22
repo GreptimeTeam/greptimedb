@@ -28,13 +28,13 @@ fn build_string_data_rows(
     schema: Arc<Vec<FieldInfo>>,
     rows: Vec<Vec<String>>,
 ) -> Vec<PgWireResult<DataRow>> {
+    let mut encoder = DataRowEncoder::new(schema.clone());
     rows.iter()
         .map(|row| {
-            let mut encoder = DataRowEncoder::new(schema.clone());
             for value in row {
                 encoder.encode_field(&Some(value))?;
             }
-            encoder.finish()
+            Ok(encoder.take_row())
         })
         .collect()
 }

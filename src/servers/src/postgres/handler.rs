@@ -262,6 +262,26 @@ impl QueryParser for DefaultQueryParser {
             })
         }
     }
+
+    fn get_parameter_types(&self, _stmt: &Self::Statement) -> PgWireResult<Vec<Type>> {
+        // we have our own implementation of describes in ExtendedQueryHandler
+        // so we don't use these methods
+        Err(PgWireError::ApiError(
+            "get_parameter_types is not expected to be called".into(),
+        ))
+    }
+
+    fn get_result_schema(
+        &self,
+        _stmt: &Self::Statement,
+        _column_format: Option<&Format>,
+    ) -> PgWireResult<Vec<FieldInfo>> {
+        // we have our own implementation of describes in ExtendedQueryHandler
+        // so we don't use these methods
+        Err(PgWireError::ApiError(
+            "get_result_schema is not expected to be called".into(),
+        ))
+    }
 }
 
 #[async_trait]
