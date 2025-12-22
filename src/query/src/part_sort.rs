@@ -1113,7 +1113,7 @@ mod test {
     async fn fuzzy_test_driver() {
         let mut rng = fastrand::Rng::new();
 
-        loop {
+        for _ in 0..1000 {
             let seed = rng.u64(..);
             fuzzy_test(seed, true).await;
             fuzzy_test(seed, false).await;
