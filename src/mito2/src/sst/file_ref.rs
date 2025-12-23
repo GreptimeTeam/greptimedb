@@ -142,11 +142,7 @@ impl FileReferenceManager {
             let file_ref = FileRef::new(
                 file_meta.region_id,
                 file_meta.file_id,
-                if file_meta.exists_index() {
-                    Some(file_meta.index_version)
-                } else {
-                    None
-                },
+                file_meta.index_version(),
             );
             self.files_per_region
                 .entry(region_id)
