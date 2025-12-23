@@ -102,6 +102,30 @@ like `feat`/`fix`/`docs`, with a concise summary of code change following. AVOID
 
 All commit messages SHOULD adhere to the [Conventional Commits specification](https://conventionalcommits.org/).
 
+## AI-Assisted contributions
+
+We has the following policy for AI-assisted PRs:
+
+- The PR author should **understand the core ideas** behind the implementation **end-to-end**, and be able to justify the design and code during review.
+- **Calls out unknowns and assumptions**. It's okay to not fully understand some bits of AI generated code. You should comment on these cases and point them out to reviewers so that they can use their knowledge of the codebase to clear up any concerns. For example, you might comment "calling this function here seems to work but I'm not familiar with how it works internally, I wonder if there's a race condition if it is called concurrently".
+
+### Why fully AI-generated PRs without understanding are not helpful
+
+Today, AI tools cannot reliably make complex changes to DataFusion on their own, which is why we rely on pull requests and code review.
+
+The purposes of code review are:
+
+1. Finish the intended task.
+2. Share knowledge between authors and reviewers, as a long-term investment in the project. For this reason, even if someone familiar with the codebase can finish a task quickly, we're still happy to help a new contributor work on it even if it takes longer.
+
+An AI dump for an issue doesn’t meet these purposes. Maintainers could finish the task faster by using AI directly, and the submitters gain little knowledge if they act only as a pass through AI proxy without understanding.
+
+Please understand the reviewing capacity is **very limited** for the project, so large PRs which appear to not have the requisite understanding might not get reviewed, and eventually closed or redirected.
+
+### Better ways to contribute than an “AI dump”
+
+It's recommended to write a high-quality issue with a clear problem statement and a minimal, reproducible example. This can make it easier for others to contribute.
+
 ## Getting Help
 
 There are many ways to get help when you're stuck. It is recommended to ask for help by opening an issue, with a detailed description
