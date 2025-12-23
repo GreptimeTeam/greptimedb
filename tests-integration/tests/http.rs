@@ -1468,6 +1468,7 @@ prefill_log_files = false
 file_size = "64MiB"
 purge_threshold = "256MiB"
 purge_interval = "1m"
+ignore_metadata_snapshot_restore_error = false
 
 [procedure]
 max_retry_times = 3
