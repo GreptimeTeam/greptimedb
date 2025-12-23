@@ -157,6 +157,7 @@ use crate::DatanodeId;
 use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::key::flow::flow_state::FlowStateValue;
 use crate::key::node_address::NodeAddressValue;
+use crate::key::table_repart::TableRepartKey;
 use crate::key::table_route::TableRouteKey;
 use crate::key::topic_region::TopicRegionValue;
 use crate::key::txn_helper::TxnOpGetResponseSet;
@@ -930,6 +931,7 @@ impl TableMetadataManager {
         );
         let table_info_key = TableInfoKey::new(table_id);
         let table_route_key = TableRouteKey::new(table_id);
+        let table_repart_key = TableRepartKey::new(table_id);
         let datanode_table_keys = datanode_ids
             .into_iter()
             .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
@@ -944,6 +946,7 @@ impl TableMetadataManager {
         keys.push(table_name.to_bytes());
         keys.push(table_info_key.to_bytes());
         keys.push(table_route_key.to_bytes());
+        keys.push(table_repart_key.to_bytes());
         for key in &datanode_table_keys {
             keys.push(key.to_bytes());
         }
