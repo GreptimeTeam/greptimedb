@@ -347,6 +347,9 @@ struct PartSortStream {
     range_groups: Vec<(Timestamp, usize, usize)>,
     /// Current group being processed (index into range_groups).
     cur_group_idx: usize,
+    /// Dynamic Filter for all TopK instance, notice the `PartSortExec`/`PartSortStream`/`TopK` must share the same filter
+    /// so that updates from each `TopK` can be seen by others(and by the table scan operator).
+    filter: Option<Arc<RwLock<TopKDynamicFilters>>>,
 }
 
 impl PartSortStream {
@@ -360,7 +363,7 @@ impl PartSortStream {
         filter: Option<Arc<RwLock<TopKDynamicFilters>>>,
     ) -> datafusion_common::Result<Self> {
         let buffer = if let Some(limit) = limit {
-            let Some(filter) = filter else {
+            let Some(filter) = filter.clone() else {
                 return internal_err!(
                     "TopKDynamicFilters must be provided when limit is set at {}",
                     snafu::location!()
@@ -377,7 +380,7 @@ impl PartSortStream {
                     context.session_config().batch_size(),
                     context.runtime_env(),
                     &sort.metrics,
-                    filter,
+                    filter.clone(),
                 )?,
                 0,
             )
@@ -407,6 +410,7 @@ impl PartSortStream {
             root_metrics: sort.metrics.clone(),
             range_groups,
             cur_group_idx: 0,
+            filter,
         })
     }
 }
@@ -749,9 +753,12 @@ impl PartSortStream {
 
     /// Internal method for sorting `Top` buffer (with limit).
     fn sort_top_buffer(&mut self) -> datafusion_common::Result<DfRecordBatch> {
-        let filter = Arc::new(RwLock::new(TopKDynamicFilters::new(Arc::new(
-            DynamicFilterPhysicalExpr::new(vec![], lit(true)),
-        ))));
+        let Some(filter) = self.filter.clone() else {
+            return internal_err!(
+                "TopKDynamicFilters must be provided when sorting with limit at {}",
+                snafu::location!()
+            );
+        };
         let new_top_buffer = TopK::try_new(
             self.partition,
             self.schema().clone(),
