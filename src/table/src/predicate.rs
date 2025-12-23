@@ -25,6 +25,7 @@ use datafusion_common::pruning::PruningStatistics;
 use datafusion_expr::expr::{Expr, InList};
 use datafusion_expr::{Between, BinaryExpr, Operator};
 use datafusion_physical_expr::execution_props::ExecutionProps;
+use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
 use datafusion_physical_expr::{PhysicalExpr, create_physical_expr};
 use datatypes::arrow;
 use datatypes::value::scalar_value_to_timestamp;
@@ -51,11 +52,15 @@ macro_rules! return_none_if_utf8 {
     };
 }
 
-/// Reference-counted pointer to a list of logical exprs.
+/// Reference-counted pointer to a list of logical exprs and a list of dynamic filter physical exprs.
 #[derive(Debug, Clone)]
 pub struct Predicate {
     /// logical exprs
     exprs: Arc<Vec<Expr>>,
+    /// dynamic filter physical exprs, only useful if dynamic filtering is enabled
+    ///
+    /// They are usually from `TopK` or `Join` operators, and can dynamically filter data during query execution by using current runtime information to further reduce data scanning
+    dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>,
 }
 
 impl Predicate {
@@ -65,12 +70,37 @@ impl Predicate {
     pub fn new(exprs: Vec<Expr>) -> Self {
         Self {
             exprs: Arc::new(exprs),
+            dyn_filters: Arc::new(vec![]),
+        }
+    }
+
+    /// Sets the dynamic filter physical exprs.
+    pub fn with_dyn_filters(self, dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>) -> Self {
+        Self {
+            exprs: self.exprs,
+            dyn_filters,
         }
     }
 
     /// Returns the logical exprs.
     pub fn exprs(&self) -> &[Expr] {
         &self.exprs
+    }
+
+    /// Returns the dynamic filter physical exprs. Notice this return a live dynamic filters which
+    /// can change during query execution.
+    pub fn dyn_filters(&self) -> &Arc<Vec<DynamicFilterPhysicalExpr>> {
+        &self.dyn_filters
+    }
+
+    /// Returns the dynamic filter as physical exprs. Notice this return a "snapshot" of
+    /// dynamic filters at the time of calling this method.
+    pub fn dyn_filter_phy_exprs(&self) -> error::Result<Vec<Arc<dyn PhysicalExpr>>> {
+        self.dyn_filters
+            .iter()
+            .map(|e| e.current())
+            .collect::<Result<Vec<_>, _>>()
+            .context(error::DatafusionSnafu)
     }
 
     /// Builds physical exprs according to provided schema.
@@ -88,10 +118,13 @@ impl Predicate {
         // registering variables.
         let execution_props = &ExecutionProps::new();
 
+        let dyn_filters = self.dyn_filter_phy_exprs()?;
+
         Ok(self
             .exprs
             .iter()
             .filter_map(|expr| create_physical_expr(expr, df_schema.as_ref(), execution_props).ok())
+            .chain(dyn_filters)
             .collect::<Vec<_>>())
     }
 
