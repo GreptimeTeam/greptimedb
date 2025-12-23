@@ -559,6 +559,15 @@ impl PartSortStream {
         }
         // else check if last value in topk is not in next group range
         let topk_buffer = self.sort_top_buffer()?;
+
+        // Guard against empty buffer - this can happen if TopK's internal filtering
+        // removed all rows, or if the buffer was cleared. In this case, we cannot
+        // determine if we can stop early, so continue processing.
+        // Fixes: https://github.com/orgs/GreptimeTeam/discussions/7457
+        if topk_buffer.num_rows() == 0 {
+            return Ok(false);
+        }
+
         let min_batch = topk_buffer.slice(topk_buffer.num_rows() - 1, 1);
         let min_sort_column = self.expression.evaluate_to_sort_column(&min_batch)?.values;
         let last_val = downcast_ts_array!(
