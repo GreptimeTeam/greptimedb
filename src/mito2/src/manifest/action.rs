@@ -450,7 +450,8 @@ impl RegionMetaActionList {
         Self { actions }
     }
 
-    pub fn into_region_edit(self) -> (Option<RegionChange>, RegionEdit) {
+    /// Split the actions into a region change and an edit.
+    pub fn split_region_change_and_edit(self) -> (Option<RegionChange>, RegionEdit) {
         let mut edit = RegionEdit {
             files_to_add: Vec::new(),
             files_to_remove: Vec::new(),

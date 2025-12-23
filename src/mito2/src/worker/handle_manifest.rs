@@ -248,12 +248,13 @@ impl<S> RegionWorkerLoop<S> {
 
         // Allow retrieving `is_staging` before spawn the edit region task.
         let is_staging = region.is_staging();
-        // Marks the region as editing.
-        if let Err(e) = region.set_editing(if is_staging {
+        let expect_state = if is_staging {
             RegionLeaderState::Staging
         } else {
             RegionLeaderState::Writable
-        }) {
+        };
+        // Marks the region as editing.
+        if let Err(e) = region.set_editing(expect_state) {
             let _ = sender.send(Err(e));
             return;
         }

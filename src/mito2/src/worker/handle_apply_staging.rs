@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use chrono::Utc;
-use common_telemetry::{debug, info, warn};
+use common_telemetry::{debug, info};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::region_request::ApplyStagingManifestRequest;
@@ -54,7 +54,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             if is_match {
                 // If current partition expr is already the same as the request,
                 // treats the region already applied the staging manifest.
-                warn!(
+                info!(
                     "Region {} already applied the staging manifest, partition expr: {}, ignore the apply staging manifest request",
                     region_id, request.partition_expr
                 );

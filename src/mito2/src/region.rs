@@ -378,7 +378,8 @@ impl MitoRegion {
         &self,
         state: SettableRegionRoleState,
     ) -> Result<()> {
-        let mut manager = self.manifest_ctx.manifest_manager.write().await;
+        let mut manager: RwLockWriteGuard<'_, RegionManifestManager> =
+            self.manifest_ctx.manifest_manager.write().await;
         let current_state = self.state();
 
         match state {
@@ -738,7 +739,7 @@ impl MitoRegion {
         );
 
         // Apply the merged changes to in-memory version control
-        let (merged_change, merged_edit) = merged_actions.into_region_edit();
+        let (merged_change, merged_edit) = merged_actions.split_region_change_and_edit();
         // Safety: we have already ensured that there is a change action in the merged actions.
         let new_metadata = merged_change.as_ref().unwrap().metadata.clone();
         self.version_control.alter_schema(new_metadata);
