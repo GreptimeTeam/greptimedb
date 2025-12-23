@@ -616,9 +616,9 @@ impl PartSortStream {
         let filter = array.as_boolean().clone();
         let overlap = filter.iter().next().flatten();
         if let Some(false) = overlap {
-            return Ok(true);
+            Ok(true)
         } else {
-            return Ok(false);
+            Ok(false)
         }
     }
 
