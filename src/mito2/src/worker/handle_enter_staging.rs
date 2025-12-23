@@ -23,7 +23,7 @@ use store_api::storage::RegionId;
 use crate::error::{RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionList};
-use crate::region::{MitoRegionRef, RegionLeaderState};
+use crate::region::{MitoRegionRef, RegionLeaderState, get_partition_expr_str};
 use crate::request::{
     BackgroundNotify, DdlRequest, EnterStagingResult, OptionOutputTx, SenderDdlRequest,
     WorkerRequest, WorkerRequestWithTime,
@@ -70,7 +70,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 FlushReason::EnterStaging,
                 None,
                 self.config.clone(),
-                region.is_staging(),
+                false,
+                get_partition_expr_str(&region, false),
             );
             if let Err(e) =
                 self.flush_scheduler

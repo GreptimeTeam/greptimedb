@@ -27,7 +27,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
-use snafu::{OptionExt, ensure};
+use partition::expr::PartitionExpr;
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
@@ -43,8 +44,8 @@ pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
-    FlushableRegionStateSnafu, RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result,
-    UpdateManifestSnafu,
+    FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
+    RegionTruncatedSnafu, Result, UpdateManifestSnafu,
 };
 use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
@@ -1268,6 +1269,39 @@ impl ManifestStats {
 
     fn file_removed_cnt(&self) -> u64 {
         self.file_removed_cnt.load(Ordering::Relaxed)
+    }
+}
+
+/// Parses the partition expression from a JSON string.
+pub fn parse_partition_expr(partition_expr_str: Option<&str>) -> Result<Option<PartitionExpr>> {
+    match partition_expr_str {
+        None => Ok(None),
+        Some("") => Ok(None),
+        Some(json_str) => {
+            let expr = partition::expr::PartitionExpr::from_json_str(json_str)
+                .with_context(|_| InvalidPartitionExprSnafu { expr: json_str })?;
+            Ok(expr)
+        }
+    }
+}
+
+/// Gets the partition expr for a region.
+///
+/// If the region is in staging mode, returns the partition expr from the staging partition expr.
+/// Otherwise, returns the partition expr from the version metadata.
+pub fn get_partition_expr_str(region: &MitoRegionRef, is_staging: bool) -> Option<String> {
+    if is_staging {
+        let staging_partition_expr = region.staging_partition_expr.lock().unwrap();
+        if staging_partition_expr.is_none() {
+            warn!(
+                "Staging partition expr is none for region {} in staging state",
+                region.region_id
+            );
+        }
+        staging_partition_expr.clone()
+    } else {
+        let version = region.version();
+        version.metadata.partition_expr.clone()
     }
 }
 
