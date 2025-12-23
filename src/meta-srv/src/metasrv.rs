@@ -233,6 +233,9 @@ pub struct MetasrvOptions {
     #[cfg(feature = "pg_kvbackend")]
     /// Optional PostgreSQL schema for metadata table (defaults to current search_path if empty).
     pub meta_schema_name: Option<String>,
+    #[cfg(feature = "pg_kvbackend")]
+    /// Automatically create PostgreSQL schema if it doesn't exist (default: true).
+    pub auto_create_schema: bool,
     #[serde(with = "humantime_serde")]
     pub node_max_idle_time: Duration,
     /// The event recorder options.
@@ -337,6 +340,8 @@ impl Default for MetasrvOptions {
             meta_election_lock_id: common_meta::kv_backend::DEFAULT_META_ELECTION_LOCK_ID,
             #[cfg(feature = "pg_kvbackend")]
             meta_schema_name: None,
+            #[cfg(feature = "pg_kvbackend")]
+            auto_create_schema: true,
             node_max_idle_time: Duration::from_secs(24 * 60 * 60),
             event_recorder: EventRecorderOptions::default(),
             stats_persistence: StatsPersistenceOptions::default(),
