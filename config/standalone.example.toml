@@ -310,6 +310,16 @@ file_size = "64MB"
 purge_threshold = "256MB"
 ## The interval of the metadata store to trigger a purge.
 purge_interval = "1m"
+## Optional path to a metadata snapshot file for restoration.
+## 
+## This path is interpreted as relative to the data home directory.
+## If not provided, no metadata will be restored from a snapshot.
+## If the metadata store is not empty, the metadata will not be restored from a snapshot.
+##
+## Leave unset or set to an empty string ("") to disable metadata snapshot restoration.
+#+ init_metadata_path = ""
+## Whether to ignore the error when restoring metadata from a snapshot.
+#+ ignore_metadata_snapshot_restore_error = false
 
 ## Procedure storage options.
 [procedure]

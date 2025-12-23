@@ -316,7 +316,7 @@ impl GreptimeDbStandaloneBuilder {
 
         let kv_backend = standalone::build_metadata_kvbackend(
             format!("{}/kv", &opts.storage.data_home),
-            kv_backend_config,
+            &kv_backend_config,
         )
         .unwrap();
         let procedure_manager =

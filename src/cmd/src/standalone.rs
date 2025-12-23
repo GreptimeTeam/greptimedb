@@ -370,8 +370,26 @@ impl StartCommand {
             .context(error::CreateDirSnafu { dir: data_home })?;
 
         let metadata_dir = metadata_store_dir(data_home);
-        let kv_backend = standalone::build_metadata_kvbackend(metadata_dir, opts.metadata_store)
+        let kv_backend = standalone::build_metadata_kvbackend(metadata_dir, &opts.metadata_store)
             .context(error::BuildMetadataKvbackendSnafu)?;
+        // Restore metadata from snapshot if the path is provided.
+        if let Some(init_metadata_path) = &opts.metadata_store.init_metadata_path
+            && !init_metadata_path.is_empty()
+        {
+            let object_store_manager =
+                DatanodeBuilder::build_object_store_manager(&dn_opts.storage)
+                    .await
+                    .context(error::BuildObjectStoreManagerSnafu)?;
+            standalone::restore_metadata_from_snapshot(
+                &kv_backend,
+                &object_store_manager,
+                init_metadata_path,
+                opts.metadata_store.ignore_metadata_snapshot_restore_error,
+            )
+            .await
+            .context(error::RestoreMetadataFromSnapshotSnafu)?;
+        }
+
         let procedure_manager =
             standalone::build_procedure_manager(kv_backend.clone(), opts.procedure);
 

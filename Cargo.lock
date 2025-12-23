@@ -12501,11 +12501,13 @@ dependencies = [
  "hostname 0.4.1",
  "log-store",
  "mito2",
+ "object-store",
  "query",
  "serde",
  "servers",
  "snafu 0.8.6",
  "store-api",
+ "tempfile",
  "tokio",
 ]
 

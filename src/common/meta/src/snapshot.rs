@@ -177,6 +177,8 @@ impl MetadataSnapshotManager {
     }
 
     /// Restores the metadata from the backup file to the metadata store.
+    ///
+    /// Returns the number of key-value pairs restored.
     pub async fn restore(&self, file_path: &str) -> Result<u64> {
         let path = Path::new(file_path);
 

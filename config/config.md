@@ -97,6 +97,8 @@
 | `metadata_store.file_size` | String | `64MB` | The size of the metadata store log file. |
 | `metadata_store.purge_threshold` | String | `256MB` | The threshold of the metadata store size to trigger a purge. |
 | `metadata_store.purge_interval` | String | `1m` | The interval of the metadata store to trigger a purge. |
+| `metadata_store.init_metadata_path` | String | `""` | Optional path to a metadata snapshot file for restoration.<br/><br/>This path is interpreted as relative to the data home directory.<br/>If not provided, no metadata will be restored from a snapshot.<br/>If the metadata store is not empty, the metadata will not be restored from a snapshot.<br/><br/>Leave unset or set to an empty string ("") to disable metadata snapshot restoration. |
+| `metadata_store.ignore_metadata_snapshot_restore_error` | Bool | `false` | Whether to ignore the error when restoring metadata from a snapshot. |
 | `procedure` | -- | -- | Procedure storage options. |
 | `procedure.max_retry_times` | Integer | `3` | Procedure max retry time. |
 | `procedure.retry_delay` | String | `500ms` | Initial retry delay of procedures, increases exponentially |

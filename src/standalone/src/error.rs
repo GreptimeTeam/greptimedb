@@ -36,6 +36,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to check target source clean"))]
+    CheckTargetSourceClean {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to restore metadata snapshot"))]
+    RestoreMetadataSnapshot {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -45,6 +59,8 @@ impl ErrorExt for Error {
         match self {
             Error::OpenMetadataKvBackend { source, .. } => source.status_code(),
             Error::External { source, .. } => source.status_code(),
+            Error::CheckTargetSourceClean { source, .. } => source.status_code(),
+            Error::RestoreMetadataSnapshot { source, .. } => source.status_code(),
         }
     }
 

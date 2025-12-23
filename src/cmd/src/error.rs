@@ -316,6 +316,20 @@ pub enum Error {
         location: Location,
         source: common_wal::error::Error,
     },
+
+    #[snafu(display("Failed to build object store manager"))]
+    BuildObjectStoreManager {
+        #[snafu(implicit)]
+        location: Location,
+        source: datanode::error::Error,
+    },
+
+    #[snafu(display("Failed to restore metadata from snapshot"))]
+    RestoreMetadataFromSnapshot {
+        #[snafu(implicit)]
+        location: Location,
+        source: standalone::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -335,6 +349,8 @@ impl ErrorExt for Error {
             Error::StartCli { source, .. } => source.status_code(),
             Error::BuildMetadataKvbackend { source, .. } => source.status_code(),
             Error::SetupStandalonePlugins { source, .. } => source.status_code(),
+            Error::BuildObjectStoreManager { source, .. } => source.status_code(),
+            Error::RestoreMetadataFromSnapshot { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
                 source.status_code()

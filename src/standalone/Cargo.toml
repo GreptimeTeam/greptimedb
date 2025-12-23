@@ -32,9 +32,13 @@ frontend.workspace = true
 hostname.workspace = true
 log-store.workspace = true
 mito2.workspace = true
+object-store.workspace = true
 query.workspace = true
 serde.workspace = true
 servers.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

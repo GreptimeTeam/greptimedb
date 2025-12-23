@@ -19,5 +19,5 @@ pub mod options;
 pub mod procedure;
 
 pub use information_extension::StandaloneInformationExtension;
-pub use metadata::build_metadata_kvbackend;
+pub use metadata::{build_metadata_kvbackend, restore_metadata_from_snapshot};
 pub use procedure::build_procedure_manager;
