@@ -1157,7 +1157,7 @@ mod test {
 
         // The TopK result buffer is empty, so we cannot determine early-stop.
         // Ensure this path returns `Ok(false)` (and, importantly, does not panic).
-        assert!(!stream.can_stop_early().unwrap());
+        assert!(!stream.can_stop_early(&schema).unwrap());
     }
 
     #[ignore = "hard to gen expected data correctly here, TODO(discord9): fix it later"]
