@@ -80,6 +80,7 @@ impl EnterStagingRegion {
                 ))
             })
             .collect::<Result<HashMap<_, _>>>()?;
+        // Safety: `leader_peer` is set for all region routes, checked in `repartition_start`.
         let target_region_routes_by_peer =
             group_region_routes_by_peer(&prepare_result.target_routes);
         let mut instructions = HashMap::with_capacity(target_region_routes_by_peer.len());
