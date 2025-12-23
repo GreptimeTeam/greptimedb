@@ -308,26 +308,30 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
 
-        let need_compaction = edit_result.result.is_ok()
-            && !edit_result.edit.files_to_add.is_empty()
-            && !edit_result.is_staging;
-
-        if edit_result.result.is_ok() && !edit_result.is_staging {
-            // Applies the edit to the region.
-            region.version_control.apply_edit(
-                Some(edit_result.edit),
-                &[],
-                region.file_purger.clone(),
-            );
-        }
-
-        if edit_result.update_region_state {
-            if edit_result.is_staging {
+        let need_compaction = if edit_result.is_staging {
+            if edit_result.update_region_state {
+                // For staging regions, edits are not applied immediately,
+                // as they remain invisible until the region exits the staging state.
                 region.switch_state_to_staging(RegionLeaderState::Editing);
-            } else {
+            }
+
+            false
+        } else {
+            // Only apply the edit if the result is ok and region is not in staging state.
+            if edit_result.result.is_ok() {
+                // Applies the edit to the region.
+                region.version_control.apply_edit(
+                    Some(edit_result.edit),
+                    &[],
+                    region.file_purger.clone(),
+                );
+            }
+            if edit_result.update_region_state {
                 region.switch_state_to_writable(RegionLeaderState::Editing);
             }
-        }
+
+            true
+        };
 
         let _ = edit_result.sender.send(edit_result.result);
 
