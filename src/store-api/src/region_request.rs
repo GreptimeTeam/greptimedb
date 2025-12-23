@@ -427,7 +427,7 @@ fn make_region_apply_staging_manifest(
     let region_id = region_id.into();
     let files_to_add = files_to_add
         .context(UnexpectedSnafu {
-            reason: "'files_to_add' is not empty",
+            reason: "'files_to_add' field is missing",
         })?
         .data;
     Ok(vec![(
@@ -1454,7 +1454,22 @@ pub struct EnterStagingRequest {
     pub partition_expr: String,
 }
 
-/// Request to apply a staging manifest to a region.
+/// This request is used as part of the region repartition.
+/// 
+/// After a region has entered staging mode with a new region rule (partition
+/// expression) and a separate process (for example, `remap_manifests`) has
+/// generated the new file assignments for the staging region, this request
+/// applies that generated manifest to the region.
+///
+/// In practice, this means:
+/// - The `partition_expr` identifies the staging region rule that the manifest
+///   was generated for.
+/// - `files_to_add` carries the serialized metadata (such as file manifests or
+///   file lists) that should be attached to the region under the new rule.
+///
+/// It should typically be called **after** the staging region has been
+/// initialized by [`EnterStagingRequest`] and the new file layout has been
+/// computed, to finalize the repartition operation.
 #[derive(Debug, Clone)]
 pub struct ApplyStagingManifestRequest {
     /// The partition expression of the staging region.

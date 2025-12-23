@@ -1216,7 +1216,8 @@ impl RegionServerInner {
             | RegionRequest::Compact(_)
             | RegionRequest::Truncate(_)
             | RegionRequest::BuildIndex(_)
-            | RegionRequest::EnterStaging(_) => RegionChange::None,
+            | RegionRequest::EnterStaging(_)
+            | RegionRequest::ApplyStagingManifest(_) => RegionChange::None,
             RegionRequest::Catchup(_) => RegionChange::Catchup,
         };
 
