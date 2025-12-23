@@ -1455,7 +1455,7 @@ pub struct EnterStagingRequest {
 }
 
 /// This request is used as part of the region repartition.
-/// 
+///
 /// After a region has entered staging mode with a new region rule (partition
 /// expression) and a separate process (for example, `remap_manifests`) has
 /// generated the new file assignments for the staging region, this request
