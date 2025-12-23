@@ -2895,4 +2895,84 @@ mod test {
         )
         .await;
     }
+
+    /// First group: [0,20), data: [0, 5, 15]
+    /// Second group: [10, 30), data: [21, 25, 29]
+    /// after first group, calling early stop manually, and check if filter is updated
+    #[tokio::test]
+    async fn test_early_stop_check_update_dyn_filter() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            false,
+        )]));
+
+        let mock_input = Arc::new(MockInputExec::new(vec![vec![]], schema.clone()));
+        let exec = PartSortExec::try_new(
+            PhysicalSortExpr {
+                expr: Arc::new(Column::new("ts", 0)),
+                options: SortOptions {
+                    descending: false,
+                    ..Default::default()
+                },
+            },
+            Some(3),
+            vec![vec![
+                PartitionRange {
+                    start: Timestamp::new(0, unit.into()),
+                    end: Timestamp::new(20, unit.into()),
+                    num_rows: 3,
+                    identifier: 1,
+                },
+                PartitionRange {
+                    start: Timestamp::new(10, unit.into()),
+                    end: Timestamp::new(30, unit.into()),
+                    num_rows: 3,
+                    identifier: 1,
+                },
+            ]],
+            mock_input.clone(),
+        )
+        .unwrap();
+
+        let filter = exec.filter.clone().unwrap();
+        let input_stream = mock_input
+            .execute(0, Arc::new(TaskContext::default()))
+            .unwrap();
+        let mut stream = PartSortStream::new(
+            Arc::new(TaskContext::default()),
+            &exec,
+            Some(3),
+            input_stream,
+            vec![],
+            0,
+            Some(filter.clone()),
+        )
+        .unwrap();
+
+        // initially, snapshot_generation is 1
+        assert_eq!(filter.read().expr().snapshot_generation(), 1);
+        let batch =
+            DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![0, 5, 15])])
+                .unwrap();
+        stream.push_buffer(batch).unwrap();
+
+        // after pushing first batch, snapshot_generation is updated to 2
+        assert_eq!(filter.read().expr().snapshot_generation(), 2);
+        assert!(!stream.can_stop_early().unwrap());
+        // still two as not updated
+        assert_eq!(filter.read().expr().snapshot_generation(), 2);
+
+        let _ = stream.sort_top_buffer().unwrap();
+
+        let batch =
+            DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![21, 25, 29])])
+                .unwrap();
+        stream.push_buffer(batch).unwrap();
+        let new = stream.sort_top_buffer().unwrap();
+
+        // dyn filter kick in, and filter out all rows >= 15(the filter is rows<15)
+        assert_eq!(new.num_rows(), 0)
+    }
 }
