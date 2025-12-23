@@ -224,8 +224,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to find table partition for table id {}", table_id))]
-    TablePartitionNotFound {
+    #[snafu(display("Failed to find table repartition metadata for table id {}", table_id))]
+    TableRepartNotFound {
         table_id: TableId,
         #[snafu(implicit)]
         location: Location,
@@ -1098,7 +1098,7 @@ impl ErrorExt for Error {
             | DecodeProto { .. }
             | BuildTableMeta { .. }
             | TableRouteNotFound { .. }
-            | TablePartitionNotFound { .. }
+            | TableRepartNotFound { .. }
             | ConvertRawTableInfo { .. }
             | RegionOperatingRace { .. }
             | EncodeWalOptions { .. }

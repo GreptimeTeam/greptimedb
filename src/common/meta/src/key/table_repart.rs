@@ -106,6 +106,9 @@ impl TableRepartValue {
     ///
     /// If `dst` is empty, this method does nothing.
     pub fn update_mappings(&mut self, src: RegionId, dst: &[RegionId]) {
+        if dst.is_empty() {
+            return;
+        }
         self.src_to_dst.entry(src).or_default().extend(dst);
     }
 
@@ -280,7 +283,7 @@ impl TableRepartManager {
         let current_table_repart = self
             .get_with_raw_bytes(table_id)
             .await?
-            .context(crate::error::TablePartitionNotFoundSnafu { table_id })?;
+            .context(crate::error::TableRepartNotFoundSnafu { table_id })?;
 
         // Clone the current repart value and update mappings
         let mut new_table_repart_value = current_table_repart.inner.clone();
@@ -314,7 +317,7 @@ impl TableRepartManager {
         let current_table_repart = self
             .get_with_raw_bytes(table_id)
             .await?
-            .context(crate::error::TablePartitionNotFoundSnafu { table_id })?;
+            .context(crate::error::TableRepartNotFoundSnafu { table_id })?;
 
         // Clone the current repart value and remove mappings
         let mut new_table_repart_value = current_table_repart.inner.clone();
