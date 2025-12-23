@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, LargeStringBuilder};
+use datafusion_common::arrow::datatypes as arrow_types;
 use datafusion_common::arrow::datatypes::DataType;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 
@@ -166,8 +167,6 @@ fn get_float_value(
     array: &datafusion_common::arrow::array::ArrayRef,
     index: usize,
 ) -> datafusion_common::Result<f64> {
-    use datafusion_common::arrow::datatypes as arrow_types;
-
     match array.data_type() {
         DataType::Float64 => Ok(array
             .as_primitive::<arrow_types::Float64Type>()
@@ -189,8 +188,6 @@ fn get_decimal_places(
     array: &datafusion_common::arrow::array::ArrayRef,
     index: usize,
 ) -> datafusion_common::Result<i64> {
-    use datafusion_common::arrow::datatypes as arrow_types;
-
     match array.data_type() {
         DataType::Int64 => Ok(array.as_primitive::<arrow_types::Int64Type>().value(index)),
         DataType::Int32 => Ok(array.as_primitive::<arrow_types::Int32Type>().value(index) as i64),
@@ -219,8 +216,6 @@ fn format_number_integer(
     index: usize,
     decimal_places: usize,
 ) -> datafusion_common::Result<String> {
-    use datafusion_common::arrow::datatypes as arrow_types;
-
     let (is_negative, abs_digits) = match array.data_type() {
         DataType::Int64 => {
             let v = array.as_primitive::<arrow_types::Int64Type>().value(index) as i128;

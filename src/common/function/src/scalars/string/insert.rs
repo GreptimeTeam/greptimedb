@@ -169,7 +169,7 @@ fn cast_to_int64(array: &ArrayRef, name: &str) -> datafusion_common::Result<Arra
 }
 
 /// Perform the INSERT string operation.
-/// pos is 1-based. If pos < 1 or pos > len(str), returns original string.
+/// pos is 1-based. If pos < 1 or pos > len(str) + 1, returns original string.
 fn insert_string(original: &str, pos: i64, replace_len: i64, new_str: &str) -> String {
     let char_count = original.chars().count();
 
