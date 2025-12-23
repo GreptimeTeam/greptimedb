@@ -49,6 +49,9 @@ use crate::region::{MitoRegionRef, RegionRoleState};
 use crate::sst::file::{RegionFileId, RegionIndexId, delete_files, delete_index};
 use crate::sst::location::{self};
 
+#[cfg(test)]
+mod worker_test;
+
 /// Helper function to determine if a file should be deleted based on common logic
 /// shared between Parquet and Puffin file types.
 fn should_delete_file(
@@ -80,9 +83,6 @@ fn should_delete_file(
             is_unknown_linger_time_exceeded()
         }
 }
-
-#[cfg(test)]
-mod worker_test;
 
 /// Limit the amount of concurrent GC jobs on the datanode
 pub struct GcLimiter {
