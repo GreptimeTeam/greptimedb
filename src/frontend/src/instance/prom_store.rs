@@ -175,18 +175,6 @@ impl PromStoreProtocolHandler for Instance {
             .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_write(&request, ctx.clone())?;
 
-        let _guard = if let Some(limiter) = &self.limiter {
-            Some(
-                limiter
-                    .limit_row_inserts(&request)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(error::OtherSnafu)?,
-            )
-        } else {
-            None
-        };
-
         let output = if with_metric_engine {
             let physical_table = ctx
                 .extension(PHYSICAL_TABLE_PARAM)

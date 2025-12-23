@@ -23,8 +23,7 @@ use datatypes::timestamp::TimestampNanosecond;
 use pipeline::pipeline_operator::PipelineOperator;
 use pipeline::{Pipeline, PipelineInfo, PipelineVersion};
 use servers::error::{
-    AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, OtherSnafu, PipelineSnafu,
-    Result as ServerResult,
+    AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult,
 };
 use servers::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use servers::query_handler::PipelineHandler;
@@ -124,18 +123,6 @@ impl Instance {
         log: RowInsertRequests,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
-        let _guard = if let Some(limiter) = &self.limiter {
-            Some(
-                limiter
-                    .limit_row_inserts(&log)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(OtherSnafu)?,
-            )
-        } else {
-            None
-        };
-
         self.inserter
             .handle_log_inserts(log, ctx, self.statement_executor.as_ref())
             .await
@@ -148,18 +135,6 @@ impl Instance {
         rows: RowInsertRequests,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
-        let _guard = if let Some(limiter) = &self.limiter {
-            Some(
-                limiter
-                    .limit_row_inserts(&rows)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(OtherSnafu)?,
-            )
-        } else {
-            None
-        };
-
         self.inserter
             .handle_trace_inserts(rows, ctx, self.statement_executor.as_ref())
             .await

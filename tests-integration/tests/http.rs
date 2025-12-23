@@ -32,6 +32,7 @@ use common_error::status_code::StatusCode as ErrorCode;
 use common_frontend::slow_query_event::{
     SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
 };
+use common_memory_manager::OnExhaustedPolicy;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use log_query::{Context, Limit, LogQuery, TimeFilter};
@@ -55,6 +56,7 @@ use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::test_helpers::{TestClient, TestResponse};
 use servers::prom_store::{self, mock_timeseries_new_label};
+use servers::request_memory_limiter::ServerMemoryLimiter;
 use table::table_name::TableName;
 use tests_integration::test_util::{
     StorageType, setup_test_http_app, setup_test_http_app_with_frontend,
@@ -143,6 +145,7 @@ macro_rules! http_tests {
                 test_jaeger_query_api_for_trace_v1,
 
                 test_influxdb_write,
+                test_http_memory_limit,
             );
         )*
     };
@@ -1379,6 +1382,8 @@ providers = []"#,
     let expected_toml_str = format!(
         r#"
 enable_telemetry = true
+max_in_flight_write_bytes = "0KiB"
+write_bytes_exhausted_policy = "wait"
 init_regions_in_background = false
 init_regions_parallelism = 16
 
@@ -3319,7 +3324,7 @@ processors:
         events = del(.events)
         base_host = del(.host)
         base_timestamp = del(.timestamp)
-        
+
         # Map each event to a complete row object
         map_values(array!(events)) -> |event| {
             {
@@ -7116,4 +7121,148 @@ fn compress_vec_with_gzip(data: Vec<u8>) -> Vec<u8> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&data).unwrap();
     encoder.finish().unwrap()
+}
+
+pub async fn test_http_memory_limit(store_type: StorageType) {
+    use tests_integration::test_util::setup_test_http_app_with_frontend_and_custom_options;
+
+    common_telemetry::init_default_ut_logging();
+
+    let http_opts = servers::http::HttpOptions {
+        addr: format!("127.0.0.1:{}", common_test_util::ports::get_port()),
+        ..Default::default()
+    };
+
+    // Create memory limiter with 2KB limit and fail-fast policy.
+    // Note: MemoryManager uses 1KB granularity (PermitGranularity::Kilobyte),
+    // so 2KB = 2 permits. Small/medium requests should fit, large should fail.
+    let memory_limiter = ServerMemoryLimiter::new(2048, OnExhaustedPolicy::Fail);
+
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_custom_options(
+        store_type,
+        "test_http_memory_limit",
+        None,
+        Some(http_opts),
+        Some(memory_limiter),
+    )
+    .await;
+
+    let client = TestClient::new(app).await;
+
+    // Create table first
+    let res = client
+        .get("/v1/sql?sql=CREATE TABLE test_mem_limit(host STRING, cpu DOUBLE, ts TIMESTAMP TIME INDEX)")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Test 1: Small POST request should succeed (uses actual memory limiting path)
+    // Note: GET requests have no body, so they bypass body memory limiting entirely.
+    let small_insert = "INSERT INTO test_mem_limit VALUES ('host1', 1.0, 0)";
+    let res = client
+        .post("/v1/sql")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("sql={}", small_insert))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "Small POST should succeed");
+
+    // Test 1B: Medium request in the 500-1024 byte range should also succeed
+    // (due to 1KB granularity alignment)
+    let medium_values: Vec<String> = (0..8)
+        .map(|i| format!("('host{}', {}.5, {})", i, i, i * 1000))
+        .collect();
+    let medium_insert = format!(
+        "INSERT INTO test_mem_limit VALUES {}",
+        medium_values.join(", ")
+    );
+
+    let res = client
+        .post("/v1/sql")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("sql={}", medium_insert))
+        .send()
+        .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "Medium request (~700 bytes) should succeed within aligned 1KB limit"
+    );
+
+    // Test 2: Large write request should be rejected (exceeds 2KB limit)
+    // Generate a large INSERT with many rows and long strings to definitely exceed 2KB
+    let large_values: Vec<String> = (0..100)
+        .map(|i| {
+            format!(
+                "('this_is_a_very_long_hostname_string_to_increase_body_size_row_{}', {}.5, {})",
+                i,
+                i,
+                i * 1000
+            )
+        })
+        .collect();
+    let large_insert = format!(
+        "INSERT INTO test_mem_limit VALUES {}",
+        large_values.join(", ")
+    );
+
+    let res = client
+        .post("/v1/sql")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("sql={}", large_insert))
+        .send()
+        .await;
+
+    assert_eq!(
+        res.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "Large write should be rejected with 429"
+    );
+
+    let error_body = res.text().await;
+    assert!(
+        error_body.contains("Request body memory limit exceeded"),
+        "Error message should be 'Request body memory limit exceeded', got: {}",
+        error_body
+    );
+
+    // Test 3A: Small InfluxDB write should succeed
+    let small_influx = "test_influx,host=host1 cpu=1.5 1000000000";
+    let res = client
+        .post("/v1/influxdb/write?db=public")
+        .body(small_influx)
+        .send()
+        .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::NO_CONTENT,
+        "Small InfluxDB write should succeed"
+    );
+
+    // Test 3B: Large InfluxDB write should be rejected
+    let large_influx_body = (0..100)
+        .map(|i| {
+            format!(
+                "test_influx,host=host{} cpu={}.5 {}",
+                i,
+                i,
+                (i as i64) * 1000000000
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let res = client
+        .post("/v1/influxdb/write?db=public")
+        .body(large_influx_body)
+        .send()
+        .await;
+
+    assert_eq!(
+        res.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "Large InfluxDB write should be rejected"
+    );
+
+    guard.remove_all().await;
 }

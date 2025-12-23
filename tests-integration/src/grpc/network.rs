@@ -143,6 +143,7 @@ mod tests {
             "test_grpc_max_connection_age",
             None,
             Some(config),
+            None,
         )
         .await;
         let addr = server.bind_addr().unwrap().to_string();

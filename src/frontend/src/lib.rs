@@ -19,7 +19,6 @@ pub mod events;
 pub mod frontend;
 pub mod heartbeat;
 pub mod instance;
-pub(crate) mod limiter;
 pub(crate) mod metrics;
 pub mod server;
 pub mod service_config;

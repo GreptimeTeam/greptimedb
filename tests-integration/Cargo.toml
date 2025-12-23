@@ -30,6 +30,7 @@ common-error.workspace = true
 common-event-recorder.workspace = true
 common-frontend.workspace = true
 common-grpc.workspace = true
+common-memory-manager.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-procedure.workspace = true
 common-query.workspace = true

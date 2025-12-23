@@ -29,6 +29,7 @@ use bytes;
 use bytes::Bytes;
 use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
+use common_memory_manager::MemoryGuard;
 use common_query::{Output, OutputData};
 use common_recordbatch::DfRecordBatch;
 use common_telemetry::debug;
@@ -39,7 +40,7 @@ use futures::{Stream, future, ready};
 use futures_util::{StreamExt, TryStreamExt};
 use prost::Message;
 use session::context::{QueryContext, QueryContextRef};
-use snafu::{ResultExt, ensure};
+use snafu::{IntoError, ResultExt, ensure};
 use table::table_name::TableName;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -49,8 +50,8 @@ use crate::error::{InvalidParameterSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::grpc::greptime_handler::{GreptimeRequestHandler, get_request_type};
 use crate::grpc::{FlightCompression, TonicResult, context_auth};
-use crate::metrics::{METRIC_GRPC_MEMORY_USAGE_BYTES, METRIC_GRPC_REQUESTS_REJECTED_TOTAL};
-use crate::request_limiter::{RequestMemoryGuard, RequestMemoryLimiter};
+use crate::request_memory_limiter::ServerMemoryLimiter;
+use crate::request_memory_metrics::RequestMemoryMetrics;
 use crate::{error, hint_headers};
 
 pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + 'static>>;
@@ -219,7 +220,7 @@ impl FlightCraft for GreptimeRequestHandler {
     ) -> TonicResult<Response<TonicStream<PutResult>>> {
         let (headers, extensions, stream) = request.into_parts();
 
-        let limiter = extensions.get::<RequestMemoryLimiter>().cloned();
+        let limiter = extensions.get::<ServerMemoryLimiter>().cloned();
 
         let query_ctx = context_auth::create_query_context_from_grpc_metadata(&headers)?;
         context_auth::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
@@ -260,7 +261,7 @@ pub struct PutRecordBatchRequest {
     pub record_batch: DfRecordBatch,
     pub schema_bytes: Bytes,
     pub flight_data: FlightData,
-    pub(crate) _guard: Option<RequestMemoryGuard>,
+    pub(crate) _guard: Option<MemoryGuard<RequestMemoryMetrics>>,
 }
 
 impl PutRecordBatchRequest {
@@ -270,28 +271,24 @@ impl PutRecordBatchRequest {
         request_id: i64,
         schema_bytes: Bytes,
         flight_data: FlightData,
-        limiter: Option<&RequestMemoryLimiter>,
+        limiter: Option<&ServerMemoryLimiter>,
     ) -> Result<Self> {
         let memory_usage = flight_data.data_body.len()
             + flight_data.app_metadata.len()
             + flight_data.data_header.len();
 
-        let _guard = limiter
-            .filter(|limiter| limiter.is_enabled())
-            .map(|limiter| {
-                limiter
-                    .try_acquire(memory_usage)
-                    .map(|guard| {
-                        guard.inspect(|g| {
-                            METRIC_GRPC_MEMORY_USAGE_BYTES.set(g.current_usage() as i64);
-                        })
-                    })
-                    .inspect_err(|_| {
-                        METRIC_GRPC_REQUESTS_REJECTED_TOTAL.inc();
-                    })
-            })
-            .transpose()?
-            .flatten();
+        let _guard = if let Some(limiter) = limiter {
+            let guard = limiter.try_acquire(memory_usage as u64).ok_or_else(|| {
+                let inner_err = common_memory_manager::Error::MemoryLimitExceeded {
+                    requested_bytes: memory_usage as u64,
+                    limit_bytes: limiter.limit_bytes(),
+                };
+                error::MemoryLimitExceededSnafu.into_error(inner_err)
+            })?;
+            Some(guard)
+        } else {
+            None
+        };
 
         Ok(Self {
             table_name,
@@ -308,7 +305,7 @@ pub struct PutRecordBatchRequestStream {
     flight_data_stream: Streaming<FlightData>,
     catalog: String,
     schema_name: String,
-    limiter: Option<RequestMemoryLimiter>,
+    limiter: Option<ServerMemoryLimiter>,
     // Client now lazily sends schema data so we cannot eagerly wait for it.
     // Instead, we need to decode while receiving record batches.
     state: StreamState,
@@ -331,7 +328,7 @@ impl PutRecordBatchRequestStream {
         flight_data_stream: Streaming<FlightData>,
         catalog: String,
         schema: String,
-        limiter: Option<RequestMemoryLimiter>,
+        limiter: Option<ServerMemoryLimiter>,
     ) -> TonicResult<Self> {
         Ok(Self {
             flight_data_stream,
@@ -395,7 +392,6 @@ impl Stream for PutRecordBatchRequestStream {
 
             match poll {
                 Some(Ok(flight_data)) => {
-                    // Clone limiter once to avoid borrowing issues
                     let limiter = self.limiter.clone();
 
                     match &mut self.state {

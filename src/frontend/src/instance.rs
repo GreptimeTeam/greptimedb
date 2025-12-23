@@ -97,7 +97,6 @@ use crate::error::{
     ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
     StatementTimeoutSnafu, TableOperationSnafu,
 };
-use crate::limiter::LimiterRef;
 use crate::stream_wrapper::CancellableStreamWrapper;
 
 lazy_static! {
@@ -118,7 +117,6 @@ pub struct Instance {
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
     event_recorder: Option<EventRecorderRef>,
-    limiter: Option<LimiterRef>,
     process_manager: ProcessManagerRef,
     slow_query_options: SlowQueryOptions,
     suspend: Arc<AtomicBool>,

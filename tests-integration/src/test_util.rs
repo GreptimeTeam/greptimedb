@@ -49,6 +49,7 @@ use servers::otel_arrow::OtelArrowServiceHandler;
 use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
+use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::Server;
 use servers::tls::ReloadableTlsServerConfig;
 use session::context::QueryContext;
@@ -439,6 +440,23 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
     name: &str,
     user_provider: Option<UserProviderRef>,
 ) -> (Router, TestGuard) {
+    setup_test_http_app_with_frontend_and_custom_options(
+        store_type,
+        name,
+        user_provider,
+        None,
+        None,
+    )
+    .await
+}
+
+pub async fn setup_test_http_app_with_frontend_and_custom_options(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
+    http_opts: Option<HttpOptions>,
+    memory_limiter: Option<ServerMemoryLimiter>,
+) -> (Router, TestGuard) {
     let plugins = Plugins::new();
     if let Some(user_provider) = user_provider.clone() {
         plugins.insert::<UserProviderRef>(user_provider.clone());
@@ -449,14 +467,12 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 
     create_test_table(instance.fe_instance(), "demo").await;
 
-    let http_opts = HttpOptions {
+    let http_opts = http_opts.unwrap_or_else(|| HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
         ..Default::default()
-    };
+    });
 
-    let mut http_server = HttpServerBuilder::new(http_opts);
-
-    http_server = http_server
+    let mut http_server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(
             instance.fe_instance().clone(),
         ))
@@ -469,6 +485,10 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 
     if let Some(user_provider) = user_provider {
         http_server = http_server.with_user_provider(user_provider);
+    }
+
+    if let Some(limiter) = memory_limiter {
+        http_server = http_server.with_memory_limiter(limiter);
     }
 
     let http_server = http_server.build();
@@ -561,7 +581,7 @@ pub async fn setup_grpc_server(
     store_type: StorageType,
     name: &str,
 ) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
-    setup_grpc_server_with(store_type, name, None, None).await
+    setup_grpc_server_with(store_type, name, None, None, None).await
 }
 
 pub async fn setup_grpc_server_with_user_provider(
@@ -569,7 +589,7 @@ pub async fn setup_grpc_server_with_user_provider(
     name: &str,
     user_provider: Option<UserProviderRef>,
 ) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
-    setup_grpc_server_with(store_type, name, user_provider, None).await
+    setup_grpc_server_with(store_type, name, user_provider, None, None).await
 }
 
 pub async fn setup_grpc_server_with(
@@ -577,6 +597,7 @@ pub async fn setup_grpc_server_with(
     name: &str,
     user_provider: Option<UserProviderRef>,
     grpc_config: Option<GrpcServerConfig>,
+    memory_limiter: Option<servers::request_memory_limiter::ServerMemoryLimiter>,
 ) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
     let instance = setup_standalone_instance(name, store_type).await;
 
@@ -598,7 +619,13 @@ pub async fn setup_grpc_server_with(
     let flight_handler = Arc::new(greptime_request_handler.clone());
 
     let grpc_config = grpc_config.unwrap_or_default();
-    let grpc_builder = GrpcServerBuilder::new(grpc_config.clone(), runtime)
+    let mut grpc_builder = GrpcServerBuilder::new(grpc_config.clone(), runtime);
+
+    if let Some(limiter) = memory_limiter {
+        grpc_builder = grpc_builder.with_memory_limiter(limiter);
+    }
+
+    let grpc_builder = grpc_builder
         .database_handler(greptime_request_handler)
         .flight_handler(flight_handler)
         .prometheus_handler(fe_instance_ref.clone(), user_provider.clone())

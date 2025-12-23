@@ -32,6 +32,7 @@ common-frontend.workspace = true
 common-function.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true
+common-memory-manager.workspace = true
 common-meta.workspace = true
 common-options.workspace = true
 common-procedure.workspace = true
