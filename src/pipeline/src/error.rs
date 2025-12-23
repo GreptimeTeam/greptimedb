@@ -646,10 +646,14 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Multiple pipelines with different schemas found, but none under current schema. Please replicate one of them or delete until only one schema left. schemas: {}",
-        schemas
+        "Multiple pipelines with different schemas found, but none under current schema. Please replicate one of them or delete until only one schema left. name: {}, current_schema: {}, schemas: {}",
+        name,
+        current_schema,
+        schemas,
     ))]
     MultiPipelineWithDiffSchema {
+        name: String,
+        current_schema: String,
         schemas: String,
         #[snafu(implicit)]
         location: Location,
