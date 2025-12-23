@@ -562,6 +562,9 @@ impl PartSortStream {
             return Ok(false);
         };
 
+        // dyn filter is updated based on the last value of topk heap("threshold")
+        // it's a max-heap for a ASC TopK operator
+        // so can use dyn filter to prune data range
         let filter = self
             .filter
             .as_ref()
