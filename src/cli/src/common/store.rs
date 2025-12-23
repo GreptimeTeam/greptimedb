@@ -61,6 +61,12 @@ pub struct StoreConfig {
     #[cfg(feature = "pg_kvbackend")]
     #[clap(long)]
     pub meta_schema_name: Option<String>,
+
+    /// Automatically create PostgreSQL schema if it doesn't exist (default: true).
+    #[cfg(feature = "pg_kvbackend")]
+    #[clap(long, default_value_t = true)]
+    pub auto_create_schema: bool,
+
     /// TLS mode for backend store connections (etcd, PostgreSQL, MySQL)
     #[clap(long = "backend-tls-mode", value_enum, default_value = "disable")]
     pub backend_tls_mode: TlsMode,
@@ -138,6 +144,7 @@ impl StoreConfig {
                         schema_name,
                         table_name,
                         max_txn_ops,
+                        self.auto_create_schema,
                     )
                     .await
                     .map_err(BoxedError::new)?)

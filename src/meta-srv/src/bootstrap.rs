@@ -339,6 +339,7 @@ pub async fn metasrv_builder(
                 opts.meta_schema_name.as_deref(),
                 &opts.meta_table_name,
                 opts.max_txn_ops,
+                opts.auto_create_schema,
             )
             .await
             .context(error::KvBackendSnafu)?;
