@@ -99,6 +99,8 @@ impl MetricEngineInner {
                 }
             })
             .collect::<Vec<_>>();
+        // `copy_region_from` does not trigger compaction, 
+        // so there should be no files removed and thus no missing files.
         ensure!(
             missing_file_ids.is_empty(),
             MissingFilesSnafu {
