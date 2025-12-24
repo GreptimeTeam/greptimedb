@@ -32,6 +32,7 @@ use crate::procedure::test_util::MailboxContext;
 pub struct TestingEnv {
     pub table_metadata_manager: TableMetadataManagerRef,
     pub mailbox_ctx: MailboxContext,
+    pub server_addr: String,
 }
 
 impl Default for TestingEnv {
@@ -51,10 +52,11 @@ impl TestingEnv {
         Self {
             table_metadata_manager,
             mailbox_ctx,
+            server_addr: "localhost".to_string(),
         }
     }
 
-    pub fn create_context(self, persistent_context: PersistentContext) -> Context {
+    pub fn create_context(&self, persistent_context: PersistentContext) -> Context {
         let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(
             self.mailbox_ctx.mailbox().clone(),
             MetasrvInfo {
@@ -66,6 +68,8 @@ impl TestingEnv {
             persistent_ctx: persistent_context,
             table_metadata_manager: self.table_metadata_manager.clone(),
             cache_invalidator,
+            mailbox: self.mailbox_ctx.mailbox().clone(),
+            server_addr: self.server_addr.clone(),
         }
     }
 }

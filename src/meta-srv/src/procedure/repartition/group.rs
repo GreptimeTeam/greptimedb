@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod enter_staging_region;
 pub(crate) mod repartition_start;
 pub(crate) mod update_metadata;
+pub(crate) mod utils;
 
 use std::any::Any;
 use std::fmt::Debug;
+use std::time::Duration;
 
 use common_error::ext::BoxedError;
 use common_meta::DatanodeId;
@@ -34,6 +37,7 @@ use uuid::Uuid;
 
 use crate::error::{self, Result};
 use crate::procedure::repartition::plan::RegionDescriptor;
+use crate::service::mailbox::MailboxRef;
 
 pub type GroupId = Uuid;
 
@@ -45,6 +49,10 @@ pub struct Context {
     pub cache_invalidator: CacheInvalidatorRef,
 
     pub table_metadata_manager: TableMetadataManagerRef,
+
+    pub mailbox: MailboxRef,
+
+    pub server_addr: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -183,6 +191,13 @@ impl Context {
             )
             .await
             .context(error::TableMetadataManagerSnafu)
+    }
+
+    /// Returns the next operation timeout.
+    ///
+    /// If the next operation timeout is not set, it will return `None`.
+    pub fn next_operation_timeout(&self) -> Option<Duration> {
+        Some(Duration::from_secs(10))
     }
 }
 

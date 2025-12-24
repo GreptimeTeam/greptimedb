@@ -24,6 +24,7 @@ use store_api::storage::GcReport;
 
 mod close_region;
 mod downgrade_region;
+mod enter_staging;
 mod file_ref;
 mod flush_region;
 mod gc_worker;
@@ -32,6 +33,7 @@ mod upgrade_region;
 
 use crate::heartbeat::handler::close_region::CloseRegionsHandler;
 use crate::heartbeat::handler::downgrade_region::DowngradeRegionsHandler;
+use crate::heartbeat::handler::enter_staging::EnterStagingRegionsHandler;
 use crate::heartbeat::handler::file_ref::GetFileRefsHandler;
 use crate::heartbeat::handler::flush_region::FlushRegionsHandler;
 use crate::heartbeat::handler::gc_worker::GcRegionsHandler;
@@ -123,6 +125,9 @@ impl RegionHeartbeatResponseHandler {
             Instruction::GcRegions(_) => Ok(Some(Box::new(GcRegionsHandler.into()))),
             Instruction::InvalidateCaches(_) => InvalidHeartbeatResponseSnafu.fail(),
             Instruction::Suspend => Ok(None),
+            Instruction::EnterStagingRegions(_) => {
+                Ok(Some(Box::new(EnterStagingRegionsHandler.into())))
+            }
         }
     }
 }
@@ -136,6 +141,7 @@ pub enum InstructionHandlers {
     UpgradeRegions(UpgradeRegionsHandler),
     GetFileRefs(GetFileRefsHandler),
     GcRegions(GcRegionsHandler),
+    EnterStagingRegions(EnterStagingRegionsHandler),
 }
 
 macro_rules! impl_from_handler {
@@ -157,7 +163,8 @@ impl_from_handler!(
     DowngradeRegionsHandler => DowngradeRegions,
     UpgradeRegionsHandler => UpgradeRegions,
     GetFileRefsHandler => GetFileRefs,
-    GcRegionsHandler => GcRegions
+    GcRegionsHandler => GcRegions,
+    EnterStagingRegionsHandler => EnterStagingRegions
 );
 
 macro_rules! dispatch_instr {
@@ -202,6 +209,7 @@ dispatch_instr!(
     UpgradeRegions => UpgradeRegions,
     GetFileRefs => GetFileRefs,
     GcRegions => GcRegions,
+    EnterStagingRegions => EnterStagingRegions
 );
 
 #[async_trait]
@@ -254,7 +262,9 @@ mod tests {
     use common_meta::heartbeat::mailbox::{
         HeartbeatMailbox, IncomingMessage, MailboxRef, MessageMeta,
     };
-    use common_meta::instruction::{DowngradeRegion, OpenRegion, UpgradeRegion};
+    use common_meta::instruction::{
+        DowngradeRegion, EnterStagingRegion, OpenRegion, UpgradeRegion,
+    };
     use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
@@ -334,6 +344,16 @@ mod tests {
         let instruction = Instruction::UpgradeRegions(vec![UpgradeRegion {
             region_id,
             ..Default::default()
+        }]);
+        assert!(
+            heartbeat_handler
+                .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction)))
+        );
+
+        // Enter staging region
+        let instruction = Instruction::EnterStagingRegions(vec![EnterStagingRegion {
+            region_id,
+            partition_expr: "".to_string(),
         }]);
         assert!(
             heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((meta, instruction)))
