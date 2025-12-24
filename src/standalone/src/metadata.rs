@@ -19,9 +19,10 @@ use common_error::ext::BoxedError;
 use common_meta::kv_backend::KvBackendRef;
 use common_telemetry::info;
 use log_store::raft_engine::RaftEngineBackend;
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
+use url::Url;
 
-use crate::error::{OpenMetadataKvBackendSnafu, Result};
+use crate::error::{InvalidUrlSchemeSnafu, OpenMetadataKvBackendSnafu, ParseUrlSnafu, Result};
 
 /// Builds the metadata kvbackend.
 pub fn build_metadata_kvbackend(dir: String, config: KvBackendConfig) -> Result<KvBackendRef> {
@@ -34,4 +35,17 @@ pub fn build_metadata_kvbackend(dir: String, config: KvBackendConfig) -> Result<
         .context(OpenMetadataKvBackendSnafu)?;
 
     Ok(Arc::new(kv_backend))
+}
+
+/// Builds the metadata kvbackend from a list of URLs.
+pub fn build_metadata_kv_from_url(url: &str) -> Result<KvBackendRef> {
+    let url = Url::parse(url).context(ParseUrlSnafu { url })?;
+    ensure!(
+        url.scheme() == "raftengine",
+        InvalidUrlSchemeSnafu {
+            scheme: url.scheme(),
+        }
+    );
+
+    build_metadata_kvbackend(url.path().to_string(), Default::default())
 }
