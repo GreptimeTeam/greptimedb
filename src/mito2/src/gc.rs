@@ -249,6 +249,7 @@ impl LocalGcWorker {
                 .entry(*region_id)
                 .or_insert_with(HashSet::new)
                 .extend(file_refs.clone());
+            // no need to include manifest files here, as they are already included in region manifest
         }
 
         Ok(tmp_ref_files)
@@ -328,15 +329,37 @@ impl LocalGcWorker {
         let region_id = region.region_id();
 
         debug!("Doing gc for region {}", region_id);
+
+        let manifest = region.manifest_ctx.manifest().await;
+        // TODO: check manifest version here? if not match, skip gc for this region?
+        if self
+            .file_ref_manifest
+            .manifest_version
+            .get(&region.region_id())
+            .cloned()
+            != Some(manifest.manifest_version)
+        {
+            // should be rare enough(few seconds after leader update manifest version), just skip gc for this region
+            warn!(
+                "Tmp ref files manifest version {:?} does not match region {} manifest version {}, skip gc for this region",
+                self.file_ref_manifest
+                    .manifest_version
+                    .get(&region.region_id()),
+                region.region_id(),
+                manifest.manifest_version
+            );
+            return Ok(vec![]);
+        }
+
         // do the time consuming listing only when full_file_listing is true
         // and do it first to make sure we have the latest manifest etc.
         let all_entries = if self.full_file_listing {
-            self.list_from_object_store(&region).await?
+            self.list_from_object_store(region.region_id(), manifest.clone())
+                .await?
         } else {
             vec![]
         };
 
-        let manifest = region.manifest_ctx.manifest().await;
         let region_id = manifest.metadata.region_id;
         let current_files = &manifest.files;
 
@@ -509,10 +532,12 @@ impl LocalGcWorker {
     /// List all files in the region directory.
     /// Returns a vector of all file entries found.
     /// This might take a long time if there are many files in the region directory.
-    async fn list_from_object_store(&self, region: &MitoRegionRef) -> Result<Vec<Entry>> {
+    async fn list_from_object_store(
+        &self,
+        region_id: RegionId,
+        manifest: Arc<RegionManifest>,
+    ) -> Result<Vec<Entry>> {
         let start = tokio::time::Instant::now();
-        let region_id = region.region_id();
-        let manifest = region.manifest_ctx.manifest().await;
         let current_files = &manifest.files;
         let concurrency = (current_files.len() / Self::CONCURRENCY_LIST_PER_FILES)
             .max(1)

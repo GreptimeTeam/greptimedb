@@ -73,8 +73,8 @@ impl Default for GcSchedulerOptions {
             retry_backoff_duration: Duration::from_secs(5),
             region_gc_concurrency: 16,
             min_region_size_threshold: 100 * 1024 * 1024, // 100MB
-            sst_count_weight: 1.0,
-            file_removed_count_weight: 0.5,
+            sst_count_weight: 0.5,
+            file_removed_count_weight: 1.0,
             gc_cooldown_period: Duration::from_secs(60 * 5), // 5 minutes
             regions_per_table_threshold: 20,                 // Select top 20 regions per table
             mailbox_timeout: Duration::from_secs(60),        // 60 seconds
