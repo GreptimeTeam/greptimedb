@@ -33,6 +33,10 @@ impl Indexer {
         if !self.do_update_bloom_filter(batch).await {
             self.do_abort().await;
         }
+        #[cfg(feature = "vector_index")]
+        if !self.do_update_vector_index(batch).await {
+            self.do_abort().await;
+        }
     }
 
     /// Returns false if the update failed.
@@ -103,6 +107,32 @@ impl Indexer {
         } else {
             warn!(
                 err; "Failed to update bloom filter, region_id: {}, file_id: {}",
+                self.region_id, self.file_id,
+            );
+        }
+
+        false
+    }
+
+    /// Returns false if the update failed.
+    #[cfg(feature = "vector_index")]
+    async fn do_update_vector_index(&mut self, batch: &mut Batch) -> bool {
+        let Some(creator) = self.vector_indexer.as_mut() else {
+            return true;
+        };
+
+        let Err(err) = creator.update(batch).await else {
+            return true;
+        };
+
+        if cfg!(any(test, feature = "test")) {
+            panic!(
+                "Failed to update vector index, region_id: {}, file_id: {}, err: {:?}",
+                self.region_id, self.file_id, err
+            );
+        } else {
+            warn!(
+                err; "Failed to update vector index, region_id: {}, file_id: {}",
                 self.region_id, self.file_id,
             );
         }

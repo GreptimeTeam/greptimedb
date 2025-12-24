@@ -326,6 +326,8 @@ impl DefaultCompactor {
         let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
         let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
         let bloom_filter_index_config = compaction_region.engine_config.bloom_filter_index.clone();
+        #[cfg(feature = "vector_index")]
+        let vector_index_config = compaction_region.engine_config.vector_index.clone();
 
         let input_file_names = output
             .inputs
@@ -372,6 +374,8 @@ impl DefaultCompactor {
                     inverted_index_config,
                     fulltext_index_config,
                     bloom_filter_index_config,
+                    #[cfg(feature = "vector_index")]
+                    vector_index_config,
                 },
                 &write_opts,
                 &mut metrics,
