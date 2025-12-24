@@ -458,10 +458,7 @@ impl ScanRegion {
                     .with_pre_filter_mode(filter_mode),
             )?;
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
-                // todo: we should add stats to MemtableRange
-                let mut stats = ranges_in_memtable.stats.clone();
-                stats.num_ranges = 1;
-                stats.num_rows = v.num_rows();
+                let stats = v.stats().clone();
                 MemRangeBuilder::new(v, stats)
             }));
         }

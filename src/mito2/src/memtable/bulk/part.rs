@@ -170,6 +170,31 @@ impl BulkPart {
         }
     }
 
+    /// Creates MemtableStats from this BulkPart.
+    pub fn to_memtable_stats(
+        &self,
+        region_metadata: &RegionMetadataRef,
+    ) -> crate::memtable::MemtableStats {
+        let ts_type = region_metadata
+            .time_index_column()
+            .column_schema
+            .data_type
+            .clone()
+            .as_timestamp()
+            .expect("Timestamp column must have timestamp type");
+        let min_ts = ts_type.create_timestamp(self.min_timestamp);
+        let max_ts = ts_type.create_timestamp(self.max_timestamp);
+
+        crate::memtable::MemtableStats {
+            estimated_bytes: self.estimated_size(),
+            time_range: Some((min_ts, max_ts)),
+            num_rows: self.num_rows(),
+            num_ranges: 1,
+            max_sequence: self.sequence,
+            series_count: self.estimated_series_count(),
+        }
+    }
+
     /// Fills missing columns in the BulkPart batch with default values.
     ///
     /// This function checks if the batch schema matches the region metadata schema,
@@ -965,6 +990,30 @@ impl EncodedBulkPart {
         &self.data
     }
 
+    /// Creates MemtableStats from this EncodedBulkPart.
+    pub fn to_memtable_stats(&self) -> crate::memtable::MemtableStats {
+        let meta = &self.metadata;
+        let ts_type = meta
+            .region_metadata
+            .time_index_column()
+            .column_schema
+            .data_type
+            .clone()
+            .as_timestamp()
+            .expect("Timestamp column must have timestamp type");
+        let min_ts = ts_type.create_timestamp(meta.min_timestamp);
+        let max_ts = ts_type.create_timestamp(meta.max_timestamp);
+
+        crate::memtable::MemtableStats {
+            estimated_bytes: self.size_bytes(),
+            time_range: Some((min_ts, max_ts)),
+            num_rows: meta.num_rows,
+            num_ranges: 1,
+            max_sequence: meta.max_sequence,
+            series_count: meta.num_series as usize,
+        }
+    }
+
     /// Converts this `EncodedBulkPart` to `SstInfo`.
     ///
     /// # Arguments
@@ -1061,6 +1110,8 @@ pub struct BulkPartMeta {
     pub region_metadata: RegionMetadataRef,
     /// Number of series.
     pub num_series: u64,
+    /// Maximum sequence number in part.
+    pub max_sequence: u64,
 }
 
 /// Metrics for encoding a part.
@@ -1122,6 +1173,7 @@ impl BulkPartEncoder {
         arrow_schema: SchemaRef,
         min_timestamp: i64,
         max_timestamp: i64,
+        max_sequence: u64,
         metrics: &mut BulkPartEncodeMetrics,
     ) -> Result<Option<EncodedBulkPart>> {
         let mut buf = Vec::with_capacity(4096);
@@ -1173,6 +1225,7 @@ impl BulkPartEncoder {
                 parquet_metadata,
                 region_metadata: self.metadata.clone(),
                 num_series,
+                max_sequence,
             },
         }))
     }
@@ -1206,6 +1259,7 @@ impl BulkPartEncoder {
                 parquet_metadata,
                 region_metadata: self.metadata.clone(),
                 num_series: part.estimated_series_count() as u64,
+                max_sequence: part.sequence,
             },
         }))
     }

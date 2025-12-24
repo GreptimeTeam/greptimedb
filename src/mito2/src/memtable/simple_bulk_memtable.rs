@@ -287,13 +287,18 @@ impl Memtable for SimpleBulkMemtable {
         let ranges = contexts
             .into_iter()
             .enumerate()
-            .map(|(idx, (num_rows, context))| (idx, MemtableRange::new(context, num_rows)))
+            .map(|(idx, (num_rows, context))| {
+                // Create minimal stats for each range
+                let range_stats = MemtableStats {
+                    num_rows,
+                    num_ranges: 1,
+                    ..Default::default()
+                };
+                (idx, MemtableRange::new(context, range_stats))
+            })
             .collect();
 
-        Ok(MemtableRanges {
-            ranges,
-            stats: self.stats(),
-        })
+        Ok(MemtableRanges { ranges })
     }
 
     fn is_empty(&self) -> bool {

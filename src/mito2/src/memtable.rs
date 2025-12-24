@@ -204,8 +204,6 @@ pub type BoxedRecordBatchIterator = Box<dyn Iterator<Item = Result<RecordBatch>>
 pub struct MemtableRanges {
     /// Range IDs and ranges.
     pub ranges: BTreeMap<usize, MemtableRange>,
-    /// Statistics of the memtable at the query time.
-    pub stats: MemtableStats,
 }
 
 impl IterBuilder for MemtableRanges {
@@ -569,15 +567,19 @@ impl MemtableRangeContext {
 pub struct MemtableRange {
     /// Shared context.
     context: MemtableRangeContextRef,
-    /// Number of rows in current memtable range.
-    // todo(hl): use [MemtableRangeStats] instead.
-    num_rows: usize,
+    /// Statistics for this memtable range.
+    stats: MemtableStats,
 }
 
 impl MemtableRange {
-    /// Creates a new range from context.
-    pub fn new(context: MemtableRangeContextRef, num_rows: usize) -> Self {
-        Self { context, num_rows }
+    /// Creates a new range from context and stats.
+    pub fn new(context: MemtableRangeContextRef, stats: MemtableStats) -> Self {
+        Self { context, stats }
+    }
+
+    /// Returns the statistics for this range.
+    pub fn stats(&self) -> &MemtableStats {
+        &self.stats
     }
 
     /// Returns the id of the memtable to read.
@@ -624,7 +626,7 @@ impl MemtableRange {
     }
 
     pub fn num_rows(&self) -> usize {
-        self.num_rows
+        self.stats.num_rows
     }
 
     /// Returns the encoded range if available.

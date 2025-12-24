@@ -382,7 +382,7 @@ impl Memtable for BulkMemtable {
             if !bulk_parts.unordered_part.is_empty()
                 && let Some(unordered_bulk_part) = bulk_parts.unordered_part.to_bulk_part()?
             {
-                let num_rows = unordered_bulk_part.num_rows();
+                let part_stats = unordered_bulk_part.to_memtable_stats(&self.metadata);
                 let range = MemtableRange::new(
                     Arc::new(MemtableRangeContext::new(
                         self.id,
@@ -393,7 +393,7 @@ impl Memtable for BulkMemtable {
                         }),
                         predicate.clone(),
                     )),
-                    num_rows,
+                    part_stats,
                 );
                 ranges.insert(range_id, range);
                 range_id += 1;
@@ -406,6 +406,7 @@ impl Memtable for BulkMemtable {
                     continue;
                 }
 
+                let part_stats = part_wrapper.part.to_memtable_stats(&self.metadata);
                 let range = MemtableRange::new(
                     Arc::new(MemtableRangeContext::new(
                         self.id,
@@ -416,7 +417,7 @@ impl Memtable for BulkMemtable {
                         }),
                         predicate.clone(),
                     )),
-                    part_wrapper.part.num_rows(),
+                    part_stats,
                 );
                 ranges.insert(range_id, range);
                 range_id += 1;
@@ -429,6 +430,7 @@ impl Memtable for BulkMemtable {
                     continue;
                 }
 
+                let part_stats = encoded_part_wrapper.part.to_memtable_stats();
                 let range = MemtableRange::new(
                     Arc::new(MemtableRangeContext::new(
                         self.id,
@@ -440,18 +442,14 @@ impl Memtable for BulkMemtable {
                         }),
                         predicate.clone(),
                     )),
-                    encoded_part_wrapper.part.metadata().num_rows,
+                    part_stats,
                 );
                 ranges.insert(range_id, range);
                 range_id += 1;
             }
         }
 
-        let mut stats = self.stats();
-        stats.num_ranges = ranges.len();
-
-        // TODO(yingwen): Supports per range stats.
-        Ok(MemtableRanges { ranges, stats })
+        Ok(MemtableRanges { ranges })
     }
 
     fn is_empty(&self) -> bool {
@@ -811,6 +809,14 @@ impl PartToMerge {
         }
     }
 
+    /// Gets the maximum sequence number of this part.
+    fn max_sequence(&self) -> u64 {
+        match self {
+            PartToMerge::Bulk { part, .. } => part.sequence,
+            PartToMerge::Encoded { part, .. } => part.metadata().max_sequence,
+        }
+    }
+
     /// Creates a record batch iterator for this part.
     fn create_iterator(
         self,
@@ -984,7 +990,7 @@ impl MemtableCompactor {
             return Ok(None);
         }
 
-        // Calculates timestamp bounds for merged data
+        // Calculates timestamp bounds and max sequence for merged data
         let min_timestamp = parts_to_merge
             .iter()
             .map(|p| p.min_timestamp())
@@ -995,6 +1001,11 @@ impl MemtableCompactor {
             .map(|p| p.max_timestamp())
             .max()
             .unwrap_or(i64::MIN);
+        let max_sequence = parts_to_merge
+            .iter()
+            .map(|p| p.max_sequence())
+            .max()
+            .unwrap_or(0);
 
         let context = Arc::new(BulkIterContext::new(
             metadata.clone(),
@@ -1051,6 +1062,7 @@ impl MemtableCompactor {
             arrow_schema.clone(),
             min_timestamp,
             max_timestamp,
+            max_sequence,
             &mut metrics,
         )?;
 
@@ -1278,7 +1290,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(3, ranges.ranges.len());
-        assert_eq!(5, ranges.stats.num_rows);
+        let total_rows: usize = ranges.ranges.values().map(|r| r.stats().num_rows()).sum();
+        assert_eq!(5, total_rows);
 
         for (_range_id, range) in ranges.ranges.iter() {
             assert!(range.num_rows() > 0);
@@ -1446,8 +1459,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(3, ranges.ranges.len());
-        assert_eq!(5, ranges.stats.num_rows);
-        assert_eq!(3, ranges.stats.num_ranges);
+        let total_rows: usize = ranges.ranges.values().map(|r| r.stats().num_rows()).sum();
+        assert_eq!(5, total_rows);
+        assert_eq!(3, ranges.ranges.len());
 
         for (range_id, range) in ranges.ranges.iter() {
             assert!(*range_id < 3);
@@ -1524,7 +1538,8 @@ mod tests {
 
         // Should have ranges for both bulk parts and encoded parts
         assert_eq!(3, ranges.ranges.len());
-        assert_eq!(10, ranges.stats.num_rows);
+        let total_rows: usize = ranges.ranges.values().map(|r| r.stats().num_rows()).sum();
+        assert_eq!(10, total_rows);
 
         for (_range_id, range) in ranges.ranges.iter() {
             assert!(range.num_rows() > 0);
@@ -1606,7 +1621,8 @@ mod tests {
 
         // Should have at least 1 range (the compacted part)
         assert!(!ranges.ranges.is_empty());
-        assert_eq!(10, ranges.stats.num_rows);
+        let total_rows: usize = ranges.ranges.values().map(|r| r.stats().num_rows()).sum();
+        assert_eq!(10, total_rows);
 
         // Read all data and verify
         let mut total_rows_read = 0;
@@ -1693,7 +1709,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(13, ranges.stats.num_rows);
+        let total_rows: usize = ranges.ranges.values().map(|r| r.stats().num_rows()).sum();
+        assert_eq!(13, total_rows);
 
         let mut total_rows_read = 0;
         for (_range_id, range) in ranges.ranges.iter() {
@@ -1750,7 +1767,8 @@ mod tests {
 
         // Should have 1 range for the unordered_part
         assert_eq!(1, ranges.ranges.len());
-        assert_eq!(3, ranges.stats.num_rows);
+        let total_rows: usize = ranges.ranges.values().map(|r| r.stats().num_rows()).sum();
+        assert_eq!(3, total_rows);
 
         // Verify data is sorted correctly in the range
         let range = ranges.ranges.get(&0).unwrap();
