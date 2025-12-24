@@ -34,10 +34,10 @@ use store_api::storage::RegionId;
 use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, Result};
 use crate::flush::FlushReason;
 use crate::manifest::action::RegionChange;
+use crate::region::MitoRegionRef;
 use crate::region::options::CompactionOptions::Twcs;
 use crate::region::options::{RegionOptions, TwcsOptions};
 use crate::region::version::VersionRef;
-use crate::region::{MitoRegionRef, get_partition_expr_str};
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::sst::FormatType;
 use crate::worker::RegionWorkerLoop;
@@ -114,15 +114,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             info!("Flush region: {} before alteration", region_id);
 
             // Try to submit a flush task.
-            let is_staging = region.is_staging();
-            let task = self.new_flush_task(
-                &region,
-                FlushReason::Alter,
-                None,
-                self.config.clone(),
-                is_staging,
-                get_partition_expr_str(&region, is_staging),
-            );
+            let task = self.new_flush_task(&region, FlushReason::Alter, None, self.config.clone());
             if let Err(e) =
                 self.flush_scheduler
                     .schedule_flush(region.region_id, &region.version_control, task)

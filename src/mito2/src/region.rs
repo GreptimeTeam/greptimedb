@@ -726,6 +726,27 @@ impl MitoRegion {
 
         Ok(())
     }
+
+    /// Gets the partition expr for a region.
+    ///
+    /// If the region is in staging mode, returns the partition expr from the staging partition expr.
+    /// Otherwise, returns the partition expr from the version metadata.
+    pub fn partition_expr_str(&self) -> Option<String> {
+        let is_staging = self.is_staging();
+        if is_staging {
+            let staging_partition_expr = self.staging_partition_expr.lock().unwrap();
+            if staging_partition_expr.is_none() {
+                warn!(
+                    "Staging partition expr is none for region {} in staging state",
+                    self.region_id
+                );
+            }
+            staging_partition_expr.clone()
+        } else {
+            let version = self.version();
+            version.metadata.partition_expr.clone()
+        }
+    }
 }
 
 /// Context to update the region manifest.
@@ -1282,26 +1303,6 @@ pub fn parse_partition_expr(partition_expr_str: Option<&str>) -> Result<Option<P
                 .with_context(|_| InvalidPartitionExprSnafu { expr: json_str })?;
             Ok(expr)
         }
-    }
-}
-
-/// Gets the partition expr for a region.
-///
-/// If the region is in staging mode, returns the partition expr from the staging partition expr.
-/// Otherwise, returns the partition expr from the version metadata.
-pub fn get_partition_expr_str(region: &MitoRegionRef, is_staging: bool) -> Option<String> {
-    if is_staging {
-        let staging_partition_expr = region.staging_partition_expr.lock().unwrap();
-        if staging_partition_expr.is_none() {
-            warn!(
-                "Staging partition expr is none for region {} in staging state",
-                region.region_id
-            );
-        }
-        staging_partition_expr.clone()
-    } else {
-        let version = region.version();
-        version.metadata.partition_expr.clone()
     }
 }
 

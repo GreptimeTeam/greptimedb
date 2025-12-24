@@ -25,7 +25,7 @@ use store_api::storage::RegionId;
 use crate::config::{IndexBuildMode, MitoConfig};
 use crate::error::{RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
-use crate::region::{MitoRegionRef, get_partition_expr_str};
+use crate::region::MitoRegionRef;
 use crate::request::{BuildIndexRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
@@ -80,16 +80,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
             if region.last_flush_millis() < min_last_flush_time {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
-                let is_staging = region.is_staging();
-                let partition_expr = get_partition_expr_str(region, is_staging);
-                let task = self.new_flush_task(
-                    region,
-                    FlushReason::EngineFull,
-                    None,
-                    self.config.clone(),
-                    is_staging,
-                    partition_expr,
-                );
+                let task =
+                    self.new_flush_task(region, FlushReason::EngineFull, None, self.config.clone());
                 self.flush_scheduler.schedule_flush(
                     region.region_id,
                     &region.version_control,
@@ -127,16 +119,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // Stop flushing regions if memory usage is already below the flush limit
                 break;
             }
-            let is_staging = region.is_staging();
-            let partition_expr = get_partition_expr_str(region, is_staging);
-            let task = self.new_flush_task(
-                region,
-                FlushReason::EngineFull,
-                None,
-                self.config.clone(),
-                is_staging,
-                partition_expr,
-            );
+            let task =
+                self.new_flush_task(region, FlushReason::EngineFull, None, self.config.clone());
             debug!("Scheduling flush task for region {}", region.region_id);
             // Schedule a flush task for the current region
             self.flush_scheduler
@@ -155,8 +139,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         reason: FlushReason,
         row_group_size: Option<usize>,
         engine_config: Arc<MitoConfig>,
-        is_staging: bool,
-        partition_expr: Option<String>,
     ) -> RegionFlushTask {
         RegionFlushTask {
             region_id: region.region_id,
@@ -171,8 +153,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             manifest_ctx: region.manifest_ctx.clone(),
             index_options: region.version().options.index_options.clone(),
             flush_semaphore: self.flush_semaphore.clone(),
-            is_staging,
-            partition_expr,
+            is_staging: region.is_staging(),
+            partition_expr: region.partition_expr_str(),
         }
     }
 }
@@ -198,16 +180,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         } else {
             FlushReason::Manual
         };
-        let is_staging = region.is_staging();
-
-        let mut task = self.new_flush_task(
-            &region,
-            reason,
-            request.row_group_size,
-            self.config.clone(),
-            is_staging,
-            get_partition_expr_str(&region, is_staging),
-        );
+        let mut task =
+            self.new_flush_task(&region, reason, request.row_group_size, self.config.clone());
         task.push_sender(sender);
         if let Err(e) =
             self.flush_scheduler
@@ -230,8 +204,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             self.update_topic_latest_entry_id(region);
 
-            let is_staging = region.is_staging();
-            let partition_expr = get_partition_expr_str(region, is_staging);
             if region.last_flush_millis() < min_last_flush_time {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
                 let task = self.new_flush_task(
@@ -239,8 +211,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     FlushReason::Periodically,
                     None,
                     self.config.clone(),
-                    is_staging,
-                    partition_expr,
                 );
                 self.flush_scheduler.schedule_flush(
                     region.region_id,
