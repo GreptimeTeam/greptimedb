@@ -48,6 +48,10 @@ impl MetricEngineInner {
         let target_metadata_region_id = utils::to_metadata_region_id(region_id);
         let target_data_region_id = utils::to_data_region_id(region_id);
         let source_data_region_id = utils::to_data_region_id(source_region_id);
+        info!(
+            "Syncing region from region {} to region {}",
+            source_region_id, region_id
+        );
 
         let res = self
             .mito
