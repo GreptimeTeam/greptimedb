@@ -37,10 +37,10 @@ use store_api::region_engine::{
     MitoCopyRegionFromResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
 };
 use store_api::region_request::{
-    AffectedRows, EnterStagingRequest, RegionAlterRequest, RegionBuildIndexRequest,
-    RegionBulkInsertsRequest, RegionCatchupRequest, RegionCloseRequest, RegionCompactRequest,
-    RegionCreateRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
-    RegionTruncateRequest,
+    AffectedRows, ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest,
+    RegionBuildIndexRequest, RegionBulkInsertsRequest, RegionCatchupRequest, RegionCloseRequest,
+    RegionCompactRequest, RegionCreateRequest, RegionFlushRequest, RegionOpenRequest,
+    RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -741,6 +741,11 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: region_bulk_inserts_request,
             },
+            RegionRequest::ApplyStagingManifest(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: sender.into(),
+                request: DdlRequest::ApplyStagingManifest(v),
+            }),
         };
 
         Ok((worker_request, receiver))
@@ -852,6 +857,7 @@ pub(crate) enum DdlRequest {
     Truncate(RegionTruncateRequest),
     Catchup((RegionCatchupRequest, Option<WalEntryReceiver>)),
     EnterStaging(EnterStagingRequest),
+    ApplyStagingManifest(ApplyStagingManifestRequest),
 }
 
 /// Sender and Ddl request.
@@ -1080,6 +1086,8 @@ pub(crate) struct RegionEditResult {
     pub(crate) result: Result<()>,
     /// Whether region state need to be set to Writable after handling this request.
     pub(crate) update_region_state: bool,
+    /// The region is in staging mode before handling this request.
+    pub(crate) is_staging: bool,
 }
 
 #[derive(Debug)]
