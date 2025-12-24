@@ -15,9 +15,14 @@
 use std::{fmt, mem};
 
 use common_telemetry::debug;
+use snafu::ensure;
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 
+use crate::error::{
+    MemoryAcquireTimeoutSnafu, MemoryLimitExceededSnafu, MemorySemaphoreClosedSnafu, Result,
+};
 use crate::manager::{MemoryMetrics, MemoryQuota};
+use crate::policy::OnExhaustedPolicy;
 
 /// Guard representing a slice of reserved memory.
 pub struct MemoryGuard<M: MemoryMetrics> {
@@ -55,11 +60,52 @@ impl<M: MemoryMetrics> MemoryGuard<M> {
         }
     }
 
-    /// Tries to allocate additional memory during task execution.
+    /// Acquires additional memory, waiting if necessary until enough is available.
+    ///
+    /// On success, merges the new memory into this guard.
+    ///
+    /// # Errors
+    /// - Returns error if requested bytes would exceed the manager's total limit
+    /// - Returns error if the semaphore is unexpectedly closed
+    pub async fn acquire_additional(&mut self, bytes: u64) -> Result<()> {
+        match &mut self.state {
+            GuardState::Unlimited => Ok(()),
+            GuardState::Limited { permit, quota } => {
+                if bytes == 0 {
+                    return Ok(());
+                }
+
+                let additional_permits = quota.bytes_to_permits(bytes);
+                let current_permits = permit.num_permits() as u32;
+
+                ensure!(
+                    current_permits.saturating_add(additional_permits) <= quota.limit_permits,
+                    MemoryLimitExceededSnafu {
+                        requested_bytes: bytes,
+                        limit_bytes: quota.permits_to_bytes(quota.limit_permits)
+                    }
+                );
+
+                let additional_permit = quota
+                    .semaphore
+                    .clone()
+                    .acquire_many_owned(additional_permits)
+                    .await
+                    .map_err(|_| MemorySemaphoreClosedSnafu.build())?;
+
+                permit.merge(additional_permit);
+                quota.update_in_use_metric();
+                debug!("Acquired additional {} bytes", bytes);
+                Ok(())
+            }
+        }
+    }
+
+    /// Tries to acquire additional memory without waiting.
     ///
     /// On success, merges the new memory into this guard and returns true.
     /// On failure, returns false and leaves this guard unchanged.
-    pub fn request_additional(&mut self, bytes: u64) -> bool {
+    pub fn try_acquire_additional(&mut self, bytes: u64) -> bool {
         match &mut self.state {
             GuardState::Unlimited => true,
             GuardState::Limited { permit, quota } => {
@@ -77,11 +123,11 @@ impl<M: MemoryMetrics> MemoryGuard<M> {
                     Ok(additional_permit) => {
                         permit.merge(additional_permit);
                         quota.update_in_use_metric();
-                        debug!("Allocated additional {} bytes", bytes);
+                        debug!("Acquired additional {} bytes", bytes);
                         true
                     }
                     Err(TryAcquireError::NoPermits) | Err(TryAcquireError::Closed) => {
-                        quota.metrics.inc_rejected("request_additional");
+                        quota.metrics.inc_rejected("try_acquire_additional");
                         false
                     }
                 }
@@ -89,11 +135,55 @@ impl<M: MemoryMetrics> MemoryGuard<M> {
         }
     }
 
-    /// Releases a portion of granted memory back to the pool early,
-    /// before the guard is dropped.
+    /// Acquires additional memory based on the given policy.
+    ///
+    /// - For `OnExhaustedPolicy::Wait`: Waits up to the timeout duration for memory to become available
+    /// - For `OnExhaustedPolicy::Fail`: Returns immediately if memory is not available
+    ///
+    /// # Errors
+    /// - `MemoryLimitExceeded`: Requested bytes would exceed the total limit (both policies), or memory is currently exhausted (Fail policy only)
+    /// - `MemoryAcquireTimeout`: Timeout elapsed while waiting for memory (Wait policy only)
+    /// - `MemorySemaphoreClosed`: The internal semaphore is unexpectedly closed (rare, indicates system issue)
+    pub async fn acquire_additional_with_policy(
+        &mut self,
+        bytes: u64,
+        policy: OnExhaustedPolicy,
+    ) -> Result<()> {
+        match policy {
+            OnExhaustedPolicy::Wait { timeout } => {
+                match tokio::time::timeout(timeout, self.acquire_additional(bytes)).await {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(e),
+                    Err(_elapsed) => MemoryAcquireTimeoutSnafu {
+                        requested_bytes: bytes,
+                        waited: timeout,
+                    }
+                    .fail(),
+                }
+            }
+            OnExhaustedPolicy::Fail => {
+                if self.try_acquire_additional(bytes) {
+                    Ok(())
+                } else {
+                    MemoryLimitExceededSnafu {
+                        requested_bytes: bytes,
+                        limit_bytes: match &self.state {
+                            GuardState::Unlimited => 0,
+                            GuardState::Limited { quota, .. } => {
+                                quota.permits_to_bytes(quota.limit_permits)
+                            }
+                        },
+                    }
+                    .fail()
+                }
+            }
+        }
+    }
+
+    /// Releases a portion of granted memory back to the pool before the guard is dropped.
     ///
     /// Returns true if the release succeeds or is a no-op; false if the request exceeds granted.
-    pub fn early_release_partial(&mut self, bytes: u64) -> bool {
+    pub fn release_partial(&mut self, bytes: u64) -> bool {
         match &mut self.state {
             GuardState::Unlimited => true,
             GuardState::Limited { permit, quota } => {
@@ -109,7 +199,7 @@ impl<M: MemoryMetrics> MemoryGuard<M> {
                             quota.permits_to_bytes(released_permit.num_permits() as u32);
                         drop(released_permit);
                         quota.update_in_use_metric();
-                        debug!("Early released {} bytes from memory guard", released_bytes);
+                        debug!("Released {} bytes from memory guard", released_bytes);
                         true
                     }
                     None => false,

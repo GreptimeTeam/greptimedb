@@ -83,7 +83,7 @@ fn test_request_additional_success() {
     assert_eq!(manager.used_bytes(), base);
 
     // Request additional memory (3MB) - should succeed and merge
-    assert!(guard.request_additional(3 * PERMIT_GRANULARITY_BYTES));
+    assert!(guard.try_acquire_additional(3 * PERMIT_GRANULARITY_BYTES));
     assert_eq!(guard.granted_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
     assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
 }
@@ -98,11 +98,11 @@ fn test_request_additional_exceeds_limit() {
     let mut guard = manager.try_acquire(base).unwrap();
 
     // Request additional memory (3MB) - should succeed
-    assert!(guard.request_additional(3 * PERMIT_GRANULARITY_BYTES));
+    assert!(guard.try_acquire_additional(3 * PERMIT_GRANULARITY_BYTES));
     assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
 
     // Request more (3MB) - should fail (would exceed 10MB limit)
-    let result = guard.request_additional(3 * PERMIT_GRANULARITY_BYTES);
+    let result = guard.try_acquire_additional(3 * PERMIT_GRANULARITY_BYTES);
     assert!(!result);
 
     // Still at 8MB
@@ -119,7 +119,7 @@ fn test_request_additional_auto_release_on_guard_drop() {
         let mut guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
 
         // Request additional - memory is merged into guard
-        assert!(guard.request_additional(3 * PERMIT_GRANULARITY_BYTES));
+        assert!(guard.try_acquire_additional(3 * PERMIT_GRANULARITY_BYTES));
         assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
 
         // When guard drops, all memory (base + additional) is released together
@@ -135,7 +135,7 @@ fn test_request_additional_unlimited() {
     let mut guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
 
     // Should always succeed with unlimited manager
-    assert!(guard.request_additional(100 * PERMIT_GRANULARITY_BYTES));
+    assert!(guard.try_acquire_additional(100 * PERMIT_GRANULARITY_BYTES));
     assert_eq!(guard.granted_bytes(), 0);
     assert_eq!(manager.used_bytes(), 0);
 }
@@ -148,7 +148,7 @@ fn test_request_additional_zero_bytes() {
     let mut guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
 
     // Request 0 bytes should succeed without affecting anything
-    assert!(guard.request_additional(0));
+    assert!(guard.try_acquire_additional(0));
     assert_eq!(guard.granted_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
     assert_eq!(manager.used_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
 }
@@ -162,7 +162,7 @@ fn test_early_release_partial_success() {
     assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
 
     // Release half
-    assert!(guard.early_release_partial(4 * PERMIT_GRANULARITY_BYTES));
+    assert!(guard.release_partial(4 * PERMIT_GRANULARITY_BYTES));
     assert_eq!(guard.granted_bytes(), 4 * PERMIT_GRANULARITY_BYTES);
     assert_eq!(manager.used_bytes(), 4 * PERMIT_GRANULARITY_BYTES);
 
@@ -177,7 +177,7 @@ fn test_early_release_partial_exceeds_granted() {
     let mut guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
 
     // Try to release more than granted - should fail
-    assert!(!guard.early_release_partial(10 * PERMIT_GRANULARITY_BYTES));
+    assert!(!guard.release_partial(10 * PERMIT_GRANULARITY_BYTES));
     assert_eq!(guard.granted_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
     assert_eq!(manager.used_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
 }
@@ -188,7 +188,7 @@ fn test_early_release_partial_unlimited() {
     let mut guard = manager.try_acquire(100 * PERMIT_GRANULARITY_BYTES).unwrap();
 
     // Unlimited guard - release should succeed (no-op)
-    assert!(guard.early_release_partial(50 * PERMIT_GRANULARITY_BYTES));
+    assert!(guard.release_partial(50 * PERMIT_GRANULARITY_BYTES));
     assert_eq!(guard.granted_bytes(), 0);
 }
 
@@ -200,22 +200,22 @@ fn test_request_and_early_release_symmetry() {
     let mut guard = manager.try_acquire(5 * PERMIT_GRANULARITY_BYTES).unwrap();
 
     // Request additional
-    assert!(guard.request_additional(5 * PERMIT_GRANULARITY_BYTES));
+    assert!(guard.try_acquire_additional(5 * PERMIT_GRANULARITY_BYTES));
     assert_eq!(guard.granted_bytes(), 10 * PERMIT_GRANULARITY_BYTES);
     assert_eq!(manager.used_bytes(), 10 * PERMIT_GRANULARITY_BYTES);
 
     // Early release some
-    assert!(guard.early_release_partial(3 * PERMIT_GRANULARITY_BYTES));
+    assert!(guard.release_partial(3 * PERMIT_GRANULARITY_BYTES));
     assert_eq!(guard.granted_bytes(), 7 * PERMIT_GRANULARITY_BYTES);
     assert_eq!(manager.used_bytes(), 7 * PERMIT_GRANULARITY_BYTES);
 
     // Request again
-    assert!(guard.request_additional(2 * PERMIT_GRANULARITY_BYTES));
+    assert!(guard.try_acquire_additional(2 * PERMIT_GRANULARITY_BYTES));
     assert_eq!(guard.granted_bytes(), 9 * PERMIT_GRANULARITY_BYTES);
     assert_eq!(manager.used_bytes(), 9 * PERMIT_GRANULARITY_BYTES);
 
     // Early release again
-    assert!(guard.early_release_partial(4 * PERMIT_GRANULARITY_BYTES));
+    assert!(guard.release_partial(4 * PERMIT_GRANULARITY_BYTES));
     assert_eq!(guard.granted_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
     assert_eq!(manager.used_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
 
@@ -232,7 +232,7 @@ fn test_small_allocation_rounds_up() {
 
     let mut guard = manager.try_acquire(512 * 1024).unwrap(); // 512KB
     assert_eq!(guard.granted_bytes(), PERMIT_GRANULARITY_BYTES); // Rounds up to 1MB
-    assert!(guard.request_additional(2 * PERMIT_GRANULARITY_BYTES)); // Can request more
+    assert!(guard.try_acquire_additional(2 * PERMIT_GRANULARITY_BYTES)); // Can request more
     assert_eq!(guard.granted_bytes(), 3 * PERMIT_GRANULARITY_BYTES);
 }
 
@@ -245,6 +245,6 @@ fn test_acquire_zero_bytes_lazy_allocation() {
     assert_eq!(guard.granted_bytes(), 0); // No permits consumed
     assert_eq!(manager.used_bytes(), 0);
 
-    assert!(guard.request_additional(3 * PERMIT_GRANULARITY_BYTES)); // Lazy allocation
+    assert!(guard.try_acquire_additional(3 * PERMIT_GRANULARITY_BYTES)); // Lazy allocation
     assert_eq!(guard.granted_bytes(), 3 * PERMIT_GRANULARITY_BYTES);
 }
