@@ -168,7 +168,7 @@ impl<M: MemoryMetrics> MemoryGuard<M> {
                     MemoryLimitExceededSnafu {
                         requested_bytes: bytes,
                         limit_bytes: match &self.state {
-                            GuardState::Unlimited => 0,
+                            GuardState::Unlimited => 0, // unreachable: unlimited mode always succeeds
                             GuardState::Limited { quota, .. } => {
                                 quota.permits_to_bytes(quota.limit_permits)
                             }

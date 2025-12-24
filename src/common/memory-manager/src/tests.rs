@@ -226,7 +226,7 @@ fn test_request_and_early_release_symmetry() {
 #[test]
 fn test_small_allocation_rounds_up() {
     // Test that allocations smaller than PERMIT_GRANULARITY_BYTES
-    // round up to 1 permit and can use request_additional()
+    // round up to 1 permit and can use try_acquire_additional()
     let limit = 10 * PERMIT_GRANULARITY_BYTES;
     let manager = MemoryManager::new(limit, NoOpMetrics);
 
@@ -238,7 +238,7 @@ fn test_small_allocation_rounds_up() {
 
 #[test]
 fn test_acquire_zero_bytes_lazy_allocation() {
-    // Test that acquire(0) returns 0 permits but can request_additional() later
+    // Test that acquire(0) returns 0 permits but can try_acquire_additional() later
     let manager = MemoryManager::new(10 * PERMIT_GRANULARITY_BYTES, NoOpMetrics);
 
     let mut guard = manager.try_acquire(0).unwrap();
@@ -247,4 +247,165 @@ fn test_acquire_zero_bytes_lazy_allocation() {
 
     assert!(guard.try_acquire_additional(3 * PERMIT_GRANULARITY_BYTES)); // Lazy allocation
     assert_eq!(guard.granted_bytes(), 3 * PERMIT_GRANULARITY_BYTES);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_acquire_additional_blocks_and_unblocks() {
+    let limit = 10 * PERMIT_GRANULARITY_BYTES;
+    let manager = MemoryManager::new(limit, NoOpMetrics);
+
+    // First guard takes 9MB, leaving only 1MB available
+    let mut guard1 = manager.try_acquire(9 * PERMIT_GRANULARITY_BYTES).unwrap();
+    assert_eq!(manager.used_bytes(), 9 * PERMIT_GRANULARITY_BYTES);
+
+    // Spawn a task that will block trying to acquire additional 5MB (needs total 10MB available)
+    let manager_clone = manager.clone();
+    let waiter = tokio::spawn(async move {
+        let mut guard2 = manager_clone.try_acquire(0).unwrap();
+        // This will block until enough memory is available
+        guard2
+            .acquire_additional(5 * PERMIT_GRANULARITY_BYTES)
+            .await
+            .unwrap();
+        guard2
+    });
+
+    sleep(Duration::from_millis(10)).await;
+
+    // Release 5MB from guard1 - this should unblock the waiter
+    assert!(guard1.release_partial(5 * PERMIT_GRANULARITY_BYTES));
+
+    // Waiter should complete now
+    let guard2 = waiter.await.unwrap();
+    assert_eq!(guard2.granted_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
+
+    // Total: guard1 has 4MB, guard2 has 5MB = 9MB
+    assert_eq!(manager.used_bytes(), 9 * PERMIT_GRANULARITY_BYTES);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_acquire_additional_exceeds_total_limit() {
+    let limit = 10 * PERMIT_GRANULARITY_BYTES;
+    let manager = MemoryManager::new(limit, NoOpMetrics);
+
+    let mut guard = manager.try_acquire(8 * PERMIT_GRANULARITY_BYTES).unwrap();
+
+    // Try to acquire additional 5MB - would exceed total limit of 10MB
+    let result = guard.acquire_additional(5 * PERMIT_GRANULARITY_BYTES).await;
+    assert!(result.is_err());
+
+    // Guard should remain unchanged
+    assert_eq!(guard.granted_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
+    assert_eq!(manager.used_bytes(), 8 * PERMIT_GRANULARITY_BYTES);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_acquire_additional_success() {
+    let limit = 10 * PERMIT_GRANULARITY_BYTES;
+    let manager = MemoryManager::new(limit, NoOpMetrics);
+
+    let mut guard = manager.try_acquire(3 * PERMIT_GRANULARITY_BYTES).unwrap();
+    assert_eq!(manager.used_bytes(), 3 * PERMIT_GRANULARITY_BYTES);
+
+    // Acquire additional 4MB - should succeed
+    guard
+        .acquire_additional(4 * PERMIT_GRANULARITY_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(guard.granted_bytes(), 7 * PERMIT_GRANULARITY_BYTES);
+    assert_eq!(manager.used_bytes(), 7 * PERMIT_GRANULARITY_BYTES);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_acquire_additional_with_policy_wait_success() {
+    use crate::policy::OnExhaustedPolicy;
+
+    let limit = 10 * PERMIT_GRANULARITY_BYTES;
+    let manager = MemoryManager::new(limit, NoOpMetrics);
+
+    let mut guard1 = manager.try_acquire(8 * PERMIT_GRANULARITY_BYTES).unwrap();
+
+    let manager_clone = manager.clone();
+    let waiter = tokio::spawn(async move {
+        let mut guard2 = manager_clone.try_acquire(0).unwrap();
+        // Wait policy with 1 second timeout
+        guard2
+            .acquire_additional_with_policy(
+                5 * PERMIT_GRANULARITY_BYTES,
+                OnExhaustedPolicy::Wait {
+                    timeout: Duration::from_secs(1),
+                },
+            )
+            .await
+            .unwrap();
+        guard2
+    });
+
+    sleep(Duration::from_millis(10)).await;
+
+    // Release memory to unblock waiter
+    assert!(guard1.release_partial(5 * PERMIT_GRANULARITY_BYTES));
+
+    let guard2 = waiter.await.unwrap();
+    assert_eq!(guard2.granted_bytes(), 5 * PERMIT_GRANULARITY_BYTES);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_acquire_additional_with_policy_wait_timeout() {
+    use crate::policy::OnExhaustedPolicy;
+
+    let limit = 10 * PERMIT_GRANULARITY_BYTES;
+    let manager = MemoryManager::new(limit, NoOpMetrics);
+
+    // Take all memory
+    let _guard1 = manager.try_acquire(10 * PERMIT_GRANULARITY_BYTES).unwrap();
+
+    let mut guard2 = manager.try_acquire(0).unwrap();
+
+    // Try to acquire with short timeout - should timeout
+    let result = guard2
+        .acquire_additional_with_policy(
+            5 * PERMIT_GRANULARITY_BYTES,
+            OnExhaustedPolicy::Wait {
+                timeout: Duration::from_millis(50),
+            },
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(guard2.granted_bytes(), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_acquire_additional_with_policy_fail() {
+    use crate::policy::OnExhaustedPolicy;
+
+    let limit = 10 * PERMIT_GRANULARITY_BYTES;
+    let manager = MemoryManager::new(limit, NoOpMetrics);
+
+    let _guard1 = manager.try_acquire(8 * PERMIT_GRANULARITY_BYTES).unwrap();
+
+    let mut guard2 = manager.try_acquire(0).unwrap();
+
+    // Fail policy - should return error immediately
+    let result = guard2
+        .acquire_additional_with_policy(5 * PERMIT_GRANULARITY_BYTES, OnExhaustedPolicy::Fail)
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(guard2.granted_bytes(), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_acquire_additional_unlimited() {
+    let manager = MemoryManager::new(0, NoOpMetrics); // Unlimited
+    let mut guard = manager.try_acquire(0).unwrap();
+
+    // Should always succeed with unlimited manager
+    guard
+        .acquire_additional(1000 * PERMIT_GRANULARITY_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(guard.granted_bytes(), 0);
+    assert_eq!(manager.used_bytes(), 0);
 }
