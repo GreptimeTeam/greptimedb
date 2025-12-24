@@ -117,8 +117,8 @@ impl StatementExecutor {
             .map(|v| v.into_inner());
 
         let create_expr = &mut expr_helper::create_to_expr(&stmt, &ctx)?;
-        // We don't put ttl into the table options
-        // Because it will be used directly while compaction.
+        // Don't inherit schema-level TTL/compaction options into table options:
+        // TTL is applied during compaction, and `compaction.*` is handled separately.
         if let Some(schema_options) = schema_options {
             for (key, value) in schema_options.extra_options.iter() {
                 if key.starts_with("compaction.") {

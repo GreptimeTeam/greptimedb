@@ -508,6 +508,10 @@ async fn find_dynamic_options(
     schema_metadata_manager: &SchemaMetadataManagerRef,
 ) -> Result<(crate::region::options::CompactionOptions, TimeToLive)> {
     if region_options.compaction_override && region_options.ttl.is_some() {
+        debug!(
+            "Use region options directly for table {}: compaction={:?}, ttl={:?}",
+            table_id, region_options.compaction, region_options.ttl
+        );
         return Ok((
             region_options.compaction.clone(),
             region_options.ttl.unwrap(),
@@ -523,6 +527,10 @@ async fn find_dynamic_options(
     .context(GetSchemaMetadataSnafu)?;
 
     let ttl = if region_options.ttl.is_some() {
+        debug!(
+            "Use region TTL directly for table {}: ttl={:?}",
+            table_id, region_options.ttl
+        );
         region_options.ttl.unwrap()
     } else {
         db_options
@@ -550,15 +558,30 @@ async fn find_dynamic_options(
             } else {
                 crate::region::options::RegionOptions::try_from(&map)
                     .map(|o| o.compaction)
-                    .unwrap_or_else(|_| region_options.compaction.clone())
+                    .unwrap_or_else(|e| {
+                        error!(e; "Failed to create RegionOptions from map");
+                        region_options.compaction.clone()
+                    })
             }
         } else {
+            debug!(
+                "DB options is None for table {}, use region compaction: compaction={:?}",
+                table_id, region_options.compaction
+            );
             region_options.compaction.clone()
         }
     } else {
+        debug!(
+            "No schema options for table {}, use region compaction: compaction={:?}",
+            table_id, region_options.compaction
+        );
         region_options.compaction.clone()
     };
 
+    debug!(
+        "Resolved dynamic options for table {}: compaction={:?}, ttl={:?}",
+        table_id, compaction, ttl
+    );
     Ok((compaction, ttl))
 }
 

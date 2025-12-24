@@ -29,6 +29,7 @@ use serde_json::Value;
 use serde_with::{DisplayFromStr, NoneAsEmptyString, serde_as, with_prefix};
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::mito_engine_options::COMPACTION_OVERRIDE;
 use store_api::storage::ColumnId;
 use strum::EnumString;
 
@@ -149,7 +150,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
         };
 
         let compaction_override_flag = options_map
-            .get("compaction.override")
+            .get(COMPACTION_OVERRIDE)
             .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
             .unwrap_or(false);
         let compaction_override = has_compaction_type || compaction_override_flag;
