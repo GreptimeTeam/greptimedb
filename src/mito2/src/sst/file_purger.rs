@@ -178,8 +178,8 @@ impl FilePurger for ObjectStoreFilePurger {
         // if not on local file system, instead inform the global file purger to remove the file reference.
         // notice that no matter whether the file is deleted or not, we need to remove the reference
         // because the file is no longer in use nonetheless.
+        // for same reason, we don't care about index_outdated here.
         self.file_ref_manager.remove_file(&file_meta);
-        // TODO(discord9): consider impl a .tombstone file to reduce files needed to list
     }
 
     fn new_file(&self, file_meta: &FileMeta) {

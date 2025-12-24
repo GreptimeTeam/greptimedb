@@ -509,6 +509,20 @@ lazy_static! {
             "mito gc deleted file count",
         ).unwrap();
 
+    /// Counter for the number of unparsable files skipped by GC.
+    pub static ref GC_SKIPPED_UNPARSABLE_FILES: IntCounter =
+        register_int_counter!(
+            "greptime_mito_gc_skipped_unparsable_files",
+            "mito gc skipped unparsable files count",
+        ).unwrap();
+
+    /// Counter for the number of orphaned index files found by GC.
+    pub static ref GC_ORPHANED_INDEX_FILES: IntCounter =
+        register_int_counter!(
+            "greptime_mito_gc_orphaned_index_files",
+            "mito gc orphaned index files count",
+        ).unwrap();
+
     /// Total number of files downloaded during cache fill on region open.
     pub static ref CACHE_FILL_DOWNLOADED_FILES: IntCounter = register_int_counter!(
         "mito_cache_fill_downloaded_files",

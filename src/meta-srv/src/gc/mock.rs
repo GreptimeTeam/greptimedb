@@ -53,6 +53,7 @@ pub fn new_empty_report_with(region_ids: impl IntoIterator<Item = RegionId>) -> 
     }
     GcReport {
         deleted_files,
+        deleted_indexes: HashMap::new(),
         need_retry_regions: HashSet::new(),
     }
 }

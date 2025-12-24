@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{FileId, RegionId, SequenceNumber};
+use store_api::storage::{FileId, IndexVersion, RegionId, SequenceNumber};
 use strum::Display;
 
 use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu};
@@ -193,17 +193,27 @@ impl RegionManifestBuilder {
 
     pub fn apply_edit(&mut self, manifest_version: ManifestVersion, edit: RegionEdit) {
         self.manifest_version = manifest_version;
+
+        let mut removed_files = vec![];
         for file in edit.files_to_add {
-            self.files.insert(file.file_id, file);
+            if let Some(old_file) = self.files.insert(file.file_id, file.clone())
+                && let Some(old_index) = old_file.index_version()
+                && !old_file.is_index_up_to_date(&file)
+            {
+                // The old file has an index that is now outdated.
+                removed_files.push(RemovedFile::Index(old_file.file_id, old_index));
+            }
         }
-        self.removed_files.add_removed_files(
+        removed_files.extend(
             edit.files_to_remove
                 .iter()
-                .map(|meta| meta.file_id)
-                .collect(),
-            edit.timestamp_ms
-                .unwrap_or_else(|| Utc::now().timestamp_millis()),
+                .map(|f| RemovedFile::File(f.file_id, f.index_version())),
         );
+        let at = edit
+            .timestamp_ms
+            .unwrap_or_else(|| Utc::now().timestamp_millis());
+        self.removed_files.add_removed_files(removed_files, at);
+
         for file in edit.files_to_remove {
             self.files.remove(&file.file_id);
         }
@@ -236,7 +246,10 @@ impl RegionManifestBuilder {
                 self.flushed_sequence = truncated_sequence;
                 self.truncated_entry_id = Some(truncated_entry_id);
                 self.removed_files.add_removed_files(
-                    self.files.values().map(|meta| meta.file_id).collect(),
+                    self.files
+                        .values()
+                        .map(|f| RemovedFile::File(f.file_id, f.index_version()))
+                        .collect(),
                     truncate
                         .timestamp_ms
                         .unwrap_or_else(|| Utc::now().timestamp_millis()),
@@ -245,7 +258,10 @@ impl RegionManifestBuilder {
             }
             TruncateKind::Partial { files_to_remove } => {
                 self.removed_files.add_removed_files(
-                    files_to_remove.iter().map(|meta| meta.file_id).collect(),
+                    files_to_remove
+                        .iter()
+                        .map(|f| RemovedFile::File(f.file_id, f.index_version()))
+                        .collect(),
                     truncate
                         .timestamp_ms
                         .unwrap_or_else(|| Utc::now().timestamp_millis()),
@@ -295,20 +311,22 @@ pub struct RemovedFilesRecord {
 
 impl RemovedFilesRecord {
     /// Clear the actually deleted files from the list of removed files
-    pub fn clear_deleted_files(&mut self, deleted_files: Vec<FileId>) {
+    pub fn clear_deleted_files(&mut self, deleted_files: Vec<RemovedFile>) {
         let deleted_file_set: HashSet<_> = HashSet::from_iter(deleted_files);
         for files in self.removed_files.iter_mut() {
-            files.file_ids.retain(|fid| !deleted_file_set.contains(fid));
+            files
+                .files
+                .retain(|removed| !deleted_file_set.contains(removed));
         }
 
-        self.removed_files.retain(|fs| !fs.file_ids.is_empty());
+        self.removed_files.retain(|fs| !fs.files.is_empty());
     }
 
     pub fn update_file_removed_cnt_to_stats(&self, stats: &ManifestStats) {
         let cnt = self
             .removed_files
             .iter()
-            .map(|r| r.file_ids.len() as u64)
+            .map(|r| r.files.len() as u64)
             .sum();
         stats
             .file_removed_cnt
@@ -322,18 +340,42 @@ pub struct RemovedFiles {
     /// the files are removed from manifest. The timestamp is in milliseconds since unix epoch.
     pub removed_at: i64,
     /// The set of file ids that are removed.
-    pub file_ids: HashSet<FileId>,
+    pub files: HashSet<RemovedFile>,
+}
+
+/// A removed file, which can be a data file(optional paired with a index file) or an outdated index file.
+#[derive(Serialize, Deserialize, Hash, Clone, Debug, PartialEq, Eq)]
+pub enum RemovedFile {
+    File(FileId, Option<IndexVersion>),
+    Index(FileId, IndexVersion),
+}
+
+impl RemovedFile {
+    pub fn file_id(&self) -> FileId {
+        match self {
+            RemovedFile::File(file_id, _) => *file_id,
+            RemovedFile::Index(file_id, _) => *file_id,
+        }
+    }
+
+    pub fn index_version(&self) -> Option<IndexVersion> {
+        match self {
+            RemovedFile::File(_, index_version) => *index_version,
+            RemovedFile::Index(_, index_version) => Some(*index_version),
+        }
+    }
 }
 
 impl RemovedFilesRecord {
     /// Add a record of removed files with the current timestamp.
-    pub fn add_removed_files(&mut self, file_ids: HashSet<FileId>, at: i64) {
-        if file_ids.is_empty() {
+    pub fn add_removed_files(&mut self, removed: Vec<RemovedFile>, at: i64) {
+        if removed.is_empty() {
             return;
         }
+        let files = removed.into_iter().collect();
         self.removed_files.push(RemovedFiles {
             removed_at: at,
-            file_ids,
+            files,
         });
     }
 
@@ -738,10 +780,10 @@ mod tests {
             removed_files: RemovedFilesRecord {
                 removed_files: vec![RemovedFiles {
                     removed_at: 0,
-                    file_ids: HashSet::from([FileId::parse_str(
-                        "4b220a70-2b03-4641-9687-b65d94641208",
-                    )
-                    .unwrap()]),
+                    files: HashSet::from([RemovedFile::File(
+                        FileId::parse_str("4b220a70-2b03-4641-9687-b65d94641208").unwrap(),
+                        None,
+                    )]),
                 }],
             },
             sst_format: FormatType::PrimaryKey,
