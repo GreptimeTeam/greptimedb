@@ -14,16 +14,37 @@
 
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use common_error::ext::BoxedError;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
-use meta_srv::metasrv::{BackendClientOptions, BackendImpl};
+use meta_srv::metasrv::BackendClientOptions;
 use meta_srv::utils::etcd::create_etcd_client_with_tls;
+use serde::{Deserialize, Serialize};
 use servers::tls::{TlsMode, TlsOption};
+use snafu::OptionExt;
 
-use crate::error::EmptyStoreAddrsSnafu;
+use crate::error::{EmptyStoreAddrsSnafu, InvalidArgumentsSnafu};
+
+// The datastores that implements metadata kvbackend.
+#[derive(Clone, Debug, PartialEq, Serialize, Default, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendImpl {
+    // Etcd as metadata storage.
+    #[default]
+    EtcdStore,
+    // In memory metadata storage - mostly used for testing.
+    MemoryStore,
+    #[cfg(feature = "pg_kvbackend")]
+    // Postgres as metadata storage.
+    PostgresStore,
+    #[cfg(feature = "mysql_kvbackend")]
+    // MySql as metadata storage.
+    MysqlStore,
+    // RaftEngine as metadata storage.
+    RaftEngineStore,
+}
 
 #[derive(Debug, Default, Parser)]
 pub struct StoreConfig {
@@ -178,6 +199,18 @@ impl StoreConfig {
                     use common_meta::kv_backend::memory::MemoryKvBackend;
 
                     Ok(Arc::new(MemoryKvBackend::default()) as _)
+                }
+                BackendImpl::RaftEngineStore => {
+                    let url = store_addrs
+                        .first()
+                        .context(InvalidArgumentsSnafu {
+                            msg: "empty store addresses".to_string(),
+                        })
+                        .map_err(BoxedError::new)?;
+                    let kvbackend =
+                        standalone::build_metadata_kv_from_url(url).map_err(BoxedError::new)?;
+
+                    Ok(kvbackend)
                 }
             };
             if self.store_key_prefix.is_empty() {

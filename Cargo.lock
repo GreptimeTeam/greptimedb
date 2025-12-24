@@ -1808,6 +1808,7 @@ dependencies = [
  "servers",
  "session",
  "snafu 0.8.6",
+ "standalone",
  "store-api",
  "table",
  "tempfile",
@@ -12513,6 +12514,7 @@ dependencies = [
  "snafu 0.8.6",
  "store-api",
  "tokio",
+ "url",
 ]
 
 [[package]]
