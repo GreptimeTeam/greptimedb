@@ -60,6 +60,7 @@ where
     http_server_builder: Option<HttpServerBuilder>,
     plugins: Plugins,
     flight_handler: Option<FlightCraftRef>,
+    pub server_memory_limiter: ServerMemoryLimiter,
 }
 
 impl<T> Services<T>
@@ -67,6 +68,13 @@ where
     T: Into<FrontendOptions> + Configurable + Clone,
 {
     pub fn new(opts: T, instance: Arc<Instance>, plugins: Plugins) -> Self {
+        let feopts = opts.clone().into();
+        // Create server request memory limiter for all server protocols
+        let server_memory_limiter = ServerMemoryLimiter::new(
+            feopts.max_in_flight_write_bytes.as_bytes(),
+            feopts.write_bytes_exhausted_policy,
+        );
+
         Self {
             opts,
             instance,
@@ -74,6 +82,7 @@ where
             http_server_builder: None,
             plugins,
             flight_handler: None,
+            server_memory_limiter,
         }
     }
 
@@ -274,12 +283,6 @@ where
         let toml = opts.to_toml().context(TomlFormatSnafu)?;
         let opts: FrontendOptions = opts.into();
 
-        // Create request memory limiter for all server protocols
-        let request_memory_limiter = ServerMemoryLimiter::new(
-            opts.max_in_flight_write_bytes.as_bytes(),
-            opts.write_bytes_exhausted_policy,
-        );
-
         let handlers = ServerHandlers::default();
 
         let user_provider = self.plugins.get::<UserProviderRef>();
@@ -292,7 +295,7 @@ where
                 &opts.meta_client,
                 None,
                 true,
-                request_memory_limiter.clone(),
+                self.server_memory_limiter.clone(),
             )?;
             handlers.insert((Box::new(grpc_server), grpc_addr));
         }
@@ -305,7 +308,7 @@ where
                 &opts.meta_client,
                 Some("INTERNAL_GRPC_SERVER".to_string()),
                 false,
-                request_memory_limiter.clone(),
+                self.server_memory_limiter.clone(),
             )?;
             handlers.insert((Box::new(grpc_server), grpc_addr));
         }
@@ -315,7 +318,7 @@ where
             let http_options = &opts.http;
             let http_addr = parse_addr(&http_options.addr)?;
             let http_server =
-                self.build_http_server(&opts, toml, request_memory_limiter.clone())?;
+                self.build_http_server(&opts, toml, self.server_memory_limiter.clone())?;
             handlers.insert((Box::new(http_server), http_addr));
         }
 
