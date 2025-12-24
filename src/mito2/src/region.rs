@@ -727,11 +727,12 @@ impl MitoRegion {
         Ok(())
     }
 
-    /// Gets the partition expr for a region.
+    /// Returns the partition expression string for this region.
     ///
-    /// If the region is in staging mode, returns the partition expr from the staging partition expr.
-    /// Otherwise, returns the partition expr from the version metadata.
-    pub fn partition_expr_str(&self) -> Option<String> {
+    /// If the region is currently in staging state, this returns the partition expression held in
+    /// the staging partition field. Otherwise, it returns the partition expression from the primary
+    /// region metadata (current committed version).
+    pub fn maybe_staging_partition_expr_str(&self) -> Option<String> {
         let is_staging = self.is_staging();
         if is_staging {
             let staging_partition_expr = self.staging_partition_expr.lock().unwrap();

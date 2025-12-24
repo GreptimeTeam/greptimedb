@@ -154,7 +154,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             index_options: region.version().options.index_options.clone(),
             flush_semaphore: self.flush_semaphore.clone(),
             is_staging: region.is_staging(),
-            partition_expr: region.partition_expr_str(),
+            partition_expr: region.maybe_staging_partition_expr_str(),
         }
     }
 }
