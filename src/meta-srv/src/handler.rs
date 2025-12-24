@@ -32,7 +32,7 @@ use collect_leader_region_handler::CollectLeaderRegionHandler;
 use collect_stats_handler::CollectStatsHandler;
 use common_base::Plugins;
 use common_meta::datanode::Stat;
-use common_meta::instruction::{Instruction, InstructionReply};
+use common_meta::instruction::InstructionReply;
 use common_meta::sequence::Sequence;
 use common_telemetry::{debug, info, warn};
 use dashmap::DashMap;
@@ -114,16 +114,19 @@ pub enum HandleControl {
 #[derive(Debug, Default)]
 pub struct HeartbeatAccumulator {
     pub header: Option<ResponseHeader>,
-    pub instructions: Vec<Instruction>,
+    mailbox_message: Option<MailboxMessage>,
     pub stat: Option<Stat>,
     pub inactive_region_ids: HashSet<RegionId>,
     pub region_lease: Option<RegionLease>,
 }
 
 impl HeartbeatAccumulator {
-    pub fn into_mailbox_message(self) -> Option<MailboxMessage> {
-        // TODO(jiachun): to HeartbeatResponse payload
-        None
+    pub(crate) fn take_mailbox_message(&mut self) -> Option<MailboxMessage> {
+        self.mailbox_message.take()
+    }
+
+    pub fn set_mailbox_message(&mut self, message: MailboxMessage) {
+        let _ = self.mailbox_message.insert(message);
     }
 }
 
@@ -275,6 +278,15 @@ impl Pushers {
     async fn remove(&self, pusher_id: &str) -> Option<Pusher> {
         self.0.write().await.remove(pusher_id)
     }
+
+    pub(crate) async fn clear(&self) -> Vec<String> {
+        let mut pushers = self.0.write().await;
+        let keys = pushers.keys().cloned().collect::<Vec<_>>();
+        if !keys.is_empty() {
+            pushers.clear();
+        }
+        keys
+    }
 }
 
 #[derive(Clone)]
@@ -309,12 +321,11 @@ impl HeartbeatHandlerGroup {
     }
 
     /// Deregisters the heartbeat response [`Pusher`] with the given key from the group.
-    ///
-    /// Returns the [`Pusher`] if it exists.
-    pub async fn deregister_push(&self, pusher_id: PusherId) -> Option<Pusher> {
-        METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
+    pub async fn deregister_push(&self, pusher_id: PusherId) {
         info!("Pusher unregister: {}", pusher_id);
-        self.pushers.remove(&pusher_id.string_key()).await
+        if self.pushers.remove(&pusher_id.string_key()).await.is_some() {
+            METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
+        }
     }
 
     /// Returns the [`Pushers`] of the group.
@@ -351,10 +362,11 @@ impl HeartbeatHandlerGroup {
             }
         }
         let header = std::mem::take(&mut acc.header);
+        let mailbox_message = acc.take_mailbox_message();
         let res = HeartbeatResponse {
             header,
             region_lease: acc.region_lease,
-            ..Default::default()
+            mailbox_message,
         };
         Ok(res)
     }
@@ -382,7 +394,9 @@ impl HeartbeatMailbox {
 
     /// Parses the [Instruction] from [MailboxMessage].
     #[cfg(test)]
-    pub fn json_instruction(msg: &MailboxMessage) -> Result<Instruction> {
+    pub(crate) fn json_instruction(
+        msg: &MailboxMessage,
+    ) -> Result<common_meta::instruction::Instruction> {
         let Payload::Json(payload) =
             msg.payload
                 .as_ref()
@@ -518,6 +532,14 @@ impl Mailbox for HeartbeatMailbox {
         }
 
         Ok(())
+    }
+
+    async fn reset(&self) {
+        let keys = self.pushers.clear().await;
+        if !keys.is_empty() {
+            info!("Reset mailbox, deregister pushers: {:?}", keys);
+            METRIC_META_HEARTBEAT_CONNECTION_NUM.sub(keys.len() as i64);
+        }
     }
 }
 

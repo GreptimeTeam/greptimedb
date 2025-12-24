@@ -14,6 +14,7 @@
 
 use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, KvBackendConfig};
+use common_memory_manager::OnExhaustedPolicy;
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
 use common_wal::config::DatanodeWalConfig;
@@ -37,6 +38,12 @@ pub struct StandaloneOptions {
     pub enable_telemetry: bool,
     pub default_timezone: Option<String>,
     pub default_column_prefix: Option<String>,
+    /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
+    /// Set to 0 to disable the limit. Default: "0" (unlimited)
+    pub max_in_flight_write_bytes: ReadableSize,
+    /// Policy when write bytes quota is exhausted.
+    /// Options: "wait" (default, 10s), "wait(<duration>)", "fail"
+    pub write_bytes_exhausted_policy: OnExhaustedPolicy,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
     pub mysql: MysqlOptions,
@@ -57,7 +64,6 @@ pub struct StandaloneOptions {
     pub tracing: TracingOptions,
     pub init_regions_in_background: bool,
     pub init_regions_parallelism: usize,
-    pub max_in_flight_write_bytes: Option<ReadableSize>,
     pub slow_query: SlowQueryOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
@@ -69,6 +75,8 @@ impl Default for StandaloneOptions {
             enable_telemetry: true,
             default_timezone: None,
             default_column_prefix: None,
+            max_in_flight_write_bytes: ReadableSize(0),
+            write_bytes_exhausted_policy: OnExhaustedPolicy::default(),
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),
             mysql: MysqlOptions::default(),
@@ -91,7 +99,6 @@ impl Default for StandaloneOptions {
             tracing: TracingOptions::default(),
             init_regions_in_background: false,
             init_regions_parallelism: 16,
-            max_in_flight_write_bytes: None,
             slow_query: SlowQueryOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
@@ -120,6 +127,8 @@ impl StandaloneOptions {
         let cloned_opts = self.clone();
         FrontendOptions {
             default_timezone: cloned_opts.default_timezone,
+            max_in_flight_write_bytes: cloned_opts.max_in_flight_write_bytes,
+            write_bytes_exhausted_policy: cloned_opts.write_bytes_exhausted_policy,
             http: cloned_opts.http,
             grpc: cloned_opts.grpc,
             mysql: cloned_opts.mysql,
@@ -131,7 +140,6 @@ impl StandaloneOptions {
             meta_client: None,
             logging: cloned_opts.logging,
             user_provider: cloned_opts.user_provider,
-            max_in_flight_write_bytes: cloned_opts.max_in_flight_write_bytes,
             slow_query: cloned_opts.slow_query,
             ..Default::default()
         }

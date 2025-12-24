@@ -44,13 +44,13 @@ use crate::error::{
     PuffinReadBlobSnafu, Result,
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
-use crate::sst::file::RegionFileId;
-use crate::sst::index::TYPE_FULLTEXT_INDEX;
+use crate::sst::file::RegionIndexId;
 use crate::sst::index::fulltext_index::applier::builder::{FulltextRequest, FulltextTerm};
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::puffin_manager::{
     PuffinManagerFactory, SstPuffinBlob, SstPuffinDir, SstPuffinReader,
 };
+use crate::sst::index::{TYPE_FULLTEXT_INDEX, trigger_index_background_download};
 
 pub mod builder;
 
@@ -221,7 +221,7 @@ impl FulltextIndexApplier {
     /// * `metrics` - Optional mutable reference to collect metrics on demand
     pub async fn apply_fine(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
         mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<BTreeSet<RowId>>> {
@@ -275,7 +275,7 @@ impl FulltextIndexApplier {
     async fn apply_fine_one_column(
         &self,
         file_size_hint: Option<u64>,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         column_id: ColumnId,
         request: &FulltextRequest,
         metrics: Option<&mut FulltextIndexApplyMetrics>,
@@ -356,7 +356,7 @@ impl FulltextIndexApplier {
     /// * `metrics` - Optional mutable reference to collect metrics on demand
     pub async fn apply_coarse(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
         row_groups: impl Iterator<Item = (usize, bool)>,
         mut metrics: Option<&mut FulltextIndexApplyMetrics>,
@@ -405,7 +405,7 @@ impl FulltextIndexApplier {
 
     async fn apply_coarse_one_column(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
         column_id: ColumnId,
         terms: &[FulltextTerm],
@@ -440,6 +440,7 @@ impl FulltextIndexApplier {
                 .content_length;
             let reader = CachedBloomFilterIndexBlobReader::new(
                 file_id.file_id(),
+                file_id.version,
                 column_id,
                 Tag::Fulltext,
                 blob_size,
@@ -611,7 +612,7 @@ impl IndexSource {
     /// Returns `None` if the blob is not found.
     async fn blob(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         key: &str,
         file_size_hint: Option<u64>,
         metrics: Option<&mut FulltextIndexApplyMetrics>,
@@ -649,7 +650,7 @@ impl IndexSource {
     /// Returns `None` if the directory is not found.
     async fn dir(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         key: &str,
         file_size_hint: Option<u64>,
         mut metrics: Option<&mut FulltextIndexApplyMetrics>,
@@ -699,7 +700,7 @@ impl IndexSource {
     /// Return reader and whether it is fallbacked to remote store.
     async fn ensure_reader(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
     ) -> Result<(SstPuffinReader, bool)> {
         match self.build_local_cache(file_id, file_size_hint).await {
@@ -711,14 +712,18 @@ impl IndexSource {
 
     async fn build_local_cache(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
     ) -> Result<Option<SstPuffinReader>> {
         let Some(file_cache) = &self.file_cache else {
             return Ok(None);
         };
 
-        let index_key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Puffin);
+        let index_key = IndexKey::new(
+            file_id.region_id(),
+            file_id.file_id(),
+            FileType::Puffin(file_id.version),
+        );
         if file_cache.get(index_key).await.is_none() {
             return Ok(None);
         };
@@ -740,15 +745,23 @@ impl IndexSource {
 
     async fn build_remote(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
     ) -> Result<SstPuffinReader> {
+        let path_factory = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
+
+        // Trigger background download if file cache and file size are available
+        trigger_index_background_download(
+            self.file_cache.as_ref(),
+            &file_id,
+            file_size_hint,
+            &path_factory,
+            &self.remote_store,
+        );
+
         let puffin_manager = self
             .puffin_manager_factory
-            .build(
-                self.remote_store.clone(),
-                RegionFilePathFactory::new(self.table_dir.clone(), self.path_type),
-            )
+            .build(self.remote_store.clone(), path_factory)
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
         let reader = puffin_manager

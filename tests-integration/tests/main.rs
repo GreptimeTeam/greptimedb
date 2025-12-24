@@ -16,6 +16,7 @@
 mod grpc;
 #[macro_use]
 mod http;
+mod jsonbench;
 #[macro_use]
 mod sql;
 #[macro_use]

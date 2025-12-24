@@ -24,7 +24,7 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
-use servers::error::{self, AuthSnafu, OtherSnafu, Result as ServerResult};
+use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
@@ -81,18 +81,6 @@ impl OpenTelemetryProtocolHandler for Instance {
             Arc::new(c)
         } else {
             ctx
-        };
-
-        let _guard = if let Some(limiter) = &self.limiter {
-            Some(
-                limiter
-                    .limit_row_inserts(&requests)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(OtherSnafu)?,
-            )
-        } else {
-            None
         };
 
         // If the user uses the legacy path, it is by default without metric engine.
@@ -190,18 +178,6 @@ impl OpenTelemetryProtocolHandler for Instance {
             pipeline_handler,
         )
         .await?;
-
-        let _guard = if let Some(limiter) = &self.limiter {
-            Some(
-                limiter
-                    .limit_ctx_req(&opt_req)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(OtherSnafu)?,
-            )
-        } else {
-            None
-        };
 
         let mut outputs = vec![];
 

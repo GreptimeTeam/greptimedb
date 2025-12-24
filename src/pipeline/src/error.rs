@@ -19,6 +19,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::timestamp::TimestampNanosecond;
 use snafu::{Location, Snafu};
+use vrl::value::Kind;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -676,8 +677,12 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Vrl script should return `.` in the end"))]
+    #[snafu(display(
+        "Vrl script should return object or array in the end, got `{:?}`",
+        result_kind
+    ))]
     VrlReturnValue {
+        result_kind: Kind,
         #[snafu(implicit)]
         location: Location,
     },
@@ -691,6 +696,25 @@ pub enum Error {
 
     #[snafu(display("Top level value must be map"))]
     ValueMustBeMap {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Array element at index {index} must be an object for one-to-many transformation, got {actual_type}"
+    ))]
+    ArrayElementMustBeObject {
+        index: usize,
+        actual_type: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to transform array element at index {index}: {source}"))]
+    TransformArrayElement {
+        index: usize,
+        #[snafu(source)]
+        source: Box<Error>,
         #[snafu(implicit)]
         location: Location,
     },
@@ -792,7 +816,10 @@ impl ErrorExt for Error {
             | InvalidPipelineVersion { .. }
             | InvalidCustomTimeIndex { .. }
             | TimeIndexMustBeNonNull { .. } => StatusCode::InvalidArguments,
-            MultiPipelineWithDiffSchema { .. } | ValueMustBeMap { .. } => StatusCode::IllegalState,
+            MultiPipelineWithDiffSchema { .. }
+            | ValueMustBeMap { .. }
+            | ArrayElementMustBeObject { .. } => StatusCode::IllegalState,
+            TransformArrayElement { source, .. } => source.status_code(),
             BuildDfLogicalPlan { .. } | RecordBatchLenNotMatch { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             DataFrame { source, .. } => source.status_code(),

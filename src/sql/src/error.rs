@@ -215,6 +215,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid JSON structure setting, reason: {reason}"))]
+    InvalidJsonStructureSetting {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to serialize column default constraint"))]
     SerializeColumnDefaultConstraint {
         #[snafu(implicit)]
@@ -280,6 +287,13 @@ pub enum Error {
 
     #[snafu(display("Failed to set SKIPPING index option"))]
     SetSkippingIndexOption {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to set VECTOR index option"))]
+    SetVectorIndexOption {
         source: datatypes::error::Error,
         #[snafu(implicit)]
         location: Location,
@@ -367,6 +381,7 @@ impl ErrorExt for Error {
 
             InvalidColumnOption { .. }
             | InvalidExprAsOptionValue { .. }
+            | InvalidJsonStructureSetting { .. }
             | InvalidDatabaseName { .. }
             | InvalidDatabaseOption { .. }
             | ColumnTypeMismatch { .. }
@@ -394,7 +409,9 @@ impl ErrorExt for Error {
             ConvertValue { .. } => StatusCode::Unsupported,
 
             PermissionDenied { .. } => StatusCode::PermissionDenied,
-            SetFulltextOption { .. } | SetSkippingIndexOption { .. } => StatusCode::Unexpected,
+            SetFulltextOption { .. }
+            | SetSkippingIndexOption { .. }
+            | SetVectorIndexOption { .. } => StatusCode::Unexpected,
         }
     }
 

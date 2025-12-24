@@ -71,12 +71,6 @@ impl GrpcQueryHandler for Instance {
             .check_permission(ctx.current_user(), PermissionReq::GrpcRequest(&request))
             .context(PermissionSnafu)?;
 
-        let _guard = if let Some(limiter) = &self.limiter {
-            Some(limiter.limit_request(&request).await?)
-        } else {
-            None
-        };
-
         let output = match request {
             Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
             Request::RowInserts(requests) => {
@@ -234,6 +228,11 @@ impl GrpcQueryHandler for Instance {
                     DdlExpr::DropView(_) => {
                         todo!("implemented in the following PR")
                     }
+                    DdlExpr::CommentOn(expr) => {
+                        self.statement_executor
+                            .comment_by_expr(expr, ctx.clone())
+                            .await?
+                    }
                 }
             }
         };
@@ -296,39 +295,15 @@ impl GrpcQueryHandler for Instance {
         mut stream: servers::grpc::flight::PutRecordBatchRequestStream,
         ctx: QueryContextRef,
     ) -> Pin<Box<dyn Stream<Item = Result<DoPutResponse>> + Send>> {
-        // Resolve table once for the stream
         // Clone all necessary data to make it 'static
         let catalog_manager = self.catalog_manager().clone();
         let plugins = self.plugins.clone();
         let inserter = self.inserter.clone();
-        let table_name = stream.table_name().clone();
         let ctx = ctx.clone();
+        let mut table_ref: Option<TableRef> = None;
+        let mut table_checked = false;
 
         Box::pin(try_stream! {
-            plugins
-                .get::<PermissionCheckerRef>()
-                .as_ref()
-                .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
-                .context(PermissionSnafu)?;
-            // Cache for resolved table reference - resolve once and reuse
-            let table_ref = catalog_manager
-                .table(
-                    &table_name.catalog_name,
-                    &table_name.schema_name,
-                    &table_name.table_name,
-                    None,
-                )
-                .await
-                .context(CatalogSnafu)?
-                .with_context(|| TableNotFoundSnafu {
-                    table_name: table_name.to_string(),
-                })?;
-
-            // Check permissions once for the stream
-            let interceptor_ref = plugins.get::<GrpcQueryInterceptorRef<Error>>();
-            let interceptor = interceptor_ref.as_ref();
-            interceptor.pre_bulk_insert(table_ref.clone(), ctx.clone())?;
-
             // Process each request in the stream
             while let Some(request_result) = stream.next().await {
                 let request = request_result.map_err(|e| {
@@ -336,11 +311,45 @@ impl GrpcQueryHandler for Instance {
                     IncompleteGrpcRequestSnafu { err_msg: error_msg }.build()
                 })?;
 
+                // Resolve table and check permissions on first RecordBatch (after schema is received)
+                if !table_checked {
+                    let table_name = &request.table_name;
+
+                    plugins
+                        .get::<PermissionCheckerRef>()
+                        .as_ref()
+                        .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
+                        .context(PermissionSnafu)?;
+
+                    // Resolve table reference
+                    table_ref = Some(
+                        catalog_manager
+                            .table(
+                                &table_name.catalog_name,
+                                &table_name.schema_name,
+                                &table_name.table_name,
+                                None,
+                            )
+                            .await
+                            .context(CatalogSnafu)?
+                            .with_context(|| TableNotFoundSnafu {
+                                table_name: table_name.to_string(),
+                            })?,
+                    );
+
+                    // Check permissions for the table
+                    let interceptor_ref = plugins.get::<GrpcQueryInterceptorRef<Error>>();
+                    let interceptor = interceptor_ref.as_ref();
+                    interceptor.pre_bulk_insert(table_ref.clone().unwrap(), ctx.clone())?;
+
+                    table_checked = true;
+                }
+
                 let request_id = request.request_id;
                 let start = Instant::now();
                 let rows = inserter
                     .handle_bulk_insert(
-                        table_ref.clone(),
+                        table_ref.clone().unwrap(),
                         request.flight_data,
                         request.record_batch,
                         request.schema_bytes,
@@ -397,6 +406,9 @@ fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryConte
             check_and_fill!(expr);
         }
         Expr::DropView(expr) => {
+            check_and_fill!(expr);
+        }
+        Expr::CommentOn(expr) => {
             check_and_fill!(expr);
         }
     }

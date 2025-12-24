@@ -410,8 +410,7 @@ fn sql_value_to_value(
         })?
     } else {
         common_sql::convert::sql_value_to_value(
-            column,
-            &column_schema.data_type,
+            column_schema,
             sql_val,
             timezone,
             None,

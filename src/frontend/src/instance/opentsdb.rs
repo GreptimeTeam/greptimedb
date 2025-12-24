@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_error::ext::BoxedError;
 use common_telemetry::tracing;
-use servers::error::{self as server_error, AuthSnafu, ExecuteGrpcQuerySnafu, OtherSnafu};
+use servers::error::{self as server_error, AuthSnafu, ExecuteGrpcQuerySnafu};
 use servers::opentsdb::codec::DataPoint;
 use servers::opentsdb::data_point_to_grpc_row_insert_requests;
 use servers::query_handler::OpentsdbProtocolHandler;
@@ -40,18 +40,6 @@ impl OpentsdbProtocolHandler for Instance {
             .context(AuthSnafu)?;
 
         let (requests, _) = data_point_to_grpc_row_insert_requests(data_points)?;
-
-        let _guard = if let Some(limiter) = &self.limiter {
-            Some(
-                limiter
-                    .limit_row_inserts(&requests)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(OtherSnafu)?,
-            )
-        } else {
-            None
-        };
 
         // OpenTSDB is single value.
         let output = self

@@ -21,12 +21,14 @@ pub use opendal::raw::{
     Access, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
     RpWrite, oio,
 };
+use opendal::raw::{OpCopy, RpCopy};
 pub use opendal::{Buffer, Error, ErrorKind, Metadata, Result};
 
 pub type MockWriterFactory = Arc<dyn Fn(&str, OpWrite, oio::Writer) -> oio::Writer + Send + Sync>;
 pub type MockReaderFactory = Arc<dyn Fn(&str, OpRead, oio::Reader) -> oio::Reader + Send + Sync>;
 pub type MockListerFactory = Arc<dyn Fn(&str, OpList, oio::Lister) -> oio::Lister + Send + Sync>;
 pub type MockDeleterFactory = Arc<dyn Fn(oio::Deleter) -> oio::Deleter + Send + Sync>;
+pub type CopyInterceptor = Arc<dyn Fn(&str, &str, OpCopy) -> Option<Result<RpCopy>> + Send + Sync>;
 
 #[derive(Builder)]
 pub struct MockLayer {
@@ -38,6 +40,8 @@ pub struct MockLayer {
     lister_factory: Option<MockListerFactory>,
     #[builder(setter(strip_option), default)]
     deleter_factory: Option<MockDeleterFactory>,
+    #[builder(setter(strip_option), default)]
+    copy_interceptor: Option<CopyInterceptor>,
 }
 
 impl Clone for MockLayer {
@@ -47,6 +51,7 @@ impl Clone for MockLayer {
             reader_factory: self.reader_factory.clone(),
             lister_factory: self.lister_factory.clone(),
             deleter_factory: self.deleter_factory.clone(),
+            copy_interceptor: self.copy_interceptor.clone(),
         }
     }
 }
@@ -61,6 +66,7 @@ impl<A: Access> Layer<A> for MockLayer {
             reader_factory: self.reader_factory.clone(),
             lister_factory: self.lister_factory.clone(),
             deleter_factory: self.deleter_factory.clone(),
+            copy_interceptor: self.copy_interceptor.clone(),
         }
     }
 }
@@ -71,6 +77,7 @@ pub struct MockAccessor<A> {
     reader_factory: Option<MockReaderFactory>,
     lister_factory: Option<MockListerFactory>,
     deleter_factory: Option<MockDeleterFactory>,
+    copy_interceptor: Option<CopyInterceptor>,
 }
 
 impl<A: Debug> Debug for MockAccessor<A> {
@@ -213,5 +220,17 @@ impl<A: Access> LayeredAccess for MockAccessor<A> {
                 )
             })
         }
+    }
+
+    async fn copy(&self, from: &str, to: &str, args: OpCopy) -> Result<RpCopy> {
+        let Some(copy_interceptor) = self.copy_interceptor.as_ref() else {
+            return self.inner.copy(from, to, args).await;
+        };
+
+        let Some(result) = copy_interceptor(from, to, args.clone()) else {
+            return self.inner.copy(from, to, args).await;
+        };
+
+        result
     }
 }

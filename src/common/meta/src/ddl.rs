@@ -31,6 +31,7 @@ use crate::region_registry::LeaderRegionRegistryRef;
 pub mod alter_database;
 pub mod alter_logical_tables;
 pub mod alter_table;
+pub mod comment_on;
 pub mod create_database;
 pub mod create_flow;
 pub mod create_logical_tables;

@@ -40,4 +40,8 @@ impl Dialect for GreptimeDbDialect {
     fn supports_filter_during_aggregation(&self) -> bool {
         true
     }
+
+    fn supports_struct_literal(&self) -> bool {
+        true
+    }
 }

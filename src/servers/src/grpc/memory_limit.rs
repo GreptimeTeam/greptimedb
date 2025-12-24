@@ -18,15 +18,15 @@ use futures::future::BoxFuture;
 use tonic::server::NamedService;
 use tower::{Layer, Service};
 
-use crate::request_limiter::RequestMemoryLimiter;
+use crate::request_memory_limiter::ServerMemoryLimiter;
 
 #[derive(Clone)]
 pub struct MemoryLimiterExtensionLayer {
-    limiter: RequestMemoryLimiter,
+    limiter: ServerMemoryLimiter,
 }
 
 impl MemoryLimiterExtensionLayer {
-    pub fn new(limiter: RequestMemoryLimiter) -> Self {
+    pub fn new(limiter: ServerMemoryLimiter) -> Self {
         Self { limiter }
     }
 }
@@ -45,7 +45,7 @@ impl<S> Layer<S> for MemoryLimiterExtensionLayer {
 #[derive(Clone)]
 pub struct MemoryLimiterExtensionService<S> {
     inner: S,
-    limiter: RequestMemoryLimiter,
+    limiter: ServerMemoryLimiter,
 }
 
 impl<S: NamedService> NamedService for MemoryLimiterExtensionService<S> {

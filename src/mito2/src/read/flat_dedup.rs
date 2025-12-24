@@ -15,9 +15,12 @@
 //! Dedup implementation for flat format.
 
 use std::ops::Range;
+use std::sync::Arc;
+use std::time::Instant;
 
 use api::v1::OpType;
 use async_stream::try_stream;
+use common_telemetry::debug;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, BooleanBufferBuilder, UInt8Array, UInt64Array,
     make_comparator,
@@ -36,7 +39,8 @@ use snafu::ResultExt;
 
 use crate::error::{ComputeArrowSnafu, NewRecordBatchSnafu, Result};
 use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
-use crate::read::dedup::DedupMetrics;
+use crate::metrics::MERGE_FILTER_ROWS_TOTAL;
+use crate::read::dedup::{DedupMetrics, DedupMetricsReport};
 use crate::sst::parquet::flat_format::{
     op_type_column_index, primary_key_column_index, time_index_column_index,
 };
@@ -88,15 +92,22 @@ pub struct FlatDedupReader<I, S> {
     stream: I,
     strategy: S,
     metrics: DedupMetrics,
+    /// Optional metrics reporter.
+    metrics_reporter: Option<Arc<dyn DedupMetricsReport>>,
 }
 
 impl<I, S> FlatDedupReader<I, S> {
-    /// Creates a new dedup iterator.
-    pub fn new(stream: I, strategy: S) -> Self {
+    /// Creates a new dedup reader.
+    pub fn new(
+        stream: I,
+        strategy: S,
+        metrics_reporter: Option<Arc<dyn DedupMetricsReport>>,
+    ) -> Self {
         Self {
             stream,
             strategy,
             metrics: DedupMetrics::default(),
+            metrics_reporter,
         }
     }
 }
@@ -108,11 +119,14 @@ impl<I: Stream<Item = Result<RecordBatch>> + Unpin, S: RecordBatchDedupStrategy>
     async fn fetch_next_batch(&mut self) -> Result<Option<RecordBatch>> {
         while let Some(batch) = self.stream.try_next().await? {
             if let Some(batch) = self.strategy.push_batch(batch, &mut self.metrics)? {
+                self.metrics.maybe_report(&self.metrics_reporter);
                 return Ok(Some(batch));
             }
         }
 
-        self.strategy.finish(&mut self.metrics)
+        let result = self.strategy.finish(&mut self.metrics)?;
+        self.metrics.maybe_report(&self.metrics_reporter);
+        Ok(result)
     }
 
     /// Converts the reader into a stream.
@@ -121,6 +135,24 @@ impl<I: Stream<Item = Result<RecordBatch>> + Unpin, S: RecordBatchDedupStrategy>
             while let Some(batch) = self.fetch_next_batch().await? {
                 yield batch;
             }
+        }
+    }
+}
+
+impl<I, S> Drop for FlatDedupReader<I, S> {
+    fn drop(&mut self) {
+        debug!("Flat dedup reader finished, metrics: {:?}", self.metrics);
+
+        MERGE_FILTER_ROWS_TOTAL
+            .with_label_values(&["dedup"])
+            .inc_by(self.metrics.num_unselected_rows as u64);
+        MERGE_FILTER_ROWS_TOTAL
+            .with_label_values(&["delete"])
+            .inc_by(self.metrics.num_deleted_rows as u64);
+
+        // Report any remaining metrics.
+        if let Some(reporter) = &self.metrics_reporter {
+            reporter.report(&mut self.metrics);
         }
     }
 }
@@ -214,6 +246,8 @@ impl RecordBatchDedupStrategy for FlatLastRow {
         batch: RecordBatch,
         metrics: &mut DedupMetrics,
     ) -> Result<Option<RecordBatch>> {
+        let start = Instant::now();
+
         if batch.num_rows() == 0 {
             return Ok(None);
         }
@@ -235,6 +269,7 @@ impl RecordBatchDedupStrategy for FlatLastRow {
             // The batch after dedup is empty.
             // We don't need to update `prev_batch` because they have the same
             // key and timestamp.
+            metrics.dedup_cost += start.elapsed();
             return Ok(None);
         };
 
@@ -246,7 +281,11 @@ impl RecordBatchDedupStrategy for FlatLastRow {
         self.prev_batch = Some(batch_last_row);
 
         // Filters deleted rows at last.
-        maybe_filter_deleted(batch, self.filter_deleted, metrics)
+        let result = maybe_filter_deleted(batch, self.filter_deleted, metrics);
+
+        metrics.dedup_cost += start.elapsed();
+
+        result
     }
 
     fn finish(&mut self, _metrics: &mut DedupMetrics) -> Result<Option<RecordBatch>> {
@@ -275,6 +314,8 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
         batch: RecordBatch,
         metrics: &mut DedupMetrics,
     ) -> Result<Option<RecordBatch>> {
+        let start = Instant::now();
+
         if batch.num_rows() == 0 {
             return Ok(None);
         }
@@ -290,6 +331,7 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
             self.buffer = BatchLastRow::try_new(record_batch);
             self.contains_delete = contains_delete;
 
+            metrics.dedup_cost += start.elapsed();
             return Ok(None);
         };
 
@@ -305,7 +347,9 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
             self.buffer = BatchLastRow::try_new(record_batch);
             self.contains_delete = contains_delete;
 
-            return maybe_filter_deleted(buffer.last_batch, self.filter_deleted, metrics);
+            let result = maybe_filter_deleted(buffer.last_batch, self.filter_deleted, metrics);
+            metrics.dedup_cost += start.elapsed();
+            return result;
         }
 
         // The next batch has duplicated rows.
@@ -332,6 +376,8 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
         self.buffer = BatchLastRow::try_new(record_batch);
         self.contains_delete = contains_delete;
 
+        metrics.dedup_cost += start.elapsed();
+
         Ok(output)
     }
 
@@ -340,7 +386,13 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
             return Ok(None);
         };
 
-        maybe_filter_deleted(buffer.last_batch, self.filter_deleted, metrics)
+        let start = Instant::now();
+
+        let result = maybe_filter_deleted(buffer.last_batch, self.filter_deleted, metrics);
+
+        metrics.dedup_cost += start.elapsed();
+
+        result
     }
 }
 

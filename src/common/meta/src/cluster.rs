@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Display, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::str::FromStr;
 
@@ -60,7 +61,7 @@ pub trait ClusterInfo {
 }
 
 /// The key of [NodeInfo] in the storage. The format is `__meta_cluster_node_info-0-{role}-{node_id}`.
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct NodeInfoKey {
     /// The role of the node. It can be `[Role::Datanode]` or `[Role::Frontend]`.
     pub role: Role,
@@ -135,7 +136,7 @@ pub struct NodeInfo {
     pub hostname: String,
 }
 
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum Role {
     Datanode,
     Frontend,
@@ -238,6 +239,12 @@ impl From<&NodeInfoKey> for Vec<u8> {
             key.node_id
         )
         .into_bytes()
+    }
+}
+
+impl Display for NodeInfoKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}-{}", self.role, self.node_id)
     }
 }
 

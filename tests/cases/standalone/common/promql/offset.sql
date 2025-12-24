@@ -42,13 +42,16 @@ tql eval (1500, 1500, '1s') calculate_rate_offset_total offset -10m;
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 0, '1s') calculate_rate_offset_total offset 10m;
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (0, 0, '1s') calculate_rate_offset_total offset -10m;
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') calculate_rate_offset_total offset 10m;
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') calculate_rate_offset_total offset -10m;
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') rate(calculate_rate_window_total[10m]);
 
 -- SQLNESS SORT_RESULT 3 1

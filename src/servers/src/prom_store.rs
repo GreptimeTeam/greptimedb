@@ -26,7 +26,7 @@ use arrow::datatypes::{Float64Type, TimestampMillisecondType};
 use common_grpc::precision::Precision;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_recordbatch::{RecordBatch, RecordBatches};
-use common_telemetry::tracing;
+use common_telemetry::{tracing, warn};
 use datafusion::dataframe::DataFrame;
 use datafusion::prelude::{Expr, col, lit, regexp_match};
 use datafusion_common::ScalarValue;
@@ -414,6 +414,10 @@ pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertR
 
                 table_data.add_row(one_row);
             }
+        }
+
+        if !series.histograms.is_empty() {
+            warn!("Native histograms are not supported yet, data ignored");
         }
     }
 

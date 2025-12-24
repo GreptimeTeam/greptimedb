@@ -121,7 +121,7 @@ impl FlatSchemaOptions {
 ///
 /// The schema is:
 /// ```text
-/// primary key columns, field columns, time index, __prmary_key, __sequence, __op_type
+/// primary key columns, field columns, time index, __primary_key, __sequence, __op_type
 /// ```
 ///
 /// # Panics

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt::Display;
 use std::net::SocketAddr;
 use std::sync::Mutex as StdMutex;
@@ -20,9 +21,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use auth::UserProviderRef;
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::routing::Route;
 use axum::serve::ListenerExt;
 use axum::{Router, middleware, routing};
 use common_base::Plugins;
@@ -42,7 +44,8 @@ use serde_json::Value;
 use snafu::{ResultExt, ensure};
 use tokio::sync::Mutex;
 use tokio::sync::oneshot::{self, Sender};
-use tower::ServiceBuilder;
+use tonic::codegen::Service;
+use tower::{Layer, ServiceBuilder};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::decompression::RequestDecompressionLayer;
@@ -80,7 +83,7 @@ use crate::query_handler::{
     OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef, PipelineHandlerRef,
     PromStoreProtocolHandlerRef,
 };
-use crate::request_limiter::RequestMemoryLimiter;
+use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::server::Server;
 
 pub mod authorize;
@@ -131,7 +134,7 @@ pub struct HttpServer {
     router: StdMutex<Router>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
-    memory_limiter: RequestMemoryLimiter,
+    memory_limiter: ServerMemoryLimiter,
 
     // plugins
     plugins: Plugins,
@@ -153,9 +156,6 @@ pub struct HttpOptions {
     pub disable_dashboard: bool,
 
     pub body_limit: ReadableSize,
-
-    /// Maximum total memory for all concurrent HTTP request bodies. 0 disables the limit.
-    pub max_total_body_memory: ReadableSize,
 
     /// Validation mode while decoding Prometheus remote write requests.
     pub prom_validation_mode: PromValidationMode,
@@ -201,7 +201,6 @@ impl Default for HttpOptions {
             timeout: Duration::from_secs(0),
             disable_dashboard: false,
             body_limit: DEFAULT_BODY_LIMIT,
-            max_total_body_memory: ReadableSize(0),
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
             prom_validation_mode: PromValidationMode::Strict,
@@ -536,12 +535,12 @@ pub struct GreptimeOptionsConfigState {
     pub greptime_config_options: String,
 }
 
-#[derive(Default)]
 pub struct HttpServerBuilder {
     options: HttpOptions,
     plugins: Plugins,
     user_provider: Option<UserProviderRef>,
     router: Router,
+    memory_limiter: ServerMemoryLimiter,
 }
 
 impl HttpServerBuilder {
@@ -551,7 +550,14 @@ impl HttpServerBuilder {
             plugins: Plugins::default(),
             user_provider: None,
             router: Router::new(),
+            memory_limiter: ServerMemoryLimiter::default(),
         }
+    }
+
+    /// Set a global memory limiter for all server protocols.
+    pub fn with_memory_limiter(mut self, limiter: ServerMemoryLimiter) -> Self {
+        self.memory_limiter = limiter;
+        self
     }
 
     pub fn with_sql_handler(self, sql_handler: ServerSqlQueryHandlerRef) -> Self {
@@ -732,9 +738,21 @@ impl HttpServerBuilder {
         }
     }
 
+    pub fn add_layer<L>(self, layer: L) -> Self
+    where
+        L: Layer<Route> + Clone + Send + Sync + 'static,
+        L::Service: Service<Request> + Clone + Send + Sync + 'static,
+        <L::Service as Service<Request>>::Response: IntoResponse + 'static,
+        <L::Service as Service<Request>>::Error: Into<Infallible> + 'static,
+        <L::Service as Service<Request>>::Future: Send + 'static,
+    {
+        Self {
+            router: self.router.layer(layer),
+            ..self
+        }
+    }
+
     pub fn build(self) -> HttpServer {
-        let memory_limiter =
-            RequestMemoryLimiter::new(self.options.max_total_body_memory.as_bytes() as usize);
         HttpServer {
             options: self.options,
             user_provider: self.user_provider,
@@ -742,7 +760,7 @@ impl HttpServerBuilder {
             plugins: self.plugins,
             router: StdMutex::new(self.router),
             bind_addr: None,
-            memory_limiter,
+            memory_limiter: self.memory_limiter,
         }
     }
 }

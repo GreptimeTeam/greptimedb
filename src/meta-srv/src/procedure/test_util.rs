@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{HeartbeatResponse, MailboxMessage};
 use common_meta::instruction::{
-    DowngradeRegionReply, DowngradeRegionsReply, FlushRegionReply, InstructionReply, SimpleReply,
-    UpgradeRegionReply, UpgradeRegionsReply,
+    DowngradeRegionReply, DowngradeRegionsReply, EnterStagingRegionReply, EnterStagingRegionsReply,
+    FlushRegionReply, InstructionReply, SimpleReply, UpgradeRegionReply, UpgradeRegionsReply,
 };
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::TableRouteValue;
@@ -198,7 +198,7 @@ pub fn new_downgrade_region_reply(
     }
 }
 
-/// Generates a [InstructionReply::UpgradeRegion] reply.
+/// Generates a [InstructionReply::UpgradeRegions] reply.
 pub fn new_upgrade_region_reply(
     id: u64,
     ready: bool,
@@ -219,6 +219,34 @@ pub fn new_upgrade_region_reply(
                     exists,
                     error,
                 }),
+            ))
+            .unwrap(),
+        )),
+    }
+}
+
+/// Generates a [InstructionReply::EnterStagingRegions] reply.
+pub fn new_enter_staging_region_reply(
+    id: u64,
+    region_id: RegionId,
+    ready: bool,
+    exists: bool,
+    error: Option<String>,
+) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::EnterStagingRegions(
+                EnterStagingRegionsReply::new(vec![EnterStagingRegionReply {
+                    region_id,
+                    ready,
+                    exists,
+                    error,
+                }]),
             ))
             .unwrap(),
         )),

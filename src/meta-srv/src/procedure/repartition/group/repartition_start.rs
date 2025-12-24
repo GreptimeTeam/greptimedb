@@ -97,6 +97,17 @@ impl RepartitionStart {
                     .map(|r| (*r).clone())
             })
             .collect::<Result<Vec<_>>>()?;
+        for target_region_route in &target_region_routes {
+            ensure!(
+                target_region_route.leader_peer.is_some(),
+                error::UnexpectedSnafu {
+                    violated: format!(
+                        "Leader peer is not set for region: {}",
+                        target_region_route.region.id
+                    ),
+                }
+            );
+        }
         let central_region = sources[0].region_id;
         let central_region_datanode_id = source_region_routes[0]
             .leader_peer

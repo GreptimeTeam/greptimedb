@@ -65,8 +65,7 @@ impl JaegerQueryHandler for Instance {
         // It's equivalent to `SELECT DISTINCT(service_name) FROM {db}.{trace_table}`.
         Ok(query_trace_table(
             ctx,
-            self.catalog_manager(),
-            self.query_engine(),
+            self,
             vec![SelectExpr::from(col(SERVICE_NAME_COLUMN))],
             vec![],
             vec![],
@@ -107,8 +106,7 @@ impl JaegerQueryHandler for Instance {
         // ```.
         Ok(query_trace_table(
             ctx,
-            self.catalog_manager(),
-            self.query_engine(),
+            self,
             vec![
                 SelectExpr::from(col(SPAN_NAME_COLUMN)),
                 SelectExpr::from(col(SPAN_KIND_COLUMN)),
@@ -160,8 +158,7 @@ impl JaegerQueryHandler for Instance {
 
         Ok(query_trace_table(
             ctx,
-            self.catalog_manager(),
-            self.query_engine(),
+            self,
             selects,
             filters,
             vec![col(TIMESTAMP_COLUMN).sort(false, false)], // Sort by timestamp in descending order.
@@ -220,8 +217,7 @@ impl JaegerQueryHandler for Instance {
         // ```.
         let output = query_trace_table(
             ctx.clone(),
-            self.catalog_manager(),
-            self.query_engine(),
+            self,
             vec![wildcard()],
             filters,
             vec![],
@@ -285,8 +281,7 @@ impl JaegerQueryHandler for Instance {
                 // query all spans
                 Ok(query_trace_table(
                     ctx,
-                    self.catalog_manager(),
-                    self.query_engine(),
+                    self,
                     vec![wildcard()],
                     filters,
                     vec![col(TIMESTAMP_COLUMN).sort(false, false)], // Sort by timestamp in descending order.
@@ -303,8 +298,7 @@ impl JaegerQueryHandler for Instance {
 #[allow(clippy::too_many_arguments)]
 async fn query_trace_table(
     ctx: QueryContextRef,
-    catalog_manager: &CatalogManagerRef,
-    query_engine: &QueryEngineRef,
+    instance: &Instance,
     selects: Vec<SelectExpr>,
     filters: Vec<Expr>,
     sorts: Vec<SortExpr>,
@@ -334,7 +328,8 @@ async fn query_trace_table(
         }
     };
 
-    let table = catalog_manager
+    let table = instance
+        .catalog_manager()
         .table(
             ctx.current_catalog(),
             &ctx.current_schema(),
@@ -367,7 +362,7 @@ async fn query_trace_table(
         .map(|s| format!("\"{}\"", s))
         .collect::<HashSet<String>>();
 
-    let df_context = create_df_context(query_engine)?;
+    let df_context = create_df_context(instance.query_engine())?;
 
     let dataframe = df_context
         .read_table(Arc::new(DfTableProviderAdapter::new(table)))

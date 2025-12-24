@@ -135,6 +135,14 @@ impl Scanner {
         }
     }
 
+    pub(crate) fn index_ids(&self) -> Vec<crate::sst::file::RegionIndexId> {
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.input().index_ids(),
+            Scanner::Unordered(unordered_scan) => unordered_scan.input().index_ids(),
+            Scanner::Series(series_scan) => series_scan.input().index_ids(),
+        }
+    }
+
     /// Sets the target partitions for the scanner. It can controls the parallelism of the scanner.
     pub(crate) fn set_target_partitions(&mut self, target_partitions: usize) {
         use store_api::region_engine::{PrepareRequest, RegionScanner};
@@ -1129,6 +1137,12 @@ impl ScanInput {
         self.files.len()
     }
 
+    /// Gets the file handle from a row group index.
+    pub(crate) fn file_from_index(&self, index: RowGroupIndex) -> &FileHandle {
+        let file_index = index.index - self.num_memtables();
+        &self.files[file_index]
+    }
+
     pub fn region_metadata(&self) -> &RegionMetadataRef {
         self.mapper.metadata()
     }
@@ -1161,6 +1175,10 @@ impl ScanInput {
     /// Returns SST file ids to scan.
     pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::RegionFileId> {
         self.files.iter().map(|file| file.file_id()).collect()
+    }
+
+    pub(crate) fn index_ids(&self) -> Vec<crate::sst::file::RegionIndexId> {
+        self.files.iter().map(|file| file.index_id()).collect()
     }
 }
 

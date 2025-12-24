@@ -1414,14 +1414,14 @@ impl PromPlanner {
                 .clone()
                 .gt_eq(DfExpr::Literal(
                     ScalarValue::TimestampMillisecond(
-                        Some(self.ctx.start + offset_duration - self.ctx.lookback_delta - range),
+                        Some(self.ctx.start - offset_duration - self.ctx.lookback_delta - range),
                         None,
                     ),
                     None,
                 ))
                 .and(time_index_expr.lt_eq(DfExpr::Literal(
                     ScalarValue::TimestampMillisecond(
-                        Some(self.ctx.end + offset_duration + self.ctx.lookback_delta),
+                        Some(self.ctx.end - offset_duration + self.ctx.lookback_delta),
                         None,
                     ),
                     None,
@@ -1437,14 +1437,14 @@ impl PromPlanner {
                     .clone()
                     .gt_eq(DfExpr::Literal(
                         ScalarValue::TimestampMillisecond(
-                            Some(timestamp + offset_duration - lookback_delta - range),
+                            Some(timestamp - offset_duration - lookback_delta - range),
                             None,
                         ),
                         None,
                     ))
                     .and(time_index_expr.clone().lt_eq(DfExpr::Literal(
                         ScalarValue::TimestampMillisecond(
-                            Some(timestamp + offset_duration + lookback_delta),
+                            Some(timestamp - offset_duration + lookback_delta),
                             None,
                         ),
                         None,

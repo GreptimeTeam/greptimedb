@@ -12,16 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
-use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use common_config::file_watcher::{FileWatcherBuilder, FileWatcherConfig};
 use common_telemetry::{info, warn};
-use notify::{EventKind, RecursiveMode, Watcher};
-use snafu::{ResultExt, ensure};
+use snafu::ResultExt;
 
-use crate::error::{FileWatchSnafu, InvalidConfigSnafu, Result};
+use crate::error::{FileWatchSnafu, Result};
 use crate::user_provider::{UserInfoMap, authenticate_with_credential, load_credential_from_file};
 use crate::{Identity, Password, UserInfoRef, UserProvider};
 
@@ -41,61 +39,36 @@ impl WatchFileUserProvider {
     pub fn new(filepath: &str) -> Result<Self> {
         let credential = load_credential_from_file(filepath)?;
         let users = Arc::new(Mutex::new(credential));
-        let this = WatchFileUserProvider {
-            users: users.clone(),
-        };
 
-        let (tx, rx) = channel::<notify::Result<notify::Event>>();
-        let mut debouncer =
-            notify::recommended_watcher(tx).context(FileWatchSnafu { path: "<none>" })?;
-        let mut dir = Path::new(filepath).to_path_buf();
-        ensure!(
-            dir.pop(),
-            InvalidConfigSnafu {
-                value: filepath,
-                msg: "UserProvider path must be a file path",
-            }
-        );
-        debouncer
-            .watch(&dir, RecursiveMode::NonRecursive)
-            .context(FileWatchSnafu { path: filepath })?;
+        let users_clone = users.clone();
+        let filepath_owned = filepath.to_string();
 
-        let filepath = filepath.to_string();
-        std::thread::spawn(move || {
-            let filename = Path::new(&filepath).file_name();
-            let _hold = debouncer;
-            while let Ok(res) = rx.recv() {
-                if let Ok(event) = res {
-                    let is_this_file = event.paths.iter().any(|p| p.file_name() == filename);
-                    let is_relevant_event = matches!(
-                        event.kind,
-                        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+        FileWatcherBuilder::new()
+            .watch_path(filepath)
+            .context(FileWatchSnafu)?
+            .config(FileWatcherConfig::new())
+            .spawn(move || match load_credential_from_file(&filepath_owned) {
+                Ok(credential) => {
+                    let mut users = users_clone.lock().expect("users credential must be valid");
+                    #[cfg(not(test))]
+                    info!("User provider file {} reloaded", &filepath_owned);
+                    #[cfg(test)]
+                    info!(
+                        "User provider file {} reloaded: {:?}",
+                        &filepath_owned, credential
                     );
-                    if is_this_file && is_relevant_event {
-                        info!(?event.kind, "User provider file {} changed", &filepath);
-                        match load_credential_from_file(&filepath) {
-                            Ok(credential) => {
-                                let mut users =
-                                    users.lock().expect("users credential must be valid");
-                                #[cfg(not(test))]
-                                info!("User provider file {filepath} reloaded");
-                                #[cfg(test)]
-                                info!("User provider file {filepath} reloaded: {credential:?}");
-                                *users = credential;
-                            }
-                            Err(err) => {
-                                warn!(
-                                    ?err,
-                                    "Fail to load credential from file {filepath}; keep the old one",
-                                )
-                            }
-                        }
-                    }
+                    *users = credential;
                 }
-            }
-        });
+                Err(err) => {
+                    warn!(
+                        ?err,
+                        "Fail to load credential from file {}; keep the old one", &filepath_owned
+                    )
+                }
+            })
+            .context(FileWatchSnafu)?;
 
-        Ok(this)
+        Ok(WatchFileUserProvider { users })
     }
 }
 

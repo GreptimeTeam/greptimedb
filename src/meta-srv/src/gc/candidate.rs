@@ -88,7 +88,8 @@ impl GcScheduler {
 
                 // Skip regions that are in cooldown period
                 if let Some(gc_info) = tracker.get(&region_stat.id)
-                    && now.duration_since(gc_info.last_gc_time) < self.config.gc_cooldown_period
+                    && now.saturating_duration_since(gc_info.last_gc_time)
+                        < self.config.gc_cooldown_period
                 {
                     debug!("Skipping region {} due to cooldown", region_stat.id);
                     continue;

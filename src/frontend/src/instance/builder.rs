@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
@@ -48,7 +49,6 @@ use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
 use crate::instance::Instance;
 use crate::instance::region_query::FrontendRegionQueryHandler;
-use crate::limiter::Limiter;
 
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
@@ -85,6 +85,33 @@ impl FrontendBuilder {
             procedure_executor,
             process_manager,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_test(
+        options: &FrontendOptions,
+        meta_client: meta_client::MetaClientRef,
+    ) -> Self {
+        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+
+        let layered_cache_registry = Arc::new(
+            common_meta::cache::LayeredCacheRegistryBuilder::default()
+                .add_cache_registry(cache::build_fundamental_cache_registry(kv_backend.clone()))
+                .build(),
+        );
+
+        Self::new(
+            options.clone(),
+            kv_backend,
+            layered_cache_registry,
+            catalog::memory::MemoryCatalogManager::with_default_setup(),
+            Arc::new(client::client_manager::NodeClients::default()),
+            meta_client,
+            Arc::new(catalog::process_manager::ProcessManager::new(
+                "".to_string(),
+                None,
+            )),
+        )
     }
 
     pub fn with_local_cache_invalidator(self, cache_invalidator: CacheInvalidatorRef) -> Self {
@@ -220,14 +247,6 @@ impl FrontendBuilder {
             self.options.event_recorder.ttl,
         ))));
 
-        // Create the limiter if the max_in_flight_write_bytes is set.
-        let limiter = self
-            .options
-            .max_in_flight_write_bytes
-            .map(|max_in_flight_write_bytes| {
-                Arc::new(Limiter::new(max_in_flight_write_bytes.as_bytes() as usize))
-            });
-
         Ok(Instance {
             catalog_manager: self.catalog_manager,
             pipeline_operator,
@@ -238,10 +257,10 @@ impl FrontendBuilder {
             deleter,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
             event_recorder: Some(event_recorder),
-            limiter,
             process_manager,
             otlp_metrics_table_legacy_cache: DashMap::new(),
             slow_query_options: self.options.slow_query.clone(),
+            suspend: Arc::new(AtomicBool::new(false)),
         })
     }
 }

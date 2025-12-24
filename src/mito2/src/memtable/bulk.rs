@@ -668,10 +668,10 @@ impl BulkMemtable {
 }
 
 /// Iterator builder for bulk range
-struct BulkRangeIterBuilder {
-    part: BulkPart,
-    context: Arc<BulkIterContext>,
-    sequence: Option<SequenceRange>,
+pub struct BulkRangeIterBuilder {
+    pub part: BulkPart,
+    pub context: Arc<BulkIterContext>,
+    pub sequence: Option<SequenceRange>,
 }
 
 impl IterBuilder for BulkRangeIterBuilder {
@@ -1188,7 +1188,6 @@ impl MemtableBuilder for BulkMemtableBuilder {
 
 #[cfg(test)]
 mod tests {
-
     use mito_codec::row_converter::build_primary_key_codec;
 
     use super::*;

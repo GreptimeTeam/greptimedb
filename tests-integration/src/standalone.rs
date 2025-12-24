@@ -259,9 +259,8 @@ impl GreptimeDbStandaloneBuilder {
         let grpc_handler = instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;
         let weak_grpc_handler = Arc::downgrade(&grpc_handler);
         frontend_instance_handler
-            .lock()
-            .unwrap()
-            .replace(weak_grpc_handler);
+            .set_handler(weak_grpc_handler)
+            .await;
 
         let flow_streaming_engine = flownode.flow_engine().streaming_engine();
         let invoker = flow::FrontendInvoker::build_from(

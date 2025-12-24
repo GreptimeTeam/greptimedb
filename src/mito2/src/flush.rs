@@ -36,8 +36,8 @@ use crate::access_layer::{
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
-    Error, FlushRegionSnafu, InvalidPartitionExprSnafu, JoinSnafu, RegionClosedSnafu,
-    RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+    Error, FlushRegionSnafu, JoinSnafu, RegionClosedSnafu, RegionDroppedSnafu,
+    RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::{
@@ -54,7 +54,7 @@ use crate::read::merge::MergeReaderBuilder;
 use crate::read::{FlatSource, Source};
 use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
-use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
+use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState, parse_partition_expr};
 use crate::request::{
     BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderBulkRequest,
     SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
@@ -252,6 +252,10 @@ pub(crate) struct RegionFlushTask {
     pub(crate) flush_semaphore: Arc<Semaphore>,
     /// Whether the region is in staging mode.
     pub(crate) is_staging: bool,
+    /// Partition expression of the region.
+    ///
+    /// This is used to generate the file meta.
+    pub(crate) partition_expr: Option<String>,
 }
 
 impl RegionFlushTask {
@@ -441,14 +445,8 @@ impl RegionFlushTask {
         let mut file_metas = Vec::with_capacity(memtables.len());
         let mut flushed_bytes = 0;
         let mut series_count = 0;
-        // Convert partition expression once outside the map
-        let partition_expr = match &version.metadata.partition_expr {
-            None => None,
-            Some(json_expr) if json_expr.is_empty() => None,
-            Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                .with_context(|_| InvalidPartitionExprSnafu { expr: json_str })?,
-        };
         let mut flush_metrics = Metrics::new(WriteType::Flush);
+        let partition_expr = parse_partition_expr(self.partition_expr.as_deref())?;
         for mem in memtables {
             if mem.is_empty() {
                 // Skip empty memtables.
@@ -640,10 +638,11 @@ impl RegionFlushTask {
             time_range: sst_info.time_range,
             level: 0,
             file_size: sst_info.file_size,
+            max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
             available_indexes: sst_info.index_metadata.build_available_indexes(),
             indexes: sst_info.index_metadata.build_indexes(),
             index_file_size: sst_info.index_metadata.file_size,
-            index_file_id: None,
+            index_version: 0,
             num_rows: sst_info.num_rows as u64,
             num_row_groups: sst_info.num_row_groups,
             sequence: NonZeroU64::new(max_sequence),
@@ -730,11 +729,13 @@ async fn memtable_source(mem_ranges: MemtableRanges, options: &RegionOptions) ->
             // dedup according to merge mode
             match options.merge_mode.unwrap_or(MergeMode::LastRow) {
                 MergeMode::LastRow => {
-                    Box::new(DedupReader::new(merge_reader, LastRow::new(false))) as _
+                    Box::new(DedupReader::new(merge_reader, LastRow::new(false), None)) as _
                 }
-                MergeMode::LastNonNull => {
-                    Box::new(DedupReader::new(merge_reader, LastNonNull::new(false))) as _
-                }
+                MergeMode::LastNonNull => Box::new(DedupReader::new(
+                    merge_reader,
+                    LastNonNull::new(false),
+                    None,
+                )) as _,
             }
         };
         Source::Reader(maybe_dedup)
@@ -771,7 +772,12 @@ fn memtable_flat_sources(
             let iter = only_range.build_record_batch_iter(None)?;
             // Dedup according to append mode and merge mode.
             // Even single range may have duplicate rows.
-            let iter = maybe_dedup_one(options, field_column_start, iter);
+            let iter = maybe_dedup_one(
+                options.append_mode,
+                options.merge_mode(),
+                field_column_start,
+                iter,
+            );
             flat_sources.sources.push(FlatSource::Iter(iter));
         };
     } else {
@@ -793,7 +799,8 @@ fn memtable_flat_sources(
             if last_iter_rows > min_flush_rows {
                 let maybe_dedup = merge_and_dedup(
                     &schema,
-                    options,
+                    options.append_mode,
+                    options.merge_mode(),
                     field_column_start,
                     std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges)),
                 )?;
@@ -805,7 +812,13 @@ fn memtable_flat_sources(
 
         // Handle remaining iters.
         if !input_iters.is_empty() {
-            let maybe_dedup = merge_and_dedup(&schema, options, field_column_start, input_iters)?;
+            let maybe_dedup = merge_and_dedup(
+                &schema,
+                options.append_mode,
+                options.merge_mode(),
+                field_column_start,
+                input_iters,
+            )?;
 
             flat_sources.sources.push(FlatSource::Iter(maybe_dedup));
         }
@@ -814,19 +827,64 @@ fn memtable_flat_sources(
     Ok(flat_sources)
 }
 
-fn merge_and_dedup(
+/// Merges multiple record batch iterators and applies deduplication based on the specified mode.
+///
+/// This function is used during the flush process to combine data from multiple memtable ranges
+/// into a single stream while handling duplicate records according to the configured merge strategy.
+///
+/// # Arguments
+///
+/// * `schema` - The Arrow schema reference that defines the structure of the record batches
+/// * `append_mode` - When true, no deduplication is performed and all records are preserved.
+///                  This is used for append-only workloads where duplicate handling is not required.
+/// * `merge_mode` - The strategy used for deduplication when not in append mode:
+///   - `MergeMode::LastRow`: Keeps the last record for each primary key
+///   - `MergeMode::LastNonNull`: Keeps the last non-null values for each field
+/// * `field_column_start` - The starting column index for fields in the record batch.
+///                          Used when `MergeMode::LastNonNull` to identify which columns
+///                          contain field values versus primary key columns.
+/// * `input_iters` - A vector of record batch iterators to be merged and deduplicated
+///
+/// # Returns
+///
+/// Returns a boxed record batch iterator that yields the merged and potentially deduplicated
+/// record batches.
+///
+/// # Behavior
+///
+/// 1. Creates a `FlatMergeIterator` to merge all input iterators in sorted order based on
+///    primary key and timestamp
+/// 2. If `append_mode` is true, returns the merge iterator directly without deduplication
+/// 3. If `append_mode` is false, wraps the merge iterator with a `FlatDedupIterator` that
+///    applies the specified merge mode:
+///    - `LastRow`: Removes duplicate rows, keeping only the last one
+///    - `LastNonNull`: Removes duplicates but preserves the last non-null value for each field
+///
+/// # Examples
+///
+/// ```ignore
+/// let merged_iter = merge_and_dedup(
+///     &schema,
+///     false,  // not append mode, apply dedup
+///     MergeMode::LastRow,
+///     2,  // fields start at column 2 after primary key columns
+///     vec![iter1, iter2, iter3],
+/// )?;
+/// ```
+pub fn merge_and_dedup(
     schema: &SchemaRef,
-    options: &RegionOptions,
+    append_mode: bool,
+    merge_mode: MergeMode,
     field_column_start: usize,
     input_iters: Vec<BoxedRecordBatchIterator>,
 ) -> Result<BoxedRecordBatchIterator> {
     let merge_iter = FlatMergeIterator::new(schema.clone(), input_iters, DEFAULT_READ_BATCH_SIZE)?;
-    let maybe_dedup = if options.append_mode {
+    let maybe_dedup = if append_mode {
         // No dedup in append mode
         Box::new(merge_iter) as _
     } else {
         // Dedup according to merge mode.
-        match options.merge_mode() {
+        match merge_mode {
             MergeMode::LastRow => {
                 Box::new(FlatDedupIterator::new(merge_iter, FlatLastRow::new(false))) as _
             }
@@ -839,17 +897,18 @@ fn merge_and_dedup(
     Ok(maybe_dedup)
 }
 
-fn maybe_dedup_one(
-    options: &RegionOptions,
+pub fn maybe_dedup_one(
+    append_mode: bool,
+    merge_mode: MergeMode,
     field_column_start: usize,
     input_iter: BoxedRecordBatchIterator,
 ) -> BoxedRecordBatchIterator {
-    if options.append_mode {
+    if append_mode {
         // No dedup in append mode
         input_iter
     } else {
         // Dedup according to merge mode.
-        match options.merge_mode() {
+        match merge_mode {
             MergeMode::LastRow => {
                 Box::new(FlatDedupIterator::new(input_iter, FlatLastRow::new(false)))
             }
@@ -1272,6 +1331,7 @@ mod tests {
             index_options: IndexOptions::default(),
             flush_semaphore: Arc::new(Semaphore::new(2)),
             is_staging: false,
+            partition_expr: None,
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler
@@ -1315,6 +1375,7 @@ mod tests {
                 index_options: IndexOptions::default(),
                 flush_semaphore: Arc::new(Semaphore::new(2)),
                 is_staging: false,
+                partition_expr: None,
             })
             .collect();
         // Schedule first task.
@@ -1507,6 +1568,7 @@ mod tests {
                 index_options: IndexOptions::default(),
                 flush_semaphore: Arc::new(Semaphore::new(2)),
                 is_staging: false,
+                partition_expr: None,
             })
             .collect();
         // Schedule first task.

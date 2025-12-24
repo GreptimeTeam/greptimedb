@@ -46,6 +46,22 @@ pub enum OutputData {
     Stream(SendableRecordBatchStream),
 }
 
+impl OutputData {
+    /// Consume the data to pretty printed string.
+    pub async fn pretty_print(self) -> String {
+        match self {
+            OutputData::AffectedRows(x) => {
+                format!("Affected Rows: {x}")
+            }
+            OutputData::RecordBatches(x) => x.pretty_print().unwrap_or_else(|e| e.to_string()),
+            OutputData::Stream(x) => common_recordbatch::util::collect_batches(x)
+                .await
+                .and_then(|x| x.pretty_print())
+                .unwrap_or_else(|e| e.to_string()),
+        }
+    }
+}
+
 /// OutputMeta stores meta information produced/generated during the execution
 #[derive(Debug, Default)]
 pub struct OutputMeta {

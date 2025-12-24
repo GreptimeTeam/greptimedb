@@ -508,5 +508,6 @@ fn mysql_error_kind(status_code: &StatusCode) -> ErrorKind {
         StatusCode::FlowNotFound => ErrorKind::ER_NO_SUCH_TABLE,
         StatusCode::TriggerAlreadyExists => ErrorKind::ER_TABLE_EXISTS_ERROR,
         StatusCode::TriggerNotFound => ErrorKind::ER_NO_SUCH_TABLE,
+        StatusCode::Suspended => ErrorKind::ER_SERVER_SHUTDOWN,
     }
 }

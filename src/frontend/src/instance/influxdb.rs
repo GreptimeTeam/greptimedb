@@ -22,7 +22,7 @@ use common_error::ext::BoxedError;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use servers::error::{
-    AuthSnafu, CatalogSnafu, Error, OtherSnafu, TimestampOverflowSnafu, UnexpectedResultSnafu,
+    AuthSnafu, CatalogSnafu, Error, TimestampOverflowSnafu, UnexpectedResultSnafu,
 };
 use servers::influxdb::InfluxdbRequest;
 use servers::interceptor::{LineProtocolInterceptor, LineProtocolInterceptorRef};
@@ -58,18 +58,6 @@ impl InfluxdbLineProtocolHandler for Instance {
         let requests = interceptor_ref
             .post_lines_conversion(requests, ctx.clone())
             .await?;
-
-        let _guard = if let Some(limiter) = &self.limiter {
-            Some(
-                limiter
-                    .limit_row_inserts(&requests)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(OtherSnafu)?,
-            )
-        } else {
-            None
-        };
 
         self.handle_influx_row_inserts(requests, ctx)
             .await

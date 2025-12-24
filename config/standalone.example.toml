@@ -6,6 +6,16 @@ default_timezone = "UTC"
 ## @toml2docs:none-default
 default_column_prefix = "greptime"
 
+## Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
+## Set to 0 to disable the limit. Default: "0" (unlimited)
+## @toml2docs:none-default
+#+ max_in_flight_write_bytes = "1GB"
+
+## Policy when write bytes quota is exhausted.
+## Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"
+## @toml2docs:none-default
+#+ write_bytes_exhausted_policy = "wait"
+
 ## Initialize all regions in the background during the startup.
 ## By default, it provides services after all regions have been initialized.
 init_regions_in_background = false
@@ -21,10 +31,6 @@ max_concurrent_queries = 0
 
 ## Enable telemetry to collect anonymous usage data. Enabled by default.
 #+ enable_telemetry = true
-
-## The maximum in-flight write bytes.
-## @toml2docs:none-default
-#+ max_in_flight_write_bytes = "500MB"
 
 ## The runtime options.
 #+ [runtime]
@@ -43,10 +49,6 @@ timeout = "0s"
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
 ## Set to 0 to disable limit.
 body_limit = "64MB"
-## Maximum total memory for all concurrent HTTP request bodies.
-## Set to 0 to disable the limit. Default: "0" (unlimited)
-## @toml2docs:none-default
-#+ max_total_body_memory = "1GB"
 ## HTTP CORS support, it's turned on by default
 ## This allows browser to access http APIs without CORS restrictions
 enable_cors = true
@@ -67,10 +69,6 @@ prom_validation_mode = "strict"
 bind_addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
-## Maximum total memory for all concurrent gRPC request messages.
-## Set to 0 to disable the limit. Default: "0" (unlimited)
-## @toml2docs:none-default
-#+ max_total_message_memory = "1GB"
 ## The maximum connection age for gRPC connection.
 ## The value can be a human-readable time string. For example: `10m` for ten minutes or `1h` for one hour.
 ## Refer to https://grpc.io/docs/guides/keepalive/ for more details.
@@ -230,6 +228,14 @@ recovery_parallelism = 2
 ## **It's only used when the provider is `kafka`**.
 broker_endpoints = ["127.0.0.1:9092"]
 
+## The connect timeout for kafka client.
+## **It's only used when the provider is `kafka`**.
+#+ connect_timeout = "3s"
+
+## The timeout for kafka client.
+## **It's only used when the provider is `kafka`**.
+#+ timeout = "3s"
+
 ## Automatically create topics for WAL.
 ## Set to `true` to automatically create topics for WAL.
 ## Otherwise, use topics named `topic_name_prefix_[0..num_topics)`
@@ -332,6 +338,7 @@ max_running_procedures = 128
 # endpoint = "https://s3.amazonaws.com"
 # region = "us-west-2"
 # enable_virtual_host_style = false
+# disable_ec2_metadata = false
 
 # Example of using Oss as the storage.
 # [storage]
@@ -387,18 +394,6 @@ data_home = "./greptimedb_data"
 ## - `Azblob`: the data is stored in the Azure Blob Storage.
 ## - `Oss`: the data is stored in the Aliyun OSS.
 type = "File"
-
-## Whether to enable read cache. If not set, the read cache will be enabled by default when using object storage.
-#+ enable_read_cache = true
-
-## Read cache configuration for object storage such as 'S3' etc, it's configured by default when using object storage. It is recommended to configure it when using object storage for better performance.
-## A local file directory, defaults to `{data_home}`. An empty string means disabling.
-## @toml2docs:none-default
-#+ cache_path = ""
-
-## The local file cache capacity in bytes. If your disk space is sufficient, it is recommended to set it larger.
-## @toml2docs:none-default
-cache_capacity = "5GiB"
 
 ## The S3 bucket name.
 ## **It's only used when the storage type is `S3`, `Oss` and `Gcs`**.
@@ -546,6 +541,15 @@ compress_manifest = false
 ## @toml2docs:none-default="Auto"
 #+ max_background_purges = 8
 
+## Memory budget for compaction tasks. Setting it to 0 or "unlimited" disables the limit.
+## @toml2docs:none-default="0"
+#+ experimental_compaction_memory_limit = "0"
+
+## Behavior when compaction cannot acquire memory from the budget.
+## Options: "wait" (default, 10s), "wait(<duration>)", "fail"
+## @toml2docs:none-default="wait"
+#+ experimental_compaction_on_exhausted = "wait"
+
 ## Interval to auto flush a region if it has not flushed yet.
 auto_flush_interval = "1h"
 
@@ -600,6 +604,13 @@ preload_index_cache = true
 ## Must be between 0 and 100 (exclusive). For example, with a 5GiB write cache and 20% allocation,
 ## 1GiB is reserved for index files and 4GiB for data files.
 index_cache_percent = 20
+
+## Enable refilling cache on read operations (default: true).
+## When disabled, cache refilling on read won't happen.
+enable_refill_cache_on_read = true
+
+## Capacity for manifest cache (default: 256MB).
+manifest_cache_size = "256MB"
 
 ## Buffer size for SST writing.
 sst_write_buffer_size = "8MB"

@@ -82,6 +82,18 @@ impl From<f64> for JsonNumber {
     }
 }
 
+impl From<Number> for JsonNumber {
+    fn from(n: Number) -> Self {
+        if let Some(i) = n.as_i64() {
+            i.into()
+        } else if let Some(i) = n.as_u64() {
+            i.into()
+        } else {
+            n.as_f64().unwrap_or(f64::NAN).into()
+        }
+    }
+}
+
 impl Display for JsonNumber {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -109,7 +121,28 @@ pub enum JsonVariant {
 }
 
 impl JsonVariant {
-    fn native_type(&self) -> JsonNativeType {
+    pub(crate) fn as_i64(&self) -> Option<i64> {
+        match self {
+            JsonVariant::Number(n) => n.as_i64(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_u64(&self) -> Option<u64> {
+        match self {
+            JsonVariant::Number(n) => n.as_u64(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_f64(&self) -> Option<f64> {
+        match self {
+            JsonVariant::Number(n) => Some(n.as_f64()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn native_type(&self) -> JsonNativeType {
         match self {
             JsonVariant::Null => JsonNativeType::Null,
             JsonVariant::Bool(_) => JsonNativeType::Bool,
@@ -205,6 +238,32 @@ impl<K: Into<String>, V: Into<JsonVariant>, const N: usize> From<[(K, V); N]> fo
     }
 }
 
+impl From<serde_json::Value> for JsonVariant {
+    fn from(v: serde_json::Value) -> Self {
+        fn helper(v: serde_json::Value) -> JsonVariant {
+            match v {
+                serde_json::Value::Null => JsonVariant::Null,
+                serde_json::Value::Bool(b) => b.into(),
+                serde_json::Value::Number(n) => n.into(),
+                serde_json::Value::String(s) => s.into(),
+                serde_json::Value::Array(array) => {
+                    JsonVariant::Array(array.into_iter().map(helper).collect())
+                }
+                serde_json::Value::Object(object) => {
+                    JsonVariant::Object(object.into_iter().map(|(k, v)| (k, helper(v))).collect())
+                }
+            }
+        }
+        helper(v)
+    }
+}
+
+impl From<BTreeMap<String, JsonVariant>> for JsonVariant {
+    fn from(v: BTreeMap<String, JsonVariant>) -> Self {
+        Self::Object(v)
+    }
+}
+
 impl Display for JsonVariant {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -277,24 +336,11 @@ impl JsonValue {
     }
 
     pub(crate) fn as_i64(&self) -> Option<i64> {
-        match self.json_variant {
-            JsonVariant::Number(n) => n.as_i64(),
-            _ => None,
-        }
+        self.json_variant.as_i64()
     }
 
     pub(crate) fn as_u64(&self) -> Option<u64> {
-        match self.json_variant {
-            JsonVariant::Number(n) => n.as_u64(),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn as_f64(&self) -> Option<f64> {
-        match self.json_variant {
-            JsonVariant::Number(n) => Some(n.as_f64()),
-            _ => None,
-        }
+        self.json_variant.as_u64()
     }
 
     pub(crate) fn as_f64_lossy(&self) -> Option<f64> {

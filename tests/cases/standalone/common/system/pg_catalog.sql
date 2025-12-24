@@ -133,6 +133,64 @@ where relnamespace in (
 );
 
 -- SQLNESS PROTOCOL POSTGRES
+SELECT
+    CASE WHEN
+            quote_ident(table_schema) IN (
+            SELECT
+            CASE WHEN trim(s[i]) = '"$user"' THEN user ELSE trim(s[i]) END
+            FROM
+            generate_series(
+                array_lower(string_to_array(current_setting('search_path'),','),1),
+                array_upper(string_to_array(current_setting('search_path'),','),1)
+            ) as i,
+            string_to_array(current_setting('search_path'),',') s
+            )
+        THEN quote_ident(table_name)
+        ELSE quote_ident(table_schema) || '.' || quote_ident(table_name)
+    END AS "table"
+    FROM information_schema.tables
+    WHERE quote_ident(table_schema) NOT IN ('information_schema',
+                                'pg_catalog',
+                                '_timescaledb_cache',
+                                '_timescaledb_catalog',
+                                '_timescaledb_internal',
+                                '_timescaledb_config',
+                                'timescaledb_information',
+                                'timescaledb_experimental')
+    ORDER BY CASE WHEN
+            quote_ident(table_schema) IN (
+            SELECT
+            CASE WHEN trim(s[i]) = '"$user"' THEN user ELSE trim(s[i]) END
+            FROM
+            generate_series(
+                array_lower(string_to_array(current_setting('search_path'),','),1),
+                array_upper(string_to_array(current_setting('search_path'),','),1)
+            ) as i,
+            string_to_array(current_setting('search_path'),',') s
+            ) THEN 0 ELSE 1 END, 1;
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT quote_ident(column_name) AS "column", data_type AS "type"
+    FROM information_schema.columns
+    WHERE
+        CASE WHEN array_length(parse_ident('my_db.foo'),1) = 2
+        THEN quote_ident(table_schema) = (parse_ident('my_db.foo'))[1]
+            AND quote_ident(table_name) = (parse_ident('my_db.foo'))[2]
+        ELSE quote_ident(table_name) = 'my_db.foo'
+            AND
+            quote_ident(table_schema) IN (
+            SELECT
+            CASE WHEN trim(s[i]) = '"$user"' THEN user ELSE trim(s[i]) END
+            FROM
+            generate_series(
+                array_lower(string_to_array(current_setting('search_path'),','),1),
+                array_upper(string_to_array(current_setting('search_path'),','),1)
+            ) as i,
+            string_to_array(current_setting('search_path'),',') s
+            )
+        END;
+
+-- SQLNESS PROTOCOL POSTGRES
 -- SQLNESS REPLACE (\d+\s*) OID
 select relnamespace, relname, relkind
 from pg_catalog.pg_class
@@ -192,12 +250,11 @@ SELECT
 	oid
 	,nspname
 	,nspname = ANY (current_schemas(true)) AS is_on_search_path
-	
+
 	    ,obj_description(oid, 'pg_namespace') AS comment
-	
+
 FROM pg_namespace; SELECT
 oid
 ,nspname
 FROM pg_namespace
 WHERE oid = pg_my_temp_schema();
-

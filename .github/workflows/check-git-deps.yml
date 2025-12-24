@@ -1,0 +1,154 @@
+name: Check Git Dependencies on Main Branch
+
+on:
+    pull_request:
+        branches: [main]
+        paths:
+            - 'Cargo.toml'
+    push:
+        branches: [main]
+        paths:
+            - 'Cargo.toml'
+
+jobs:
+    check-git-deps:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v6
+
+            - name: Check git dependencies
+              env:
+                  WHITELIST_DEPS: "greptime-proto,meter-core,meter-macros"
+              run: |
+                  #!/bin/bash
+                  set -e
+
+                  echo "Checking whitelisted git dependencies..."
+
+                  # Function to check if a commit is on main branch
+                  check_commit_on_main() {
+                      local repo_url="$1"
+                      local commit="$2"
+                      local repo_name=$(basename "$repo_url" .git)
+
+                      echo "Checking $repo_name"
+                      echo "Repo: $repo_url"
+                      echo "Commit: $commit"
+
+                      # Create a temporary directory for cloning
+                      local temp_dir=$(mktemp -d)
+
+                      # Clone the repository
+                      if git clone "$repo_url" "$temp_dir" 2>/dev/null; then
+                          cd "$temp_dir"
+
+                          # Try to determine the main branch name
+                          local main_branch="main"
+                          if ! git rev-parse --verify origin/main >/dev/null 2>&1; then
+                              if git rev-parse --verify origin/master >/dev/null 2>&1; then
+                                  main_branch="master"
+                              else
+                                  # Try to get the default branch
+                                  main_branch=$(git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')
+                              fi
+                          fi
+
+                          echo "Main branch: $main_branch"
+
+                          # Check if commit exists
+                          if git cat-file -e "$commit" 2>/dev/null; then
+                              # Check if commit is on main branch
+                              if git merge-base --is-ancestor "$commit" "origin/$main_branch" 2>/dev/null; then
+                                  echo "PASS: Commit $commit is on $main_branch branch"
+                                  cd - >/dev/null
+                                  rm -rf "$temp_dir"
+                                  return 0
+                              else
+                                  echo "FAIL: Commit $commit is NOT on $main_branch branch"
+
+                                  # Try to find which branch contains this commit
+                                  local branch_name=$(git branch -r --contains "$commit" 2>/dev/null | head -1 | sed 's/^[[:space:]]*origin\///' | sed 's/[[:space:]]*$//')
+                                  if [[ -n "$branch_name" ]]; then
+                                      echo "Found on branch: $branch_name"
+                                  fi
+                                  cd - >/dev/null
+                                  rm -rf "$temp_dir"
+                                  return 1
+                              fi
+                          else
+                              echo "FAIL: Commit $commit not found in repository"
+                              cd - >/dev/null
+                              rm -rf "$temp_dir"
+                              return 1
+                          fi
+                      else
+                          echo "FAIL: Failed to clone $repo_url"
+                          rm -rf "$temp_dir"
+                          return 1
+                      fi
+                  }
+
+                  # Extract whitelisted git dependencies from Cargo.toml
+                  echo "Extracting git dependencies from Cargo.toml..."
+
+                  # Create temporary array to store dependencies
+                  declare -a deps=()
+
+                  # Build awk pattern from whitelist
+                  IFS=',' read -ra WHITELIST <<< "$WHITELIST_DEPS"
+                  awk_pattern=""
+                  for dep in "${WHITELIST[@]}"; do
+                      if [[ -n "$awk_pattern" ]]; then
+                          awk_pattern="$awk_pattern|"
+                      fi
+                      awk_pattern="$awk_pattern$dep"
+                  done
+
+                  # Extract whitelisted dependencies
+                  while IFS= read -r line; do
+                      if [[ -n "$line" ]]; then
+                          deps+=("$line")
+                      fi
+                  done < <(awk -v pattern="$awk_pattern" '
+                  $0 ~ pattern ".*git = \"https:/" {
+                      match($0, /git = "([^"]+)"/, arr)
+                      git_url = arr[1]
+                      if (match($0, /rev = "([^"]+)"/, rev_arr)) {
+                          rev = rev_arr[1]
+                          print git_url " " rev
+                      } else {
+                          # Check next line for rev
+                          getline
+                          if (match($0, /rev = "([^"]+)"/, rev_arr)) {
+                              rev = rev_arr[1]
+                              print git_url " " rev
+                          }
+                      }
+                  }
+                  ' Cargo.toml)
+
+                  echo "Found ${#deps[@]} dependencies to check:"
+                  for dep in "${deps[@]}"; do
+                      echo "  $dep"
+                  done
+
+                  failed=0
+
+                  for dep in "${deps[@]}"; do
+                      read -r repo_url commit <<< "$dep"
+                      if ! check_commit_on_main "$repo_url" "$commit"; then
+                          failed=1
+                      fi
+                  done
+
+                  echo "Check completed."
+
+                  if [[ $failed -eq 1 ]]; then
+                      echo "ERROR: Some git dependencies are not on their main branches!"
+                      echo "Please update the commits to point to main branch commits."
+                      exit 1
+                  else
+                      echo "SUCCESS: All git dependencies are on their main branches!"
+                  fi

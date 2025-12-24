@@ -62,7 +62,7 @@ use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
 };
 use crate::sst::parquet::file_range::{
-    FileRangeContext, FileRangeContextRef, PreFilterMode, row_group_contains_delete,
+    FileRangeContext, FileRangeContextRef, PreFilterMode, RangeBase, row_group_contains_delete,
 };
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
@@ -269,7 +269,7 @@ impl ParquetReaderBuilder {
         let file_size = self.file_handle.meta_ref().file_size;
 
         // Loads parquet metadata of the file.
-        let parquet_meta = self
+        let (parquet_meta, cache_miss) = self
             .read_parquet_metadata(&file_path, file_size, &mut metrics.metadata_cache_metrics)
             .await?;
         // Decodes region metadata.
@@ -326,6 +326,28 @@ impl ParquetReaderBuilder {
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
 
+        // Trigger background download if metadata had a cache miss and selection is not empty
+        if cache_miss && !selection.is_empty() {
+            use crate::cache::file_cache::{FileType, IndexKey};
+            let index_key = IndexKey::new(
+                self.file_handle.region_id(),
+                self.file_handle.file_id().file_id(),
+                FileType::Parquet,
+            );
+            self.cache_strategy.maybe_download_background(
+                index_key,
+                file_path.clone(),
+                self.object_store.clone(),
+                file_size,
+            );
+        }
+
+        let prune_schema = self
+            .expected_metadata
+            .as_ref()
+            .map(|meta| meta.schema.clone())
+            .unwrap_or_else(|| region_meta.schema.clone());
+
         let reader_builder = RowGroupReaderBuilder {
             file_handle: self.file_handle.clone(),
             file_path,
@@ -352,14 +374,26 @@ impl ParquetReaderBuilder {
             vec![]
         };
 
+        let dyn_filters = if let Some(predicate) = &self.predicate {
+            predicate.dyn_filters().clone()
+        } else {
+            Arc::new(vec![])
+        };
+
         let codec = build_primary_key_codec(read_format.metadata());
 
         let context = FileRangeContext::new(
             reader_builder,
-            filters,
-            read_format,
-            codec,
-            self.pre_filter_mode,
+            RangeBase {
+                filters,
+                dyn_filters,
+                read_format,
+                expected_metadata: self.expected_metadata.clone(),
+                prune_schema,
+                codec,
+                compat_batch: None,
+                pre_filter_mode: self.pre_filter_mode,
+            },
         );
 
         metrics.build_cost += start.elapsed();
@@ -395,12 +429,13 @@ impl ParquetReaderBuilder {
     }
 
     /// Reads parquet metadata of specific file.
+    /// Returns (metadata, cache_miss_flag).
     async fn read_parquet_metadata(
         &self,
         file_path: &str,
         file_size: u64,
         cache_metrics: &mut MetadataCacheMetrics,
-    ) -> Result<Arc<ParquetMetaData>> {
+    ) -> Result<(Arc<ParquetMetaData>, bool)> {
         let start = Instant::now();
         let _t = READ_STAGE_ELAPSED
             .with_label_values(&["read_parquet_metadata"])
@@ -414,7 +449,7 @@ impl ParquetReaderBuilder {
             .await
         {
             cache_metrics.metadata_load_cost += start.elapsed();
-            return Ok(metadata);
+            return Ok((metadata, false));
         }
 
         // Cache miss, load metadata directly.
@@ -427,7 +462,7 @@ impl ParquetReaderBuilder {
             .put_parquet_meta_data(file_id, metadata.clone());
 
         cache_metrics.metadata_load_cost += start.elapsed();
-        Ok(metadata)
+        Ok((metadata, true))
     }
 
     /// Computes row groups to read, along with their respective row selections.
@@ -558,7 +593,7 @@ impl ParquetReaderBuilder {
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let apply_res = index_applier
                 .apply_fine(
-                    self.file_handle.file_id(),
+                    self.file_handle.index_id(),
                     Some(file_size_hint),
                     metrics.fulltext_index_apply_metrics.as_mut(),
                 )
@@ -630,7 +665,7 @@ impl ParquetReaderBuilder {
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let apply_res = index_applier
                 .apply(
-                    self.file_handle.file_id(),
+                    self.file_handle.index_id(),
                     Some(file_size_hint),
                     metrics.inverted_index_apply_metrics.as_mut(),
                 )
@@ -709,7 +744,7 @@ impl ParquetReaderBuilder {
             });
             let apply_res = index_applier
                 .apply(
-                    self.file_handle.file_id(),
+                    self.file_handle.index_id(),
                     Some(file_size_hint),
                     rgs,
                     metrics.bloom_filter_apply_metrics.as_mut(),
@@ -792,7 +827,7 @@ impl ParquetReaderBuilder {
             });
             let apply_res = index_applier
                 .apply_coarse(
-                    self.file_handle.file_id(),
+                    self.file_handle.index_id(),
                     Some(file_size_hint),
                     rgs,
                     metrics.fulltext_index_apply_metrics.as_mut(),

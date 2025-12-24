@@ -40,16 +40,17 @@ pub(super) fn parse_json_datatype_options(parser: &mut Parser<'_>) -> Result<Opt
 
 #[cfg(test)]
 mod tests {
-    use sqlparser::ast::DataType;
+    use sqlparser::ast::{DataType, Expr, Ident, StructField};
 
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::{ParseOptions, ParserContext};
     use crate::statements::OptionMap;
     use crate::statements::create::{
-        Column, JSON_FORMAT_FULL_STRUCTURED, JSON_FORMAT_PARTIAL, JSON_FORMAT_RAW, JSON_OPT_FORMAT,
-        JSON_OPT_UNSTRUCTURED_KEYS,
+        Column, JSON_FORMAT_FULL_STRUCTURED, JSON_FORMAT_PARTIAL, JSON_FORMAT_RAW, JSON_OPT_FIELDS,
+        JSON_OPT_FORMAT, JSON_OPT_UNSTRUCTURED_KEYS,
     };
     use crate::statements::statement::Statement;
+    use crate::util::OptionValue;
 
     #[test]
     fn test_parse_json_datatype_options() {
@@ -74,6 +75,42 @@ mod tests {
 
             extensions.json_datatype_options
         }
+
+        let sql = r#"
+CREATE TABLE json_data (
+    my_json JSON(format = "partial", fields = Struct<i Int, "o.a" String, "o.b" String, `x.y.z` Float64>),
+    ts TIMESTAMP TIME INDEX,
+)"#;
+        let options = parse(sql).unwrap();
+        assert_eq!(options.len(), 2);
+        let option = options.value(JSON_OPT_FIELDS);
+        let expected = OptionValue::try_new(Expr::Struct {
+            values: vec![],
+            fields: vec![
+                StructField {
+                    field_name: Some(Ident::new("i")),
+                    field_type: DataType::Int(None),
+                    options: None,
+                },
+                StructField {
+                    field_name: Some(Ident::with_quote('"', "o.a")),
+                    field_type: DataType::String(None),
+                    options: None,
+                },
+                StructField {
+                    field_name: Some(Ident::with_quote('"', "o.b")),
+                    field_type: DataType::String(None),
+                    options: None,
+                },
+                StructField {
+                    field_name: Some(Ident::with_quote('`', "x.y.z")),
+                    field_type: DataType::Float64,
+                    options: None,
+                },
+            ],
+        })
+        .ok();
+        assert_eq!(option, expected.as_ref());
 
         let sql = r#"
 CREATE TABLE json_data (

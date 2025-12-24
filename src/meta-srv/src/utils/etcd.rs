@@ -18,10 +18,12 @@ use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
 
 use crate::error::{self, BuildTlsOptionsSnafu, Result};
+use crate::metasrv::BackendClientOptions;
 
 /// Creates an etcd client with TLS configuration.
 pub async fn create_etcd_client_with_tls(
     store_addrs: &[String],
+    client_options: &BackendClientOptions,
     tls_config: Option<&TlsOption>,
 ) -> Result<Client> {
     let etcd_endpoints = store_addrs
@@ -30,14 +32,20 @@ pub async fn create_etcd_client_with_tls(
         .filter(|x| !x.is_empty())
         .collect::<Vec<_>>();
 
-    let connect_options = tls_config
-        .map(|c| create_etcd_tls_options(&convert_tls_option(c)))
-        .transpose()
-        .context(BuildTlsOptionsSnafu)?
-        .flatten()
-        .map(|tls_options| ConnectOptions::new().with_tls(tls_options));
+    let mut connect_options = ConnectOptions::new()
+        .with_keep_alive_while_idle(true)
+        .with_keep_alive(
+            client_options.keep_alive_interval,
+            client_options.keep_alive_timeout,
+        );
+    if let Some(tls_config) = tls_config
+        && let Some(tls_options) = create_etcd_tls_options(&convert_tls_option(tls_config))
+            .context(BuildTlsOptionsSnafu)?
+    {
+        connect_options = connect_options.with_tls(tls_options);
+    }
 
-    Client::connect(&etcd_endpoints, connect_options)
+    Client::connect(&etcd_endpoints, Some(connect_options))
         .await
         .context(error::ConnectEtcdSnafu)
 }

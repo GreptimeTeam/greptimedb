@@ -454,7 +454,11 @@ async fn test_region_gc_concurrency_with_retryable_errors() {
             (
                 region_id,
                 // mock the actual gc report with deleted files when succeeded(even no files to delete)
-                GcReport::new(HashMap::from([(region_id, vec![])]), HashSet::new()),
+                GcReport::new(
+                    HashMap::from([(region_id, vec![])]),
+                    Default::default(),
+                    HashSet::new(),
+                ),
             )
         })
         .collect();

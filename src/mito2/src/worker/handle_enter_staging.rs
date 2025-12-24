@@ -70,7 +70,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 FlushReason::EnterStaging,
                 None,
                 self.config.clone(),
-                region.is_staging(),
             );
             if let Err(e) =
                 self.flush_scheduler

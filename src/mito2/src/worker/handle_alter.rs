@@ -114,13 +114,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             info!("Flush region: {} before alteration", region_id);
 
             // Try to submit a flush task.
-            let task = self.new_flush_task(
-                &region,
-                FlushReason::Alter,
-                None,
-                self.config.clone(),
-                region.is_staging(),
-            );
+            let task = self.new_flush_task(&region, FlushReason::Alter, None, self.config.clone());
             if let Err(e) =
                 self.flush_scheduler
                     .schedule_flush(region.region_id, &region.version_control, task)

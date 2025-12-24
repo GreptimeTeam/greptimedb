@@ -135,6 +135,9 @@ async fn test_full_gc_workflow() {
     );
 }
 
+/// Due to https://github.com/rust-lang/rust/issues/100141 can't have Instant early than process start time on non-linux OS
+/// This is fine since in real usage instant will always be after process start time
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_tracker_cleanup() {
     init_default_ut_logging();

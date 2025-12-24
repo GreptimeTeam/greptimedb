@@ -19,6 +19,7 @@ use common_datasource::compression::CompressionType;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_memory_manager;
 use common_runtime::JoinError;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
@@ -1041,6 +1042,16 @@ pub enum Error {
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
 
+    #[snafu(display("Compaction memory exhausted for region {region_id} (policy: {policy})",))]
+    CompactionMemoryExhausted {
+        region_id: RegionId,
+        policy: String,
+        #[snafu(source)]
+        source: common_memory_manager::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Incompatible WAL provider change. This is typically caused by changing WAL provider in database config file without completely cleaning existing files. Global provider: {}, region provider: {}",
         global,
@@ -1162,6 +1173,18 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Invalid source and target region, source: {}, target: {}",
+        source_region_id,
+        target_region_id
+    ))]
+    InvalidSourceAndTargetRegion {
+        source_region_id: RegionId,
+        target_region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1230,7 +1253,8 @@ impl ErrorExt for Error {
             | MissingManifest { .. }
             | NoOldManifests { .. }
             | MissingPartitionExpr { .. }
-            | SerializePartitionExpr { .. } => StatusCode::InvalidArguments,
+            | SerializePartitionExpr { .. }
+            | InvalidSourceAndTargetRegion { .. } => StatusCode::InvalidArguments,
 
             RegionMetadataNotFound { .. }
             | Join { .. }
@@ -1322,6 +1346,8 @@ impl ErrorExt for Error {
             }
 
             ManualCompactionOverride {} => StatusCode::Cancelled,
+
+            CompactionMemoryExhausted { source, .. } => source.status_code(),
 
             IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
 

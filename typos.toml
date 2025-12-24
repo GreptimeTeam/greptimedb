@@ -15,5 +15,6 @@ extend-exclude = [
     "*.sql",
     "*.result",
     "src/pipeline/benches/data.log",
-    "cyborg/pnpm-lock.yaml"
+    "cyborg/pnpm-lock.yaml",
+    "tests-integration/resources/*"
 ]

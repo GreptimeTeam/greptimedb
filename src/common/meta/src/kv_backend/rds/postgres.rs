@@ -848,7 +848,7 @@ impl PgStore {
                 .context(CreatePostgresPoolSnafu)?,
         };
 
-        Self::with_pg_pool(pool, None, table_name, max_txn_ops).await
+        Self::with_pg_pool(pool, None, table_name, max_txn_ops, false).await
     }
 
     /// Create [PgStore] impl of [KvBackendRef] from url (backward compatibility).
@@ -862,6 +862,7 @@ impl PgStore {
         schema_name: Option<&str>,
         table_name: &str,
         max_txn_ops: usize,
+        auto_create_schema: bool,
     ) -> Result<KvBackendRef> {
         // Ensure the postgres metadata backend is ready to use.
         let client = match pool.get().await {
@@ -873,9 +874,23 @@ impl PgStore {
                 .fail();
             }
         };
+
+        // Automatically create schema if enabled and schema_name is provided.
+        if auto_create_schema
+            && let Some(schema) = schema_name
+            && !schema.is_empty()
+        {
+            let create_schema_sql = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", schema);
+            client
+                .execute(&create_schema_sql, &[])
+                .await
+                .with_context(|_| PostgresExecutionSnafu {
+                    sql: create_schema_sql.clone(),
+                })?;
+        }
+
         let template_factory = PgSqlTemplateFactory::new(schema_name, table_name);
         let sql_template_set = template_factory.build();
-        // Do not attempt to create schema implicitly.
         client
             .execute(&sql_template_set.create_table_statement, &[])
             .await
@@ -959,7 +974,7 @@ mod tests {
         let Some(pool) = build_pg15_pool().await else {
             return;
         };
-        let res = PgStore::with_pg_pool(pool, None, "pg15_public_should_fail", 128).await;
+        let res = PgStore::with_pg_pool(pool, None, "pg15_public_should_fail", 128, false).await;
         assert!(
             res.is_err(),
             "creating table in public should fail for test_user"
@@ -1213,5 +1228,250 @@ mod tests {
 
         let t = PgSqlTemplateFactory::format_table_ident(Some(""), "test_table");
         assert_eq!(t, "\"test_table\"");
+    }
+
+    #[tokio::test]
+    async fn test_auto_create_schema_enabled() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_postgres_integration_test!();
+        let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoints);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .context(CreatePostgresPoolSnafu)
+            .unwrap();
+
+        let schema_name = "test_auto_create_enabled";
+        let table_name = "test_table";
+
+        // Drop the schema if it exists to start clean
+        let client = pool.get().await.unwrap();
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", schema_name),
+                &[],
+            )
+            .await;
+
+        // Create store with auto_create_schema enabled
+        let _ = PgStore::with_pg_pool(pool.clone(), Some(schema_name), table_name, 128, true)
+            .await
+            .unwrap();
+
+        // Verify schema was created
+        let row = client
+            .query_one(
+                "SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1",
+                &[&schema_name],
+            )
+            .await
+            .unwrap();
+        let created_schema: String = row.get(0);
+        assert_eq!(created_schema, schema_name);
+
+        // Verify table was created in the schema
+        let row = client
+            .query_one(
+                "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2",
+                &[&schema_name, &table_name],
+            )
+            .await
+            .unwrap();
+        let created_table_schema: String = row.get(0);
+        let created_table_name: String = row.get(1);
+        assert_eq!(created_table_schema, schema_name);
+        assert_eq!(created_table_name, table_name);
+
+        // Cleanup
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", schema_name),
+                &[],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_auto_create_schema_disabled() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_postgres_integration_test!();
+        let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoints);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .context(CreatePostgresPoolSnafu)
+            .unwrap();
+
+        let schema_name = "test_auto_create_disabled";
+        let table_name = "test_table";
+
+        // Drop the schema if it exists to start clean
+        let client = pool.get().await.unwrap();
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", schema_name),
+                &[],
+            )
+            .await;
+
+        // Try to create store with auto_create_schema disabled (should fail)
+        let result =
+            PgStore::with_pg_pool(pool.clone(), Some(schema_name), table_name, 128, false).await;
+
+        // Verify it failed because schema doesn't exist
+        assert!(
+            result.is_err(),
+            "Expected error when schema doesn't exist and auto_create_schema is disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auto_create_schema_already_exists() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_postgres_integration_test!();
+        let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoints);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .context(CreatePostgresPoolSnafu)
+            .unwrap();
+
+        let schema_name = "test_auto_create_existing";
+        let table_name = "test_table";
+
+        // Manually create the schema first
+        let client = pool.get().await.unwrap();
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", schema_name),
+                &[],
+            )
+            .await;
+        client
+            .execute(&format!("CREATE SCHEMA \"{}\"", schema_name), &[])
+            .await
+            .unwrap();
+
+        // Create store with auto_create_schema enabled (should succeed idempotently)
+        let _ = PgStore::with_pg_pool(pool.clone(), Some(schema_name), table_name, 128, true)
+            .await
+            .unwrap();
+
+        // Verify schema still exists
+        let row = client
+            .query_one(
+                "SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1",
+                &[&schema_name],
+            )
+            .await
+            .unwrap();
+        let created_schema: String = row.get(0);
+        assert_eq!(created_schema, schema_name);
+
+        // Verify table was created in the schema
+        let row = client
+            .query_one(
+                "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2",
+                &[&schema_name, &table_name],
+            )
+            .await
+            .unwrap();
+        let created_table_schema: String = row.get(0);
+        let created_table_name: String = row.get(1);
+        assert_eq!(created_table_schema, schema_name);
+        assert_eq!(created_table_name, table_name);
+
+        // Cleanup
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", schema_name),
+                &[],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_auto_create_schema_no_schema_name() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_postgres_integration_test!();
+        let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoints);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .context(CreatePostgresPoolSnafu)
+            .unwrap();
+
+        let table_name = "test_table_no_schema";
+
+        // Create store with auto_create_schema enabled but no schema name (should succeed)
+        // This should create the table in the default schema (public)
+        let _ = PgStore::with_pg_pool(pool.clone(), None, table_name, 128, true)
+            .await
+            .unwrap();
+
+        // Verify table was created in public schema
+        let client = pool.get().await.unwrap();
+        let row = client
+            .query_one(
+                "SELECT table_schema, table_name FROM information_schema.tables WHERE table_name = $1",
+                &[&table_name],
+            )
+            .await
+            .unwrap();
+        let created_table_schema: String = row.get(0);
+        let created_table_name: String = row.get(1);
+        assert_eq!(created_table_name, table_name);
+        // Verify it's in public schema (or whichever is the default)
+        assert!(created_table_schema == "public" || !created_table_schema.is_empty());
+
+        // Cleanup
+        let _ = client
+            .execute(&format!("DROP TABLE IF EXISTS \"{}\"", table_name), &[])
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_auto_create_schema_with_empty_schema_name() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_postgres_integration_test!();
+        let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoints);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .context(CreatePostgresPoolSnafu)
+            .unwrap();
+
+        let table_name = "test_table_empty_schema";
+
+        // Create store with auto_create_schema enabled but empty schema name (should succeed)
+        // This should create the table in the default schema (public)
+        let _ = PgStore::with_pg_pool(pool.clone(), Some(""), table_name, 128, true)
+            .await
+            .unwrap();
+
+        // Verify table was created in public schema
+        let client = pool.get().await.unwrap();
+        let row = client
+            .query_one(
+                "SELECT table_schema, table_name FROM information_schema.tables WHERE table_name = $1",
+                &[&table_name],
+            )
+            .await
+            .unwrap();
+        let created_table_schema: String = row.get(0);
+        let created_table_name: String = row.get(1);
+        assert_eq!(created_table_name, table_name);
+        // Verify it's in public schema (or whichever is the default)
+        assert!(created_table_schema == "public" || !created_table_schema.is_empty());
+
+        // Cleanup
+        let _ = client
+            .execute(&format!("DROP TABLE IF EXISTS \"{}\"", table_name), &[])
+            .await;
     }
 }

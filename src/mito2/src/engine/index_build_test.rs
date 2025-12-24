@@ -55,10 +55,10 @@ async fn num_of_index_files(engine: &MitoEngine, scanner: &Scanner, region_id: R
         return 0;
     }
     let mut index_files_count: usize = 0;
-    for region_file_id in scanner.file_ids() {
+    for region_index_id in scanner.index_ids() {
         let index_path = location::index_file_path(
             access_layer.table_dir(),
-            region_file_id,
+            region_index_id,
             access_layer.path_type(),
         );
         if access_layer
@@ -160,6 +160,8 @@ async fn test_index_build_type_flush() {
 
 #[tokio::test]
 async fn test_index_build_type_compact() {
+    common_telemetry::init_default_ut_logging();
+
     let mut env = TestEnv::with_prefix("test_index_build_type_compact_").await;
     let listener = Arc::new(IndexBuildListener::default());
     let engine = env

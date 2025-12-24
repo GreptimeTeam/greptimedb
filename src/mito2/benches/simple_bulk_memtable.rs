@@ -144,6 +144,7 @@ async fn flush(mem: &SimpleBulkMemtable) {
         let reader = Box::new(DedupReader::new(
             merge_reader,
             read::dedup::LastRow::new(true),
+            None,
         ));
         Source::Reader(reader)
     };

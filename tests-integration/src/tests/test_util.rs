@@ -439,10 +439,6 @@ pub fn find_testing_resource(path: &str) -> String {
     prepare_path(&p)
 }
 
-pub async fn execute_sql(instance: &Arc<Instance>, sql: &str) -> Output {
-    execute_sql_with(instance, sql, QueryContext::arc()).await
-}
-
 pub async fn try_execute_sql(instance: &Arc<Instance>, sql: &str) -> Result<Output> {
     try_execute_sql_with(instance, sql, QueryContext::arc()).await
 }
@@ -453,16 +449,6 @@ pub async fn try_execute_sql_with(
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
     instance.do_query(sql, query_ctx).await.remove(0)
-}
-
-pub async fn execute_sql_with(
-    instance: &Arc<Instance>,
-    sql: &str,
-    query_ctx: QueryContextRef,
-) -> Output {
-    try_execute_sql_with(instance, sql, query_ctx)
-        .await
-        .unwrap_or_else(|e| panic!("Failed to execute sql: {sql}, error: {e:?}"))
 }
 
 /// Dump the kv backend to a vector of key-value pairs.

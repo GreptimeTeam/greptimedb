@@ -65,6 +65,7 @@ use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::TableRef;
+use table::metadata::TableInfoRef;
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 
 use crate::QueryEngineRef;
@@ -821,13 +822,12 @@ pub fn show_create_database(database_name: &str, options: OptionMap) -> Result<O
 }
 
 pub fn show_create_table(
-    table: TableRef,
+    table_info: TableInfoRef,
     schema_options: Option<SchemaOptions>,
     partitions: Option<Partitions>,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let table_info = table.table_info();
-    let table_name = &table_info.name;
+    let table_name = table_info.name.clone();
 
     let quote_style = query_ctx.quote_style();
 
@@ -838,7 +838,7 @@ pub fn show_create_table(
     });
     let sql = format!("{}", stmt);
     let columns = vec![
-        Arc::new(StringVector::from(vec![table_name.clone()])) as _,
+        Arc::new(StringVector::from(vec![table_name])) as _,
         Arc::new(StringVector::from(vec![sql])) as _,
     ];
     let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)

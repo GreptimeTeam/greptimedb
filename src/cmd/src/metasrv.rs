@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use clap::Parser;
 use common_base::Plugins;
 use common_config::Configurable;
+use common_meta::distributed_time_constants::init_distributed_time_constants;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_version::{short_version, verbose_version};
@@ -154,8 +155,6 @@ pub struct StartCommand {
     #[clap(short, long)]
     selector: Option<String>,
     #[clap(long)]
-    use_memory_store: Option<bool>,
-    #[clap(long)]
     enable_region_failover: Option<bool>,
     #[clap(long)]
     http_addr: Option<String>,
@@ -185,7 +184,6 @@ impl Debug for StartCommand {
             .field("store_addrs", &self.sanitize_store_addrs())
             .field("config_file", &self.config_file)
             .field("selector", &self.selector)
-            .field("use_memory_store", &self.use_memory_store)
             .field("enable_region_failover", &self.enable_region_failover)
             .field("http_addr", &self.http_addr)
             .field("http_timeout", &self.http_timeout)
@@ -267,10 +265,6 @@ impl StartCommand {
                 .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
         }
 
-        if let Some(use_memory_store) = self.use_memory_store {
-            opts.use_memory_store = use_memory_store;
-        }
-
         if let Some(enable_region_failover) = self.enable_region_failover {
             opts.enable_region_failover = enable_region_failover;
         }
@@ -327,6 +321,7 @@ impl StartCommand {
         log_versions(verbose_version(), short_version(), APP_NAME);
         maybe_activate_heap_profile(&opts.component.memory);
         create_resource_limit_metrics(APP_NAME);
+        init_distributed_time_constants(opts.component.heartbeat_interval);
 
         info!("Metasrv start command: {:#?}", self);
 
@@ -389,7 +384,6 @@ mod tests {
             server_addr = "127.0.0.1:3002"
             store_addr = "127.0.0.1:2379"
             selector = "LeaseBased"
-            use_memory_store = false
 
             [logging]
             level = "debug"
@@ -468,7 +462,6 @@ mod tests {
             server_addr = "127.0.0.1:3002"
             datanode_lease_secs = 15
             selector = "LeaseBased"
-            use_memory_store = false
 
             [http]
             addr = "127.0.0.1:4000"

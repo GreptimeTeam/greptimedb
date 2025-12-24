@@ -19,12 +19,13 @@ use api::v1::Rows;
 use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionEngine as _;
 use store_api::region_request::{RegionCompactRequest, RegionRequest};
-use store_api::storage::{FileRefsManifest, RegionId};
+use store_api::storage::{FileRef, FileRefsManifest, RegionId};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::{delete_and_flush, put_and_flush};
 use crate::gc::{GcConfig, LocalGcWorker};
+use crate::manifest::action::RemovedFile;
 use crate::region::MitoRegionRef;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
@@ -120,9 +121,9 @@ async fn test_gc_worker_basic_truncate() {
     let manifest = region.manifest_ctx.manifest().await;
     assert!(
         manifest.removed_files.removed_files[0]
-            .file_ids
-            .contains(&to_be_deleted_file_id)
-            && manifest.removed_files.removed_files[0].file_ids.len() == 1
+            .files
+            .contains(&RemovedFile::File(to_be_deleted_file_id, None))
+            && manifest.removed_files.removed_files[0].files.len() == 1
             && manifest.files.is_empty(),
         "Manifest after truncate: {:?}",
         manifest
@@ -214,9 +215,9 @@ async fn test_gc_worker_truncate_with_ref() {
     let manifest = region.manifest_ctx.manifest().await;
     assert!(
         manifest.removed_files.removed_files[0]
-            .file_ids
-            .contains(&to_be_deleted_file_id)
-            && manifest.removed_files.removed_files[0].file_ids.len() == 1
+            .files
+            .contains(&RemovedFile::File(to_be_deleted_file_id, None))
+            && manifest.removed_files.removed_files[0].files.len() == 1
             && manifest.files.is_empty(),
         "Manifest after truncate: {:?}",
         manifest
@@ -225,7 +226,11 @@ async fn test_gc_worker_truncate_with_ref() {
 
     let regions = BTreeMap::from([(region_id, region.clone())]);
     let file_ref_manifest = FileRefsManifest {
-        file_refs: [(region_id, HashSet::from([to_be_deleted_file_id]))].into(),
+        file_refs: [(
+            region_id,
+            HashSet::from([FileRef::new(region_id, to_be_deleted_file_id, None)]),
+        )]
+        .into(),
         manifest_version: [(region_id, version)].into(),
     };
     let gc_worker = create_gc_worker(&engine, regions, &file_ref_manifest, true).await;
@@ -235,7 +240,7 @@ async fn test_gc_worker_truncate_with_ref() {
 
     let manifest = region.manifest_ctx.manifest().await;
     assert!(
-        manifest.removed_files.removed_files[0].file_ids.len() == 1 && manifest.files.is_empty(),
+        manifest.removed_files.removed_files[0].files.len() == 1 && manifest.files.is_empty(),
         "Manifest: {:?}",
         manifest
     );
@@ -300,7 +305,7 @@ async fn test_gc_worker_basic_compact() {
 
     let region = engine.get_region(region_id).unwrap();
     let manifest = region.manifest_ctx.manifest().await;
-    assert_eq!(manifest.removed_files.removed_files[0].file_ids.len(), 3);
+    assert_eq!(manifest.removed_files.removed_files[0].files.len(), 3);
 
     let version = manifest.manifest_version;
 
@@ -376,7 +381,7 @@ async fn test_gc_worker_compact_with_ref() {
 
     let region = engine.get_region(region_id).unwrap();
     let manifest = region.manifest_ctx.manifest().await;
-    assert_eq!(manifest.removed_files.removed_files[0].file_ids.len(), 3);
+    assert_eq!(manifest.removed_files.removed_files[0].files.len(), 3);
 
     let version = manifest.manifest_version;
 
@@ -385,9 +390,12 @@ async fn test_gc_worker_compact_with_ref() {
         file_refs: HashMap::from([(
             region_id,
             manifest.removed_files.removed_files[0]
-                .file_ids
+                .files
                 .iter()
-                .cloned()
+                .map(|removed_file| match removed_file {
+                    RemovedFile::File(file_id, v) => FileRef::new(region_id, *file_id, *v),
+                    RemovedFile::Index(file_id, v) => FileRef::new(region_id, *file_id, Some(*v)),
+                })
                 .collect(),
         )]),
         manifest_version: [(region_id, version)].into(),

@@ -57,7 +57,7 @@ const PIPELINE_HINT_PREFIX: &str = "greptime_";
 ///
 /// The options are set in the format of hint keys. See [`PIPELINE_HINT_KEYS`].
 /// It's is used as the key in [`ContextReq`] for grouping the row insert requests.
-#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
 pub struct ContextOpt {
     // table options, that need to be set in the query context before making row insert requests
     auto_create_table: Option<String>,
@@ -192,8 +192,15 @@ impl ContextReq {
         Self { req: req_map }
     }
 
-    pub fn add_row(&mut self, opt: ContextOpt, req: RowInsertRequest) {
-        self.req.entry(opt).or_default().push(req);
+    pub fn add_row(&mut self, opt: &ContextOpt, req: RowInsertRequest) {
+        match self.req.get_mut(opt) {
+            None => {
+                self.req.insert(opt.clone(), vec![req]);
+            }
+            Some(e) => {
+                e.push(req);
+            }
+        }
     }
 
     pub fn add_rows(&mut self, opt: ContextOpt, reqs: impl IntoIterator<Item = RowInsertRequest>) {

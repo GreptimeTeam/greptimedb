@@ -49,11 +49,11 @@ use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{
     BackendImpl, ElectionRef, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
 };
-use crate::selector::SelectorType;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
 use crate::selector::weight_compute::RegionNumsBasedWeightCompute;
+use crate::selector::{Selector, SelectorType};
 use crate::service::admin;
 use crate::service::admin::admin_axum_router;
 use crate::utils::etcd::create_etcd_client_with_tls;
@@ -245,7 +245,12 @@ macro_rules! add_compressed_service {
 }
 
 pub fn router(metasrv: Arc<Metasrv>) -> Router {
-    let mut router = tonic::transport::Server::builder().accept_http1(true); // for admin services
+    let mut router = tonic::transport::Server::builder()
+        // for admin services
+        .accept_http1(true)
+        // For quick network failures detection.
+        .http2_keepalive_interval(Some(metasrv.options().grpc.http2_keep_alive_interval))
+        .http2_keepalive_timeout(Some(metasrv.options().grpc.http2_keep_alive_timeout));
     let router = add_compressed_service!(router, HeartbeatServer::from_arc(metasrv.clone()));
     let router = add_compressed_service!(router, StoreServer::from_arc(metasrv.clone()));
     let router = add_compressed_service!(router, ClusterServer::from_arc(metasrv.clone()));
@@ -262,8 +267,12 @@ pub async fn metasrv_builder(
         (Some(kv_backend), _) => (kv_backend, None),
         (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
         (None, BackendImpl::EtcdStore) => {
-            let etcd_client =
-                create_etcd_client_with_tls(&opts.store_addrs, opts.backend_tls.as_ref()).await?;
+            let etcd_client = create_etcd_client_with_tls(
+                &opts.store_addrs,
+                &opts.backend_client,
+                opts.backend_tls.as_ref(),
+            )
+            .await?;
             let kv_backend = EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
             let election = EtcdElection::with_etcd_client(
                 &opts.grpc.server_addr,
@@ -280,7 +289,7 @@ pub async fn metasrv_builder(
 
             use common_meta::distributed_time_constants::POSTGRES_KEEP_ALIVE_SECS;
             use common_meta::kv_backend::rds::PgStore;
-            use deadpool_postgres::Config;
+            use deadpool_postgres::{Config, ManagerConfig, RecyclingMethod};
 
             use crate::election::rds::postgres::{ElectionPgClient, PgElection};
             use crate::utils::postgres::create_postgres_pool;
@@ -294,9 +303,16 @@ pub async fn metasrv_builder(
             let mut cfg = Config::new();
             cfg.keepalives = Some(true);
             cfg.keepalives_idle = Some(Duration::from_secs(POSTGRES_KEEP_ALIVE_SECS));
-            // We use a separate pool for election since we need a different session keep-alive idle time.
-            let pool = create_postgres_pool(&opts.store_addrs, Some(cfg), opts.backend_tls.clone())
-                .await?;
+            cfg.manager = Some(ManagerConfig {
+                recycling_method: RecyclingMethod::Verified,
+            });
+            // Use a dedicated pool for the election client to allow customized session settings.
+            let pool = create_postgres_pool(
+                &opts.store_addrs,
+                Some(cfg.clone()),
+                opts.backend_tls.clone(),
+            )
+            .await?;
 
             let election_client = ElectionPgClient::new(
                 pool,
@@ -316,13 +332,14 @@ pub async fn metasrv_builder(
             )
             .await?;
 
-            let pool =
-                create_postgres_pool(&opts.store_addrs, None, opts.backend_tls.clone()).await?;
+            let pool = create_postgres_pool(&opts.store_addrs, Some(cfg), opts.backend_tls.clone())
+                .await?;
             let kv_backend = PgStore::with_pg_pool(
                 pool,
                 opts.meta_schema_name.as_deref(),
                 &opts.meta_table_name,
                 opts.max_txn_ops,
+                opts.auto_create_schema,
             )
             .await
             .context(error::KvBackendSnafu)?;
@@ -393,7 +410,12 @@ pub async fn metasrv_builder(
         info!("Using selector from plugins");
         selector
     } else {
-        let selector = match opts.selector {
+        let selector: Arc<
+            dyn Selector<
+                    Context = crate::metasrv::SelectorContext,
+                    Output = Vec<common_meta::peer::Peer>,
+                >,
+        > = match opts.selector {
             SelectorType::LoadBased => Arc::new(LoadBasedSelector::new(
                 RegionNumsBasedWeightCompute,
                 meta_peer_client.clone(),

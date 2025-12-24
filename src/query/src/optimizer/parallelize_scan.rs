@@ -87,11 +87,19 @@ impl ParallelizeScan {
                         && order_expr.options.descending
                     {
                         for ranges in partition_ranges.iter_mut() {
-                            ranges.sort_by(|a, b| b.end.cmp(&a.end));
+                            // Primary: end descending (larger end first)
+                            // Secondary: start descending (shorter range first when ends are equal)
+                            ranges.sort_by(|a, b| {
+                                b.end.cmp(&a.end).then_with(|| b.start.cmp(&a.start))
+                            });
                         }
                     } else {
                         for ranges in partition_ranges.iter_mut() {
-                            ranges.sort_by(|a, b| a.start.cmp(&b.start));
+                            // Primary: start ascending (smaller start first)
+                            // Secondary: end ascending (shorter range first when starts are equal)
+                            ranges.sort_by(|a, b| {
+                                a.start.cmp(&b.start).then_with(|| a.end.cmp(&b.end))
+                            });
                         }
                     }
 

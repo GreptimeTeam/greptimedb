@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use common_base::memory_limit::MemoryLimit;
 use common_base::readable_size::ReadableSize;
+use common_memory_manager::OnExhaustedPolicy;
 use common_stat::{get_total_cpu_cores, get_total_memory_readable};
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
@@ -92,6 +93,10 @@ pub struct MitoConfig {
     pub max_background_compactions: usize,
     /// Max number of running background purge jobs (default: number of cpu cores).
     pub max_background_purges: usize,
+    /// Memory budget for compaction tasks. Setting it to 0 or "unlimited" disables the limit.
+    pub experimental_compaction_memory_limit: MemoryLimit,
+    /// Behavior when compaction cannot acquire memory from the budget.
+    pub experimental_compaction_on_exhausted: OnExhaustedPolicy,
 
     // Flush configs:
     /// Interval to auto flush a region if it has not flushed yet (default 30 min).
@@ -126,6 +131,11 @@ pub struct MitoConfig {
     /// The remaining capacity is used for data (parquet) files.
     /// Must be between 0 and 100 (exclusive).
     pub index_cache_percent: u8,
+    /// Enable background downloading of files to the local cache when accessed during queries (default: true).
+    /// When enabled, files will be asynchronously downloaded to improve performance for subsequent reads.
+    pub enable_refill_cache_on_read: bool,
+    /// Capacity for manifest cache (default: 256MB).
+    pub manifest_cache_size: ReadableSize,
 
     // Other configs:
     /// Buffer size for SST writing.
@@ -178,6 +188,8 @@ impl Default for MitoConfig {
             max_background_flushes: divide_num_cpus(2),
             max_background_compactions: divide_num_cpus(4),
             max_background_purges: get_total_cpu_cores(),
+            experimental_compaction_memory_limit: MemoryLimit::Unlimited,
+            experimental_compaction_on_exhausted: OnExhaustedPolicy::default(),
             auto_flush_interval: Duration::from_secs(30 * 60),
             global_write_buffer_size: ReadableSize::gb(1),
             global_write_buffer_reject_size: ReadableSize::gb(2),
@@ -191,6 +203,8 @@ impl Default for MitoConfig {
             write_cache_ttl: None,
             preload_index_cache: true,
             index_cache_percent: DEFAULT_INDEX_CACHE_PERCENT,
+            enable_refill_cache_on_read: true,
+            manifest_cache_size: ReadableSize::mb(256),
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,

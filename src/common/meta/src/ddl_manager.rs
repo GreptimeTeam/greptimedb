@@ -27,6 +27,7 @@ use store_api::storage::TableId;
 use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::alter_table::AlterTableProcedure;
+use crate::ddl::comment_on::CommentOnProcedure;
 use crate::ddl::create_database::CreateDatabaseProcedure;
 use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
@@ -52,18 +53,18 @@ use crate::rpc::ddl::DdlTask::CreateTrigger;
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::DdlTask::DropTrigger;
 use crate::rpc::ddl::DdlTask::{
-    AlterDatabase, AlterLogicalTables, AlterTable, CreateDatabase, CreateFlow, CreateLogicalTables,
-    CreateTable, CreateView, DropDatabase, DropFlow, DropLogicalTables, DropTable, DropView,
-    TruncateTable,
+    AlterDatabase, AlterLogicalTables, AlterTable, CommentOn, CreateDatabase, CreateFlow,
+    CreateLogicalTables, CreateTable, CreateView, DropDatabase, DropFlow, DropLogicalTables,
+    DropTable, DropView, TruncateTable,
 };
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::trigger::CreateTriggerTask;
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::trigger::DropTriggerTask;
 use crate::rpc::ddl::{
-    AlterDatabaseTask, AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask,
-    CreateViewTask, DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask, QueryContext,
-    SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
+    AlterDatabaseTask, AlterTableTask, CommentOnTask, CreateDatabaseTask, CreateFlowTask,
+    CreateTableTask, CreateViewTask, DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask,
+    QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
 };
 use crate::rpc::router::RegionRoute;
 
@@ -192,7 +193,8 @@ impl DdlManager {
             TruncateTableProcedure,
             CreateDatabaseProcedure,
             DropDatabaseProcedure,
-            DropViewProcedure
+            DropViewProcedure,
+            CommentOnProcedure
         );
 
         for (type_name, loader_factory) in loaders {
@@ -408,6 +410,19 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
+    /// Submits and executes a comment on task.
+    #[tracing::instrument(skip_all)]
+    pub async fn submit_comment_on_task(
+        &self,
+        comment_on_task: CommentOnTask,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+        let procedure = CommentOnProcedure::new(comment_on_task, context);
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
     async fn submit_procedure(
         &self,
         procedure_with_id: ProcedureWithId,
@@ -476,6 +491,7 @@ impl DdlManager {
                     handle_create_view_task(self, create_view_task).await
                 }
                 DropView(drop_view_task) => handle_drop_view_task(self, drop_view_task).await,
+                CommentOn(comment_on_task) => handle_comment_on_task(self, comment_on_task).await,
                 #[cfg(feature = "enterprise")]
                 CreateTrigger(create_trigger_task) => {
                     handle_create_trigger_task(
@@ -904,6 +920,26 @@ async fn handle_create_view_task(
     Ok(SubmitDdlTaskResponse {
         key: procedure_id.into(),
         table_ids: vec![view_id],
+    })
+}
+
+async fn handle_comment_on_task(
+    ddl_manager: &DdlManager,
+    comment_on_task: CommentOnTask,
+) -> Result<SubmitDdlTaskResponse> {
+    let (id, _) = ddl_manager
+        .submit_comment_on_task(comment_on_task.clone())
+        .await?;
+
+    let procedure_id = id.to_string();
+    info!(
+        "Comment on {}.{}.{} is updated via procedure_id {id:?}",
+        comment_on_task.catalog_name, comment_on_task.schema_name, comment_on_task.object_name
+    );
+
+    Ok(SubmitDdlTaskResponse {
+        key: procedure_id.into(),
+        ..Default::default()
     })
 }
 

@@ -62,7 +62,7 @@ use plugins::frontend::context::{
     CatalogManagerConfigureContext, StandaloneCatalogManagerConfigureContext,
 };
 use plugins::standalone::context::DdlManagerConfigureContext;
-use servers::tls::{TlsMode, TlsOption};
+use servers::tls::{TlsMode, TlsOption, merge_tls_option};
 use snafu::ResultExt;
 use standalone::StandaloneInformationExtension;
 use standalone::options::StandaloneOptions;
@@ -293,19 +293,20 @@ impl StartCommand {
                     ),
                 }.fail();
             }
-            opts.grpc.bind_addr.clone_from(addr)
+            opts.grpc.bind_addr.clone_from(addr);
+            opts.grpc.tls = merge_tls_option(&opts.grpc.tls, tls_opts.clone());
         }
 
         if let Some(addr) = &self.mysql_addr {
             opts.mysql.enable = true;
             opts.mysql.addr.clone_from(addr);
-            opts.mysql.tls = tls_opts.clone();
+            opts.mysql.tls = merge_tls_option(&opts.mysql.tls, tls_opts.clone());
         }
 
         if let Some(addr) = &self.postgres_addr {
             opts.postgres.enable = true;
             opts.postgres.addr.clone_from(addr);
-            opts.postgres.tls = tls_opts;
+            opts.postgres.tls = merge_tls_option(&opts.postgres.tls, tls_opts.clone());
         }
 
         if self.influxdb_enable {
@@ -551,9 +552,8 @@ impl StartCommand {
         let grpc_handler = fe_instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;
         let weak_grpc_handler = Arc::downgrade(&grpc_handler);
         frontend_instance_handler
-            .lock()
-            .unwrap()
-            .replace(weak_grpc_handler);
+            .set_handler(weak_grpc_handler)
+            .await;
 
         // set the frontend invoker for flownode
         let flow_streaming_engine = flownode.flow_engine().streaming_engine();
@@ -765,7 +765,6 @@ mod tests {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             mysql_addr: Some("127.0.0.1:4002".to_string()),
             postgres_addr: Some("127.0.0.1:4003".to_string()),
-            tls_watch: true,
             ..Default::default()
         };
 
@@ -782,8 +781,6 @@ mod tests {
 
         assert_eq!("./greptimedb_data/test/logs", opts.logging.dir);
         assert_eq!("debug", opts.logging.level.unwrap());
-        assert!(opts.mysql.tls.watch);
-        assert!(opts.postgres.tls.watch);
     }
 
     #[test]

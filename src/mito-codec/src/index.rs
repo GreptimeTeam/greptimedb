@@ -48,7 +48,7 @@ impl IndexValueCodec {
     ) -> Result<()> {
         ensure!(!value.is_null(), IndexEncodeNullSnafu);
 
-        if field.data_type().is_string() {
+        if field.encode_data_type().is_string() {
             let value = value
                 .try_into_string()
                 .context(FieldTypeMismatchSnafu)?

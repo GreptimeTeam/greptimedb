@@ -16,6 +16,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use auth::UserProviderRef;
+use axum::extract::{Request, State};
+use axum::middleware::Next;
+use axum::response::IntoResponse;
 use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::info;
@@ -27,6 +30,7 @@ use servers::grpc::frontend_grpc_handler::FrontendGrpcHandler;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{GrpcOptions, GrpcServer};
 use servers::http::event::LogValidatorRef;
+use servers::http::result::error_result::ErrorResponse;
 use servers::http::utils::router::RouterConfigurator;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::interceptor::LogIngestInterceptorRef;
@@ -36,9 +40,11 @@ use servers::otel_arrow::OtelArrowServiceHandler;
 use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
+use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::{Server, ServerHandlers};
 use servers::tls::{ReloadableTlsServerConfig, maybe_watch_server_tls_config};
 use snafu::ResultExt;
+use tonic::Status;
 
 use crate::error::{self, Result, StartServerSnafu, TomlFormatSnafu};
 use crate::frontend::FrontendOptions;
@@ -71,15 +77,25 @@ where
         }
     }
 
-    pub fn grpc_server_builder(&self, opts: &GrpcOptions) -> Result<GrpcServerBuilder> {
+    pub fn grpc_server_builder(
+        &self,
+        opts: &GrpcOptions,
+        request_memory_limiter: ServerMemoryLimiter,
+    ) -> Result<GrpcServerBuilder> {
         let builder = GrpcServerBuilder::new(opts.as_config(), common_runtime::global_runtime())
+            .with_memory_limiter(request_memory_limiter)
             .with_tls_config(opts.tls.clone())
             .context(error::InvalidTlsConfigSnafu)?;
         Ok(builder)
     }
 
-    pub fn http_server_builder(&self, opts: &FrontendOptions) -> HttpServerBuilder {
+    pub fn http_server_builder(
+        &self,
+        opts: &FrontendOptions,
+        request_memory_limiter: ServerMemoryLimiter,
+    ) -> HttpServerBuilder {
         let mut builder = HttpServerBuilder::new(opts.http.clone())
+            .with_memory_limiter(request_memory_limiter)
             .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(self.instance.clone()));
 
         let validator = self.plugins.get::<LogValidatorRef>();
@@ -125,7 +141,16 @@ where
             builder = builder.with_extra_router(configurator.router());
         }
 
-        builder
+        builder.add_layer(axum::middleware::from_fn_with_state(
+            self.instance.clone(),
+            async move |State(state): State<Arc<Instance>>, request: Request, next: Next| {
+                if state.is_suspended() {
+                    return ErrorResponse::from_error(servers::error::SuspendedSnafu.build())
+                        .into_response();
+                }
+                next.run(request).await
+            },
+        ))
     }
 
     pub fn with_grpc_server_builder(self, builder: GrpcServerBuilder) -> Self {
@@ -155,11 +180,12 @@ where
         meta_client: &Option<MetaClientOptions>,
         name: Option<String>,
         external: bool,
+        request_memory_limiter: ServerMemoryLimiter,
     ) -> Result<GrpcServer> {
         let builder = if let Some(builder) = self.grpc_server_builder.take() {
             builder
         } else {
-            self.grpc_server_builder(grpc)?
+            self.grpc_server_builder(grpc, request_memory_limiter)?
         };
 
         let user_provider = if external {
@@ -197,7 +223,17 @@ where
                 self.instance.clone(),
                 user_provider.clone(),
             ))
-            .flight_handler(flight_handler);
+            .flight_handler(flight_handler)
+            .add_layer(axum::middleware::from_fn_with_state(
+                self.instance.clone(),
+                async move |State(state): State<Arc<Instance>>, request: Request, next: Next| {
+                    if state.is_suspended() {
+                        let status = Status::from(servers::error::SuspendedSnafu.build());
+                        return status.into_http();
+                    }
+                    next.run(request).await
+                },
+            ));
 
         let grpc_server = if !external {
             let frontend_grpc_handler =
@@ -211,11 +247,16 @@ where
         Ok(grpc_server)
     }
 
-    fn build_http_server(&mut self, opts: &FrontendOptions, toml: String) -> Result<HttpServer> {
+    fn build_http_server(
+        &mut self,
+        opts: &FrontendOptions,
+        toml: String,
+        request_memory_limiter: ServerMemoryLimiter,
+    ) -> Result<HttpServer> {
         let builder = if let Some(builder) = self.http_server_builder.take() {
             builder
         } else {
-            self.http_server_builder(opts)
+            self.http_server_builder(opts, request_memory_limiter)
         };
 
         let http_server = builder
@@ -233,6 +274,12 @@ where
         let toml = opts.to_toml().context(TomlFormatSnafu)?;
         let opts: FrontendOptions = opts.into();
 
+        // Create request memory limiter for all server protocols
+        let request_memory_limiter = ServerMemoryLimiter::new(
+            opts.max_in_flight_write_bytes.as_bytes(),
+            opts.write_bytes_exhausted_policy,
+        );
+
         let handlers = ServerHandlers::default();
 
         let user_provider = self.plugins.get::<UserProviderRef>();
@@ -240,7 +287,13 @@ where
         {
             // Always init GRPC server
             let grpc_addr = parse_addr(&opts.grpc.bind_addr)?;
-            let grpc_server = self.build_grpc_server(&opts.grpc, &opts.meta_client, None, true)?;
+            let grpc_server = self.build_grpc_server(
+                &opts.grpc,
+                &opts.meta_client,
+                None,
+                true,
+                request_memory_limiter.clone(),
+            )?;
             handlers.insert((Box::new(grpc_server), grpc_addr));
         }
 
@@ -252,6 +305,7 @@ where
                 &opts.meta_client,
                 Some("INTERNAL_GRPC_SERVER".to_string()),
                 false,
+                request_memory_limiter.clone(),
             )?;
             handlers.insert((Box::new(grpc_server), grpc_addr));
         }
@@ -260,7 +314,8 @@ where
             // Always init HTTP server
             let http_options = &opts.http;
             let http_addr = parse_addr(&http_options.addr)?;
-            let http_server = self.build_http_server(&opts, toml)?;
+            let http_server =
+                self.build_http_server(&opts, toml, request_memory_limiter.clone())?;
             handlers.insert((Box::new(http_server), http_addr));
         }
 

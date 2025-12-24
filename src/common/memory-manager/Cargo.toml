@@ -1,0 +1,20 @@
+[package]
+name = "common-memory-manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+common-error = { workspace = true }
+common-macro = { workspace = true }
+common-telemetry = { workspace = true }
+humantime = { workspace = true }
+serde = { workspace = true }
+snafu = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

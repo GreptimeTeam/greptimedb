@@ -63,7 +63,7 @@ use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::FormatType;
-use crate::sst::file::RegionFileId;
+use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::file_purger::{FilePurgerRef, create_file_purger};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -636,54 +636,6 @@ pub fn get_object_store(
     }
 }
 
-/// A loader for loading metadata from a region dir.
-#[derive(Debug, Clone)]
-pub struct RegionMetadataLoader {
-    config: Arc<MitoConfig>,
-    object_store_manager: ObjectStoreManagerRef,
-}
-
-impl RegionMetadataLoader {
-    /// Creates a new `RegionOpenerBuilder`.
-    pub fn new(config: Arc<MitoConfig>, object_store_manager: ObjectStoreManagerRef) -> Self {
-        Self {
-            config,
-            object_store_manager,
-        }
-    }
-
-    /// Loads the metadata of the region from the region dir.
-    pub async fn load(
-        &self,
-        region_dir: &str,
-        region_options: &RegionOptions,
-    ) -> Result<Option<RegionMetadataRef>> {
-        let manifest = self
-            .load_manifest(region_dir, &region_options.storage)
-            .await?;
-        Ok(manifest.map(|m| m.metadata.clone()))
-    }
-
-    /// Loads the manifest of the region from the region dir.
-    pub async fn load_manifest(
-        &self,
-        region_dir: &str,
-        storage: &Option<String>,
-    ) -> Result<Option<Arc<RegionManifest>>> {
-        let object_store = get_object_store(storage, &self.object_store_manager)?;
-        let region_manifest_options =
-            RegionManifestOptions::new(&self.config, region_dir, &object_store);
-        let Some(manifest_manager) =
-            RegionManifestManager::open(region_manifest_options, &Default::default()).await?
-        else {
-            return Ok(None);
-        };
-
-        let manifest = manifest_manager.manifest();
-        Ok(Some(manifest))
-    }
-}
-
 /// Checks whether the recovered region has the same schema as region to create.
 pub(crate) fn check_recovered_region(
     recovered: &RegionMetadata,
@@ -867,8 +819,8 @@ impl RegionLoadCacheTask {
                     if file_meta.exists_index() {
                         let puffin_key = IndexKey::new(
                             file_meta.region_id,
-                            file_meta.index_file_id().file_id(),
-                            FileType::Puffin,
+                            file_meta.file_id,
+                            FileType::Puffin(file_meta.index_version),
                         );
 
                         if !file_cache.contains_key(&puffin_key) {
@@ -925,11 +877,17 @@ impl RegionLoadCacheTask {
                 break;
             }
 
-            let index_remote_path = location::index_file_path(
-                table_dir,
+            let index_version = if let FileType::Puffin(version) = puffin_key.file_type {
+                version
+            } else {
+                unreachable!("`files_to_download` should only contains Puffin files");
+            };
+            let index_id = RegionIndexId::new(
                 RegionFileId::new(puffin_key.region_id, puffin_key.file_id),
-                path_type,
+                index_version,
             );
+
+            let index_remote_path = location::index_file_path(table_dir, index_id, path_type);
 
             match file_cache
                 .download(puffin_key, &index_remote_path, object_store, file_size)

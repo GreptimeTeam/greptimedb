@@ -43,6 +43,7 @@ use crate::parser::{FLOW, ParserContext};
 use crate::parsers::tql_parser;
 use crate::parsers::utils::{
     self, validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
+    validate_column_vector_index_create_option,
 };
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
@@ -60,6 +61,7 @@ pub const EXPIRE: &str = "EXPIRE";
 pub const AFTER: &str = "AFTER";
 pub const INVERTED: &str = "INVERTED";
 pub const SKIPPING: &str = "SKIPPING";
+pub const VECTOR: &str = "VECTOR";
 
 pub type RawIntervalExpr = String;
 
@@ -925,6 +927,61 @@ impl<'a> ParserContext<'a> {
             );
 
             column_extensions.inverted_index_options = Some(OptionMap::default());
+            is_index_declared |= true;
+        }
+
+        // vector index
+        if let Token::Word(word) = parser.peek_token().token
+            && word.value.eq_ignore_ascii_case(VECTOR)
+        {
+            parser.next_token();
+            // Consume `INDEX` keyword
+            ensure!(
+                parser.parse_keyword(Keyword::INDEX),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "expect INDEX after VECTOR keyword",
+                }
+            );
+
+            ensure!(
+                column_extensions.vector_index_options.is_none(),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "duplicated VECTOR INDEX option",
+                }
+            );
+
+            // Check that column is a vector type
+            let column_type = get_unalias_type(column_type);
+            let data_type = sql_data_type_to_concrete_data_type(&column_type, column_extensions)?;
+            ensure!(
+                matches!(data_type, ConcreteDataType::Vector(_)),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "VECTOR INDEX only supports Vector type columns",
+                }
+            );
+
+            let options = parser
+                .parse_options(Keyword::WITH)
+                .context(error::SyntaxSnafu)?
+                .into_iter()
+                .map(parse_option_string)
+                .collect::<Result<Vec<_>>>()?;
+
+            for (key, _) in options.iter() {
+                ensure!(
+                    validate_column_vector_index_create_option(key),
+                    InvalidColumnOptionSnafu {
+                        name: column_name.to_string(),
+                        msg: format!("invalid VECTOR INDEX option: {key}"),
+                    }
+                );
+            }
+
+            let options = OptionMap::new(options);
+            column_extensions.vector_index_options = Some(options);
             is_index_declared |= true;
         }
 
@@ -2714,7 +2771,8 @@ CREATE TABLE log (
 
     #[test]
     fn test_parse_column_extensions_vector() {
-        let sql = "VECTOR(128)";
+        // Test that vector options are parsed from data_type (no additional SQL needed)
+        let sql = "";
         let dialect = GenericDialect {};
         let mut tokenizer = Tokenizer::new(&dialect, sql);
         let tokens = tokenizer.tokenize().unwrap();
@@ -2734,7 +2792,8 @@ CREATE TABLE log (
 
     #[test]
     fn test_parse_column_extensions_vector_invalid() {
-        let sql = "VECTOR()";
+        // Test that vector with no dimension fails
+        let sql = "";
         let dialect = GenericDialect {};
         let mut tokenizer = Tokenizer::new(&dialect, sql);
         let tokens = tokenizer.tokenize().unwrap();
@@ -2911,5 +2970,175 @@ CREATE TABLE log (
             ParserContext::create_with_dialect(s, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!("SELECT '10 seconds'::INTERVAL", &stmts[0].to_string());
+    }
+
+    #[test]
+    fn test_parse_create_table_vector_index_options() {
+        // Test basic vector index
+        let sql = r"
+CREATE TABLE vectors (
+    ts TIMESTAMP TIME INDEX,
+    vec VECTOR(128) VECTOR INDEX,
+)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        if let Statement::CreateTable(c) = &result[0] {
+            c.columns.iter().for_each(|col| {
+                if col.name().value == "vec" {
+                    assert!(
+                        col.extensions
+                            .vector_index_options
+                            .as_ref()
+                            .unwrap()
+                            .is_empty()
+                    );
+                }
+            });
+        } else {
+            panic!("should be create_table statement");
+        }
+
+        // Test vector index with options
+        let sql = r"
+CREATE TABLE vectors (
+    ts TIMESTAMP TIME INDEX,
+    vec VECTOR(128) VECTOR INDEX WITH (metric='cosine', connectivity='32', expansion_add='256', expansion_search='128')
+)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        if let Statement::CreateTable(c) = &result[0] {
+            c.columns.iter().for_each(|col| {
+                if col.name().value == "vec" {
+                    let options = col.extensions.vector_index_options.as_ref().unwrap();
+                    assert_eq!(options.len(), 4);
+                    assert_eq!(options.get("metric").unwrap(), "cosine");
+                    assert_eq!(options.get("connectivity").unwrap(), "32");
+                    assert_eq!(options.get("expansion_add").unwrap(), "256");
+                    assert_eq!(options.get("expansion_search").unwrap(), "128");
+                }
+            });
+        } else {
+            panic!("should be create_table statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_table_vector_index_invalid_type() {
+        // Test vector index on non-vector type (should fail)
+        let sql = r"
+CREATE TABLE vectors (
+    ts TIMESTAMP TIME INDEX,
+    col INT VECTOR INDEX,
+)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("VECTOR INDEX only supports Vector type columns")
+        );
+    }
+
+    #[test]
+    fn test_parse_create_table_vector_index_duplicate() {
+        // Test duplicate vector index (should fail)
+        let sql = r"
+CREATE TABLE vectors (
+    ts TIMESTAMP TIME INDEX,
+    vec VECTOR(128) VECTOR INDEX VECTOR INDEX,
+)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("duplicated VECTOR INDEX option")
+        );
+    }
+
+    #[test]
+    fn test_parse_create_table_vector_index_invalid_option() {
+        // Test invalid option key (should fail)
+        let sql = r"
+CREATE TABLE vectors (
+    ts TIMESTAMP TIME INDEX,
+    vec VECTOR(128) VECTOR INDEX WITH (metric='l2sq', invalid_option='foo')
+)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid VECTOR INDEX option")
+        );
+    }
+
+    #[test]
+    fn test_parse_column_extensions_vector_index() {
+        // Test vector index on vector type
+        {
+            let sql = "VECTOR INDEX WITH (metric = 'l2sq')";
+            let dialect = GenericDialect {};
+            let mut tokenizer = Tokenizer::new(&dialect, sql);
+            let tokens = tokenizer.tokenize().unwrap();
+            let mut parser = Parser::new(&dialect).with_tokens(tokens);
+            let name = Ident::new("vec_col");
+            let data_type =
+                DataType::Custom(vec![Ident::new("VECTOR")].into(), vec!["128".to_string()]);
+            // First, parse the vector type to set vector_options
+            let mut extensions = ColumnExtensions {
+                vector_options: Some(OptionMap::from([(
+                    VECTOR_OPT_DIM.to_string(),
+                    "128".to_string(),
+                )])),
+                ..Default::default()
+            };
+
+            let result = ParserContext::parse_column_extensions(
+                &mut parser,
+                &name,
+                &data_type,
+                &mut extensions,
+            );
+            assert!(result.is_ok());
+            assert!(extensions.vector_index_options.is_some());
+            let vi_options = extensions.vector_index_options.unwrap();
+            assert_eq!(vi_options.get("metric"), Some("l2sq"));
+        }
+
+        // Test vector index on non-vector type (should fail)
+        {
+            let sql = "VECTOR INDEX";
+            let dialect = GenericDialect {};
+            let mut tokenizer = Tokenizer::new(&dialect, sql);
+            let tokens = tokenizer.tokenize().unwrap();
+            let mut parser = Parser::new(&dialect).with_tokens(tokens);
+            let name = Ident::new("num_col");
+            let data_type = DataType::Int(None); // Non-vector type
+            let mut extensions = ColumnExtensions::default();
+            let result = ParserContext::parse_column_extensions(
+                &mut parser,
+                &name,
+                &data_type,
+                &mut extensions,
+            );
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("VECTOR INDEX only supports Vector type columns")
+            );
+        }
     }
 }
