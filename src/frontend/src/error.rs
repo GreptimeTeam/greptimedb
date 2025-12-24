@@ -357,14 +357,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to acquire more permits from limiter"))]
-    AcquireLimiter {
-        #[snafu(source)]
-        error: tokio::sync::AcquireError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Service suspended"))]
     Suspended {
         #[snafu(implicit)]
@@ -448,8 +440,6 @@ impl ErrorExt for Error {
             Error::Cancelled { .. } => StatusCode::Cancelled,
 
             Error::StatementTimeout { .. } => StatusCode::Cancelled,
-
-            Error::AcquireLimiter { .. } => StatusCode::Internal,
 
             Error::Suspended { .. } => StatusCode::Suspended,
         }

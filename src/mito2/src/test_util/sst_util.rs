@@ -27,6 +27,10 @@ use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{FileId, RegionId};
 
 use crate::read::{Batch, BatchBuilder, Source};
@@ -36,11 +40,44 @@ use crate::test_util::{VecBatchReader, new_batch_builder, new_noop_file_purger};
 /// Test region id.
 const REGION_ID: RegionId = RegionId::new(0, 0);
 
-/// Creates a new region metadata for testing SSTs.
+/// Creates a new region metadata for testing SSTs with specified encoding.
 ///
-/// Schema: tag_0, tag_1, field_0, ts
-pub fn sst_region_metadata() -> RegionMetadata {
+/// Dense schema: tag_0, tag_1, field_0, ts
+/// Sparse schema: __table_id, __tsid, tag_0, tag_1, field_0, ts
+pub fn sst_region_metadata_with_encoding(
+    encoding: store_api::codec::PrimaryKeyEncoding,
+) -> RegionMetadata {
     let mut builder = RegionMetadataBuilder::new(REGION_ID);
+
+    // For sparse encoding, add internal columns first
+    if encoding == store_api::codec::PrimaryKeyEncoding::Sparse {
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                    ConcreteDataType::uint32_datatype(),
+                    false,
+                )
+                .with_skipping_options(SkippingIndexOptions {
+                    granularity: 1,
+                    ..Default::default()
+                })
+                .unwrap(),
+                semantic_type: SemanticType::Tag,
+                column_id: ReservedColumnId::table_id(),
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: ReservedColumnId::tsid(),
+            });
+    }
+
+    // Add user-defined columns (tag_0, tag_1, field_0, ts)
     builder
         .push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new(
@@ -83,12 +120,32 @@ pub fn sst_region_metadata() -> RegionMetadata {
             ),
             semantic_type: SemanticType::Timestamp,
             column_id: 3,
-        })
-        .primary_key(vec![0, 1]);
+        });
+
+    // Set primary key based on encoding
+    if encoding == store_api::codec::PrimaryKeyEncoding::Sparse {
+        builder.primary_key(vec![
+            ReservedColumnId::table_id(),
+            ReservedColumnId::tsid(),
+            0, // tag_0
+            1, // tag_1
+        ]);
+    } else {
+        builder.primary_key(vec![0, 1]); // Dense: just user tags
+    }
+
+    builder.primary_key_encoding(encoding);
     builder.build().unwrap()
 }
 
-/// Encodes a primary key for specific tags.
+/// Creates a new region metadata for testing SSTs.
+///
+/// Schema: tag_0, tag_1, field_0, ts
+pub fn sst_region_metadata() -> RegionMetadata {
+    sst_region_metadata_with_encoding(store_api::codec::PrimaryKeyEncoding::Dense)
+}
+
+/// Encodes a primary key for specific tags using dense encoding.
 pub fn new_primary_key(tags: &[&str]) -> Vec<u8> {
     let fields = (0..tags.len())
         .map(|idx| {
@@ -102,6 +159,31 @@ pub fn new_primary_key(tags: &[&str]) -> Vec<u8> {
     converter
         .encode(tags.iter().map(|tag| ValueRef::String(tag)))
         .unwrap()
+}
+
+/// Encodes a primary key for specific tags using sparse encoding.
+/// Includes internal columns (table_id, tsid) required by sparse format.
+pub fn new_sparse_primary_key(
+    tags: &[&str],
+    metadata: &Arc<RegionMetadata>,
+    table_id: u32,
+    tsid: u64,
+) -> Vec<u8> {
+    use mito_codec::row_converter::PrimaryKeyCodec;
+
+    let codec = mito_codec::row_converter::SparsePrimaryKeyCodec::new(metadata);
+
+    // Sparse encoding requires internal columns first, then user tags
+    let values = vec![
+        (ReservedColumnId::table_id(), ValueRef::UInt32(table_id)),
+        (ReservedColumnId::tsid(), ValueRef::UInt64(tsid)),
+        (0, ValueRef::String(tags[0])), // tag_0
+        (1, ValueRef::String(tags[1])), // tag_1
+    ];
+
+    let mut buffer = Vec::new();
+    codec.encode_value_refs(&values, &mut buffer).unwrap();
+    buffer
 }
 
 /// Creates a [Source] from `batches`.

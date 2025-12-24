@@ -49,6 +49,17 @@ function create_version() {
       echo "GITHUB_REF_NAME is empty in push event" >&2
       exit 1
     fi
+    
+    # For tag releases, ensure GITHUB_REF_NAME matches the version in Cargo.toml
+    CARGO_VERSION=$(grep '^version = ' Cargo.toml | cut -d '"' -f 2 | head -n 1)
+    EXPECTED_REF_NAME="v${CARGO_VERSION}"
+    
+    if [ "$GITHUB_REF_NAME" != "$EXPECTED_REF_NAME" ]; then
+      echo "Error: GITHUB_REF_NAME '$GITHUB_REF_NAME' does not match Cargo.toml version 'v${CARGO_VERSION}'" >&2
+      echo "Expected tag name: '$EXPECTED_REF_NAME'" >&2
+      exit 1
+    fi
+    
     echo "$GITHUB_REF_NAME"
   elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
     echo "$NEXT_RELEASE_VERSION-$(git rev-parse --short HEAD)-$(date "+%Y%m%d-%s")"

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use common_config::config::Configurable;
 use common_event_recorder::EventRecorderOptions;
+use common_memory_manager::OnExhaustedPolicy;
 use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
@@ -45,6 +46,12 @@ pub struct FrontendOptions {
     pub default_timezone: Option<String>,
     pub default_column_prefix: Option<String>,
     pub heartbeat: HeartbeatOptions,
+    /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
+    /// Set to 0 to disable the limit. Default: "0" (unlimited)
+    pub max_in_flight_write_bytes: ReadableSize,
+    /// Policy when write bytes quota is exhausted.
+    /// Options: "wait" (default, 10s), "wait(<duration>)", "fail"
+    pub write_bytes_exhausted_policy: OnExhaustedPolicy,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
     /// The internal gRPC options for the frontend service.
@@ -63,7 +70,6 @@ pub struct FrontendOptions {
     pub user_provider: Option<String>,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
-    pub max_in_flight_write_bytes: Option<ReadableSize>,
     pub slow_query: SlowQueryOptions,
     pub memory: MemoryOptions,
     /// The event recorder options.
@@ -77,6 +83,8 @@ impl Default for FrontendOptions {
             default_timezone: None,
             default_column_prefix: None,
             heartbeat: HeartbeatOptions::frontend_default(),
+            max_in_flight_write_bytes: ReadableSize(0),
+            write_bytes_exhausted_policy: OnExhaustedPolicy::default(),
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),
             internal_grpc: None,
@@ -93,7 +101,6 @@ impl Default for FrontendOptions {
             user_provider: None,
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
-            max_in_flight_write_bytes: None,
             slow_query: SlowQueryOptions::default(),
             memory: MemoryOptions::default(),
             event_recorder: EventRecorderOptions::default(),
@@ -142,6 +149,7 @@ impl Frontend {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     use api::v1::meta::heartbeat_server::HeartbeatServer;
     use api::v1::meta::mailbox_message::Payload;
@@ -156,7 +164,6 @@ mod tests {
     use common_error::from_header_to_err_code_msg;
     use common_error::status_code::StatusCode;
     use common_grpc::channel_manager::ChannelManager;
-    use common_meta::distributed_time_constants::default_distributed_time_constants;
     use common_meta::heartbeat::handler::HandlerGroupExecutor;
     use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
     use common_meta::heartbeat::handler::suspend::SuspendHandler;
@@ -399,6 +406,10 @@ mod tests {
                 ..Default::default()
             },
             meta_client: Some(meta_client_options.clone()),
+            heartbeat: HeartbeatOptions {
+                interval: Duration::from_secs(1),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -408,8 +419,7 @@ mod tests {
         let meta_client = create_meta_client(&meta_client_options, server.clone()).await;
         let frontend = create_frontend(&options, meta_client).await?;
 
-        let frontend_heartbeat_interval =
-            default_distributed_time_constants().frontend_heartbeat_interval;
+        let frontend_heartbeat_interval = options.heartbeat.interval;
         tokio::time::sleep(frontend_heartbeat_interval).await;
         // initial state: not suspend:
         assert!(!frontend.instance.is_suspended());

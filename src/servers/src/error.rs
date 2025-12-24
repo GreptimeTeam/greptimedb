@@ -95,6 +95,13 @@ pub enum Error {
         error: tonic::transport::Error,
     },
 
+    #[snafu(display("Request memory limit exceeded"))]
+    MemoryLimitExceeded {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_memory_manager::Error,
+    },
+
     #[snafu(display("{} server is already started", server))]
     AlreadyStarted {
         server: String,
@@ -785,6 +792,8 @@ impl ErrorExt for Error {
             Cancelled { .. } => StatusCode::Cancelled,
 
             Suspended { .. } => StatusCode::Suspended,
+
+            MemoryLimitExceeded { .. } => StatusCode::RateLimited,
         }
     }
 

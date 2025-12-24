@@ -62,7 +62,7 @@ use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
 };
 use crate::sst::parquet::file_range::{
-    FileRangeContext, FileRangeContextRef, PreFilterMode, row_group_contains_delete,
+    FileRangeContext, FileRangeContextRef, PreFilterMode, RangeBase, row_group_contains_delete,
 };
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
@@ -342,6 +342,12 @@ impl ParquetReaderBuilder {
             );
         }
 
+        let prune_schema = self
+            .expected_metadata
+            .as_ref()
+            .map(|meta| meta.schema.clone())
+            .unwrap_or_else(|| region_meta.schema.clone());
+
         let reader_builder = RowGroupReaderBuilder {
             file_handle: self.file_handle.clone(),
             file_path,
@@ -368,14 +374,26 @@ impl ParquetReaderBuilder {
             vec![]
         };
 
+        let dyn_filters = if let Some(predicate) = &self.predicate {
+            predicate.dyn_filters().clone()
+        } else {
+            Arc::new(vec![])
+        };
+
         let codec = build_primary_key_codec(read_format.metadata());
 
         let context = FileRangeContext::new(
             reader_builder,
-            filters,
-            read_format,
-            codec,
-            self.pre_filter_mode,
+            RangeBase {
+                filters,
+                dyn_filters,
+                read_format,
+                expected_metadata: self.expected_metadata.clone(),
+                prune_schema,
+                codec,
+                compat_batch: None,
+                pre_filter_mode: self.pre_filter_mode,
+            },
         );
 
         metrics.build_cost += start.elapsed();

@@ -46,7 +46,7 @@ use crate::grpc::{GrpcServer, GrpcServerConfig};
 use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
-use crate::request_limiter::RequestMemoryLimiter;
+use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::tls::TlsOption;
 
 /// Add a gRPC service (`service`) to a `builder`([RoutesBuilder]).
@@ -92,12 +92,14 @@ pub struct GrpcServerBuilder {
             HeaderInterceptor,
         >,
     >,
-    memory_limiter: RequestMemoryLimiter,
+    memory_limiter: ServerMemoryLimiter,
 }
 
 impl GrpcServerBuilder {
     pub fn new(config: GrpcServerConfig, runtime: Runtime) -> Self {
-        let memory_limiter = RequestMemoryLimiter::new(config.max_total_message_memory);
+        // Create a default unlimited limiter (can be overridden with with_memory_limiter)
+        let memory_limiter = ServerMemoryLimiter::default();
+
         Self {
             name: None,
             config,
@@ -109,6 +111,12 @@ impl GrpcServerBuilder {
         }
     }
 
+    /// Set a global memory limiter for all server protocols.
+    pub fn with_memory_limiter(mut self, limiter: ServerMemoryLimiter) -> Self {
+        self.memory_limiter = limiter;
+        self
+    }
+
     pub fn config(&self) -> &GrpcServerConfig {
         &self.config
     }
@@ -117,7 +125,7 @@ impl GrpcServerBuilder {
         &self.runtime
     }
 
-    pub fn memory_limiter(&self) -> &RequestMemoryLimiter {
+    pub fn memory_limiter(&self) -> &ServerMemoryLimiter {
         &self.memory_limiter
     }
 
@@ -238,7 +246,6 @@ impl GrpcServerBuilder {
             bind_addr: None,
             name: self.name,
             config: self.config,
-            memory_limiter: self.memory_limiter,
         }
     }
 }

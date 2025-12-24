@@ -155,8 +155,6 @@ pub struct StartCommand {
     #[clap(short, long)]
     selector: Option<String>,
     #[clap(long)]
-    use_memory_store: Option<bool>,
-    #[clap(long)]
     enable_region_failover: Option<bool>,
     #[clap(long)]
     http_addr: Option<String>,
@@ -186,7 +184,6 @@ impl Debug for StartCommand {
             .field("store_addrs", &self.sanitize_store_addrs())
             .field("config_file", &self.config_file)
             .field("selector", &self.selector)
-            .field("use_memory_store", &self.use_memory_store)
             .field("enable_region_failover", &self.enable_region_failover)
             .field("http_addr", &self.http_addr)
             .field("http_timeout", &self.http_timeout)
@@ -266,10 +263,6 @@ impl StartCommand {
             opts.selector = selector_type[..]
                 .try_into()
                 .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
-        }
-
-        if let Some(use_memory_store) = self.use_memory_store {
-            opts.use_memory_store = use_memory_store;
         }
 
         if let Some(enable_region_failover) = self.enable_region_failover {
@@ -391,7 +384,6 @@ mod tests {
             server_addr = "127.0.0.1:3002"
             store_addr = "127.0.0.1:2379"
             selector = "LeaseBased"
-            use_memory_store = false
 
             [logging]
             level = "debug"
@@ -470,7 +462,6 @@ mod tests {
             server_addr = "127.0.0.1:3002"
             datanode_lease_secs = 15
             selector = "LeaseBased"
-            use_memory_store = false
 
             [http]
             addr = "127.0.0.1:4000"

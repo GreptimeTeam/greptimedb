@@ -29,7 +29,7 @@ use tokio::sync::mpsc::Sender;
 use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::cache::CacheManager;
 use crate::compaction::CompactionScheduler;
-use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
+use crate::compaction::memory_manager::new_compaction_memory_manager;
 use crate::config::MitoConfig;
 use crate::error::Result;
 use crate::flush::FlushScheduler;

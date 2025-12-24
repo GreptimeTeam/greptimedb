@@ -52,7 +52,6 @@ use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, T
 use crate::metrics::MetricsMiddlewareLayer;
 use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
-use crate::request_limiter::RequestMemoryLimiter;
 use crate::server::Server;
 use crate::tls::TlsOption;
 
@@ -69,8 +68,6 @@ pub struct GrpcOptions {
     pub max_recv_message_size: ReadableSize,
     /// Max gRPC sending(encoding) message size
     pub max_send_message_size: ReadableSize,
-    /// Maximum total memory for all concurrent gRPC request messages. 0 disables the limit.
-    pub max_total_message_memory: ReadableSize,
     /// Compression mode in Arrow Flight service.
     pub flight_compression: FlightCompression,
     pub runtime_size: usize,
@@ -126,7 +123,6 @@ impl GrpcOptions {
         GrpcServerConfig {
             max_recv_message_size: self.max_recv_message_size.as_bytes() as usize,
             max_send_message_size: self.max_send_message_size.as_bytes() as usize,
-            max_total_message_memory: self.max_total_message_memory.as_bytes() as usize,
             tls: self.tls.clone(),
             max_connection_age: self.max_connection_age,
         }
@@ -145,7 +141,6 @@ impl Default for GrpcOptions {
             server_addr: String::new(),
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
-            max_total_message_memory: ReadableSize(0),
             flight_compression: FlightCompression::ArrowIpc,
             runtime_size: 8,
             tls: TlsOption::default(),
@@ -167,7 +162,6 @@ impl GrpcOptions {
             server_addr: format!("127.0.0.1:{}", DEFAULT_INTERNAL_GRPC_ADDR_PORT),
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
-            max_total_message_memory: ReadableSize(0),
             flight_compression: FlightCompression::ArrowIpc,
             runtime_size: 8,
             tls: TlsOption::default(),
@@ -234,7 +228,6 @@ pub struct GrpcServer {
     bind_addr: Option<SocketAddr>,
     name: Option<String>,
     config: GrpcServerConfig,
-    memory_limiter: RequestMemoryLimiter,
 }
 
 /// Grpc Server configuration
@@ -244,8 +237,6 @@ pub struct GrpcServerConfig {
     pub max_recv_message_size: usize,
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: usize,
-    /// Maximum total memory for all concurrent gRPC request messages. 0 disables the limit.
-    pub max_total_message_memory: usize,
     pub tls: TlsOption,
     /// Maximum time that a channel may exist.
     /// Useful when the server wants to control the reconnection of its clients.
@@ -258,7 +249,6 @@ impl Default for GrpcServerConfig {
         Self {
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE.as_bytes() as usize,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE.as_bytes() as usize,
-            max_total_message_memory: 0,
             tls: TlsOption::default(),
             max_connection_age: None,
         }
@@ -297,11 +287,6 @@ impl GrpcServer {
             error!(e; "GRPC serve error");
         }
         Ok(())
-    }
-
-    /// Get the memory limiter for monitoring current memory usage
-    pub fn memory_limiter(&self) -> &RequestMemoryLimiter {
-        &self.memory_limiter
     }
 }
 
