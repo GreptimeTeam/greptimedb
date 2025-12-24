@@ -111,7 +111,7 @@ We has the following policy for AI-assisted PRs:
 
 ### Why fully AI-generated PRs without understanding are not helpful
 
-Today, AI tools cannot reliably make complex changes to DataFusion on their own, which is why we rely on pull requests and code review.
+Today, AI tools cannot reliably make complex changes to GreptimeDB on their own, which is why we rely on pull requests and code review.
 
 The purposes of code review are:
 
