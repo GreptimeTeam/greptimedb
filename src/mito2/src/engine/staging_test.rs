@@ -23,11 +23,13 @@ use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
+use datatypes::value::Value;
 use object_store::Buffer;
 use object_store::layers::mock::{
     Entry, Error as MockError, ErrorKind, List, Lister, Metadata, MockLayerBuilder,
     Result as MockResult, Write, Writer,
 };
+use partition::expr::{PartitionExpr, col};
 use store_api::region_engine::{RegionEngine, SettableRegionRoleState};
 use store_api::region_request::{
     EnterStagingRequest, RegionAlterRequest, RegionFlushRequest, RegionRequest,
@@ -38,9 +40,15 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::listener::NotifyEnterStagingResultListener;
 use crate::error::Error;
-use crate::region::{RegionLeaderState, RegionRoleState};
+use crate::region::{RegionLeaderState, RegionRoleState, parse_partition_expr};
 use crate::request::WorkerRequest;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
+
+fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
+    col(col_name)
+        .gt_eq(Value::Int64(start))
+        .and(col(col_name).lt(Value::Int64(end)))
+}
 
 #[tokio::test]
 async fn test_staging_state_integration() {
@@ -227,7 +235,9 @@ async fn test_staging_state_validation_patterns() {
     );
 }
 
-const PARTITION_EXPR: &str = "partition_expr";
+fn default_partition_expr() -> String {
+    range_expr("a", 0, 100).as_json_str().unwrap()
+}
 
 #[tokio::test]
 async fn test_staging_manifest_directory() {
@@ -237,6 +247,7 @@ async fn test_staging_manifest_directory() {
 
 async fn test_staging_manifest_directory_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
+    let partition_expr = default_partition_expr();
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
@@ -274,14 +285,14 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: PARTITION_EXPR.to_string(),
+                partition_expr: partition_expr.clone(),
             }),
         )
         .await
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
     let staging_partition_expr = region.staging_partition_expr.lock().unwrap().clone();
-    assert_eq!(staging_partition_expr.unwrap(), PARTITION_EXPR);
+    assert_eq!(staging_partition_expr.unwrap(), partition_expr);
     {
         let manager = region.manifest_ctx.manifest_manager.read().await;
         assert_eq!(
@@ -292,7 +303,7 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
                 .partition_expr
                 .as_deref()
                 .unwrap(),
-            PARTITION_EXPR
+            &partition_expr,
         );
         assert!(manager.manifest().metadata.partition_expr.is_none());
     }
@@ -302,7 +313,7 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: PARTITION_EXPR.to_string(),
+                partition_expr: partition_expr.clone(),
             }),
         )
         .await
@@ -377,6 +388,7 @@ async fn test_staging_exit_success_with_manifests() {
 
 async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
+    let partition_expr = default_partition_expr();
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
@@ -407,7 +419,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: PARTITION_EXPR.to_string(),
+                partition_expr: partition_expr.clone(),
             }),
         )
         .await
@@ -465,6 +477,25 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         "Staging manifest directory should contain 3 files before exit, got: {:?}",
         staging_files_before
     );
+    let region = engine.get_region(region_id).unwrap();
+    {
+        let manager = region.manifest_ctx.manifest_manager.read().await;
+        let staging_manifest = manager.staging_manifest().unwrap();
+        assert_eq!(staging_manifest.files.len(), 3);
+        assert_eq!(
+            staging_manifest.metadata.partition_expr.as_ref().unwrap(),
+            &partition_expr
+        );
+        let expr = parse_partition_expr(Some(partition_expr.as_str()))
+            .unwrap()
+            .unwrap();
+        for file in staging_manifest.files.values() {
+            let Some(file_expr) = file.partition_expr.as_ref() else {
+                continue;
+            };
+            assert_eq!(*file_expr, expr);
+        }
+    }
 
     // Count normal manifest files before exit
     let normal_manifest_dir = format!("{}/manifest", region_dir);
@@ -583,6 +614,7 @@ async fn test_write_stall_on_enter_staging() {
 
 async fn test_write_stall_on_enter_staging_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
+    let partition_expr = default_partition_expr();
     let listener = Arc::new(NotifyEnterStagingResultListener::default());
     let engine = env
         .create_engine_with(
@@ -622,7 +654,7 @@ async fn test_write_stall_on_enter_staging_with_format(flat_format: bool) {
             .handle_request(
                 region_id,
                 RegionRequest::EnterStaging(EnterStagingRequest {
-                    partition_expr: PARTITION_EXPR.to_string(),
+                    partition_expr: partition_expr.clone(),
                 }),
             )
             .await
@@ -706,6 +738,7 @@ impl Write for MockWriter {
 }
 
 async fn test_enter_staging_error(env: &mut TestEnv, flat_format: bool) {
+    let partition_expr = default_partition_expr();
     let engine = env
         .create_engine(MitoConfig {
             default_experimental_flat_format: flat_format,
@@ -723,7 +756,7 @@ async fn test_enter_staging_error(env: &mut TestEnv, flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: PARTITION_EXPR.to_string(),
+                partition_expr: partition_expr.clone(),
             }),
         )
         .await

@@ -27,7 +27,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
-use snafu::{OptionExt, ensure};
+use partition::expr::PartitionExpr;
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
@@ -43,8 +44,8 @@ pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
-    FlushableRegionStateSnafu, RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result,
-    UpdateManifestSnafu,
+    FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
+    RegionTruncatedSnafu, Result, UpdateManifestSnafu,
 };
 use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
@@ -725,6 +726,28 @@ impl MitoRegion {
 
         Ok(())
     }
+
+    /// Returns the partition expression string for this region.
+    ///
+    /// If the region is currently in staging state, this returns the partition expression held in
+    /// the staging partition field. Otherwise, it returns the partition expression from the primary
+    /// region metadata (current committed version).
+    pub fn maybe_staging_partition_expr_str(&self) -> Option<String> {
+        let is_staging = self.is_staging();
+        if is_staging {
+            let staging_partition_expr = self.staging_partition_expr.lock().unwrap();
+            if staging_partition_expr.is_none() {
+                warn!(
+                    "Staging partition expr is none for region {} in staging state",
+                    self.region_id
+                );
+            }
+            staging_partition_expr.clone()
+        } else {
+            let version = self.version();
+            version.metadata.partition_expr.clone()
+        }
+    }
 }
 
 /// Context to update the region manifest.
@@ -1268,6 +1291,19 @@ impl ManifestStats {
 
     fn file_removed_cnt(&self) -> u64 {
         self.file_removed_cnt.load(Ordering::Relaxed)
+    }
+}
+
+/// Parses the partition expression from a JSON string.
+pub fn parse_partition_expr(partition_expr_str: Option<&str>) -> Result<Option<PartitionExpr>> {
+    match partition_expr_str {
+        None => Ok(None),
+        Some("") => Ok(None),
+        Some(json_str) => {
+            let expr = partition::expr::PartitionExpr::from_json_str(json_str)
+                .with_context(|_| InvalidPartitionExprSnafu { expr: json_str })?;
+            Ok(expr)
+        }
     }
 }
 
