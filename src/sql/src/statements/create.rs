@@ -14,27 +14,30 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 
 use common_catalog::consts::FILE_ENGINE;
+use datatypes::data_type::ConcreteDataType;
 use datatypes::json::JsonStructureSettings;
 use datatypes::schema::{
     FulltextOptions, SkippingIndexOptions, VectorDistanceMetric, VectorIndexEngineType,
     VectorIndexOptions,
 };
+use datatypes::types::StructType;
 use itertools::Itertools;
 use serde::Serialize;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use sqlparser::ast::{ColumnOptionDef, DataType, Expr, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
 use crate::error::{
-    InvalidFlowQuerySnafu, InvalidSqlSnafu, Result, SetFulltextOptionSnafu,
-    SetSkippingIndexOptionSnafu,
+    InvalidFlowQuerySnafu, InvalidJsonStructureSettingSnafu, InvalidSqlSnafu, Result,
+    SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
 };
-use crate::statements::OptionMap;
 use crate::statements::statement::Statement;
 use crate::statements::tql::Tql;
+use crate::statements::{OptionMap, sql_data_type_to_concrete_data_type};
 use crate::util::OptionValue;
 
 const LINE_SEP: &str = ",\n";
@@ -44,6 +47,7 @@ pub const VECTOR_OPT_DIM: &str = "dim";
 
 pub const JSON_OPT_UNSTRUCTURED_KEYS: &str = "unstructured_keys";
 pub const JSON_OPT_FORMAT: &str = "format";
+pub(crate) const JSON_OPT_FIELDS: &str = "fields";
 pub const JSON_FORMAT_FULL_STRUCTURED: &str = "structured";
 pub const JSON_FORMAT_RAW: &str = "raw";
 pub const JSON_FORMAT_PARTIAL: &str = "partial";
@@ -346,14 +350,51 @@ impl ColumnExtensions {
             })
             .unwrap_or_default();
 
+        let fields = if let Some(value) = options.value(JSON_OPT_FIELDS) {
+            let fields = value
+                .as_struct_fields()
+                .context(InvalidJsonStructureSettingSnafu {
+                    reason: format!(r#"expect "{JSON_OPT_FIELDS}" a struct, actual: "{value}""#,),
+                })?;
+            let fields = fields
+                .iter()
+                .map(|field| {
+                    let name = field.field_name.as_ref().map(|x| x.value.clone()).context(
+                        InvalidJsonStructureSettingSnafu {
+                            reason: format!(r#"missing field name in "{field}""#),
+                        },
+                    )?;
+                    let datatype = sql_data_type_to_concrete_data_type(
+                        &field.field_type,
+                        &Default::default(),
+                    )?;
+                    Ok(datatypes::types::StructField::new(name, datatype, true))
+                })
+                .collect::<Result<_>>()?;
+            Some(StructType::new(Arc::new(fields)))
+        } else {
+            None
+        };
+
         options
             .get(JSON_OPT_FORMAT)
             .map(|format| match format {
-                JSON_FORMAT_FULL_STRUCTURED => Ok(JsonStructureSettings::Structured(None)),
-                JSON_FORMAT_PARTIAL => Ok(JsonStructureSettings::PartialUnstructuredByKey {
-                    fields: None,
-                    unstructured_keys,
-                }),
+                JSON_FORMAT_FULL_STRUCTURED => Ok(JsonStructureSettings::Structured(fields)),
+                JSON_FORMAT_PARTIAL => {
+                    let fields = fields.map(|fields| {
+                        let mut fields = Arc::unwrap_or_clone(fields.fields());
+                        fields.push(datatypes::types::StructField::new(
+                            JsonStructureSettings::RAW_FIELD.to_string(),
+                            ConcreteDataType::string_datatype(),
+                            true,
+                        ));
+                        StructType::new(Arc::new(fields))
+                    });
+                    Ok(JsonStructureSettings::PartialUnstructuredByKey {
+                        fields,
+                        unstructured_keys,
+                    })
+                }
                 JSON_FORMAT_RAW => Ok(JsonStructureSettings::UnstructuredRaw),
                 _ => InvalidSqlSnafu {
                     msg: format!("unknown JSON datatype 'format': {format}"),

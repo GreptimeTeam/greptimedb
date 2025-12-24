@@ -50,7 +50,7 @@ use common_time::{Timestamp, Timezone};
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{RawSchema, Schema};
+use datatypes::schema::{ColumnSchema, RawSchema, Schema};
 use datatypes::value::Value;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::multi_dim::MultiDimPartitionRule;
@@ -2001,8 +2001,7 @@ fn convert_value(
     unary_op: Option<UnaryOperator>,
 ) -> Result<Value> {
     sql_value_to_value(
-        "<NONAME>",
-        &data_type,
+        &ColumnSchema::new("<NONAME>", data_type, true),
         value,
         Some(timezone),
         unary_op,

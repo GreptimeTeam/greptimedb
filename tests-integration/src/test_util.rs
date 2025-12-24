@@ -24,6 +24,7 @@ use common_base::Plugins;
 use common_config::Configurable;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
+use common_query::Output;
 use common_runtime::runtime::BuilderBuild;
 use common_runtime::{Builder as RuntimeBuilder, Runtime};
 use common_test_util::ports;
@@ -773,4 +774,17 @@ pub(crate) async fn prepare_another_catalog_and_schema(instance: &Instance) {
         )
         .await
         .unwrap();
+}
+
+pub async fn execute_sql(instance: &Arc<Instance>, sql: &str) -> Output {
+    SqlQueryHandler::do_query(instance.as_ref(), sql, QueryContext::arc())
+        .await
+        .remove(0)
+        .unwrap()
+}
+
+pub async fn execute_sql_and_expect(instance: &Arc<Instance>, sql: &str, expected: &str) {
+    let output = execute_sql(instance, sql).await;
+    let output = output.data.pretty_print().await;
+    assert_eq!(output, expected.trim());
 }
