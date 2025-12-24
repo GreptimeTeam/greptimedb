@@ -126,9 +126,9 @@ impl FileReferenceManager {
             let manifest = r.manifest_ctx.manifest().await;
             // remove in manifest files for smaller size
             ref_files.entry(r.region_id()).and_modify(|refs| {
-                *refs = refs
-                    .difference(&manifest.files.keys().cloned().collect::<HashSet<_>>())
-                    .cloned()
+                *refs = std::mem::take(refs)
+                    .into_iter()
+                    .filter(|f| !manifest.files.contains_key(&f.file_id))
                     .collect();
             });
             manifest_version.insert(r.region_id(), manifest.manifest_version);
