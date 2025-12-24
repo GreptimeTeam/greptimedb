@@ -340,14 +340,46 @@ pub struct RemovedFiles {
     /// the files are removed from manifest. The timestamp is in milliseconds since unix epoch.
     pub removed_at: i64,
     /// The set of file ids that are removed.
+    #[serde(default)]
     pub files: HashSet<RemovedFile>,
 }
 
 /// A removed file, which can be a data file(optional paired with a index file) or an outdated index file.
-#[derive(Serialize, Deserialize, Hash, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Hash, Clone, Debug, PartialEq, Eq)]
 pub enum RemovedFile {
     File(FileId, Option<IndexVersion>),
     Index(FileId, IndexVersion),
+}
+
+impl<'de> Deserialize<'de> for RemovedFile {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum CompatRemovedFile {
+            FileId(FileId),
+            Enum(RemovedFileEnum),
+        }
+
+        #[derive(Deserialize)]
+        enum RemovedFileEnum {
+            File(FileId, Option<IndexVersion>),
+            Index(FileId, IndexVersion),
+        }
+
+        let compat = CompatRemovedFile::deserialize(deserializer)?;
+        match compat {
+            CompatRemovedFile::FileId(file_id) => Ok(RemovedFile::File(file_id, None)),
+            CompatRemovedFile::Enum(e) => match e {
+                RemovedFileEnum::File(file_id, version) => Ok(RemovedFile::File(file_id, version)),
+                RemovedFileEnum::Index(file_id, version) => {
+                    Ok(RemovedFile::Index(file_id, version))
+                }
+            },
+        }
+    }
 }
 
 impl RemovedFile {
@@ -1007,5 +1039,90 @@ mod tests {
         let serialized = serde_json::to_string(&region_change).unwrap();
         let deserialized: RegionChange = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized.sst_format, FormatType::Flat);
+    }
+
+    #[test]
+    fn test_removed_file_compatibility() {
+        let file_id = FileId::random();
+        // Case 1: Deserialize from FileId string (Legacy format)
+        let json_str = format!("\"{}\"", file_id);
+        let removed_file: RemovedFile = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(removed_file, RemovedFile::File(file_id, None));
+
+        // Case 2: Deserialize from new format (File)
+        let removed_file_v2 = RemovedFile::File(file_id, Some(10));
+        let json_v2 = serde_json::to_string(&removed_file_v2).unwrap();
+        let deserialized_v2: RemovedFile = serde_json::from_str(&json_v2).unwrap();
+        assert_eq!(removed_file_v2, deserialized_v2);
+
+        // Case 3: Deserialize from new format (Index)
+        let removed_index = RemovedFile::Index(file_id, 20);
+        let json_index = serde_json::to_string(&removed_index).unwrap();
+        let deserialized_index: RemovedFile = serde_json::from_str(&json_index).unwrap();
+        assert_eq!(removed_index, deserialized_index);
+
+        // Case 4: Deserialize mixed set in RemovedFilesRecord
+        // This simulates a Set<RemovedFile> which might contain old strings or new objects if manually constructed or from old versions.
+        // Actually, if it was HashSet<FileId>, the JSON is ["id1", "id2"].
+        // If it is HashSet<RemovedFile>, the JSON is [{"File":...}, "id2"] if mixed (which shouldn't happen usually but good to test).
+
+        let json_set = format!("[\"{}\"]", file_id);
+        let removed_files_set: HashSet<RemovedFile> = serde_json::from_str(&json_set).unwrap();
+        assert!(removed_files_set.contains(&RemovedFile::File(file_id, None)));
+    }
+
+    /// It's acceptable to ignore the old field `file_ids` when deserializing RemovedFiles.
+    /// (As gc worker can scan dir to find files to delete.)
+    #[test]
+    fn test_removed_files_backward_compatibility() {
+        // Define the old version struct with file_ids field
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+        struct OldRemovedFiles {
+            pub removed_at: i64,
+            pub file_ids: HashSet<FileId>,
+        }
+
+        // Create an old version instance
+        let mut file_ids = HashSet::new();
+        file_ids.insert(FileId::random());
+        file_ids.insert(FileId::random());
+
+        let old_removed_files = OldRemovedFiles {
+            removed_at: 1234567890,
+            file_ids,
+        };
+
+        // Serialize the old version
+        let old_json = serde_json::to_string(&old_removed_files).unwrap();
+
+        // Try to deserialize into new version - file_ids should be ignored
+        let result: Result<RemovedFiles, _> = serde_json::from_str(&old_json);
+
+        // This should succeed and create a default RemovedFiles (empty files set)
+        assert!(result.is_ok(), "{:?}", result);
+        let removed_files = result.unwrap();
+        assert_eq!(removed_files.removed_at, 1234567890);
+        assert!(removed_files.files.is_empty());
+
+        // Test that new format still works
+        let file_id = FileId::random();
+        let new_json = format!(
+            r#"{{
+            "removed_at": 1234567890,
+            "files": ["{}"]
+        }}"#,
+            file_id
+        );
+
+        let result: Result<RemovedFiles, _> = serde_json::from_str(&new_json);
+        assert!(result.is_ok());
+        let removed_files = result.unwrap();
+        assert_eq!(removed_files.removed_at, 1234567890);
+        assert_eq!(removed_files.files.len(), 1);
+        assert!(
+            removed_files
+                .files
+                .contains(&RemovedFile::File(file_id, None))
+        );
     }
 }
