@@ -49,8 +49,8 @@ impl MetricEngineInner {
         let target_data_region_id = utils::to_data_region_id(region_id);
         let source_data_region_id = utils::to_data_region_id(source_region_id);
         info!(
-            "Syncing region from region {} to region {}",
-            source_region_id, region_id
+            "Syncing region from region {} to region {}, parallelism: {}",
+            source_region_id, region_id, parallelism
         );
 
         let res = self
@@ -99,7 +99,7 @@ impl MetricEngineInner {
                 }
             })
             .collect::<Vec<_>>();
-        // `copy_region_from` does not trigger compaction, 
+        // `copy_region_from` does not trigger compaction,
         // so there should be no files removed and thus no missing files.
         ensure!(
             missing_file_ids.is_empty(),
