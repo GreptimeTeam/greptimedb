@@ -1232,6 +1232,8 @@ mod tests {
         with_inverted: bool,
         with_fulltext: bool,
         with_skipping_bloom: bool,
+        #[cfg(feature = "vector_index")]
+        with_vector: bool,
     }
 
     fn mock_region_metadata(
@@ -1239,6 +1241,8 @@ mod tests {
             with_inverted,
             with_fulltext,
             with_skipping_bloom,
+            #[cfg(feature = "vector_index")]
+            with_vector,
         }: MetaConfig,
     ) -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
@@ -1299,6 +1303,24 @@ mod tests {
                 column_schema,
                 semantic_type: SemanticType::Field,
                 column_id: 5,
+            };
+
+            builder.push_column_metadata(column);
+        }
+
+        #[cfg(feature = "vector_index")]
+        if with_vector {
+            use index::vector::VectorIndexOptions;
+
+            let options = VectorIndexOptions::default();
+            let column_schema =
+                ColumnSchema::new("vec", ConcreteDataType::vector_datatype(4), true)
+                    .with_vector_index_options(&options)
+                    .unwrap();
+            let column = ColumnMetadata {
+                column_schema,
+                semantic_type: SemanticType::Field,
+                column_id: 6,
             };
 
             builder.push_column_metadata(column);
@@ -1421,6 +1443,8 @@ mod tests {
             with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: true,
+            #[cfg(feature = "vector_index")]
+            with_vector: false,
         });
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
@@ -1454,6 +1478,8 @@ mod tests {
             with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: true,
+            #[cfg(feature = "vector_index")]
+            with_vector: false,
         });
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
@@ -1538,6 +1564,8 @@ mod tests {
             with_inverted: false,
             with_fulltext: true,
             with_skipping_bloom: true,
+            #[cfg(feature = "vector_index")]
+            with_vector: false,
         });
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
@@ -1564,6 +1592,8 @@ mod tests {
             with_inverted: true,
             with_fulltext: false,
             with_skipping_bloom: true,
+            #[cfg(feature = "vector_index")]
+            with_vector: false,
         });
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
@@ -1590,6 +1620,8 @@ mod tests {
             with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: false,
+            #[cfg(feature = "vector_index")]
+            with_vector: false,
         });
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
@@ -1623,6 +1655,8 @@ mod tests {
             with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: true,
+            #[cfg(feature = "vector_index")]
+            with_vector: false,
         });
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
@@ -1642,6 +1676,82 @@ mod tests {
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
+    }
+
+    #[cfg(feature = "vector_index")]
+    #[tokio::test]
+    async fn test_update_flat_builds_vector_index() {
+        use datatypes::arrow::array::BinaryBuilder;
+        use datatypes::arrow::datatypes::{DataType, Field, Schema};
+
+        struct TestPathProvider;
+
+        impl FilePathProvider for TestPathProvider {
+            fn build_index_file_path(&self, file_id: RegionFileId) -> String {
+                format!("index/{}.puffin", file_id)
+            }
+
+            fn build_index_file_path_with_version(&self, index_id: RegionIndexId) -> String {
+                format!("index/{}.puffin", index_id)
+            }
+
+            fn build_sst_file_path(&self, file_id: RegionFileId) -> String {
+                format!("sst/{}.parquet", file_id)
+            }
+        }
+
+        fn f32s_to_bytes(values: &[f32]) -> Vec<u8> {
+            let mut bytes = Vec::with_capacity(values.len() * 4);
+            for v in values {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            bytes
+        }
+
+        let (dir, factory) =
+            PuffinManagerFactory::new_for_test_async("test_update_flat_builds_vector_index_").await;
+        let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
+
+        let metadata = mock_region_metadata(MetaConfig {
+            with_inverted: false,
+            with_fulltext: false,
+            with_skipping_bloom: false,
+            with_vector: true,
+        });
+
+        let mut indexer = IndexerBuilderImpl {
+            build_type: IndexBuildType::Flush,
+            metadata,
+            row_group_size: 1024,
+            puffin_manager: factory.build(mock_object_store(), TestPathProvider),
+            write_cache_enabled: false,
+            intermediate_manager: intm_manager,
+            index_options: IndexOptions::default(),
+            inverted_index_config: InvertedIndexConfig::default(),
+            fulltext_index_config: FulltextIndexConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
+            vector_index_config: Default::default(),
+        }
+        .build(FileId::random(), 0)
+        .await;
+
+        assert!(indexer.vector_indexer.is_some());
+
+        let vec1 = f32s_to_bytes(&[1.0, 0.0, 0.0, 0.0]);
+        let vec2 = f32s_to_bytes(&[0.0, 1.0, 0.0, 0.0]);
+
+        let mut builder = BinaryBuilder::with_capacity(2, vec1.len() + vec2.len());
+        builder.append_value(&vec1);
+        builder.append_value(&vec2);
+
+        let schema = Arc::new(Schema::new(vec![Field::new("vec", DataType::Binary, true)]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(builder.finish())]).unwrap();
+
+        indexer.update_flat(&batch).await;
+        let output = indexer.finish().await;
+
+        assert!(output.vector_index.is_available());
+        assert!(output.vector_index.columns.contains(&6));
     }
 
     #[tokio::test]

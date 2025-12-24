@@ -19,8 +19,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use common_telemetry::warn;
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::ValueRef;
+use datatypes::vectors::Helper;
 use index::vector::{VectorDistanceMetric, VectorIndexOptions, distance_metric_to_usearch};
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use roaring::RoaringBitmap;
@@ -31,8 +33,8 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 use usearch::MetricKind;
 
 use crate::error::{
-    BiErrorsSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, Result, VectorIndexBuildSnafu,
-    VectorIndexFinishSnafu,
+    BiErrorsSnafu, ConvertVectorSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, Result,
+    VectorIndexBuildSnafu, VectorIndexFinishSnafu,
 };
 use crate::metrics::{INDEX_CREATE_BYTES_TOTAL, INDEX_CREATE_ROWS_TOTAL};
 use crate::read::Batch;
@@ -281,6 +283,30 @@ impl VectorIndexer {
         Ok(())
     }
 
+    /// Updates index with a flat format `RecordBatch`.
+    /// Garbage will be cleaned up if failed to update.
+    pub async fn update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        ensure!(!self.aborted, OperateAbortedIndexSnafu);
+
+        if self.creators.is_empty() || batch.num_rows() == 0 {
+            return Ok(());
+        }
+
+        if let Err(update_err) = self.do_update_flat(batch).await {
+            // Clean up garbage if failed to update
+            if let Err(err) = self.do_cleanup().await {
+                if cfg!(any(test, feature = "test")) {
+                    panic!("Failed to clean up vector index creator, err: {err:?}");
+                } else {
+                    warn!(err; "Failed to clean up vector index creator");
+                }
+            }
+            return Err(update_err);
+        }
+
+        Ok(())
+    }
+
     /// Internal update implementation.
     async fn do_update(&mut self, batch: &mut Batch) -> Result<()> {
         let mut guard = self.stats.record_update();
@@ -319,6 +345,73 @@ impl VectorIndexer {
             }
 
             // Check memory limit - abort index creation if exceeded
+            if let Some(threshold) = self.memory_usage_threshold {
+                let current_usage = creator.memory_usage();
+                if current_usage > threshold {
+                    warn!(
+                        "Vector index memory usage {} exceeds threshold {}, aborting index creation",
+                        current_usage, threshold
+                    );
+                    return VectorIndexBuildSnafu {
+                        reason: format!(
+                            "Memory usage {} exceeds threshold {}",
+                            current_usage, threshold
+                        ),
+                    }
+                    .fail();
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Internal flat update implementation.
+    async fn do_update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        let mut guard = self.stats.record_update();
+        let n = batch.num_rows();
+        guard.inc_row_count(n);
+
+        for (col_id, creator) in &mut self.creators {
+            let Some(column_meta) = self.metadata.column_by_id(*col_id) else {
+                for _ in 0..n {
+                    creator.add_null();
+                }
+                continue;
+            };
+
+            let column_name = &column_meta.column_schema.name;
+            let Some(column_array) = batch.column_by_name(column_name) else {
+                for _ in 0..n {
+                    creator.add_null();
+                }
+                continue;
+            };
+
+            let vector =
+                Helper::try_into_vector(column_array.clone()).context(ConvertVectorSnafu)?;
+            for i in 0..n {
+                let value_ref = vector.get_ref(i);
+                if value_ref.is_null() {
+                    creator.add_null();
+                } else if let ValueRef::Binary(bytes) = value_ref {
+                    let floats = bytes_to_f32_slice(bytes);
+                    if floats.len() != creator.config.dim {
+                        return VectorIndexBuildSnafu {
+                            reason: format!(
+                                "Vector dimension mismatch: expected {}, got {}",
+                                creator.config.dim,
+                                floats.len()
+                            ),
+                        }
+                        .fail();
+                    }
+                    creator.add_vector(&floats)?;
+                } else {
+                    creator.add_null();
+                }
+            }
+
             if let Some(threshold) = self.memory_usage_threshold {
                 let current_usage = creator.memory_usage();
                 if current_usage > threshold {
