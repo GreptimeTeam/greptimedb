@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_datasource::compression::CompressionType;
 use common_telemetry::debug;
 use futures::TryStreamExt;
@@ -26,7 +28,7 @@ use crate::cache::manifest_cache::ManifestCache;
 use crate::error::{
     CompressObjectSnafu, DecompressObjectSnafu, InvalidScanIndexSnafu, OpenDalSnafu, Result,
 };
-use crate::manifest::storage::size_tracker::TrackerRef;
+use crate::manifest::storage::size_tracker::Tracker;
 use crate::manifest::storage::utils::{
     get_from_cache, put_to_cache, sort_manifests, write_and_put_cache,
 };
@@ -36,21 +38,21 @@ use crate::manifest::storage::{
 };
 
 #[derive(Debug, Clone)]
-pub(crate) struct DeltaStorage {
+pub(crate) struct DeltaStorage<T: Tracker> {
     object_store: ObjectStore,
     compress_type: CompressionType,
     path: String,
-    delta_tracker: TrackerRef,
+    delta_tracker: Arc<T>,
     manifest_cache: Option<ManifestCache>,
 }
 
-impl DeltaStorage {
+impl<T: Tracker> DeltaStorage<T> {
     pub(crate) fn new(
         path: String,
         object_store: ObjectStore,
         compress_type: CompressionType,
         manifest_cache: Option<ManifestCache>,
-        delta_tracker: TrackerRef,
+        delta_tracker: Arc<T>,
     ) -> Self {
         Self {
             object_store,
@@ -242,7 +244,7 @@ impl DeltaStorage {
 }
 
 #[cfg(test)]
-impl DeltaStorage {
+impl<T: Tracker> DeltaStorage<T> {
     pub fn set_compress_type(&mut self, compress_type: CompressionType) {
         self.compress_type = compress_type;
     }

@@ -28,8 +28,6 @@ pub(crate) enum FileKey {
     Checkpoint(ManifestVersion),
 }
 
-pub type TrackerRef = Arc<dyn Tracker>;
-
 pub(crate) trait Tracker: Send + Sync + Debug {
     fn record(&self, version: ManifestVersion, size: u64);
 }

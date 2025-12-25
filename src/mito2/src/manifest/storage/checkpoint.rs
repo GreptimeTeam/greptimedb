@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
 use common_telemetry::debug;
@@ -25,7 +26,7 @@ use crate::cache::manifest_cache::ManifestCache;
 use crate::error::{
     CompressObjectSnafu, DecompressObjectSnafu, OpenDalSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
 };
-use crate::manifest::storage::size_tracker::TrackerRef;
+use crate::manifest::storage::size_tracker::Tracker;
 use crate::manifest::storage::utils::{get_from_cache, put_to_cache, write_and_put_cache};
 use crate::manifest::storage::{
     FALL_BACK_COMPRESS_TYPE, LAST_CHECKPOINT_FILE, checkpoint_checksum, checkpoint_file, gen_path,
@@ -57,21 +58,21 @@ impl CheckpointMetadata {
 
 /// Handle checkpoint storage operations.
 #[derive(Debug, Clone)]
-pub(crate) struct CheckpointStorage {
+pub(crate) struct CheckpointStorage<T: Tracker> {
     object_store: ObjectStore,
     compress_type: CompressionType,
     path: String,
     manifest_cache: Option<ManifestCache>,
-    size_tracker: TrackerRef,
+    size_tracker: Arc<T>,
 }
 
-impl CheckpointStorage {
+impl<T: Tracker> CheckpointStorage<T> {
     pub fn new(
         path: String,
         object_store: ObjectStore,
         compress_type: CompressionType,
         manifest_cache: Option<ManifestCache>,
-        size_tracker: TrackerRef,
+        size_tracker: Arc<T>,
     ) -> Self {
         Self {
             object_store,
@@ -261,7 +262,7 @@ impl CheckpointStorage {
 }
 
 #[cfg(test)]
-impl CheckpointStorage {
+impl<T: Tracker> CheckpointStorage<T> {
     pub async fn write_last_checkpoint(
         &self,
         version: ManifestVersion,

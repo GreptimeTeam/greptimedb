@@ -38,7 +38,7 @@ use crate::cache::manifest_cache::ManifestCache;
 use crate::error::{ChecksumMismatchSnafu, OpenDalSnafu, Result};
 use crate::manifest::storage::checkpoint::CheckpointStorage;
 use crate::manifest::storage::delta::DeltaStorage;
-use crate::manifest::storage::size_tracker::SizeTracker;
+use crate::manifest::storage::size_tracker::{CheckpointTracker, DeltaTracker, SizeTracker};
 use crate::manifest::storage::staging::StagingStorage;
 use crate::manifest::storage::utils::remove_from_cache;
 
@@ -139,9 +139,9 @@ pub struct ManifestObjectStore {
     // Tracks the size of each file in the manifest directory.
     size_tracker: SizeTracker,
     // The checkpoint file storage.
-    checkpoint_storage: CheckpointStorage,
+    checkpoint_storage: CheckpointStorage<CheckpointTracker>,
     // The delta file storage.
-    delta_storage: DeltaStorage,
+    delta_storage: DeltaStorage<DeltaTracker>,
     /// The staging file storage.
     staging_storage: StagingStorage,
 }
@@ -390,11 +390,11 @@ impl ManifestObjectStore {
             .map(|v| v.to_vec())
     }
 
-    pub(crate) fn checkpoint_storage(&self) -> &CheckpointStorage {
+    pub(crate) fn checkpoint_storage(&self) -> &CheckpointStorage<CheckpointTracker> {
         &self.checkpoint_storage
     }
 
-    pub(crate) fn delta_storage(&self) -> &DeltaStorage {
+    pub(crate) fn delta_storage(&self) -> &DeltaStorage<DeltaTracker> {
         &self.delta_storage
     }
 

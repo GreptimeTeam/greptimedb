@@ -28,7 +28,7 @@ use crate::manifest::storage::{file_version, is_delta_file};
 
 #[derive(Debug, Clone)]
 pub(crate) struct StagingStorage {
-    delta_storage: DeltaStorage,
+    delta_storage: DeltaStorage<NoopTracker>,
 }
 
 impl StagingStorage {
@@ -42,7 +42,10 @@ impl StagingStorage {
             staging_path.clone(),
             object_store.clone(),
             compress_type,
+            // StagingStorage does not use a manifest cache; set to None.
             None,
+            // StagingStorage does not track file sizes, since all staging files are 
+            // deleted after exiting staging mode.
             Arc::new(NoopTracker),
         );
         Self { delta_storage }
