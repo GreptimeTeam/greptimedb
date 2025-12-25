@@ -82,8 +82,8 @@ impl FileReferenceManager {
 
     /// Gets all ref files for the given regions, meaning all open FileHandles for those regions
     /// and from related regions' manifests.
-    /// `query_regions` query for in memory file handles.
-    /// `related_regions` query for related regions' manifests to get more file refs of given region ids.
+    /// `query_regions_for_mem` queries for in memory file handles.
+    /// `related_regions_in_manifest` queries for related regions' manifests to get more file refs of given region ids.
     pub(crate) async fn get_snapshot_of_file_refs(
         &self,
         query_regions_for_mem: Vec<MitoRegionRef>,

@@ -331,7 +331,7 @@ impl LocalGcWorker {
         debug!("Doing gc for region {}", region_id);
 
         let manifest = region.manifest_ctx.manifest().await;
-        // TODO: check manifest version here? if not match, skip gc for this region?
+        // If the manifest version does not match, skip GC for this region to avoid deleting files that are still in use.
         if self
             .file_ref_manifest
             .manifest_version
