@@ -73,11 +73,11 @@ impl Default for GcSchedulerOptions {
             retry_backoff_duration: Duration::from_secs(5),
             region_gc_concurrency: 16,
             min_region_size_threshold: 100 * 1024 * 1024, // 100MB
-            sst_count_weight: 0.5,
-            file_removed_count_weight: 1.0,
+            sst_count_weight: 0.5, // more sst means could potentially remove more files, moderate priority
+            file_removed_count_weight: 1.0, // more file to be deleted, higher priority
             gc_cooldown_period: Duration::from_secs(60 * 5), // 5 minutes
-            regions_per_table_threshold: 20,                 // Select top 20 regions per table
-            mailbox_timeout: Duration::from_secs(60),        // 60 seconds
+            regions_per_table_threshold: 20, // Select top 20 regions per table
+            mailbox_timeout: Duration::from_secs(60), // 60 seconds
             // Perform full file listing every 24 hours to find orphan files
             full_file_listing_interval: Duration::from_secs(60 * 60 * 24),
             // Clean up stale tracker entries every 6 hours
