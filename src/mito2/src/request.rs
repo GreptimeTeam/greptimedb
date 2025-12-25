@@ -824,13 +824,13 @@ impl WorkerRequest {
         Ok((WorkerRequest::RemapManifests(request), receiver))
     }
 
-    /// Converts [CopyRegionFromRequest] from a [CopyRegionFromRequest](store_api::region_engine::CopyRegionFromRequest).
+    /// Converts [CopyRegionFromRequest] from a [MitoCopyRegionFromRequest](store_api::region_engine::MitoCopyRegionFromRequest).
     pub(crate) fn try_from_copy_region_from_request(
         region_id: RegionId,
-        store_api::region_engine::CopyRegionFromRequest {
+        store_api::region_engine::MitoCopyRegionFromRequest {
             source_region_id,
             parallelism,
-        }: store_api::region_engine::CopyRegionFromRequest,
+        }: store_api::region_engine::MitoCopyRegionFromRequest,
     ) -> Result<(WorkerRequest, Receiver<Result<MitoCopyRegionFromResponse>>)> {
         let (sender, receiver) = oneshot::channel();
         let request = CopyRegionFromRequest {
