@@ -66,7 +66,7 @@ use crate::error::{
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
-use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics};
+use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::file_range::{PreFilterMode, row_group_contains_delete};
 use crate::sst::parquet::flat_format::primary_key_column_index;
@@ -171,10 +171,7 @@ impl BulkPart {
     }
 
     /// Creates MemtableStats from this BulkPart.
-    pub fn to_memtable_stats(
-        &self,
-        region_metadata: &RegionMetadataRef,
-    ) -> crate::memtable::MemtableStats {
+    pub fn to_memtable_stats(&self, region_metadata: &RegionMetadataRef) -> MemtableStats {
         let ts_type = region_metadata
             .time_index_column()
             .column_schema
@@ -185,7 +182,7 @@ impl BulkPart {
         let min_ts = ts_type.create_timestamp(self.min_timestamp);
         let max_ts = ts_type.create_timestamp(self.max_timestamp);
 
-        crate::memtable::MemtableStats {
+        MemtableStats {
             estimated_bytes: self.estimated_size(),
             time_range: Some((min_ts, max_ts)),
             num_rows: self.num_rows(),
@@ -991,7 +988,7 @@ impl EncodedBulkPart {
     }
 
     /// Creates MemtableStats from this EncodedBulkPart.
-    pub fn to_memtable_stats(&self) -> crate::memtable::MemtableStats {
+    pub fn to_memtable_stats(&self) -> MemtableStats {
         let meta = &self.metadata;
         let ts_type = meta
             .region_metadata
@@ -1004,7 +1001,7 @@ impl EncodedBulkPart {
         let min_ts = ts_type.create_timestamp(meta.min_timestamp);
         let max_ts = ts_type.create_timestamp(meta.max_timestamp);
 
-        crate::memtable::MemtableStats {
+        MemtableStats {
             estimated_bytes: self.size_bytes(),
             time_range: Some((min_ts, max_ts)),
             num_rows: meta.num_rows,

@@ -243,6 +243,30 @@ impl Memtable for SimpleBulkMemtable {
         let sequence = options.sequence;
         let start_time = Instant::now();
         let projection = Arc::new(self.build_projection(projection));
+
+        // Use the memtable's overall time range and max sequence for all ranges
+        let max_sequence = self.max_sequence.load(Ordering::Relaxed);
+        let time_range = {
+            let num_rows = self.num_rows.load(Ordering::Relaxed);
+            if num_rows > 0 {
+                let ts_type = self
+                    .region_metadata
+                    .time_index_column()
+                    .column_schema
+                    .data_type
+                    .clone()
+                    .as_timestamp()
+                    .expect("Timestamp column must have timestamp type");
+                let max_timestamp =
+                    ts_type.create_timestamp(self.max_timestamp.load(Ordering::Relaxed));
+                let min_timestamp =
+                    ts_type.create_timestamp(self.min_timestamp.load(Ordering::Relaxed));
+                Some((min_timestamp, max_timestamp))
+            } else {
+                None
+            }
+        };
+
         let values = self.series.read().unwrap().read_to_values();
         let contexts = values
             .into_par_iter()
@@ -267,13 +291,24 @@ impl Memtable for SimpleBulkMemtable {
             .map(|result| {
                 result.map(|batch| {
                     let num_rows = batch.num_rows();
+                    let estimated_bytes = batch.memory_size();
+
+                    let range_stats = MemtableStats {
+                        estimated_bytes,
+                        time_range,
+                        num_rows,
+                        num_ranges: 1,
+                        max_sequence,
+                        series_count: 1,
+                    };
+
                     let builder = BatchRangeBuilder {
                         batch,
                         merge_mode: self.merge_mode,
                         scan_cost: start_time.elapsed(),
                     };
                     (
-                        num_rows,
+                        range_stats,
                         Arc::new(MemtableRangeContext::new(
                             self.id,
                             Box::new(builder),
@@ -287,15 +322,7 @@ impl Memtable for SimpleBulkMemtable {
         let ranges = contexts
             .into_iter()
             .enumerate()
-            .map(|(idx, (num_rows, context))| {
-                // Create minimal stats for each range
-                let range_stats = MemtableStats {
-                    num_rows,
-                    num_ranges: 1,
-                    ..Default::default()
-                };
-                (idx, MemtableRange::new(context, range_stats))
-            })
+            .map(|(idx, (range_stats, context))| (idx, MemtableRange::new(context, range_stats)))
             .collect();
 
         Ok(MemtableRanges { ranges })
