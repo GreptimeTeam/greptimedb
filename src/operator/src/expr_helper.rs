@@ -68,6 +68,7 @@ use sql::statements::{
     sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type, value_to_sql_value,
 };
 use sql::util::extract_tables_from_query;
+use store_api::mito_engine_options::{COMPACTION_OVERRIDE, COMPACTION_TYPE};
 use table::requests::{FILE_TABLE_META_KEY, TableOptions};
 use table::table_reference::TableReference;
 #[cfg(feature = "enterprise")]
@@ -215,6 +216,11 @@ pub fn create_to_expr(
         &TableOptions::try_from_iter(create.options.to_str_map())
             .context(UnrecognizedTableOptionSnafu)?,
     );
+
+    let mut table_options = table_options;
+    if table_options.contains_key(COMPACTION_TYPE) {
+        table_options.insert(COMPACTION_OVERRIDE.to_string(), "true".to_string());
+    }
 
     let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
 

@@ -56,11 +56,13 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
     if let Some(ttl) = table_opts.ttl.map(|t| t.to_string()) {
         options.insert(TTL_KEY.to_string(), ttl);
     } else if let Some(database_ttl) = schema_options
+        .as_ref()
         .and_then(|o| o.ttl)
         .map(|ttl| ttl.to_string())
     {
         options.insert(TTL_KEY.to_string(), database_ttl);
     };
+
     for (k, v) in table_opts
         .extra_options
         .iter()

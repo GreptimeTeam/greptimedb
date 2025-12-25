@@ -29,6 +29,7 @@ use serde_json::Value;
 use serde_with::{DisplayFromStr, NoneAsEmptyString, serde_as, with_prefix};
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::mito_engine_options::COMPACTION_OVERRIDE;
 use store_api::storage::ColumnId;
 use strum::EnumString;
 
@@ -62,6 +63,7 @@ pub struct RegionOptions {
     pub ttl: Option<TimeToLive>,
     /// Compaction options.
     pub compaction: CompactionOptions,
+    pub compaction_override: bool,
     /// Custom storage. Uses default storage if it is `None`.
     pub storage: Option<String>,
     /// If append mode is enabled, the region keeps duplicate rows.
@@ -125,7 +127,8 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
         // See https://github.com/serde-rs/serde/issues/1626
         let options: RegionOptionsWithoutEnum =
             serde_json::from_str(&json).context(JsonOptionsSnafu)?;
-        let compaction = if validate_enum_options(options_map, "compaction.type")? {
+        let has_compaction_type = validate_enum_options(options_map, "compaction.type")?;
+        let compaction = if has_compaction_type {
             serde_json::from_str(&json).context(JsonOptionsSnafu)?
         } else {
             CompactionOptions::default()
@@ -146,9 +149,16 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             None
         };
 
+        let compaction_override_flag = options_map
+            .get(COMPACTION_OVERRIDE)
+            .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
+            .unwrap_or(false);
+        let compaction_override = has_compaction_type || compaction_override_flag;
+
         let opts = RegionOptions {
             ttl: options.ttl,
             compaction,
+            compaction_override,
             storage: options.storage,
             append_mode: options.append_mode,
             wal_options,
@@ -517,6 +527,7 @@ mod tests {
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 ..Default::default()
             }),
+            compaction_override: true,
             ..Default::default()
         };
         assert_eq!(expect, options);
@@ -644,6 +655,7 @@ mod tests {
                 remote_compaction: false,
                 fallback_to_local: true,
             }),
+            compaction_override: true,
             storage: Some("S3".to_string()),
             append_mode: false,
             wal_options,
@@ -676,6 +688,7 @@ mod tests {
                 remote_compaction: false,
                 fallback_to_local: true,
             }),
+            compaction_override: false,
             storage: Some("S3".to_string()),
             append_mode: false,
             wal_options: WalOptions::Kafka(KafkaWalOptions {
@@ -740,6 +753,7 @@ mod tests {
                 remote_compaction: false,
                 fallback_to_local: true,
             }),
+            compaction_override: false,
             storage: Some("S3".to_string()),
             append_mode: false,
             wal_options: WalOptions::Kafka(KafkaWalOptions {
