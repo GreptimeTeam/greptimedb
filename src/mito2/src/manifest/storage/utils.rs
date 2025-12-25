@@ -69,5 +69,5 @@ pub(crate) async fn write_and_put_cache(
 
 /// Sorts the manifest files.
 pub(crate) fn sort_manifests(entries: &mut [(ManifestVersion, Entry)]) {
-    entries.sort_unstable_by(|(v1, _), (v2, _)| v1.cmp(v2));
+    entries.sort_unstable_by_key(|(version, _)| *version);
 }
