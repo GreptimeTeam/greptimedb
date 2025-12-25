@@ -156,7 +156,6 @@ impl DeltaStorage {
     }
 
     /// Common implementation for fetching manifests from entries in parallel.
-    /// If `is_staging` is true, cache is skipped.
     pub(crate) async fn fetch_manifests_from_entries(
         &self,
         entries: Vec<(ManifestVersion, Entry)>,

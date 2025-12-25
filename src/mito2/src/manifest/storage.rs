@@ -134,11 +134,9 @@ pub fn is_checkpoint_file(file_name: &str) -> bool {
 pub struct ManifestObjectStore {
     object_store: ObjectStore,
     path: String,
-
     /// Optional manifest cache for local caching.
     manifest_cache: Option<ManifestCache>,
-
-    // Tracks the size of each file in the manifest directory..
+    // Tracks the size of each file in the manifest directory.
     size_tracker: SizeTracker,
     // The checkpoint file storage.
     checkpoint_storage: CheckpointStorage,

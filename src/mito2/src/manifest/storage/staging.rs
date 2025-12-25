@@ -38,7 +38,6 @@ impl StagingStorage {
             let parent_dir = path.trim_end_matches("manifest/").trim_end_matches('/');
             util::normalize_dir(&format!("{}/staging/manifest", parent_dir))
         };
-
         let delta_storage = DeltaStorage::new(
             staging_path.clone(),
             object_store.clone(),
