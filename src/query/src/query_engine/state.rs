@@ -209,6 +209,7 @@ impl QueryEngineState {
             .build();
 
         let df_context = SessionContext::new_with_state(session_state);
+        register_function_aliases(&df_context);
 
         Self {
             df_context,
@@ -412,6 +413,41 @@ impl QueryPlanner for DfQueryPlanner {
         self.physical_planner
             .create_physical_plan(logical_plan, session_state)
             .await
+    }
+}
+
+/// MySQL-compatible scalar function aliases: (target_name, alias)
+const SCALAR_FUNCTION_ALIASES: &[(&str, &str)] = &[
+    ("upper", "ucase"),
+    ("lower", "lcase"),
+    ("ceil", "ceiling"),
+    ("substr", "mid"),
+    ("random", "rand"),
+];
+
+/// MySQL-compatible aggregate function aliases: (target_name, alias)
+const AGGREGATE_FUNCTION_ALIASES: &[(&str, &str)] =
+    &[("stddev_pop", "std"), ("var_pop", "variance")];
+
+/// Register function aliases.
+///
+/// This function adds aliases like `ucase` -> `upper`, `lcase` -> `lower`, etc.
+/// to make GreptimeDB more compatible with MySQL syntax.
+fn register_function_aliases(ctx: &SessionContext) {
+    let state = ctx.state();
+
+    for (target, alias) in SCALAR_FUNCTION_ALIASES {
+        if let Some(func) = state.scalar_functions().get(*target) {
+            let aliased = func.as_ref().clone().with_aliases([*alias]);
+            ctx.register_udf(aliased);
+        }
+    }
+
+    for (target, alias) in AGGREGATE_FUNCTION_ALIASES {
+        if let Some(func) = state.aggregate_functions().get(*target) {
+            let aliased = func.as_ref().clone().with_aliases([*alias]);
+            ctx.register_udaf(aliased);
+        }
     }
 }
 
