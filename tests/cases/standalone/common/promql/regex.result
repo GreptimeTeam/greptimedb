@@ -121,7 +121,7 @@ TQL ANALYZE VERBOSE (0, 0, '1s') test{host!~".*"};
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_PromSeriesDivideExec: tags=["host"] REDACTED
-|_|_|_SortExec: expr=[host@1 ASC, ts@0 ASC], preserve_partitioning=[false] REDACTED
+|_|_|_SortExec: expr=[host@1 ASC NULLS LAST, ts@0 ASC NULLS LAST], preserve_partitioning=[false] REDACTED
 |_|_|_EmptyExec REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|

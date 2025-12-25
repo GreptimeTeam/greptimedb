@@ -1,0 +1,77 @@
+-- Test ORDER BY primary key optimization
+-- When ordering by primary keys in ASC order, SortExec should be eliminated
+-- because the storage layer already maintains data in this order.
+-- Uses EXPLAIN ANALYZE to see the actual physical plan including Region-level execution.
+-- Create a table with multiple primary keys
+CREATE TABLE order_pk_test (
+    pk_a STRING,
+    pk_b STRING,
+    pk_c STRING,
+    val DOUBLE,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY (pk_a, pk_b, pk_c)
+);
+
+Affected Rows: 0
+
+-- Insert test data
+INSERT INTO order_pk_test VALUES
+    ('a1', 'b1', 'c1', 1.0, 1000),
+    ('a1', 'b1', 'c2', 2.0, 2000),
+    ('a1', 'b2', 'c1', 3.0, 3000),
+    ('a2', 'b1', 'c1', 4.0, 4000),
+    ('a2', 'b2', 'c2', 5.0, 5000);
+
+Affected Rows: 5
+
+-- Test 1: ORDER BY all primary keys in ASC order should NOT have SortExec
+-- Only SortPreservingMergeExec should be present (for merging sorted partitions)
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT * FROM order_pk_test ORDER BY pk_a, pk_b, pk_c LIMIT 10;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [pk_a@0 ASC NULLS LAST, pk_b@1 ASC NULLS LAST, pk_c@2 ASC NULLS LAST], fetch=10 REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 5_|
++-+-+-+
+
+-- Test 2: ORDER BY with DESC should have SortExec (different order from storage)
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT * FROM order_pk_test ORDER BY pk_a DESC LIMIT 10;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [pk_a@0 DESC], fetch=10 REDACTED
+|_|_|_SortExec: TopK(fetch=10), expr=[pk_a@0 DESC], preserve_partitioning=[true] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 5_|
++-+-+-+
+
+-- Cleanup
+DROP TABLE order_pk_test;
+
+Affected Rows: 0
+

@@ -237,7 +237,7 @@ impl ExecutionPlan for SeriesDivideExec {
                 expr: Arc::new(ColumnExpr::new_with_schema(tag, &input_schema).unwrap()),
                 options: Some(SortOptions {
                     descending: false,
-                    nulls_first: true,
+                    nulls_first: false, // Match storage layer: ASC NULLS LAST
                 }),
             })
             .collect();
@@ -248,7 +248,7 @@ impl ExecutionPlan for SeriesDivideExec {
             ),
             options: Some(SortOptions {
                 descending: false,
-                nulls_first: true,
+                nulls_first: false, // Match storage layer: ASC NULLS LAST
             }),
         });
 

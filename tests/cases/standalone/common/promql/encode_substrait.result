@@ -26,7 +26,7 @@ tql explain (0, 100, '1s')
 |               |       PromRangeManipulate: req range=[-39600000..0], interval=[3600000], eval range=[3600000], time index=[ts], values=["val"]                                                      |
 |               |         PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                                        |
 |               |           PromSeriesDivide: tags=["tag_a", "tag_b"]                                                                                                                                 |
-|               |             Sort: count_total.tag_a ASC NULLS FIRST, count_total.tag_b ASC NULLS FIRST, count_total.ts ASC NULLS FIRST                                                              |
+|               |             Sort: count_total.tag_a ASC NULLS LAST, count_total.tag_b ASC NULLS LAST, count_total.ts ASC NULLS LAST                                                                 |
 |               |               Filter: count_total.tag_a = Utf8("ffa") AND count_total.ts >= TimestampMillisecond(-43500000, None) AND count_total.ts <= TimestampMillisecond(300000, None)          |
 |               |                 TableScan: count_total                                                                                                                                              |
 |               | ]]                                                                                                                                                                                  |

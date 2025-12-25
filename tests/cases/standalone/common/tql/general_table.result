@@ -39,7 +39,7 @@ TQL analyze (0, 10, '1s')  sum by(job) (irate(cpu_usage{job="fire"}[5s])) / 1e9;
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[1000], eval range=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["job"] REDACTED
-|_|_|_SortExec: expr=[ts@2 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_SortExec: expr=[ts@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_ProjectionExec: expr=[value@1 as value, job@0 as job, CAST(ts@2 AS Timestamp(Millisecond, None)) as ts] REDACTED

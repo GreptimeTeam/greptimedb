@@ -123,7 +123,7 @@ impl RegionScanExec {
                     Arc::new(Column::new_with_schema(col, &arrow_schema).ok()?) as _,
                     SortOptions {
                         descending: false,
-                        nulls_first: true,
+                        nulls_first: false, // Match SQL default: ASC NULLS LAST
                     },
                 ))
             })
@@ -139,7 +139,7 @@ impl RegionScanExec {
                 ) as _,
                 SortOptions {
                     descending: false,
-                    nulls_first: true,
+                    nulls_first: false, // Match SQL default: ASC NULLS LAST
                 },
             )
         };
@@ -163,6 +163,9 @@ impl RegionScanExec {
                     vec![pk_sort_columns],
                 )
             }
+            // Without explicit distribution, we cannot guarantee global ordering
+            // across partitions. Each partition may be internally ordered, but
+            // the output is not globally sorted.
             None => EquivalenceProperties::new(arrow_schema.clone()),
         };
 

@@ -18,7 +18,7 @@ TQL EXPLAIN (0, 10, '5s') test;
 | logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                              |
 |               | PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]                    |
 |               |   PromSeriesDivide: tags=["k"]                                                                               |
-|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                     |
+|               |     Sort: test.k ASC NULLS LAST, test.j ASC NULLS LAST                                                       |
 |               |       Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None) |
 |               |         TableScan: test                                                                                      |
 |               | ]]                                                                                                           |
@@ -39,7 +39,7 @@ TQL EXPLAIN (0, 10, '1s', '2s') test;
 | logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                          |
 |               | PromInstantManipulate: range=[0..0], lookback=[2000], interval=[300000], time index=[j]                  |
 |               |   PromSeriesDivide: tags=["k"]                                                                           |
-|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                 |
+|               |     Sort: test.k ASC NULLS LAST, test.j ASC NULLS LAST                                                   |
 |               |       Filter: test.j >= TimestampMillisecond(-2000, None) AND test.j <= TimestampMillisecond(2000, None) |
 |               |         TableScan: test                                                                                  |
 |               | ]]                                                                                                       |
@@ -59,7 +59,7 @@ TQL EXPLAIN ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp 
 | logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                              |
 |               | PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]                    |
 |               |   PromSeriesDivide: tags=["k"]                                                                               |
-|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                     |
+|               |     Sort: test.k ASC NULLS LAST, test.j ASC NULLS LAST                                                       |
 |               |       Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None) |
 |               |         TableScan: test                                                                                      |
 |               | ]]                                                                                                           |
@@ -81,7 +81,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 +-+-+
 | initial_logical_plan_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
-|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Sort: test.k ASC NULLS LAST, test.j ASC NULLS LAST_|
 |_|_Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None)_|
 |_|_TableScan: test_|
 | logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
@@ -93,7 +93,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
-|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Sort: test.k ASC NULLS LAST, test.j ASC NULLS LAST_|
 |_|_Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None)_|
 |_|_TableScan: test_|
 |_| ]]_|
@@ -123,7 +123,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after optimize_projections_| MergeScan [is_placeholder=false, remote_input=[_|
 |_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
-|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Sort: test.k ASC NULLS LAST, test.j ASC NULLS LAST_|
 |_|_Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None)_|
 |_|_TableScan: test_|
 |_| ]]_|
@@ -154,7 +154,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
 |_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
-|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Sort: test.k ASC NULLS LAST, test.j ASC NULLS LAST_|
 |_|_Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None)_|
 |_|_TableScan: test_|
 |_| ]]_|
@@ -219,7 +219,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 +-+-+
 | initial_logical_plan_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
-|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Sort: test.k ASC NULLS LAST, test.j ASC NULLS LAST_|
 |_|_Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None)_|
 |_|_TableScan: test_|
 | logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
@@ -231,7 +231,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
-|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Sort: test.k ASC NULLS LAST, test.j ASC NULLS LAST_|
 |_|_Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None)_|
 |_|_TableScan: test_|
 |_| ]]_|
@@ -261,7 +261,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | logical_plan after optimize_projections_| MergeScan [is_placeholder=false, remote_input=[_|
 |_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
-|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Sort: test.k ASC NULLS LAST, test.j ASC NULLS LAST_|
 |_|_Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None)_|
 |_|_TableScan: test_|
 |_| ]]_|
@@ -292,7 +292,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
 |_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
-|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Sort: test.k ASC NULLS LAST, test.j ASC NULLS LAST_|
 |_|_Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None)_|
 |_|_TableScan: test_|
 |_| ]]_|

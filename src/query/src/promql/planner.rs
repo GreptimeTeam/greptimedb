@@ -2216,9 +2216,10 @@ impl PromPlanner {
             .ctx
             .tag_columns
             .iter()
-            .map(|col| DfExpr::Column(Column::from_name(col)).sort(true, true))
+            // Use nulls_first=false to match storage layer ordering (ASC NULLS LAST)
+            .map(|col| DfExpr::Column(Column::from_name(col)).sort(true, false))
             .collect::<Vec<_>>();
-        result.push(self.create_time_index_column_expr()?.sort(true, true));
+        result.push(self.create_time_index_column_expr()?.sort(true, false));
         Ok(result)
     }
 
@@ -2226,7 +2227,8 @@ impl PromPlanner {
         self.ctx
             .field_columns
             .iter()
-            .map(|col| DfExpr::Column(Column::from_name(col)).sort(asc, true))
+            // Use nulls_first=false to match storage layer ordering (ASC NULLS LAST)
+            .map(|col| DfExpr::Column(Column::from_name(col)).sort(asc, false))
             .collect::<Vec<_>>()
     }
 
