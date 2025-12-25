@@ -23,6 +23,7 @@ use store_api::metric_engine_consts::{
     METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION,
     METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION_DEFAULT, METRIC_ENGINE_INDEX_TYPE_OPTION,
 };
+use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS, TWCS_TIME_WINDOW};
 
 use crate::error::{Error, ParseRegionOptionsSnafu, Result};
 
@@ -31,6 +32,9 @@ use crate::error::{Error, ParseRegionOptionsSnafu, Result};
 /// Therefore, compared to the default seg row count of 1024, by adjusting it to a smaller
 /// value and appropriately increasing the size of the index, it results in an improved indexing effect.
 const SEG_ROW_COUNT_FOR_DATA_REGION: u32 = 256;
+
+/// The default compaction time window for metric engine data regions.
+const DEFAULT_DATA_REGION_COMPACTION_TIME_WINDOW: &str = "1d";
 
 /// Physical region options.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -70,6 +74,16 @@ pub fn set_data_region_options(
         options.insert(
             MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING.to_string(),
             "sparse".to_string(),
+        );
+    }
+    if !options.contains_key(TWCS_TIME_WINDOW) {
+        options.insert(
+            COMPACTION_TYPE.to_string(),
+            COMPACTION_TYPE_TWCS.to_string(),
+        );
+        options.insert(
+            TWCS_TIME_WINDOW.to_string(),
+            DEFAULT_DATA_REGION_COMPACTION_TIME_WINDOW.to_string(),
         );
     }
 }
@@ -191,5 +205,30 @@ mod tests {
                 false_positive_rate: 0.01,
             }
         );
+    }
+
+    #[test]
+    fn test_set_data_region_options_default_compaction_time_window() {
+        // Test that default time window is set when not specified
+        let mut options = HashMap::new();
+        set_data_region_options(&mut options, false);
+
+        assert_eq!(
+            options.get(COMPACTION_TYPE),
+            Some(&COMPACTION_TYPE_TWCS.to_string())
+        );
+        assert_eq!(options.get(TWCS_TIME_WINDOW), Some(&"1d".to_string()));
+    }
+
+    #[test]
+    fn test_set_data_region_options_respects_user_compaction_time_window() {
+        // Test that user-specified time window is preserved
+        let mut options = HashMap::new();
+        options.insert(TWCS_TIME_WINDOW.to_string(), "2h".to_string());
+        options.insert(COMPACTION_TYPE.to_string(), "twcs".to_string());
+        set_data_region_options(&mut options, false);
+
+        // User's time window should be preserved
+        assert_eq!(options.get(TWCS_TIME_WINDOW), Some(&"2h".to_string()));
     }
 }
