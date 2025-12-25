@@ -21,7 +21,7 @@ use common_macro::stack_trace_debug;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
 use store_api::region_request::RegionRequest;
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -123,6 +123,27 @@ pub enum Error {
 
     #[snafu(display("Mito read operation fails"))]
     MitoReadOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Mito copy region from operation fails, source region id: {}, target region id: {}",
+        source_region_id,
+        target_region_id
+    ))]
+    MitoCopyRegionFromOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+        source_region_id: RegionId,
+        target_region_id: RegionId,
+    },
+
+    #[snafu(display("Mito edit region operation fails, region id: {}", region_id))]
+    MitoEditRegion {
+        region_id: RegionId,
         source: BoxedError,
         #[snafu(implicit)]
         location: Location,
@@ -256,6 +277,21 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unsupported sync region from request for region {}", region_id))]
+    UnsupportedSyncRegionFromRequest {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Missing file metas in region {}, file ids: {:?}", region_id, file_ids))]
+    MissingFiles {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        file_ids: Vec<FileId>,
+    },
+
     #[snafu(display("Unsupported alter kind: {}", kind))]
     UnsupportedAlterKind {
         kind: String,
@@ -339,11 +375,12 @@ impl ErrorExt for Error {
             | ParseRegionOptions { .. }
             | UnexpectedRequest { .. }
             | UnsupportedAlterKind { .. }
-            | UnsupportedRemapManifestsRequest { .. } => StatusCode::InvalidArguments,
+            | UnsupportedRemapManifestsRequest { .. }
+            | UnsupportedSyncRegionFromRequest { .. } => StatusCode::InvalidArguments,
 
-            ForbiddenPhysicalAlter { .. } | UnsupportedRegionRequest { .. } => {
-                StatusCode::Unsupported
-            }
+            ForbiddenPhysicalAlter { .. }
+            | UnsupportedRegionRequest { .. }
+            | MissingFiles { .. } => StatusCode::Unsupported,
 
             DeserializeColumnMetadata { .. }
             | SerializeColumnMetadata { .. }
@@ -369,7 +406,9 @@ impl ErrorExt for Error {
             | MitoSyncOperation { source, .. }
             | MitoEnterStagingOperation { source, .. }
             | BatchOpenMitoRegion { source, .. }
-            | BatchCatchupMitoRegion { source, .. } => source.status_code(),
+            | BatchCatchupMitoRegion { source, .. }
+            | MitoCopyRegionFromOperation { source, .. }
+            | MitoEditRegion { source, .. } => source.status_code(),
 
             EncodePrimaryKey { source, .. } => source.status_code(),
 

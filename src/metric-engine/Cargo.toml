@@ -23,6 +23,7 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+chrono.workspace = true
 datafusion.workspace = true
 datatypes.workspace = true
 futures-util.workspace = true

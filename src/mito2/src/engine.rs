@@ -89,6 +89,7 @@ use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
+use common_meta::error::UnexpectedSnafu;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::{MemoryPermit, QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
@@ -107,10 +108,10 @@ use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
 };
 use store_api::region_engine::{
-    BatchResponses, CopyRegionFromRequest, CopyRegionFromResponse, MitoCopyRegionFromResponse,
-    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
-    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
-    SettableRegionRoleState, SyncManifestResponse,
+    BatchResponses, MitoCopyRegionFromRequest, MitoCopyRegionFromResponse, RegionEngine,
+    RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
+    RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
+    SyncRegionFromRequest, SyncRegionFromResponse,
 };
 use store_api::region_request::{
     AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
@@ -124,8 +125,8 @@ use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::MitoConfig;
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
-    self, InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu,
-    Result, SerdeJsonSnafu, SerializeColumnMetadataSnafu, SerializeManifestSnafu,
+    InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
+    SerdeJsonSnafu, SerializeColumnMetadataSnafu, SerializeManifestSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
@@ -397,7 +398,7 @@ impl MitoEngine {
     }
 
     /// Edit region's metadata by [RegionEdit] directly. Use with care.
-    /// Now we only allow adding files to region (the [RegionEdit] struct can only contain a non-empty "files_to_add" field).
+    /// Now we only allow adding files or removing files from region (the [RegionEdit] struct can only contain a non-empty "files_to_add" or "files_to_remove" field).
     /// Other region editing intention will result in an "invalid request" error.
     /// Also note that if a region is to be edited directly, we MUST not write data to it thereafter.
     pub async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
@@ -432,7 +433,7 @@ impl MitoEngine {
     pub async fn copy_region_from(
         &self,
         region_id: RegionId,
-        request: CopyRegionFromRequest,
+        request: MitoCopyRegionFromRequest,
     ) -> Result<MitoCopyRegionFromResponse> {
         self.inner.copy_region_from(region_id, request).await
     }
@@ -641,8 +642,7 @@ impl MitoEngine {
 ///
 /// Only adding or removing files to region is considered valid now.
 fn is_valid_region_edit(edit: &RegionEdit) -> bool {
-    !edit.files_to_add.is_empty()
-        && edit.files_to_remove.is_empty()
+    (!edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty())
         && matches!(
             edit,
             RegionEdit {
@@ -1075,7 +1075,7 @@ impl EngineInner {
     async fn copy_region_from(
         &self,
         region_id: RegionId,
-        request: CopyRegionFromRequest,
+        request: MitoCopyRegionFromRequest,
     ) -> Result<MitoCopyRegionFromResponse> {
         let (request, receiver) =
             WorkerRequest::try_from_copy_region_from_request(region_id, request)?;
@@ -1249,15 +1249,21 @@ impl RegionEngine for MitoEngine {
     async fn sync_region(
         &self,
         region_id: RegionId,
-        manifest_info: RegionManifestInfo,
-    ) -> Result<SyncManifestResponse, BoxedError> {
+        request: SyncRegionFromRequest,
+    ) -> Result<SyncRegionFromResponse, BoxedError> {
+        let manifest_info = request
+            .into_region_manifest_info()
+            .context(UnexpectedSnafu {
+                err_msg: "Expected a manifest info request",
+            })
+            .map_err(BoxedError::new)?;
         let (_, synced) = self
             .inner
             .sync_region(region_id, manifest_info)
             .await
             .map_err(BoxedError::new)?;
 
-        Ok(SyncManifestResponse::Mito { synced })
+        Ok(SyncRegionFromResponse::Mito { synced })
     }
 
     async fn remap_manifests(
@@ -1268,19 +1274,6 @@ impl RegionEngine for MitoEngine {
             .remap_manifests(request)
             .await
             .map_err(BoxedError::new)
-    }
-
-    async fn copy_region_from(
-        &self,
-        _region_id: RegionId,
-        _request: CopyRegionFromRequest,
-    ) -> Result<CopyRegionFromResponse, BoxedError> {
-        Err(BoxedError::new(
-            error::UnsupportedOperationSnafu {
-                err_msg: "copy_region_from is not supported",
-            }
-            .build(),
-        ))
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
@@ -1421,7 +1414,7 @@ mod tests {
         };
         assert!(is_valid_region_edit(&edit));
 
-        // Invalid: "files_to_add" is empty
+        // Invalid: "files_to_add" and "files_to_remove" are both empty
         let edit = RegionEdit {
             files_to_add: vec![],
             files_to_remove: vec![],
@@ -1433,7 +1426,7 @@ mod tests {
         };
         assert!(!is_valid_region_edit(&edit));
 
-        // Invalid: "files_to_remove" is not empty
+        // Valid: "files_to_remove" is not empty
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![FileMeta::default()],
@@ -1443,7 +1436,7 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
         };
-        assert!(!is_valid_region_edit(&edit));
+        assert!(is_valid_region_edit(&edit));
 
         // Invalid: other fields are not all "None"s
         let edit = RegionEdit {

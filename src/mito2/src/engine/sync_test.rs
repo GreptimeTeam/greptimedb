@@ -153,7 +153,7 @@ async fn test_sync_after_flush_region_with_format(flat_format: bool) {
     // Returns error since the max manifest is 1
     let manifest_info = RegionManifestInfo::mito(2, 0, 0);
     let err = follower_engine
-        .sync_region(region_id, manifest_info)
+        .sync_region(region_id, manifest_info.into())
         .await
         .unwrap_err();
     let err = err.as_any().downcast_ref::<Error>().unwrap();
@@ -161,7 +161,7 @@ async fn test_sync_after_flush_region_with_format(flat_format: bool) {
 
     let manifest_info = RegionManifestInfo::mito(1, 0, 0);
     follower_engine
-        .sync_region(region_id, manifest_info)
+        .sync_region(region_id, manifest_info.into())
         .await
         .unwrap();
     common_telemetry::info!("Scan the region on the follower engine after sync");
@@ -266,7 +266,7 @@ async fn test_sync_after_alter_region_with_format(flat_format: bool) {
     // Sync the region from the leader engine to the follower engine
     let manifest_info = RegionManifestInfo::mito(2, 0, 0);
     follower_engine
-        .sync_region(region_id, manifest_info)
+        .sync_region(region_id, manifest_info.into())
         .await
         .unwrap();
     let expected = "\

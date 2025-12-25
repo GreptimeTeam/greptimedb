@@ -290,6 +290,11 @@ impl MetricEngineInner {
             .metadata_region
             .logical_regions(physical_region_id)
             .await?;
+        common_telemetry::debug!(
+            "Recover states for physical region {}, logical regions: {:?}",
+            physical_region_id,
+            logical_regions
+        );
         let physical_columns = self
             .data_region
             .physical_columns(physical_region_id)

@@ -33,9 +33,9 @@ use servers::grpc::FlightCompression;
 use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    CopyRegionFromRequest, CopyRegionFromResponse, RegionEngine, RegionManifestInfo, RegionRole,
-    RegionScannerRef, RegionStatistic, RemapManifestsRequest, RemapManifestsResponse,
-    SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
+    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
+    RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
+    SyncRegionFromRequest, SyncRegionFromResponse,
 };
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
@@ -287,8 +287,8 @@ impl RegionEngine for MockRegionEngine {
     async fn sync_region(
         &self,
         _region_id: RegionId,
-        _manifest_info: RegionManifestInfo,
-    ) -> Result<SyncManifestResponse, BoxedError> {
+        _request: SyncRegionFromRequest,
+    ) -> Result<SyncRegionFromResponse, BoxedError> {
         unimplemented!()
     }
 
@@ -296,14 +296,6 @@ impl RegionEngine for MockRegionEngine {
         &self,
         _request: RemapManifestsRequest,
     ) -> Result<RemapManifestsResponse, BoxedError> {
-        unimplemented!()
-    }
-
-    async fn copy_region_from(
-        &self,
-        _region_id: RegionId,
-        _request: CopyRegionFromRequest,
-    ) -> Result<CopyRegionFromResponse, BoxedError> {
         unimplemented!()
     }
 
