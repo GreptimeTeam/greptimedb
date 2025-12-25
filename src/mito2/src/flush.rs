@@ -36,8 +36,8 @@ use crate::access_layer::{
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
-    Error, FlushRegionSnafu, InvalidPartitionExprSnafu, JoinSnafu, RegionClosedSnafu,
-    RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+    Error, FlushRegionSnafu, JoinSnafu, RegionClosedSnafu, RegionDroppedSnafu,
+    RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::{
@@ -54,7 +54,7 @@ use crate::read::merge::MergeReaderBuilder;
 use crate::read::{FlatSource, Source};
 use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
-use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
+use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState, parse_partition_expr};
 use crate::request::{
     BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderBulkRequest,
     SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
@@ -252,6 +252,10 @@ pub(crate) struct RegionFlushTask {
     pub(crate) flush_semaphore: Arc<Semaphore>,
     /// Whether the region is in staging mode.
     pub(crate) is_staging: bool,
+    /// Partition expression of the region.
+    ///
+    /// This is used to generate the file meta.
+    pub(crate) partition_expr: Option<String>,
 }
 
 impl RegionFlushTask {
@@ -441,14 +445,8 @@ impl RegionFlushTask {
         let mut file_metas = Vec::with_capacity(memtables.len());
         let mut flushed_bytes = 0;
         let mut series_count = 0;
-        // Convert partition expression once outside the map
-        let partition_expr = match &version.metadata.partition_expr {
-            None => None,
-            Some(json_expr) if json_expr.is_empty() => None,
-            Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                .with_context(|_| InvalidPartitionExprSnafu { expr: json_str })?,
-        };
         let mut flush_metrics = Metrics::new(WriteType::Flush);
+        let partition_expr = parse_partition_expr(self.partition_expr.as_deref())?;
         for mem in memtables {
             if mem.is_empty() {
                 // Skip empty memtables.
@@ -1333,6 +1331,7 @@ mod tests {
             index_options: IndexOptions::default(),
             flush_semaphore: Arc::new(Semaphore::new(2)),
             is_staging: false,
+            partition_expr: None,
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler
@@ -1376,6 +1375,7 @@ mod tests {
                 index_options: IndexOptions::default(),
                 flush_semaphore: Arc::new(Semaphore::new(2)),
                 is_staging: false,
+                partition_expr: None,
             })
             .collect();
         // Schedule first task.
@@ -1568,6 +1568,7 @@ mod tests {
                 index_options: IndexOptions::default(),
                 flush_semaphore: Arc::new(Semaphore::new(2)),
                 is_staging: false,
+                partition_expr: None,
             })
             .collect();
         // Schedule first task.

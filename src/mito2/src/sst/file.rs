@@ -312,6 +312,14 @@ impl FileMeta {
         !self.available_indexes.is_empty()
     }
 
+    pub fn index_version(&self) -> Option<IndexVersion> {
+        if self.exists_index() {
+            Some(self.index_version)
+        } else {
+            None
+        }
+    }
+
     /// Whether the index file is up-to-date comparing to another file meta.    
     pub fn is_index_up_to_date(&self, other: &FileMeta) -> bool {
         self.exists_index() && other.exists_index() && self.index_version >= other.index_version

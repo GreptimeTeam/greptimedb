@@ -2580,10 +2580,12 @@ dependencies = [
 name = "common-sql"
 version = "1.0.0-beta.3"
 dependencies = [
+ "arrow-schema",
  "common-base",
  "common-decimal",
  "common-error",
  "common-macro",
+ "common-telemetry",
  "common-time",
  "datafusion-sql",
  "datatypes",
@@ -5462,7 +5464,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=173efe5ec62722089db7c531c0b0d470a072b915#173efe5ec62722089db7c531c0b0d470a072b915"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=520fa524f9d590752ea327683e82ffd65721b27c#520fa524f9d590752ea327683e82ffd65721b27c"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -12229,7 +12231,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.58.0"
-source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=4b519a5caa95472cc3988f5556813a583dd35af1#4b519a5caa95472cc3988f5556813a583dd35af1"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=a0ce2bc6eb3e804532932f39833c32432f5c9a39#a0ce2bc6eb3e804532932f39833c32432f5c9a39"
 dependencies = [
  "lazy_static",
  "log",
@@ -12253,7 +12255,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.3.0"
-source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=4b519a5caa95472cc3988f5556813a583dd35af1#4b519a5caa95472cc3988f5556813a583dd35af1"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=a0ce2bc6eb3e804532932f39833c32432f5c9a39#a0ce2bc6eb3e804532932f39833c32432f5c9a39"
 dependencies = [
  "proc-macro2",
  "quote",

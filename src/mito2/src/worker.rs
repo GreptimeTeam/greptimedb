@@ -15,6 +15,7 @@
 //! Structs and utilities for writing regions.
 
 mod handle_alter;
+mod handle_apply_staging;
 mod handle_bulk_insert;
 mod handle_catchup;
 mod handle_close;
@@ -1005,7 +1006,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await;
                 }
                 WorkerRequest::EditRegion(request) => {
-                    self.handle_region_edit(request).await;
+                    self.handle_region_edit(request);
                 }
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
@@ -1105,6 +1106,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         ddl.sender,
                     )
                     .await;
+                    continue;
+                }
+                DdlRequest::ApplyStagingManifest(req) => {
+                    self.handle_apply_staging_manifest_request(ddl.region_id, req, ddl.sender)
+                        .await;
                     continue;
                 }
             };

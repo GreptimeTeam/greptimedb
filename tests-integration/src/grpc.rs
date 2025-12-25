@@ -62,7 +62,6 @@ mod test {
     use common_meta::rpc::router::region_distribution;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
-    use common_test_util::recordbatch::check_output_stream;
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
     use query::query_engine::DefaultSerializer;
@@ -76,11 +75,10 @@ mod test {
 
     use super::*;
     use crate::standalone::GreptimeDbStandaloneBuilder;
+    use crate::test_util::execute_sql_and_expect;
     use crate::tests;
     use crate::tests::MockDistributedInstance;
-    use crate::tests::test_util::{
-        MockInstance, both_instances_cases, distributed, execute_sql, standalone,
-    };
+    use crate::tests::test_util::{MockInstance, both_instances_cases, distributed, standalone};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_distributed_handle_ddl_request() {
@@ -1242,8 +1240,7 @@ CREATE TABLE {table_name} (
             .unwrap();
         assert!(matches!(output.data, OutputData::AffectedRows(3)));
 
-        let output = execute_sql(&frontend, "show create table auto_created_table").await;
-
+        let sql = "show create table auto_created_table";
         let expected = r#"+--------------------+---------------------------------------------------+
 | Table              | Create Table                                      |
 +--------------------+---------------------------------------------------+
@@ -1261,6 +1258,6 @@ CREATE TABLE {table_name} (
 |                    |   'compaction.type' = 'twcs'                      |
 |                    | )                                                 |
 +--------------------+---------------------------------------------------+"#;
-        check_output_stream(output.data, expected).await;
+        execute_sql_and_expect(&frontend, sql, expected).await;
     }
 }

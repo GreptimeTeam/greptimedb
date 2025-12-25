@@ -19,6 +19,7 @@ use store_api::path_utils::region_name;
 use store_api::region_request::PathType;
 use store_api::storage::{FileId, RegionId};
 
+use crate::cache::file_cache::FileType;
 use crate::error::UnexpectedSnafu;
 use crate::sst::file::{RegionFileId, RegionIndexId};
 
@@ -110,31 +111,29 @@ pub fn parse_index_file_info(filepath: &str) -> crate::error::Result<(FileId, u6
     }
 }
 
-/// Get RegionFileId from sst or index filename
-pub fn parse_file_id_from_path(filepath: &str) -> crate::error::Result<FileId> {
+pub fn parse_file_id_type_from_path(filepath: &str) -> crate::error::Result<(FileId, FileType)> {
     let filename = filepath.rsplit('/').next().context(UnexpectedSnafu {
         reason: format!("invalid file path: {}", filepath),
     })?;
+    // get part before first '.'
     let parts: Vec<&str> = filename.split('.').collect();
-    if parts.len() != 2 {
+    if parts.len() < 2 {
         return UnexpectedSnafu {
             reason: format!("invalid file name: {}", filename),
         }
         .fail();
     }
-    if parts[1] != "parquet" && parts[1] != "puffin" {
-        return UnexpectedSnafu {
-            reason: format!("invalid file extension: {}", parts[1]),
-        }
-        .fail();
-    }
     let file_id = parts[0];
-    FileId::parse_str(file_id).map_err(|e| {
+    let file_id = FileId::parse_str(file_id).map_err(|e| {
         UnexpectedSnafu {
             reason: format!("invalid file id: {}, err: {}", file_id, e),
         }
         .build()
-    })
+    })?;
+    let file_type = FileType::parse(parts[1..].join(".").as_str()).context(UnexpectedSnafu {
+        reason: format!("invalid file type in file name: {}", filename),
+    })?;
+    Ok((file_id, file_type))
 }
 
 #[cfg(test)]
@@ -219,5 +218,63 @@ mod tests {
                 .unwrap();
         assert_eq!(result.0.to_string(), file_id.to_string());
         assert_eq!(result.1, 42);
+    }
+
+    #[test]
+    fn test_parse_file_id_type_from_path() {
+        use crate::cache::file_cache::FileType;
+
+        // Test parquet file
+        let file_id = FileId::random();
+        let path = format!("table_dir/1_0000000002/data/{}.parquet", file_id);
+        let result = parse_file_id_type_from_path(&path).unwrap();
+        assert_eq!(result.0.to_string(), file_id.to_string());
+        assert_eq!(result.1, FileType::Parquet);
+
+        // Test puffin file (legacy format, version 0)
+        let file_id = FileId::random();
+        let path = format!("table_dir/1_0000000002/index/{}.puffin", file_id);
+        let result = parse_file_id_type_from_path(&path).unwrap();
+        assert_eq!(result.0.to_string(), file_id.to_string());
+        assert_eq!(result.1, FileType::Puffin(0));
+
+        // Test versioned puffin file
+        let file_id = FileId::random();
+        let path = format!("table_dir/1_0000000002/index/{}.1.puffin", file_id);
+        let result = parse_file_id_type_from_path(&path).unwrap();
+        assert_eq!(result.0.to_string(), file_id.to_string());
+        assert_eq!(result.1, FileType::Puffin(1));
+
+        // Test with different path types
+        let file_id = FileId::random();
+        let path = format!("table_dir/1_0000000002/metadata/{}.parquet", file_id);
+        let result = parse_file_id_type_from_path(&path).unwrap();
+        assert_eq!(result.0.to_string(), file_id.to_string());
+        assert_eq!(result.1, FileType::Parquet);
+
+        // Test with bare path type
+        let file_id = FileId::random();
+        let path = format!("table_dir/1_0000000002/{}.parquet", file_id);
+        let result = parse_file_id_type_from_path(&path).unwrap();
+        assert_eq!(result.0.to_string(), file_id.to_string());
+        assert_eq!(result.1, FileType::Parquet);
+
+        // Test error cases
+        // Invalid file extension
+        let result = parse_file_id_type_from_path("table_dir/1_0000000002/data/test.invalid");
+        assert!(result.is_err());
+
+        // Invalid file ID
+        let result =
+            parse_file_id_type_from_path("table_dir/1_0000000002/data/invalid-file-id.parquet");
+        assert!(result.is_err());
+
+        // No file extension
+        let result = parse_file_id_type_from_path("table_dir/1_0000000002/data/test");
+        assert!(result.is_err());
+
+        // Empty filename
+        let result = parse_file_id_type_from_path("table_dir/1_0000000002/data/");
+        assert!(result.is_err());
     }
 }

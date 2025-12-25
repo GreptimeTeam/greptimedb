@@ -27,7 +27,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
-use snafu::{OptionExt, ensure};
+use partition::expr::PartitionExpr;
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
@@ -43,8 +44,8 @@ pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
-    FlushableRegionStateSnafu, RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result,
-    UpdateManifestSnafu,
+    FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
+    RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
 };
 use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
@@ -99,6 +100,16 @@ pub enum RegionLeaderState {
 pub enum RegionRoleState {
     Leader(RegionLeaderState),
     Follower,
+}
+
+impl RegionRoleState {
+    /// Converts the region role state to leader state if it is a leader state.
+    pub fn into_leader_state(self) -> Option<RegionLeaderState> {
+        match self {
+            RegionRoleState::Leader(leader_state) => Some(leader_state),
+            RegionRoleState::Follower => None,
+        }
+    }
 }
 
 /// Metadata and runtime status of a region.
@@ -321,11 +332,8 @@ impl MitoRegion {
 
     /// Sets the editing state.
     /// You should call this method in the worker loop.
-    pub(crate) fn set_editing(&self) -> Result<()> {
-        self.compare_exchange_state(
-            RegionLeaderState::Writable,
-            RegionRoleState::Leader(RegionLeaderState::Editing),
-        )
+    pub(crate) fn set_editing(&self, expect: RegionLeaderState) -> Result<()> {
+        self.compare_exchange_state(expect, RegionRoleState::Leader(RegionLeaderState::Editing))
     }
 
     /// Sets the staging state.
@@ -358,6 +366,7 @@ impl MitoRegion {
     /// You should call this method in the worker loop.
     /// Transitions from Staging to Writable state.
     pub fn exit_staging(&self) -> Result<()> {
+        *self.staging_partition_expr.lock().unwrap() = None;
         self.compare_exchange_state(
             RegionLeaderState::Staging,
             RegionRoleState::Leader(RegionLeaderState::Writable),
@@ -369,7 +378,8 @@ impl MitoRegion {
         &self,
         state: SettableRegionRoleState,
     ) -> Result<()> {
-        let mut manager = self.manifest_ctx.manifest_manager.write().await;
+        let mut manager: RwLockWriteGuard<'_, RegionManifestManager> =
+            self.manifest_ctx.manifest_manager.write().await;
         let current_state = self.state();
 
         match state {
@@ -704,6 +714,20 @@ impl MitoRegion {
                 return Ok(());
             }
         };
+        let expect_change = merged_actions.actions.iter().any(|a| a.is_change());
+        let expect_edit = merged_actions.actions.iter().any(|a| a.is_edit());
+        ensure!(
+            expect_change,
+            UnexpectedSnafu {
+                reason: "expect a change action in merged actions"
+            }
+        );
+        ensure!(
+            expect_edit,
+            UnexpectedSnafu {
+                reason: "expect an edit action in merged actions"
+            }
+        );
 
         // Submit merged actions using the manifest manager's update method
         // Pass the `false` so it saves to normal directory, not staging
@@ -715,15 +739,42 @@ impl MitoRegion {
         );
 
         // Apply the merged changes to in-memory version control
-        let merged_edit = merged_actions.into_region_edit();
+        let (merged_change, merged_edit) = merged_actions.split_region_change_and_edit();
+        // Safety: we have already ensured that there is a change action in the merged actions.
+        let new_metadata = merged_change.as_ref().unwrap().metadata.clone();
+        self.version_control.alter_schema(new_metadata);
         self.version_control
             .apply_edit(Some(merged_edit), &[], self.file_purger.clone());
 
         // Clear all staging manifests and transit state
-        manager.store().clear_staging_manifests().await?;
+        if let Err(e) = manager.clear_staging_manifest_and_dir().await {
+            error!(e; "Failed to clear staging manifest dir for region {}", self.region_id);
+        }
         self.exit_staging()?;
 
         Ok(())
+    }
+
+    /// Returns the partition expression string for this region.
+    ///
+    /// If the region is currently in staging state, this returns the partition expression held in
+    /// the staging partition field. Otherwise, it returns the partition expression from the primary
+    /// region metadata (current committed version).
+    pub fn maybe_staging_partition_expr_str(&self) -> Option<String> {
+        let is_staging = self.is_staging();
+        if is_staging {
+            let staging_partition_expr = self.staging_partition_expr.lock().unwrap();
+            if staging_partition_expr.is_none() {
+                warn!(
+                    "Staging partition expr is none for region {} in staging state",
+                    self.region_id
+                );
+            }
+            staging_partition_expr.clone()
+        } else {
+            let version = self.version();
+            version.metadata.partition_expr.clone()
+        }
     }
 }
 
@@ -1268,6 +1319,19 @@ impl ManifestStats {
 
     fn file_removed_cnt(&self) -> u64 {
         self.file_removed_cnt.load(Ordering::Relaxed)
+    }
+}
+
+/// Parses the partition expression from a JSON string.
+pub fn parse_partition_expr(partition_expr_str: Option<&str>) -> Result<Option<PartitionExpr>> {
+    match partition_expr_str {
+        None => Ok(None),
+        Some("") => Ok(None),
+        Some(json_str) => {
+            let expr = partition::expr::PartitionExpr::from_json_str(json_str)
+                .with_context(|_| InvalidPartitionExprSnafu { expr: json_str })?;
+            Ok(expr)
+        }
     }
 }
 

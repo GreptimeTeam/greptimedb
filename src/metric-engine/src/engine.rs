@@ -220,6 +220,13 @@ impl RegionEngine for MetricEngine {
                     UnsupportedRegionRequestSnafu { request }.fail()
                 }
             }
+            RegionRequest::ApplyStagingManifest(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    return self.inner.mito.handle_request(region_id, request).await;
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
+            }
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
             RegionRequest::Create(create) => {
                 self.inner

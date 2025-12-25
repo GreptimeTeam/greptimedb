@@ -242,8 +242,12 @@ fn values_to_vectors_by_exact_types(
     args.iter()
         .zip(exact_types.iter())
         .map(|(value, data_type)| {
-            let data_type = &ConcreteDataType::from_arrow_type(data_type);
-            let value = sql_value_to_value(DUMMY_COLUMN, data_type, value, tz, None, false)
+            let schema = ColumnSchema::new(
+                DUMMY_COLUMN,
+                ConcreteDataType::from_arrow_type(data_type),
+                true,
+            );
+            let value = sql_value_to_value(&schema, value, tz, None, false)
                 .context(error::SqlCommonSnafu)?;
 
             Ok(value_to_vector(value))
@@ -260,10 +264,12 @@ fn values_to_vectors_by_valid_types(
     args.iter()
         .map(|value| {
             for data_type in valid_types {
-                let data_type = &ConcreteDataType::from_arrow_type(data_type);
-                if let Ok(value) =
-                    sql_value_to_value(DUMMY_COLUMN, data_type, value, tz, None, false)
-                {
+                let schema = ColumnSchema::new(
+                    DUMMY_COLUMN,
+                    ConcreteDataType::from_arrow_type(data_type),
+                    true,
+                );
+                if let Ok(value) = sql_value_to_value(&schema, value, tz, None, false) {
                     return Ok(value_to_vector(value));
                 }
             }

@@ -356,8 +356,7 @@ impl BatchGcProcedure {
         }
 
         // Send GetFileRefs instructions to each datanode
-        let mut all_file_refs: HashMap<RegionId, HashSet<store_api::storage::FileId>> =
-            HashMap::new();
+        let mut all_file_refs: HashMap<RegionId, HashSet<_>> = HashMap::new();
         let mut all_manifest_versions = HashMap::new();
 
         for (peer, regions) in datanode2query_regions {

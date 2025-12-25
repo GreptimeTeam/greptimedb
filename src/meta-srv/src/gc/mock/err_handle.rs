@@ -20,7 +20,7 @@ use common_meta::datanode::RegionManifestInfo;
 use common_meta::peer::Peer;
 use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
-use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
+use store_api::storage::{FileId, FileRef, FileRefsManifest, GcReport, RegionId};
 
 use crate::gc::mock::{
     MockSchedulerCtx, TEST_REGION_SIZE_200MB, mock_region_stat, new_empty_report_with,
@@ -60,7 +60,10 @@ async fn test_gc_regions_failure_handling() {
 
     let file_refs = FileRefsManifest {
         manifest_version: HashMap::from([(region_id, 1)]),
-        file_refs: HashMap::from([(region_id, HashSet::from([FileId::random()]))]),
+        file_refs: HashMap::from([(
+            region_id,
+            HashSet::from([FileRef::new(region_id, FileId::random(), None)]),
+        )]),
     };
 
     let ctx = Arc::new(
