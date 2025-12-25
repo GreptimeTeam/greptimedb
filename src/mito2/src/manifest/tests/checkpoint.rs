@@ -25,7 +25,7 @@ use crate::manifest::action::{
     RegionCheckpoint, RegionEdit, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
-use crate::manifest::storage::CheckpointMetadata;
+use crate::manifest::storage::checkpoint::CheckpointMetadata;
 use crate::manifest::tests::utils::basic_region_metadata;
 use crate::sst::file::FileMeta;
 use crate::test_util::TestEnv;
@@ -117,7 +117,8 @@ async fn manager_without_checkpoint() {
     expected.sort_unstable();
     let mut paths = manager
         .store()
-        .get_paths(|e| Some(e.name().to_string()), false)
+        .delta_storage()
+        .get_paths(|e| Some(e.name().to_string()))
         .await
         .unwrap();
     paths.sort_unstable();
@@ -159,7 +160,8 @@ async fn manager_with_checkpoint_distance_1() {
     expected.sort_unstable();
     let mut paths = manager
         .store()
-        .get_paths(|e| Some(e.name().to_string()), false)
+        .delta_storage()
+        .get_paths(|e| Some(e.name().to_string()))
         .await
         .unwrap();
     paths.sort_unstable();
@@ -168,7 +170,7 @@ async fn manager_with_checkpoint_distance_1() {
     // check content in `_last_checkpoint`
     let raw_bytes = manager
         .store()
-        .read_file(&manager.store().last_checkpoint_path())
+        .read_file(&manager.store().checkpoint_storage().last_checkpoint_path())
         .await
         .unwrap();
     let raw_json = std::str::from_utf8(&raw_bytes).unwrap();
@@ -213,7 +215,7 @@ async fn test_corrupted_data_causing_checksum_error() {
     // Corrupt the last checkpoint data
     let mut corrupted_bytes = manager
         .store()
-        .read_file(&manager.store().last_checkpoint_path())
+        .read_file(&manager.store().checkpoint_storage().last_checkpoint_path())
         .await
         .unwrap();
     corrupted_bytes[0] ^= 1;
@@ -221,6 +223,7 @@ async fn test_corrupted_data_causing_checksum_error() {
     // Overwrite the latest checkpoint data
     manager
         .store()
+        .checkpoint_storage()
         .write_last_checkpoint(9, &corrupted_bytes)
         .await
         .unwrap();
@@ -410,7 +413,8 @@ async fn manifest_install_manifest_to_with_checkpoint() {
     expected.sort_unstable();
     let mut paths = manager
         .store()
-        .get_paths(|e| Some(e.name().to_string()), false)
+        .delta_storage()
+        .get_paths(|e| Some(e.name().to_string()))
         .await
         .unwrap();
 
