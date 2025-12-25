@@ -44,7 +44,7 @@ impl StagingStorage {
             compress_type,
             // StagingStorage does not use a manifest cache; set to None.
             None,
-            // StagingStorage does not track file sizes, since all staging files are 
+            // StagingStorage does not track file sizes, since all staging files are
             // deleted after exiting staging mode.
             Arc::new(NoopTracker),
         );
