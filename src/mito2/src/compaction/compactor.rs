@@ -35,7 +35,7 @@ use crate::access_layer::{
 };
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::{PickerOutput, new_picker};
-use crate::compaction::{CompactionOutput, CompactionSstReaderBuilder, find_ttl};
+use crate::compaction::{CompactionOutput, CompactionSstReaderBuilder, find_dynamic_options};
 use crate::config::MitoConfig;
 use crate::error::{
     EmptyRegionDirSnafu, InvalidPartitionExprSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result,
@@ -203,16 +203,22 @@ pub async fn open_compaction_region(
         // Use the specified ttl.
         Either::Left(ttl) => ttl,
         // Get the ttl from the schema metadata manager.
-        Either::Right(schema_metadata_manager) => find_ttl(
-            req.region_id.table_id(),
-            current_version.options.ttl,
-            &schema_metadata_manager,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
-            TimeToLive::default()
-        }),
+        Either::Right(schema_metadata_manager) => {
+            let (_, ttl) = find_dynamic_options(
+                req.region_id.table_id(),
+                &req.region_options,
+                &schema_metadata_manager,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
+                (
+                    crate::region::options::CompactionOptions::default(),
+                    TimeToLive::default(),
+                )
+            });
+            ttl
+        }
     };
 
     Ok(CompactionRegion {

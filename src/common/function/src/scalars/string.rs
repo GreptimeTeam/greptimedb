@@ -14,13 +14,31 @@
 
 //! String scalar functions
 
+mod elt;
+mod field;
+mod format;
+mod insert;
+mod locate;
 mod regexp_extract;
+mod space;
 
+pub(crate) use elt::EltFunction;
+pub(crate) use field::FieldFunction;
+pub(crate) use format::FormatFunction;
+pub(crate) use insert::InsertFunction;
+pub(crate) use locate::LocateFunction;
 pub(crate) use regexp_extract::RegexpExtractFunction;
+pub(crate) use space::SpaceFunction;
 
 use crate::function_registry::FunctionRegistry;
 
 /// Register all string functions
 pub fn register_string_functions(registry: &FunctionRegistry) {
+    EltFunction::register(registry);
+    FieldFunction::register(registry);
+    FormatFunction::register(registry);
+    InsertFunction::register(registry);
+    LocateFunction::register(registry);
     RegexpExtractFunction::register(registry);
+    SpaceFunction::register(registry);
 }

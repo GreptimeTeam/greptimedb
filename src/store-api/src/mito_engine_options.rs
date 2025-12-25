@@ -27,6 +27,8 @@ pub const TTL_KEY: &str = "ttl";
 pub const SNAPSHOT_READ: &str = "snapshot_read";
 /// Option key for compaction type.
 pub const COMPACTION_TYPE: &str = "compaction.type";
+/// Option key for forcing compaction options override.
+pub const COMPACTION_OVERRIDE: &str = "compaction.override";
 /// TWCS compaction strategy.
 pub const COMPACTION_TYPE_TWCS: &str = "twcs";
 /// Option key for twcs min file num to trigger a compaction.
@@ -61,6 +63,7 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
     [
         "ttl",
         COMPACTION_TYPE,
+        COMPACTION_OVERRIDE,
         TWCS_TRIGGER_FILE_NUM,
         TWCS_MAX_OUTPUT_FILE_SIZE,
         TWCS_TIME_WINDOW,
@@ -90,6 +93,7 @@ mod tests {
     fn test_is_mito_engine_option_key() {
         assert!(is_mito_engine_option_key("ttl"));
         assert!(is_mito_engine_option_key("compaction.type"));
+        assert!(is_mito_engine_option_key("compaction.override"));
         assert!(is_mito_engine_option_key(
             "compaction.twcs.trigger_file_num"
         ));

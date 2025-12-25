@@ -244,6 +244,7 @@ mod tests {
             options: RegionOptions {
                 ttl: ttl.map(|t| t.into()),
                 compaction: Default::default(),
+                compaction_override: false,
                 storage: None,
                 append_mode: false,
                 wal_options: Default::default(),
