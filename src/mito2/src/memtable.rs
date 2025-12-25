@@ -206,6 +206,27 @@ pub struct MemtableRanges {
     pub ranges: BTreeMap<usize, MemtableRange>,
 }
 
+impl MemtableRanges {
+    /// Returns the total number of rows across all ranges.
+    pub fn num_rows(&self) -> usize {
+        self.ranges.values().map(|r| r.stats().num_rows()).sum()
+    }
+
+    /// Returns the total series count across all ranges.
+    pub fn series_count(&self) -> usize {
+        self.ranges.values().map(|r| r.stats().series_count()).sum()
+    }
+
+    /// Returns the maximum sequence number across all ranges.
+    pub fn max_sequence(&self) -> SequenceNumber {
+        self.ranges
+            .values()
+            .map(|r| r.stats().max_sequence())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
 impl IterBuilder for MemtableRanges {
     fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
         UnsupportedOperationSnafu {

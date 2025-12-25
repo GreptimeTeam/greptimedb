@@ -466,14 +466,8 @@ impl RegionFlushTask {
             let num_mem_ranges = mem_ranges.ranges.len();
 
             // Aggregate stats from all ranges
-            let (num_mem_rows, memtable_series_count) =
-                mem_ranges
-                    .ranges
-                    .values()
-                    .fold((0, 0), |(rows, series), range| {
-                        let stats = range.stats();
-                        (rows + stats.num_rows(), series + stats.series_count())
-                    });
+            let num_mem_rows = mem_ranges.num_rows();
+            let memtable_series_count = mem_ranges.series_count();
             let memtable_id = mem.id();
             // Increases series count for each mem range. We consider each mem range has different series so
             // the counter may have more series than the actual series count.
@@ -529,12 +523,7 @@ impl RegionFlushTask {
                     compact_cost,
                 );
             } else {
-                let max_sequence = mem_ranges
-                    .ranges
-                    .values()
-                    .map(|r| r.stats().max_sequence())
-                    .max()
-                    .unwrap_or(0);
+                let max_sequence = mem_ranges.max_sequence();
                 let source = memtable_source(mem_ranges, &version.options).await?;
 
                 // Flush to level 0.
