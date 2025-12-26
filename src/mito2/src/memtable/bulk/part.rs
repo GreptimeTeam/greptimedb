@@ -172,13 +172,7 @@ impl BulkPart {
 
     /// Creates MemtableStats from this BulkPart.
     pub fn to_memtable_stats(&self, region_metadata: &RegionMetadataRef) -> MemtableStats {
-        let ts_type = region_metadata
-            .time_index_column()
-            .column_schema
-            .data_type
-            .clone()
-            .as_timestamp()
-            .expect("Timestamp column must have timestamp type");
+        let ts_type = region_metadata.time_index_type();
         let min_ts = ts_type.create_timestamp(self.min_timestamp);
         let max_ts = ts_type.create_timestamp(self.max_timestamp);
 
@@ -990,14 +984,7 @@ impl EncodedBulkPart {
     /// Creates MemtableStats from this EncodedBulkPart.
     pub fn to_memtable_stats(&self) -> MemtableStats {
         let meta = &self.metadata;
-        let ts_type = meta
-            .region_metadata
-            .time_index_column()
-            .column_schema
-            .data_type
-            .clone()
-            .as_timestamp()
-            .expect("Timestamp column must have timestamp type");
+        let ts_type = meta.region_metadata.time_index_type();
         let min_ts = ts_type.create_timestamp(meta.min_timestamp);
         let max_ts = ts_type.create_timestamp(meta.max_timestamp);
 
