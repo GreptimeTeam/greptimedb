@@ -148,14 +148,6 @@ impl From<&S3Connection> for S3 {
             builder = builder.enable_virtual_host_style();
         }
 
-        if connection.allow_anonymous {
-            builder = builder.allow_anonymous();
-        }
-
-        if connection.disable_config_load {
-            builder = builder.disable_config_load();
-        }
-
         builder
     }
 }
