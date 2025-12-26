@@ -16,11 +16,79 @@ use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use store_api::storage::RegionId;
 
+use crate::procedure::repartition::group::GroupId;
+
 /// Metadata describing a region involved in the plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegionDescriptor {
     /// The region id of the region involved in the plan.
     pub region_id: RegionId,
-    /// The new partition expression of the region.
+    /// The partition expression of the region.
     pub partition_expr: PartitionExpr,
+}
+
+/// A plan entry for the region allocation phase, describing source regions
+/// and target partition expressions before allocation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AllocationPlanEntry {
+    /// The group id for this plan entry.
+    pub group_id: GroupId,
+    /// Source region descriptors involved in the plan.
+    pub source_regions: Vec<RegionDescriptor>,
+    /// The target partition expressions for the new or changed regions.
+    pub target_partition_exprs: Vec<PartitionExpr>,
+    /// The number of regions that need to be allocated (target count - source count, if positive).
+    pub regions_to_allocate: usize,
+    /// The number of regions that need to be deallocated (source count - target count, if positive).
+    pub regions_to_deallocate: usize,
+}
+
+/// A plan entry for the dispatch phase after region allocation,
+/// with concrete source and target region descriptors.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RepartitionPlanEntry {
+    /// The group id for this plan entry.
+    pub group_id: GroupId,
+    /// The source region descriptors involved in the plan.
+    pub source_regions: Vec<RegionDescriptor>,
+    /// The target region descriptors involved in the plan.
+    pub target_regions: Vec<RegionDescriptor>,
+    /// The region ids of the allocated regions.
+    pub allocated_region_ids: Vec<RegionId>,
+    /// The region ids of the regions that are pending deallocation.
+    pub pending_deallocate_region_ids: Vec<RegionId>,
+}
+
+impl RepartitionPlanEntry {
+    /// Converts an allocation plan entry into a repartition plan entry.
+    ///
+    /// The target regions are derived from the source regions and the target partition expressions.
+    /// The allocated region ids and pending deallocate region ids are empty.
+    pub fn from_allocation_plan_entry(
+        AllocationPlanEntry {
+            group_id,
+            source_regions,
+            target_partition_exprs,
+            regions_to_allocate,
+            regions_to_deallocate,
+        }: &AllocationPlanEntry,
+    ) -> Self {
+        debug_assert!(*regions_to_allocate == 0 && *regions_to_deallocate == 0);
+        let target_regions = source_regions
+            .iter()
+            .zip(target_partition_exprs.iter())
+            .map(|(source_region, target_partition_expr)| RegionDescriptor {
+                region_id: source_region.region_id,
+                partition_expr: target_partition_expr.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        Self {
+            group_id: *group_id,
+            source_regions: source_regions.clone(),
+            target_regions,
+            allocated_region_ids: vec![],
+            pending_deallocate_region_ids: vec![],
+        }
+    }
 }
