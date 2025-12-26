@@ -1978,6 +1978,7 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 | greptime      | information_schema | columns    | column_key               | string          | FIELD         |
 | greptime      | information_schema | columns    | column_name              | string          | FIELD         |
 | greptime      | information_schema | columns    | column_type              | string          | FIELD         |
+| greptime      | information_schema | columns    | comment                  | string          | FIELD         |
 | greptime      | information_schema | columns    | data_type                | string          | FIELD         |
 | greptime      | information_schema | columns    | datetime_precision       | bigint          | FIELD         |
 | greptime      | information_schema | columns    | extra                    | string          | FIELD         |
@@ -2038,6 +2039,7 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 | another_catalog | information_schema | columns       | column_key               | string          | FIELD         |
 | another_catalog | information_schema | columns       | column_name              | string          | FIELD         |
 | another_catalog | information_schema | columns       | column_type              | string          | FIELD         |
+| another_catalog | information_schema | columns       | comment                  | string          | FIELD         |
 | another_catalog | information_schema | columns       | data_type                | string          | FIELD         |
 | another_catalog | information_schema | columns       | datetime_precision       | bigint          | FIELD         |
 | another_catalog | information_schema | columns       | extra                    | string          | FIELD         |

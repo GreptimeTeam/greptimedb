@@ -32,6 +32,17 @@ SHOW CREATE TABLE comment_table_test;
 |                    | )                                                 |
 +--------------------+---------------------------------------------------+
 
+SELECT table_comment
+FROM information_schema.tables
+WHERE table_schema = 'public'
+  AND table_name = 'comment_table_test';
+
++-------------------------+
+| table_comment           |
++-------------------------+
+| table level description |
++-------------------------+
+
 -- Remove table comment
 COMMENT ON TABLE comment_table_test IS NULL;
 
@@ -53,6 +64,17 @@ SHOW CREATE TABLE comment_table_test;
 |                    | ENGINE=mito                                       |
 |                    |                                                   |
 +--------------------+---------------------------------------------------+
+
+SELECT table_comment
+FROM information_schema.tables
+WHERE table_schema = 'public'
+  AND table_name = 'comment_table_test';
+
++---------------+
+| table_comment |
++---------------+
+|               |
++---------------+
 
 DROP TABLE comment_table_test;
 
@@ -90,6 +112,18 @@ SHOW CREATE TABLE comment_column_test;
 |                     |                                                         |
 +---------------------+---------------------------------------------------------+
 
+SELECT comment
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'comment_column_test'
+  AND column_name = 'val';
+
++--------------------------+
+| comment                  |
++--------------------------+
+| value column description |
++--------------------------+
+
 -- Remove column comment
 COMMENT ON COLUMN comment_column_test.val IS NULL;
 
@@ -111,6 +145,18 @@ SHOW CREATE TABLE comment_column_test;
 |                     | ENGINE=mito                                        |
 |                     |                                                    |
 +---------------------+----------------------------------------------------+
+
+SELECT comment
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'comment_column_test'
+  AND column_name = 'val';
+
++---------+
+| comment |
++---------+
+|         |
++---------+
 
 DROP TABLE comment_column_test;
 
@@ -155,6 +201,16 @@ SHOW CREATE FLOW flow_comment_test;
 |                   | AS SELECT desc_str, ts FROM flow_source_comment_test |
 +-------------------+------------------------------------------------------+
 
+SELECT comment
+FROM information_schema.flows
+WHERE flow_name = 'flow_comment_test';
+
++------------------------+
+| comment                |
++------------------------+
+| flow level description |
++------------------------+
+
 -- Remove flow comment
 COMMENT ON FLOW flow_comment_test IS NULL;
 
@@ -169,6 +225,16 @@ SHOW CREATE FLOW flow_comment_test;
 |                   | SINK TO flow_sink_comment_test                       |
 |                   | AS SELECT desc_str, ts FROM flow_source_comment_test |
 +-------------------+------------------------------------------------------+
+
+SELECT comment
+FROM information_schema.flows
+WHERE flow_name = 'flow_comment_test';
+
++---------+
+| comment |
++---------+
+|         |
++---------+
 
 DROP FLOW flow_comment_test;
 

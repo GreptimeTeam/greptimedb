@@ -78,6 +78,7 @@ pub const COLUMN_DEFAULT: &str = "column_default";
 pub const IS_NULLABLE: &str = "is_nullable";
 const COLUMN_TYPE: &str = "column_type";
 pub const COLUMN_COMMENT: &str = "column_comment";
+pub const COMMENT: &str = "comment";
 const SRS_ID: &str = "srs_id";
 const INIT_CAPACITY: usize = 42;
 
@@ -144,6 +145,7 @@ impl InformationSchemaColumns {
             ColumnSchema::new(IS_NULLABLE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(COLUMN_TYPE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(COLUMN_COMMENT, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(COMMENT, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(SRS_ID, ConcreteDataType::int64_datatype(), true),
         ]))
     }
@@ -216,6 +218,7 @@ struct InformationSchemaColumnsBuilder {
     is_nullables: StringVectorBuilder,
     column_types: StringVectorBuilder,
     column_comments: StringVectorBuilder,
+    comments: StringVectorBuilder,
 }
 
 impl InformationSchemaColumnsBuilder {
@@ -248,6 +251,7 @@ impl InformationSchemaColumnsBuilder {
             is_nullables: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             column_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             column_comments: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            comments: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -399,8 +403,9 @@ impl InformationSchemaColumnsBuilder {
             self.is_nullables.push(Some("No"));
         }
         self.column_types.push(Some(&data_type));
-        self.column_comments
-            .push(column_schema.column_comment().map(|x| x.as_ref()));
+        let column_comment = column_schema.column_comment().map(|x| x.as_ref());
+        self.column_comments.push(column_comment);
+        self.comments.push(column_comment);
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -443,6 +448,7 @@ impl InformationSchemaColumnsBuilder {
             Arc::new(self.is_nullables.finish()),
             Arc::new(self.column_types.finish()),
             Arc::new(self.column_comments.finish()),
+            Arc::new(self.comments.finish()),
             srs_ids,
         ];
 
