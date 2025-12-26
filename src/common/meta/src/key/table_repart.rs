@@ -48,7 +48,7 @@ impl TableRepartKey {
         Self { table_id }
     }
 
-    /// Returns the range prefix of the table partition key.
+    /// Returns the range prefix of the table repartition key.
     pub fn range_prefix() -> Vec<u8> {
         format!("{}/", TABLE_REPART_PREFIX).into_bytes()
     }
