@@ -196,11 +196,13 @@ impl Drop for EncodedBulkPartIter {
     }
 }
 
-/// Iterator for a record batch in a bulk part.
-pub struct BulkPartRecordBatchIter {
-    /// The RecordBatch to read from
-    record_batch: Option<RecordBatch>,
-    /// Iterator context for filtering
+/// Iterator for reading record batches from a bulk part.
+///
+/// Iterates through one or more RecordBatches, applying filters and projections.
+pub struct BulkPartBatchIter {
+    /// Queue of RecordBatches to process.
+    batches: VecDeque<RecordBatch>,
+    /// Iterator context for filtering and projection.
     context: BulkIterContextRef,
     /// Sequence number filter.
     sequence: Option<SequenceRange>,
@@ -210,10 +212,10 @@ pub struct BulkPartRecordBatchIter {
     mem_scan_metrics: Option<MemScanMetrics>,
 }
 
-impl BulkPartRecordBatchIter {
-    /// Creates a new [BulkPartRecordBatchIter] from a RecordBatch.
+impl BulkPartBatchIter {
+    /// Creates a new [BulkPartBatchIter] from multiple RecordBatches.
     pub fn new(
-        record_batch: RecordBatch,
+        batches: Vec<RecordBatch>,
         context: BulkIterContextRef,
         sequence: Option<SequenceRange>,
         series_count: usize,
@@ -222,7 +224,7 @@ impl BulkPartRecordBatchIter {
         assert!(context.read_format().as_flat().is_some());
 
         Self {
-            record_batch: Some(record_batch),
+            batches: VecDeque::from(batches),
             context,
             sequence,
             metrics: MemScanMetricsData {
@@ -231,6 +233,23 @@ impl BulkPartRecordBatchIter {
             },
             mem_scan_metrics,
         }
+    }
+
+    /// Creates a new [BulkPartBatchIter] from a single RecordBatch.
+    pub fn from_single(
+        record_batch: RecordBatch,
+        context: BulkIterContextRef,
+        sequence: Option<SequenceRange>,
+        series_count: usize,
+        mem_scan_metrics: Option<MemScanMetrics>,
+    ) -> Self {
+        Self::new(
+            vec![record_batch],
+            context,
+            sequence,
+            series_count,
+            mem_scan_metrics,
+        )
     }
 
     fn report_mem_scan_metrics(&mut self) {
@@ -256,13 +275,14 @@ impl BulkPartRecordBatchIter {
 
         // Apply projection first.
         let projected_batch = self.apply_projection(record_batch)?;
+
         // Apply combined filtering (both predicate and sequence filters)
-        // For BulkPartRecordBatchIter, we don't have row group information.
         let skip_fields = match self.context.pre_filter_mode() {
             PreFilterMode::All => false,
             PreFilterMode::SkipFields => true,
             PreFilterMode::SkipFieldsOnDelete => true,
         };
+
         let Some(filtered_batch) =
             apply_combined_filters(&self.context, &self.sequence, projected_batch, skip_fields)?
         else {
@@ -279,31 +299,32 @@ impl BulkPartRecordBatchIter {
     }
 }
 
-impl Iterator for BulkPartRecordBatchIter {
+impl Iterator for BulkPartBatchIter {
     type Item = error::Result<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let Some(record_batch) = self.record_batch.take() else {
-            // `take()` should be cheap, we report the metrics directly.
-            self.report_mem_scan_metrics();
-            return None;
-        };
-
-        let result = self.process_batch(record_batch).transpose();
-
-        // Reports metrics when iteration is complete
-        if result.is_none() {
-            self.report_mem_scan_metrics();
+        // Process batches until we find a non-empty one or run out
+        while let Some(batch) = self.batches.pop_front() {
+            match self.process_batch(batch) {
+                Ok(Some(result)) => return Some(Ok(result)),
+                Ok(None) => continue, // This batch was filtered out, try next
+                Err(e) => {
+                    self.report_mem_scan_metrics();
+                    return Some(Err(e));
+                }
+            }
         }
 
-        result
+        // No more batches
+        self.report_mem_scan_metrics();
+        None
     }
 }
 
-impl Drop for BulkPartRecordBatchIter {
+impl Drop for BulkPartBatchIter {
     fn drop(&mut self) {
         common_telemetry::debug!(
-            "BulkPartRecordBatchIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}",
+            "BulkPartBatchIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}",
             self.context.region_id(),
             self.metrics.total_series,
             self.metrics.num_rows,
@@ -393,137 +414,6 @@ fn apply_combined_filters(
     Ok(Some(filtered_batch))
 }
 
-/// Iterator for reading data from a MultiBulkPart.
-///
-/// Iterates through multiple RecordBatches, applying filters and projections.
-pub struct MultiBulkPartIter {
-    /// Queue of RecordBatches to process.
-    batches: VecDeque<RecordBatch>,
-    /// Iterator context for filtering and projection.
-    context: BulkIterContextRef,
-    /// Sequence number filter.
-    sequence: Option<SequenceRange>,
-    /// Metrics for this iterator.
-    metrics: MemScanMetricsData,
-    /// Optional memory scan metrics to report to.
-    mem_scan_metrics: Option<MemScanMetrics>,
-}
-
-impl MultiBulkPartIter {
-    /// Creates a new MultiBulkPartIter.
-    pub fn new(
-        batches: Vec<RecordBatch>,
-        context: BulkIterContextRef,
-        sequence: Option<SequenceRange>,
-        series_count: usize,
-        mem_scan_metrics: Option<MemScanMetrics>,
-    ) -> Self {
-        assert!(context.read_format().as_flat().is_some());
-
-        Self {
-            batches: VecDeque::from(batches),
-            context,
-            sequence,
-            metrics: MemScanMetricsData {
-                total_series: series_count,
-                ..Default::default()
-            },
-            mem_scan_metrics,
-        }
-    }
-
-    fn report_mem_scan_metrics(&mut self) {
-        if let Some(mem_scan_metrics) = self.mem_scan_metrics.take() {
-            mem_scan_metrics.merge_inner(&self.metrics);
-        }
-    }
-
-    /// Applies projection to the RecordBatch if needed.
-    fn apply_projection(&self, record_batch: RecordBatch) -> error::Result<RecordBatch> {
-        let projection_indices = self.context.read_format().projection_indices();
-        if projection_indices.len() == record_batch.num_columns() {
-            return Ok(record_batch);
-        }
-
-        record_batch
-            .project(projection_indices)
-            .context(ComputeArrowSnafu)
-    }
-
-    fn process_batch(&mut self, record_batch: RecordBatch) -> error::Result<Option<RecordBatch>> {
-        let start = Instant::now();
-
-        // Apply projection first.
-        let projected_batch = self.apply_projection(record_batch)?;
-
-        // Apply combined filtering (both predicate and sequence filters)
-        let skip_fields = match self.context.pre_filter_mode() {
-            PreFilterMode::All => false,
-            PreFilterMode::SkipFields => true,
-            PreFilterMode::SkipFieldsOnDelete => true,
-        };
-
-        let Some(filtered_batch) =
-            apply_combined_filters(&self.context, &self.sequence, projected_batch, skip_fields)?
-        else {
-            self.metrics.scan_cost += start.elapsed();
-            return Ok(None);
-        };
-
-        // Update metrics
-        self.metrics.num_batches += 1;
-        self.metrics.num_rows += filtered_batch.num_rows();
-        self.metrics.scan_cost += start.elapsed();
-
-        Ok(Some(filtered_batch))
-    }
-}
-
-impl Iterator for MultiBulkPartIter {
-    type Item = error::Result<RecordBatch>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // Process batches until we find a non-empty one or run out
-        while let Some(batch) = self.batches.pop_front() {
-            match self.process_batch(batch) {
-                Ok(Some(result)) => return Some(Ok(result)),
-                Ok(None) => continue, // This batch was filtered out, try next
-                Err(e) => {
-                    self.report_mem_scan_metrics();
-                    return Some(Err(e));
-                }
-            }
-        }
-
-        // No more batches
-        self.report_mem_scan_metrics();
-        None
-    }
-}
-
-impl Drop for MultiBulkPartIter {
-    fn drop(&mut self) {
-        common_telemetry::debug!(
-            "MultiBulkPartIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}",
-            self.context.region_id(),
-            self.metrics.total_series,
-            self.metrics.num_rows,
-            self.metrics.num_batches,
-            self.metrics.scan_cost
-        );
-
-        // Report MemScanMetrics if not already reported
-        self.report_mem_scan_metrics();
-
-        READ_ROWS_TOTAL
-            .with_label_values(&["bulk_memtable"])
-            .inc_by(self.metrics.num_rows as u64);
-        READ_STAGE_ELAPSED
-            .with_label_values(&["scan_memtable"])
-            .observe(self.metrics.scan_cost.as_secs_f64());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -542,7 +432,7 @@ mod tests {
     use crate::memtable::bulk::context::BulkIterContext;
 
     #[test]
-    fn test_bulk_part_record_batch_iter() {
+    fn test_bulk_part_batch_iter() {
         // Create a simple schema
         let schema = Arc::new(Schema::new(vec![
             Field::new("key1", DataType::Utf8, false),
@@ -636,14 +526,14 @@ mod tests {
         );
         // Iterates all rows.
         let iter =
-            BulkPartRecordBatchIter::new(record_batch.clone(), context.clone(), None, 0, None);
+            BulkPartBatchIter::from_single(record_batch.clone(), context.clone(), None, 0, None);
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
         assert_eq!(1, result.len());
         assert_eq!(3, result[0].num_rows());
         assert_eq!(6, result[0].num_columns(),);
 
         // Creates iter with sequence filter (only include sequences <= 2)
-        let iter = BulkPartRecordBatchIter::new(
+        let iter = BulkPartBatchIter::from_single(
             record_batch.clone(),
             context,
             Some(SequenceRange::LtEq { max: 2 }),
@@ -670,7 +560,7 @@ mod tests {
         );
         // Creates iter with projection and predicate.
         let iter =
-            BulkPartRecordBatchIter::new(record_batch.clone(), context.clone(), None, 0, None);
+            BulkPartBatchIter::from_single(record_batch.clone(), context.clone(), None, 0, None);
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
         assert_eq!(1, result.len());
         assert_eq!(1, result[0].num_rows());

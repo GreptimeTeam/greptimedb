@@ -39,7 +39,7 @@ use crate::memtable::bulk::context::BulkIterContext;
 use crate::memtable::bulk::part::{
     BulkPart, BulkPartEncodeMetrics, BulkPartEncoder, MultiBulkPart, UnorderedPart,
 };
-use crate::memtable::bulk::part_reader::BulkPartRecordBatchIter;
+use crate::memtable::bulk::part_reader::BulkPartBatchIter;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BoxedRecordBatchIterator, EncodedBulkPart, EncodedRange,
@@ -732,7 +732,7 @@ impl IterBuilder for BulkRangeIterBuilder {
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
         let series_count = self.part.estimated_series_count();
-        let iter = BulkPartRecordBatchIter::new(
+        let iter = BulkPartBatchIter::from_single(
             self.part.batch.clone(),
             self.context.clone(),
             self.sequence,
@@ -953,7 +953,7 @@ impl PartToMerge {
         match self {
             PartToMerge::Bulk { part, .. } => {
                 let series_count = part.estimated_series_count();
-                let iter = BulkPartRecordBatchIter::new(
+                let iter = BulkPartBatchIter::from_single(
                     part.batch,
                     context,
                     None, // No sequence filter for merging

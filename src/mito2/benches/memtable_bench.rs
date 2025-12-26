@@ -24,7 +24,7 @@ use datatypes::schema::ColumnSchema;
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use mito2::memtable::bulk::context::BulkIterContext;
 use mito2::memtable::bulk::part::BulkPartConverter;
-use mito2::memtable::bulk::part_reader::BulkPartRecordBatchIter;
+use mito2::memtable::bulk::part_reader::BulkPartBatchIter;
 use mito2::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable};
 use mito2::memtable::time_series::TimeSeriesMemtable;
 use mito2::memtable::{KeyValues, Memtable};
@@ -473,7 +473,7 @@ fn flat_merge_iterator_bench(c: &mut Criterion) {
                     // Create iterators from BulkParts
                     let mut iters = Vec::with_capacity(num_parts);
                     for bulk_part in &bulk_parts {
-                        let iter = BulkPartRecordBatchIter::new(
+                        let iter = BulkPartBatchIter::from_single(
                             bulk_part.batch.clone(),
                             context.clone(),
                             None, // No sequence filter
@@ -524,7 +524,7 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
     // Benchmark with hostname filter using non-encoded primary keys
     group.bench_function("4096_rows_with_hostname_filter", |b| {
         b.iter(|| {
-            // Create context for BulkPartRecordBatchIter with predicate
+            // Create context for BulkPartBatchIter with predicate
             let context = Arc::new(
                 BulkIterContext::new(
                     metadata.clone(),
@@ -535,8 +535,8 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
                 .unwrap(),
             );
 
-            // Create and iterate over BulkPartRecordBatchIter with filter
-            let iter = BulkPartRecordBatchIter::new(
+            // Create and iterate over BulkPartBatchIter with filter
+            let iter = BulkPartBatchIter::from_single(
                 record_batch_with_filter.clone(),
                 context,
                 None, // No sequence filter
@@ -554,7 +554,7 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
     // Benchmark without filter for comparison
     group.bench_function("4096_rows_no_filter", |b| {
         b.iter(|| {
-            // Create context for BulkPartRecordBatchIter without predicate
+            // Create context for BulkPartBatchIter without predicate
             let context = Arc::new(
                 BulkIterContext::new(
                     metadata.clone(),
@@ -565,8 +565,8 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
                 .unwrap(),
             );
 
-            // Create and iterate over BulkPartRecordBatchIter
-            let iter = BulkPartRecordBatchIter::new(
+            // Create and iterate over BulkPartBatchIter
+            let iter = BulkPartBatchIter::from_single(
                 record_batch_no_filter.clone(),
                 context,
                 None, // No sequence filter
