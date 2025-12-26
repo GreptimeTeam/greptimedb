@@ -190,6 +190,7 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         // Send GetFileRefs instructions to each datanode
         let mut all_file_refs: HashMap<RegionId, HashSet<_>> = HashMap::new();
         let mut all_manifest_versions = HashMap::new();
+        let mut all_cross_region_refs = HashMap::new();
 
         for (peer, regions) in datanode2query_regions {
             let related_regions = datanode2related_regions.remove(&peer).unwrap_or_default();
@@ -213,6 +214,13 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
                         let entry = all_manifest_versions.entry(region_id).or_insert(version);
                         *entry = (*entry).min(version);
                     }
+                    // merge repartition relations
+                    for (region_id, related_region_ids) in manifest.cross_region_refs {
+                        let entry = all_cross_region_refs
+                            .entry(region_id)
+                            .or_insert_with(HashSet::new);
+                        entry.extend(related_region_ids);
+                    }
                 }
                 Err(e) => {
                     warn!(
@@ -228,6 +236,7 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         Ok(FileRefsManifest {
             file_refs: all_file_refs,
             manifest_version: all_manifest_versions,
+            cross_region_refs: all_cross_region_refs,
         })
     }
 }

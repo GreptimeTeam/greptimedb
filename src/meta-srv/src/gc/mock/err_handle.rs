@@ -64,6 +64,7 @@ async fn test_gc_regions_failure_handling() {
             region_id,
             HashSet::from([FileRef::new(region_id, FileId::random(), None)]),
         )]),
+        cross_region_refs: HashMap::new(),
     };
 
     let ctx = Arc::new(

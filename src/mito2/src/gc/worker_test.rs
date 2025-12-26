@@ -134,6 +134,7 @@ async fn test_gc_worker_basic_truncate() {
     let file_ref_manifest = FileRefsManifest {
         file_refs: Default::default(),
         manifest_version: [(region_id, version)].into(),
+        cross_region_refs: HashMap::new(),
     };
     let gc_worker = create_gc_worker(&engine, regions, &file_ref_manifest, true).await;
     let report = gc_worker.run().await.unwrap();
@@ -232,6 +233,7 @@ async fn test_gc_worker_truncate_with_ref() {
         )]
         .into(),
         manifest_version: [(region_id, version)].into(),
+        cross_region_refs: HashMap::new(),
     };
     let gc_worker = create_gc_worker(&engine, regions, &file_ref_manifest, true).await;
     let report = gc_worker.run().await.unwrap();
@@ -313,6 +315,7 @@ async fn test_gc_worker_basic_compact() {
     let file_ref_manifest = FileRefsManifest {
         file_refs: Default::default(),
         manifest_version: [(region_id, version)].into(),
+        cross_region_refs: HashMap::new(),
     };
 
     let gc_worker = create_gc_worker(&engine, regions, &file_ref_manifest, true).await;
@@ -399,6 +402,7 @@ async fn test_gc_worker_compact_with_ref() {
                 .collect(),
         )]),
         manifest_version: [(region_id, version)].into(),
+        cross_region_refs: HashMap::new(),
     };
 
     let gc_worker = create_gc_worker(&engine, regions, &file_ref_manifest, true).await;
