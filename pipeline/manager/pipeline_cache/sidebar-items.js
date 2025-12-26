@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PIPELINES_CACHE_SIZE","PIPELINES_CACHE_TTL"],"fn":["get_cache_generic","insert_cache_generic"],"struct":["PipelineCache"]};

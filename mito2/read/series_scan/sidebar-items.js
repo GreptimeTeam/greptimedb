@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SEND_TIMEOUT"],"enum":["SeriesBatch"],"fn":["new_channel_list","new_partition_metrics","primary_key_at"],"struct":["FlatSeriesBatch","FlatSeriesBatchDivider","PrimaryKeySeriesBatch","SenderList","SeriesDistributor","SeriesScan"],"type":["ReceiverList"]};

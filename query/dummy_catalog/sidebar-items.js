@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["DummyCatalogList","DummyCatalogManager","DummyCatalogProvider","DummySchemaProvider","DummyTableProvider","DummyTableProviderFactory"],"trait":["TableProviderFactory"],"type":["TableProviderFactoryRef"]};

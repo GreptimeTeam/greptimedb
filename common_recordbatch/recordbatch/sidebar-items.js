@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["align_json_array","maybe_align_json_array_with_schema","merge_record_batches"],"struct":["RecordBatch"]};

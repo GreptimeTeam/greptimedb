@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["can_load_cache","check_recovered_region","get_object_store","maybe_load_cache","replay_memtable","sanitize_region_options","version_builder_from_manifest"],"struct":["RegionLoadCacheTask","RegionOpener"],"trait":["PartitionExprFetcher"],"type":["PartitionExprFetcherRef"]};

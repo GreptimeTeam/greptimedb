@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["duration_array_value","time_array_value","timestamp_array_value"],"type":["BinaryArray","LargeStringArray","MutableBinaryArray","MutableLargeStringArray","MutableStringArray","StringArray"]};

@@ -1,0 +1,35 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Macro for declarative backend validation."><title>validate_backend in cli::common::object_store - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-e56847b5.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cli" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0-nightly (fa3155a64 2025-09-30)" data-channel="nightly" data-search-js="search-e256b49e.js" data-stringdex-js="stringdex-828709d0.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc macro"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">validate_backend</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cli/index.html">cli</a><span class="version">1.0.0-beta.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">validate_<wbr>backend</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#validation-rules" title="Validation Rules">Validation Rules</a></li><li><a href="#syntax" title="Syntax">Syntax</a></li><li><a href="#arguments" title="Arguments">Arguments</a></li><li><a href="#example" title="Example">Example</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In cli::<wbr>common::<wbr>object_<wbr>store</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cli</a>::<wbr><a href="../index.html">common</a>::<wbr><a href="index.html">object_store</a></div><h1>Macro <span class="macro">validate_<wbr>backend</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cli/common/object_store.rs.html#154-192">Source</a> </span></div><pre class="rust item-decl"><code>macro_rules! validate_backend {
+    (
+        enable: $enable:expr,
+        name: $backend_name:expr,
+        required: [ $( ($field:expr, $field_name:expr) ),* $(,)? ]
+        $(, custom_validator: $custom_validator:expr)?
+    ) =&gt; { ... };
+}</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Macro for declarative backend validation.</p>
+<h2 id="validation-rules"><a class="doc-anchor" href="#validation-rules">§</a>Validation Rules</h2>
+<p>For each storage backend (S3, OSS, GCS, Azblob), this function validates:
+<strong>When backend is enabled</strong> (e.g., <code>--s3</code>): All required fields must be non-empty</p>
+<p>Note: When backend is disabled, clap’s <code>requires</code> attribute ensures no configuration
+fields can be provided at parse time.</p>
+<h2 id="syntax"><a class="doc-anchor" href="#syntax">§</a>Syntax</h2>
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="macro">validate_backend!</span>(
+    enable: <span class="self">self</span>.enable_s3,
+    name: <span class="string">"S3"</span>,
+    required: [(field1, <span class="string">"name1"</span>), (field2, <span class="string">"name2"</span>), ...],
+    custom_validator: |missing| { ... }  <span class="comment">// optional
+</span>)</code></pre></div><h2 id="arguments"><a class="doc-anchor" href="#arguments">§</a>Arguments</h2>
+<ul>
+<li><code>enable</code>: Boolean expression indicating if backend is enabled</li>
+<li><code>name</code>: Human-readable backend name for error messages</li>
+<li><code>required</code>: Array of (field_ref, field_name) tuples for required fields</li>
+<li><code>custom_validator</code>: Optional closure for complex validation logic</li>
+</ul>
+<h2 id="example"><a class="doc-anchor" href="#example">§</a>Example</h2>
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="macro">validate_backend!</span>(
+    enable: <span class="self">self</span>.enable_s3,
+    name: <span class="string">"S3"</span>,
+    required: [
+        (<span class="kw-2">&amp;</span><span class="self">self</span>.s3.s3_bucket, <span class="string">"bucket"</span>),
+        (<span class="kw-2">&amp;</span><span class="self">self</span>.s3.s3_access_key_id, <span class="string">"access key ID"</span>),
+    ]
+)</code></pre></div></div></details></section></div></main></body></html>

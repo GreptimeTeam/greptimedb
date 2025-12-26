@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["json_is"],"struct":["JsonIsArray","JsonIsBool","JsonIsFloat","JsonIsInt","JsonIsNull","JsonIsObject","JsonIsString"]};

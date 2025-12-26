@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["IterIndex","RowIter","RowModifier","RowsIter","TsidGenerator","ValueIndex"]};

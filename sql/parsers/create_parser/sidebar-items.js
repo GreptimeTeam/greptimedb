@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["AFTER","ENGINE","EXPIRE","INVERTED","MAXVALUE","SINK","SKIPPING","VECTOR"],"fn":["ensure_exprs_are_binary","ensure_one_expr","ensure_partition_columns_defined","get_unalias_type","validate_partitions","validate_time_index"],"mod":["json"],"type":["RawIntervalExpr"]};
