@@ -19,6 +19,7 @@ use arrow::datatypes::{
     Time64NanosecondType, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
     TimestampNanosecondType, TimestampSecondType,
 };
+use arrow_array::Array;
 use common_time::time::Time;
 use common_time::{Duration, Timestamp};
 
@@ -125,4 +126,29 @@ pub fn duration_array_value(array: &ArrayRef, i: usize) -> Duration {
         }
     };
     Duration::new(v, time_unit.into())
+}
+
+/// Get the string value at index `i` for `Utf8`, `LargeUtf8`, or `Utf8View` arrays.
+///
+/// Returns `None` when the array type is not a string type or the value is null.
+///
+/// # Panics
+///
+/// If index `i` is out of bounds.
+pub fn string_array_value_at_index(array: &ArrayRef, i: usize) -> Option<&str> {
+    match array.data_type() {
+        DataType::Utf8 => {
+            let array = array.as_string::<i32>();
+            array.is_valid(i).then(|| array.value(i))
+        }
+        DataType::LargeUtf8 => {
+            let array = array.as_string::<i64>();
+            array.is_valid(i).then(|| array.value(i))
+        }
+        DataType::Utf8View => {
+            let array = array.as_string_view();
+            array.is_valid(i).then(|| array.value(i))
+        }
+        _ => None,
+    }
 }
