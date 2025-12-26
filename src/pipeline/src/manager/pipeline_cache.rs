@@ -109,7 +109,7 @@ impl PipelineCache {
         schema: &str,
         name: &str,
         version: PipelineVersion,
-    ) -> Result<Option<Arc<Pipeline>>> {
+    ) -> Result<Option<(Arc<Pipeline>, String)>> {
         get_cache_generic(&self.pipelines, schema, name, version)
     }
 
@@ -118,7 +118,7 @@ impl PipelineCache {
         schema: &str,
         name: &str,
         version: PipelineVersion,
-    ) -> Result<Option<(String, TimestampNanosecond)>> {
+    ) -> Result<Option<((String, TimestampNanosecond), String)>> {
         get_cache_generic(&self.failover_cache, schema, name, version)
     }
 
@@ -127,7 +127,7 @@ impl PipelineCache {
         schema: &str,
         name: &str,
         version: PipelineVersion,
-    ) -> Result<Option<(String, TimestampNanosecond)>> {
+    ) -> Result<Option<((String, TimestampNanosecond), String)>> {
         get_cache_generic(&self.original_pipelines, schema, name, version)
     }
 
@@ -178,16 +178,16 @@ fn get_cache_generic<T: Clone + Send + Sync + 'static>(
     schema: &str,
     name: &str,
     version: PipelineVersion,
-) -> Result<Option<T>> {
+) -> Result<Option<(T, String)>> {
     // lets try empty schema first
     let emp_key = generate_pipeline_cache_key(EMPTY_SCHEMA_NAME, name, version);
     if let Some(value) = cache.get(&emp_key) {
-        return Ok(Some(value));
+        return Ok(Some((value, EMPTY_SCHEMA_NAME.to_string())));
     }
     // use input schema
     let schema_k = generate_pipeline_cache_key(schema, name, version);
     if let Some(value) = cache.get(&schema_k) {
-        return Ok(Some(value));
+        return Ok(Some((value, schema.to_string())));
     }
 
     // try all schemas
@@ -199,7 +199,14 @@ fn get_cache_generic<T: Clone + Send + Sync + 'static>(
 
     match ks.len() {
         0 => Ok(None),
-        1 => Ok(Some(ks.remove(0).1)),
+        1 => {
+            let (key, value) = ks.remove(0);
+            if let Some((key_schema, _)) = key.split_once("/") {
+                Ok(Some((value, key_schema.to_string())))
+            } else {
+                Ok(Some((value, EMPTY_SCHEMA_NAME.to_string())))
+            }
+        }
         _ => {
             debug!(
                 "caches keys: {:?}, emp key: {:?}, schema key: {:?}, suffix key: {:?}",

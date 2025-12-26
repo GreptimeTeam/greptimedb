@@ -261,14 +261,14 @@ impl PipelineTable {
         version: PipelineVersion,
     ) -> Result<Arc<Pipeline>> {
         if let Some(pipeline) = self.cache.get_pipeline_cache(schema, name, version)? {
-            return Ok(pipeline);
+            return Ok(pipeline.0);
         }
 
-        let pipeline = self.get_pipeline_str(schema, name, version).await?;
+        let (pipeline, found_schema) = self.get_pipeline_str(schema, name, version).await?;
         let compiled_pipeline = Arc::new(Self::compile_pipeline(&pipeline.0)?);
 
         self.cache.insert_pipeline_cache(
-            schema,
+            &found_schema,
             name,
             version,
             compiled_pipeline.clone(),
@@ -284,7 +284,7 @@ impl PipelineTable {
         schema: &str,
         name: &str,
         input_version: PipelineVersion,
-    ) -> Result<(String, TimestampNanosecond)> {
+    ) -> Result<((String, TimestampNanosecond), String)> {
         if let Some(pipeline) = self
             .cache
             .get_pipeline_str_cache(schema, name, input_version)?
@@ -345,7 +345,7 @@ impl PipelineTable {
                 p.clone(),
                 input_version.is_none(),
             );
-            return Ok(p);
+            return Ok((p, found_schema));
         }
 
         // check if there's empty schema pipeline
@@ -374,7 +374,7 @@ impl PipelineTable {
             p.clone(),
             input_version.is_none(),
         );
-        Ok(p)
+        Ok((p, found_schema.clone()))
     }
 
     /// Insert a pipeline into the pipeline table and compile it.
