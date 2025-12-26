@@ -14,6 +14,7 @@ BUILDX_BUILDER_NAME ?= gtbuilder
 BASE_IMAGE ?= ubuntu
 RUST_TOOLCHAIN ?= $(shell cat rust-toolchain.toml | grep channel | cut -d'"' -f2)
 CARGO_REGISTRY_CACHE ?= ${HOME}/.cargo/registry
+CARGO_GIT_CACHE ?= ${HOME}/.cargo/git
 ARCH := $(shell uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
 OUTPUT_DIR := $(shell if [ "$(RELEASE)" = "true" ]; then echo "release"; elif [ ! -z "$(CARGO_PROFILE)" ]; then echo "$(CARGO_PROFILE)" ; else echo "debug"; fi)
 SQLNESS_OPTS ?=
@@ -86,7 +87,7 @@ build: ## Build debug version greptime.
 build-by-dev-builder: ## Build greptime by dev-builder.
 	docker run --network=host \
 	${ASSEMBLED_EXTRA_BUILD_ENV} \
-	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry \
+	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v ${CARGO_GIT_CACHE}:/root/.cargo/git \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${DEV_BUILDER_IMAGE_TAG} \
 	make build \
 	CARGO_EXTENSION="${CARGO_EXTENSION}" \
@@ -100,7 +101,7 @@ build-by-dev-builder: ## Build greptime by dev-builder.
 .PHONY: build-android-bin
 build-android-bin: ## Build greptime binary for android.
 	docker run --network=host \
-	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry \
+	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v ${CARGO_GIT_CACHE}:/root/.cargo/git \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-android:${DEV_BUILDER_IMAGE_TAG} \
 	make build \
 	CARGO_EXTENSION="ndk --platform 23 -t aarch64-linux-android" \
@@ -206,7 +207,7 @@ fix-udeps: ## Remove unused dependencies automatically.
 	@cargo udeps --workspace --all-targets --output json > udeps-report.json || true
 	@echo "Removing unused dependencies..."
 	@python3 scripts/fix-udeps.py udeps-report.json
-	
+
 .PHONY: fmt-check
 fmt-check: ## Check code format.
 	cargo fmt --all -- --check
@@ -224,7 +225,7 @@ stop-etcd: ## Stop single node etcd for testing purpose.
 .PHONY: run-it-in-container
 run-it-in-container: start-etcd ## Run integration tests in dev-builder.
 	docker run --network=host \
-	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v /tmp:/tmp \
+	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v ${CARGO_GIT_CACHE}:/root/.cargo/git -v /tmp:/tmp \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${DEV_BUILDER_IMAGE_TAG} \
 	make test sqlness-test BUILD_JOBS=${BUILD_JOBS}
 
