@@ -599,12 +599,12 @@ mod tests {
 
         let value = TableRepartValue { src_to_dst };
 
-        // Create the table part
+        // Create the table repart
         let (txn, _) = manager.build_create_txn(1024, &value).unwrap();
         let result = kv.txn(txn).await.unwrap();
         assert!(result.succeeded);
 
-        // Get the table part
+        // Get the table repart
         let retrieved = manager.get(1024).await.unwrap().unwrap();
         assert_eq!(retrieved, value);
     }
@@ -618,7 +618,7 @@ mod tests {
             src_to_dst: BTreeMap::new(),
         };
 
-        // Create initial table part
+        // Create initial table repart
         let (create_txn, _) = manager.build_create_txn(1024, &initial_value).unwrap();
         let result = kv.txn(create_txn).await.unwrap();
         assert!(result.succeeded);
@@ -703,7 +703,7 @@ mod tests {
         let kv = Arc::new(MemoryKvBackend::default());
         let manager = TableRepartManager::new(kv.clone());
 
-        // Create initial table part
+        // Create initial table repart
         let initial_value = TableRepartValue {
             src_to_dst: BTreeMap::new(),
         };
@@ -728,7 +728,7 @@ mod tests {
         let kv = Arc::new(MemoryKvBackend::default());
         let manager = TableRepartManager::new(kv.clone());
 
-        // Create initial table part with mappings
+        // Create initial table repart with mappings
         let mut initial_src_to_dst = BTreeMap::new();
         let src = RegionId::new(1024, 1);
         let dst_regions = vec![
@@ -767,7 +767,7 @@ mod tests {
         let kv = Arc::new(MemoryKvBackend::default());
         let manager = TableRepartManager::new(kv.clone());
 
-        // Create initial table part with mappings
+        // Create initial table repart with mappings
         let mut initial_src_to_dst = BTreeMap::new();
         let src = RegionId::new(1024, 1);
         let dst_regions = vec![RegionId::new(1024, 2), RegionId::new(1024, 3)];
@@ -826,7 +826,7 @@ mod tests {
         let kv = Arc::new(MemoryKvBackend::default());
         let manager = TableRepartManager::new(kv.clone());
 
-        // Create table part
+        // Create table repart
         let value = TableRepartValue {
             src_to_dst: {
                 let mut map = BTreeMap::new();
