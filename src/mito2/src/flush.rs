@@ -26,7 +26,7 @@ use either::Either;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, SequenceNumber};
 use strum::IntoStaticStr;
 use tokio::sync::{Semaphore, mpsc, watch};
 
@@ -464,24 +464,26 @@ impl RegionFlushTask {
             // Sets `for_flush` flag to true.
             let mem_ranges = mem.ranges(None, RangesOptions::for_flush())?;
             let num_mem_ranges = mem_ranges.ranges.len();
-            let num_mem_rows = mem_ranges.stats.num_rows();
+
+            // Aggregate stats from all ranges
+            let num_mem_rows = mem_ranges.num_rows();
+            let memtable_series_count = mem_ranges.series_count();
             let memtable_id = mem.id();
             // Increases series count for each mem range. We consider each mem range has different series so
             // the counter may have more series than the actual series count.
-            series_count += mem_ranges.stats.series_count();
+            series_count += memtable_series_count;
 
             if mem_ranges.is_record_batch() {
                 let flush_start = Instant::now();
                 let FlushFlatMemResult {
                     num_encoded,
-                    max_sequence,
                     num_sources,
                     results,
                 } = self
                     .flush_flat_mem_ranges(version, &write_opts, mem_ranges)
                     .await?;
                 for (source_idx, result) in results.into_iter().enumerate() {
-                    let (ssts_written, metrics) = result?;
+                    let (max_sequence, ssts_written, metrics) = result?;
                     if ssts_written.is_empty() {
                         // No data written.
                         continue;
@@ -521,7 +523,7 @@ impl RegionFlushTask {
                     compact_cost,
                 );
             } else {
-                let max_sequence = mem_ranges.stats.max_sequence();
+                let max_sequence = mem_ranges.max_sequence();
                 let source = memtable_source(mem_ranges, &version.options).await?;
 
                 // Flush to level 0.
@@ -583,8 +585,7 @@ impl RegionFlushTask {
         )?;
         let mut tasks = Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
         let num_encoded = flat_sources.encoded.len();
-        let max_sequence = flat_sources.max_sequence;
-        for source in flat_sources.sources {
+        for (source, max_sequence) in flat_sources.sources {
             let source = Either::Right(source);
             let write_request = self.new_write_request(version, max_sequence, source);
             let access_layer = self.access_layer.clone();
@@ -596,11 +597,11 @@ impl RegionFlushTask {
                 let ssts = access_layer
                     .write_sst(write_request, &write_opts, &mut metrics)
                     .await?;
-                Ok((ssts, metrics))
+                Ok((max_sequence, ssts, metrics))
             });
             tasks.push(task);
         }
-        for encoded in flat_sources.encoded {
+        for (encoded, max_sequence) in flat_sources.encoded {
             let access_layer = self.access_layer.clone();
             let cache_manager = self.cache_manager.clone();
             let region_id = version.metadata.region_id;
@@ -610,7 +611,7 @@ impl RegionFlushTask {
                 let metrics = access_layer
                     .put_sst(&encoded.data, region_id, &encoded.sst_info, &cache_manager)
                     .await?;
-                Ok((smallvec![encoded.sst_info], metrics))
+                Ok((max_sequence, smallvec![encoded.sst_info], metrics))
             });
             tasks.push(task);
         }
@@ -620,7 +621,6 @@ impl RegionFlushTask {
             .context(JoinSnafu)?;
         Ok(FlushFlatMemResult {
             num_encoded,
-            max_sequence,
             num_sources,
             results,
         })
@@ -696,9 +696,8 @@ impl RegionFlushTask {
 
 struct FlushFlatMemResult {
     num_encoded: usize,
-    max_sequence: u64,
     num_sources: usize,
-    results: Vec<Result<(SstInfoArray, Metrics)>>,
+    results: Vec<Result<(SequenceNumber, SstInfoArray, Metrics)>>,
 }
 
 struct DoFlushMemtablesResult {
@@ -744,9 +743,8 @@ async fn memtable_source(mem_ranges: MemtableRanges, options: &RegionOptions) ->
 }
 
 struct FlatSources {
-    max_sequence: u64,
-    sources: SmallVec<[FlatSource; 4]>,
-    encoded: SmallVec<[EncodedRange; 4]>,
+    sources: SmallVec<[(FlatSource, SequenceNumber); 4]>,
+    encoded: SmallVec<[(EncodedRange, SequenceNumber); 4]>,
 }
 
 /// Returns the max sequence and [FlatSource] for the given memtable.
@@ -756,18 +754,17 @@ fn memtable_flat_sources(
     options: &RegionOptions,
     field_column_start: usize,
 ) -> Result<FlatSources> {
-    let MemtableRanges { ranges, stats } = mem_ranges;
-    let max_sequence = stats.max_sequence();
+    let MemtableRanges { ranges } = mem_ranges;
     let mut flat_sources = FlatSources {
-        max_sequence,
         sources: SmallVec::new(),
         encoded: SmallVec::new(),
     };
 
     if ranges.len() == 1 {
         let only_range = ranges.into_values().next().unwrap();
+        let max_sequence = only_range.stats().max_sequence();
         if let Some(encoded) = only_range.encoded() {
-            flat_sources.encoded.push(encoded);
+            flat_sources.encoded.push((encoded, max_sequence));
         } else {
             let iter = only_range.build_record_batch_iter(None)?;
             // Dedup according to append mode and merge mode.
@@ -778,25 +775,39 @@ fn memtable_flat_sources(
                 field_column_start,
                 iter,
             );
-            flat_sources.sources.push(FlatSource::Iter(iter));
+            flat_sources
+                .sources
+                .push((FlatSource::Iter(iter), max_sequence));
         };
     } else {
-        let min_flush_rows = stats.num_rows / 8;
+        // Calculate total rows from all ranges for min_flush_rows calculation
+        let total_rows: usize = ranges.values().map(|r| r.stats().num_rows()).sum();
+        let min_flush_rows = total_rows / 8;
         let min_flush_rows = min_flush_rows.max(DEFAULT_ROW_GROUP_SIZE);
         let mut last_iter_rows = 0;
         let num_ranges = ranges.len();
         let mut input_iters = Vec::with_capacity(num_ranges);
+        let mut current_ranges = Vec::new();
         for (_range_id, range) in ranges {
             if let Some(encoded) = range.encoded() {
-                flat_sources.encoded.push(encoded);
+                let max_sequence = range.stats().max_sequence();
+                flat_sources.encoded.push((encoded, max_sequence));
                 continue;
             }
 
             let iter = range.build_record_batch_iter(None)?;
             input_iters.push(iter);
             last_iter_rows += range.num_rows();
+            current_ranges.push(range);
 
             if last_iter_rows > min_flush_rows {
+                // Calculate max_sequence from all merged ranges
+                let max_sequence = current_ranges
+                    .iter()
+                    .map(|r| r.stats().max_sequence())
+                    .max()
+                    .unwrap_or(0);
+
                 let maybe_dedup = merge_and_dedup(
                     &schema,
                     options.append_mode,
@@ -805,13 +816,22 @@ fn memtable_flat_sources(
                     std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges)),
                 )?;
 
-                flat_sources.sources.push(FlatSource::Iter(maybe_dedup));
+                flat_sources
+                    .sources
+                    .push((FlatSource::Iter(maybe_dedup), max_sequence));
                 last_iter_rows = 0;
+                current_ranges.clear();
             }
         }
 
         // Handle remaining iters.
         if !input_iters.is_empty() {
+            let max_sequence = current_ranges
+                .iter()
+                .map(|r| r.stats().max_sequence())
+                .max()
+                .unwrap_or(0);
+
             let maybe_dedup = merge_and_dedup(
                 &schema,
                 options.append_mode,
@@ -820,7 +840,9 @@ fn memtable_flat_sources(
                 input_iters,
             )?;
 
-            flat_sources.sources.push(FlatSource::Iter(maybe_dedup));
+            flat_sources
+                .sources
+                .push((FlatSource::Iter(maybe_dedup), max_sequence));
         }
     }
 
@@ -1491,7 +1513,7 @@ mod tests {
 
             // Consume the iterator and count rows
             let mut total_rows = 0usize;
-            for source in flat_sources.sources {
+            for (source, _sequence) in flat_sources.sources {
                 match source {
                     crate::read::FlatSource::Iter(iter) => {
                         for rb in iter {
@@ -1521,7 +1543,7 @@ mod tests {
             assert_eq!(1, flat_sources.sources.len());
 
             let mut total_rows = 0usize;
-            for source in flat_sources.sources {
+            for (source, _sequence) in flat_sources.sources {
                 match source {
                     crate::read::FlatSource::Iter(iter) => {
                         for rb in iter {

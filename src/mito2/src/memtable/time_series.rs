@@ -325,10 +325,10 @@ impl Memtable for TimeSeriesMemtable {
         });
         let context = Arc::new(MemtableRangeContext::new(self.id, builder, predicate));
 
-        let stats = self.stats();
+        let range_stats = self.stats();
+        let range = MemtableRange::new(context, range_stats);
         Ok(MemtableRanges {
-            ranges: [(0, MemtableRange::new(context, stats.num_rows))].into(),
-            stats,
+            ranges: [(0, range)].into(),
         })
     }
 
