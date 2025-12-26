@@ -11,46 +11,46 @@ from information_schema.tables
 where table_name != 'scripts'
 order by table_schema, table_name;
 
-+++++++++++++++++++++++++
-|table_catalog|table_schema|table_name|table_type|table_id|data_length|max_data_length|index_length|max_index_length|avg_row_length|engine|version|row_format|table_rows|data_free|auto_increment|create_time|update_time|check_time|table_collation|checksum|create_options|table_comment|temporary|
-+++++++++++++++++++++++++
-|greptime|information_schema|build_info|LOCALTEMPORARY|8|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|character_sets|LOCALTEMPORARY|9|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|check_constraints|LOCALTEMPORARY|12|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|cluster_info|LOCALTEMPORARY|31|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|collation_character_set_applicability|LOCALTEMPORARY|11|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|collations|LOCALTEMPORARY|10|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|column_privileges|LOCALTEMPORARY|6|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|column_statistics|LOCALTEMPORARY|7|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|columns|LOCALTEMPORARY|4|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|engines|LOCALTEMPORARY|5|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|events|LOCALTEMPORARY|13|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|files|LOCALTEMPORARY|14|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|flows|LOCALTEMPORARY|33|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|global_status|LOCALTEMPORARY|25|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|key_column_usage|LOCALTEMPORARY|16|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|optimizer_trace|LOCALTEMPORARY|17|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|parameters|LOCALTEMPORARY|18|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|partitions|LOCALTEMPORARY|28|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|procedure_info|LOCALTEMPORARY|34|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|process_list|LOCALTEMPORARY|36|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|profiling|LOCALTEMPORARY|19|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|referential_constraints|LOCALTEMPORARY|20|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|region_peers|LOCALTEMPORARY|29|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|region_statistics|LOCALTEMPORARY|35|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|routines|LOCALTEMPORARY|21|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|schema_privileges|LOCALTEMPORARY|22|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|schemata|LOCALTEMPORARY|15|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|session_status|LOCALTEMPORARY|26|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|ssts_index_meta|LOCALTEMPORARY|39|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|ssts_manifest|LOCALTEMPORARY|37|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|ssts_storage|LOCALTEMPORARY|38|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|table_constraints|LOCALTEMPORARY|30|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|table_privileges|LOCALTEMPORARY|23|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|tables|LOCALTEMPORARY|3|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|views|LOCALTEMPORARY|32|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|public|numbers|LOCALTEMPORARY|2|0|0|0|0|0|test_engine|11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-+++++++++++++++++++++++++
+++++++++++++++++++++++++++
+|table_catalog|table_schema|table_name|table_type|table_id|data_length|max_data_length|index_length|max_index_length|avg_row_length|engine|version|row_format|table_rows|data_free|auto_increment|create_time|update_time|check_time|table_collation|checksum|create_options|table_comment|comment|temporary|
+++++++++++++++++++++++++++
+|greptime|information_schema|build_info|LOCALTEMPORARY|8|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|character_sets|LOCALTEMPORARY|9|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|check_constraints|LOCALTEMPORARY|12|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|cluster_info|LOCALTEMPORARY|31|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|collation_character_set_applicability|LOCALTEMPORARY|11|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|collations|LOCALTEMPORARY|10|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|column_privileges|LOCALTEMPORARY|6|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|column_statistics|LOCALTEMPORARY|7|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|columns|LOCALTEMPORARY|4|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|engines|LOCALTEMPORARY|5|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|events|LOCALTEMPORARY|13|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|files|LOCALTEMPORARY|14|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|flows|LOCALTEMPORARY|33|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|global_status|LOCALTEMPORARY|25|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|key_column_usage|LOCALTEMPORARY|16|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|optimizer_trace|LOCALTEMPORARY|17|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|parameters|LOCALTEMPORARY|18|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|partitions|LOCALTEMPORARY|28|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|procedure_info|LOCALTEMPORARY|34|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|process_list|LOCALTEMPORARY|36|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|profiling|LOCALTEMPORARY|19|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|referential_constraints|LOCALTEMPORARY|20|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|region_peers|LOCALTEMPORARY|29|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|region_statistics|LOCALTEMPORARY|35|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|routines|LOCALTEMPORARY|21|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|schema_privileges|LOCALTEMPORARY|22|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|schemata|LOCALTEMPORARY|15|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|session_status|LOCALTEMPORARY|26|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|ssts_index_meta|LOCALTEMPORARY|39|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|ssts_manifest|LOCALTEMPORARY|37|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|ssts_storage|LOCALTEMPORARY|38|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|table_constraints|LOCALTEMPORARY|30|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|table_privileges|LOCALTEMPORARY|23|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|tables|LOCALTEMPORARY|3|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|information_schema|views|LOCALTEMPORARY|32|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+|greptime|public|numbers|LOCALTEMPORARY|2|0|0|0|0|0|test_engine|11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0||||Y|
+++++++++++++++++++++++++++
 
 select * from information_schema.columns order by table_schema, table_name, column_name;
 
@@ -440,6 +440,7 @@ select * from information_schema.columns order by table_schema, table_name, colu
 | greptime      | information_schema | tables                                | avg_row_length                    | 10               |                          |                        | 20                | 0             |                    |                    |                |            |       | select,insert |                       | UInt64               | bigint unsigned     | FIELD         |                | Yes         | bigint unsigned     |                |        |
 | greptime      | information_schema | tables                                | check_time                        | 19               |                          |                        |                   |               | 0                  |                    |                |            |       | select,insert |                       | TimestampSecond      | timestamp(0)        | FIELD         |                | Yes         | timestamp(0)        |                |        |
 | greptime      | information_schema | tables                                | checksum                          | 21               |                          |                        | 20                | 0             |                    |                    |                |            |       | select,insert |                       | UInt64               | bigint unsigned     | FIELD         |                | Yes         | bigint unsigned     |                |        |
+| greptime      | information_schema | tables                                | comment                           | 24               | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | Yes         | string              |                |        |
 | greptime      | information_schema | tables                                | create_options                    | 22               | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | Yes         | string              |                |        |
 | greptime      | information_schema | tables                                | create_time                       | 17               |                          |                        |                   |               | 0                  |                    |                |            |       | select,insert |                       | TimestampSecond      | timestamp(0)        | FIELD         |                | Yes         | timestamp(0)        |                |        |
 | greptime      | information_schema | tables                                | data_free                         | 15               |                          |                        | 20                | 0             |                    |                    |                |            |       | select,insert |                       | UInt64               | bigint unsigned     | FIELD         |                | Yes         | bigint unsigned     |                |        |
@@ -457,7 +458,7 @@ select * from information_schema.columns order by table_schema, table_name, colu
 | greptime      | information_schema | tables                                | table_rows                        | 14               |                          |                        | 20                | 0             |                    |                    |                |            |       | select,insert |                       | UInt64               | bigint unsigned     | FIELD         |                | Yes         | bigint unsigned     |                |        |
 | greptime      | information_schema | tables                                | table_schema                      | 2                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | No          | string              |                |        |
 | greptime      | information_schema | tables                                | table_type                        | 4                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | No          | string              |                |        |
-| greptime      | information_schema | tables                                | temporary                         | 24               | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | Yes         | string              |                |        |
+| greptime      | information_schema | tables                                | temporary                         | 25               | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | Yes         | string              |                |        |
 | greptime      | information_schema | tables                                | update_time                       | 18               |                          |                        |                   |               | 0                  |                    |                |            |       | select,insert |                       | TimestampSecond      | timestamp(0)        | FIELD         |                | Yes         | timestamp(0)        |                |        |
 | greptime      | information_schema | tables                                | version                           | 12               |                          |                        | 20                | 0             |                    |                    |                |            |       | select,insert |                       | UInt64               | bigint unsigned     | FIELD         |                | Yes         | bigint unsigned     |                |        |
 | greptime      | information_schema | views                                 | character_set_client              | 9                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | Yes         | string              |                |        |
