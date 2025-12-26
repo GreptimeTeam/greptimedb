@@ -136,18 +136,18 @@ impl RangesOptions {
 #[derive(Debug, Default, Clone)]
 pub struct MemtableStats {
     /// The estimated bytes allocated by this memtable from heap.
-    estimated_bytes: usize,
+    pub estimated_bytes: usize,
     /// The inclusive time range that this memtable contains. It is None if
     /// and only if the memtable is empty.
-    time_range: Option<(Timestamp, Timestamp)>,
+    pub time_range: Option<(Timestamp, Timestamp)>,
     /// Total rows in memtable
     pub num_rows: usize,
     /// Total number of ranges in the memtable.
     pub num_ranges: usize,
     /// The maximum sequence number in the memtable.
-    max_sequence: SequenceNumber,
+    pub max_sequence: SequenceNumber,
     /// Number of estimated timeseries in memtable.
-    series_count: usize,
+    pub series_count: usize,
 }
 
 impl MemtableStats {
