@@ -22,11 +22,11 @@ use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions};
 use mito2::gc::GcConfig;
 
 use crate::cluster::GreptimeDbClusterBuilder;
-use crate::test_util::{StorageType, TempDirGuard, get_test_store_config};
+use crate::test_util::{StorageType, TempDirGuard, execute_sql, get_test_store_config};
 use crate::tests::gc::{
     get_table_route, list_sst_files_from_manifest, list_sst_files_from_storage, sst_equal_check,
 };
-use crate::tests::test_util::{MockInstanceBuilder, TestContext, execute_sql, wait_procedure};
+use crate::tests::test_util::{MockInstanceBuilder, TestContext, wait_procedure};
 
 /// Helper function to create a distributed cluster with GC enabled
 async fn distributed_with_gc(store_type: &StorageType) -> (TestContext, TempDirGuard) {

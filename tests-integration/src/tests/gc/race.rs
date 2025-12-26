@@ -27,12 +27,12 @@ use store_api::storage::RegionId;
 use tokio::time::sleep;
 
 use crate::cluster::GreptimeDbClusterBuilder;
-use crate::test_util::{StorageType, TestGuard};
+use crate::test_util::{StorageType, TestGuard, execute_sql};
 use crate::tests::gc::delay_layer::create_test_object_store_manager_with_delays;
 use crate::tests::gc::{
     get_table_route, list_sst_files_from_manifest, list_sst_files_from_storage, sst_equal_check,
 };
-use crate::tests::test_util::{MockInstanceBuilder, TestContext, execute_sql, wait_procedure};
+use crate::tests::test_util::{MockInstanceBuilder, TestContext, wait_procedure};
 
 /// Get file handles for all SST files for all files in the given regions
 async fn get_file_handle_for_regions(

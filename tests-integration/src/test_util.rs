@@ -149,8 +149,6 @@ fn s3_test_config() -> S3Config {
             bucket: env::var("GT_S3_BUCKET").unwrap(),
             region: Some(env::var("GT_S3_REGION").unwrap()),
             endpoint: env::var("GT_S3_ENDPOINT_URL").ok(),
-            allow_anonymous: true, // Enable anonymous access to bypass reqsign for local testing
-            disable_config_load: true, // Disable config load to bypass reqsign for local MinIO
             ..Default::default()
         },
         ..Default::default()

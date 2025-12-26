@@ -21,9 +21,7 @@ use meta_srv::gc::Region2Peers;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
-use crate::cluster::GreptimeDbClusterBuilder;
-use crate::test_util::{StorageType, TempDirGuard, execute_sql, get_test_store_config};
-use crate::tests::test_util::{MockInstanceBuilder, TestContext, wait_procedure};
+use crate::tests::test_util::TestContext;
 
 mod basic;
 mod delay_layer;
