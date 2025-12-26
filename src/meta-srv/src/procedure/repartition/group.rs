@@ -29,19 +29,78 @@ use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue, Reg
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::rpc::router::RegionRoute;
-use common_procedure::{Context as ProcedureContext, Status};
+use common_procedure::{
+    Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
+    UserMetadata,
+};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
 use uuid::Uuid;
 
 use crate::error::{self, Result};
+use crate::procedure::repartition::group::repartition_start::RepartitionStart;
 use crate::procedure::repartition::plan::RegionDescriptor;
+use crate::procedure::repartition::{self};
 use crate::service::mailbox::MailboxRef;
 
 pub type GroupId = Uuid;
 
-pub struct RepartitionGroupProcedure {}
+#[allow(dead_code)]
+pub struct RepartitionGroupProcedure {
+    state: Box<dyn State>,
+    context: Context,
+}
+
+impl RepartitionGroupProcedure {
+    const TYPE_NAME: &'static str = "metasrv-procedure::RepartitionGroup";
+
+    pub fn new(persistent_context: PersistentContext, context: &repartition::Context) -> Self {
+        let state = Box::new(RepartitionStart);
+
+        Self {
+            state,
+            context: Context {
+                persistent_ctx: persistent_context,
+                cache_invalidator: context.cache_invalidator.clone(),
+                table_metadata_manager: context.table_metadata_manager.clone(),
+                mailbox: context.mailbox.clone(),
+                server_addr: context.server_addr.clone(),
+            },
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Procedure for RepartitionGroupProcedure {
+    fn type_name(&self) -> &str {
+        Self::TYPE_NAME
+    }
+
+    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+        todo!()
+    }
+
+    async fn rollback(&mut self, _: &ProcedureContext) -> ProcedureResult<()> {
+        todo!()
+    }
+
+    fn rollback_supported(&self) -> bool {
+        true
+    }
+
+    fn dump(&self) -> ProcedureResult<String> {
+        todo!()
+    }
+
+    fn lock_key(&self) -> LockKey {
+        todo!()
+    }
+
+    fn user_metadata(&self) -> Option<UserMetadata> {
+        todo!()
+    }
+}
 
 pub struct Context {
     pub persistent_ctx: PersistentContext,
@@ -55,11 +114,16 @@ pub struct Context {
     pub server_addr: String,
 }
 
+/// The result of the group preparation phase, containing validated region routes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GroupPrepareResult {
+    /// The validated source region routes.
     pub source_routes: Vec<RegionRoute>,
+    /// The validated target region routes.
     pub target_routes: Vec<RegionRoute>,
+    /// The primary source region id (first source region), used for retrieving region options.
     pub central_region: RegionId,
+    /// The datanode id where the primary source region is located.
     pub central_region_datanode_id: DatanodeId,
 }
 
@@ -75,6 +139,23 @@ pub struct PersistentContext {
     /// The result of group prepare.
     /// The value will be set in [RepartitionStart](crate::procedure::repartition::group::repartition_start::RepartitionStart) state.
     pub group_prepare_result: Option<GroupPrepareResult>,
+}
+
+impl PersistentContext {
+    pub fn new(
+        group_id: GroupId,
+        table_id: TableId,
+        sources: Vec<RegionDescriptor>,
+        targets: Vec<RegionDescriptor>,
+    ) -> Self {
+        Self {
+            group_id,
+            table_id,
+            sources,
+            targets,
+            group_prepare_result: None,
+        }
+    }
 }
 
 impl Context {

@@ -303,4 +303,43 @@ mod tests {
         let subtasks = create_subtasks(&from, &to).unwrap();
         assert!(subtasks.is_empty());
     }
+
+    #[test]
+    fn test_three_components() {
+        // Left: A:[0,10), B:[20,30), C:[40,50)
+        let from = vec![
+            col("x")
+                .gt_eq(Value::Int64(0))
+                .and(col("x").lt(Value::Int64(10))),
+            col("x")
+                .gt_eq(Value::Int64(20))
+                .and(col("x").lt(Value::Int64(30))),
+            col("x")
+                .gt_eq(Value::Int64(40))
+                .and(col("x").lt(Value::Int64(50))),
+        ];
+        // Right: A:[0,10), B:[20,30), C:[40,60)
+        let to = vec![
+            col("x")
+                .gt_eq(Value::Int64(0))
+                .and(col("x").lt(Value::Int64(10))),
+            col("x")
+                .gt_eq(Value::Int64(20))
+                .and(col("x").lt(Value::Int64(30))),
+            col("x")
+                .gt_eq(Value::Int64(40))
+                .and(col("x").lt(Value::Int64(60))),
+        ];
+        let subtasks = create_subtasks(&from, &to).unwrap();
+        assert_eq!(subtasks.len(), 3);
+        assert_eq!(subtasks[0].from_expr_indices, vec![0]);
+        assert_eq!(subtasks[0].to_expr_indices, vec![0]);
+        assert_eq!(subtasks[0].transition_map, vec![vec![0]]);
+        assert_eq!(subtasks[1].from_expr_indices, vec![1]);
+        assert_eq!(subtasks[1].to_expr_indices, vec![1]);
+        assert_eq!(subtasks[1].transition_map, vec![vec![1]]);
+        assert_eq!(subtasks[2].from_expr_indices, vec![2]);
+        assert_eq!(subtasks[2].to_expr_indices, vec![2]);
+        assert_eq!(subtasks[2].transition_map, vec![vec![2]]);
+    }
 }

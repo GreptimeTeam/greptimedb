@@ -17,6 +17,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_meta::DatanodeId;
+use common_procedure::ProcedureId;
 use common_runtime::JoinError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
@@ -768,6 +769,35 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to create repartition subtasks"))]
+    RepartitionCreateSubtasks {
+        source: partition::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Source partition expression '{}' does not match any existing region",
+        expr
+    ))]
+    RepartitionSourceExprMismatch {
+        expr: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to get the state receiver for repartition subprocedure {}",
+        procedure_id
+    ))]
+    RepartitionSubprocedureStateReceiver {
+        procedure_id: ProcedureId,
+        #[snafu(source)]
+        source: common_procedure::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported operation {}", operation))]
     Unsupported {
         operation: String,
@@ -1113,7 +1143,8 @@ impl ErrorExt for Error {
             | Error::LeaderPeerChanged { .. }
             | Error::RepartitionSourceRegionMissing { .. }
             | Error::RepartitionTargetRegionMissing { .. }
-            | Error::PartitionExprMismatch { .. } => StatusCode::InvalidArguments,
+            | Error::PartitionExprMismatch { .. }
+            | Error::RepartitionSourceExprMismatch { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
             | Error::InvalidRegionKeyFromUtf8 { .. }
@@ -1173,6 +1204,8 @@ impl ErrorExt for Error {
 
             Error::BuildTlsOptions { source, .. } => source.status_code(),
             Error::Other { source, .. } => source.status_code(),
+            Error::RepartitionCreateSubtasks { source, .. } => source.status_code(),
+            Error::RepartitionSubprocedureStateReceiver { source, .. } => source.status_code(),
             Error::NoEnoughAvailableNode { .. } => StatusCode::RuntimeResourcesExhausted,
 
             #[cfg(feature = "pg_kvbackend")]
