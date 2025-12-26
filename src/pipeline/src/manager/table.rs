@@ -269,8 +269,13 @@ impl PipelineTable {
         let pipeline = self.get_pipeline_str(schema, name, version).await?;
         let compiled_pipeline = Arc::new(Self::compile_pipeline(&pipeline.0)?);
 
-        self.cache
-            .insert_pipeline_cache(schema, name, version, compiled_pipeline.clone(), false);
+        self.cache.insert_pipeline_cache(
+            schema,
+            name,
+            version,
+            compiled_pipeline.clone(),
+            version.is_none(),
+        );
         Ok(compiled_pipeline)
     }
 
@@ -280,14 +285,17 @@ impl PipelineTable {
         &self,
         schema: &str,
         name: &str,
-        version: PipelineVersion,
+        input_version: PipelineVersion,
     ) -> Result<(String, TimestampNanosecond)> {
-        if let Some(pipeline) = self.cache.get_pipeline_str_cache(schema, name, version)? {
+        if let Some(pipeline) = self
+            .cache
+            .get_pipeline_str_cache(schema, name, input_version)?
+        {
             return Ok(pipeline);
         }
 
         let mut pipeline_vec;
-        match self.find_pipeline(name, version).await {
+        match self.find_pipeline(name, input_version).await {
             Ok(p) => {
                 METRIC_PIPELINE_TABLE_FIND_COUNT
                     .with_label_values(&["true"])
@@ -304,8 +312,14 @@ impl PipelineTable {
                             .inc();
                         return self
                             .cache
-                            .get_failover_cache(schema, name, version)?
-                            .ok_or(PipelineNotFoundSnafu { name, version }.build());
+                            .get_failover_cache(schema, name, input_version)?
+                            .ok_or(
+                                PipelineNotFoundSnafu {
+                                    name,
+                                    version: input_version,
+                                }
+                                .build(),
+                            );
                     }
                     _ => {
                         // if other error, we should return it
@@ -316,7 +330,10 @@ impl PipelineTable {
         };
         ensure!(
             !pipeline_vec.is_empty(),
-            PipelineNotFoundSnafu { name, version }
+            PipelineNotFoundSnafu {
+                name,
+                version: input_version
+            }
         );
 
         // if the result is exact one, use it
@@ -328,7 +345,7 @@ impl PipelineTable {
                 name,
                 Some(version),
                 p.clone(),
-                false,
+                input_version.is_none(),
             );
             return Ok(p);
         }
@@ -344,13 +361,21 @@ impl PipelineTable {
         // throw an error
         let (pipeline_content, found_schema, version) =
             pipeline.context(MultiPipelineWithDiffSchemaSnafu {
+                name: name.to_string(),
+                current_schema: schema.to_string(),
                 schemas: pipeline_vec.iter().map(|v| v.1.clone()).join(","),
             })?;
 
         let v = *version;
         let p = (pipeline_content.clone(), v);
-        self.cache
-            .insert_pipeline_str_cache(found_schema, name, Some(v), p.clone(), false);
+
+        self.cache.insert_pipeline_str_cache(
+            found_schema,
+            name,
+            Some(v),
+            p.clone(),
+            input_version.is_none(),
+        );
         Ok(p)
     }
 
