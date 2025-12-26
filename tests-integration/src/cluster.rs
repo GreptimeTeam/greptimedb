@@ -104,6 +104,7 @@ pub struct GreptimeDbClusterBuilder {
     metasrv_gc_config: GcSchedulerOptions,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
+    object_store_manager: Option<object_store::manager::ObjectStoreManagerRef>,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -137,6 +138,7 @@ impl GreptimeDbClusterBuilder {
             metasrv_gc_config: GcSchedulerOptions::default(),
             shared_home_dir: None,
             meta_selector: None,
+            object_store_manager: None,
         }
     }
 
@@ -190,6 +192,15 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_meta_selector(mut self, selector: SelectorRef) -> Self {
         self.meta_selector = Some(selector);
+        self
+    }
+
+    #[must_use]
+    pub fn with_object_store_manager(
+        mut self,
+        object_store_manager: object_store::manager::ObjectStoreManagerRef,
+    ) -> Self {
+        self.object_store_manager = Some(object_store_manager);
         self
     }
 
@@ -372,7 +383,15 @@ impl GreptimeDbClusterBuilder {
         builder
             .with_cache_registry(layered_cache_registry)
             .with_meta_client(meta_client);
-        let mut datanode = builder.build().await.unwrap();
+
+        let mut datanode = if let Some(object_store_manager) = &self.object_store_manager {
+            builder
+                .build_with_object_store_manager(object_store_manager.clone())
+                .await
+                .unwrap()
+        } else {
+            builder.build().await.unwrap()
+        };
 
         datanode.start_heartbeat().await.unwrap();
 

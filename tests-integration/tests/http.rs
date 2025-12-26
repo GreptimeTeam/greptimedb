@@ -1357,9 +1357,17 @@ pub async fn test_config_api(store_type: StorageType) {
     assert_eq!(res_get.status(), StatusCode::OK);
 
     let storage = if store_type != StorageType::File {
+        let s3_extra = if store_type == StorageType::S3 || store_type == StorageType::S3WithCache {
+            // for s3, there are extra fields in test storage config
+            r#"
+allow_anonymous = true
+disable_config_load = true"#
+        } else {
+            ""
+        };
         format!(
             r#"[storage]
-type = "{}"
+type = "{}"{s3_extra}
 providers = []
 
 [storage.http_client]
