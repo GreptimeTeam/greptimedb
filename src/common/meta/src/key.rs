@@ -157,7 +157,7 @@ use crate::DatanodeId;
 use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::key::flow::flow_state::FlowStateValue;
 use crate::key::node_address::NodeAddressValue;
-use crate::key::table_repart::TableRepartKey;
+use crate::key::table_repart::{TableRepartKey, TableRepartManager};
 use crate::key::table_route::TableRouteKey;
 use crate::key::topic_region::TopicRegionValue;
 use crate::key::txn_helper::TxnOpGetResponseSet;
@@ -394,6 +394,7 @@ pub struct TableMetadataManager {
     catalog_manager: CatalogManager,
     schema_manager: SchemaManager,
     table_route_manager: TableRouteManager,
+    table_repart_manager: TableRepartManager,
     tombstone_manager: TombstoneManager,
     topic_name_manager: TopicNameManager,
     topic_region_manager: TopicRegionManager,
@@ -546,6 +547,7 @@ impl TableMetadataManager {
             catalog_manager: CatalogManager::new(kv_backend.clone()),
             schema_manager: SchemaManager::new(kv_backend.clone()),
             table_route_manager: TableRouteManager::new(kv_backend.clone()),
+            table_repart_manager: TableRepartManager::new(kv_backend.clone()),
             tombstone_manager: TombstoneManager::new(kv_backend.clone()),
             topic_name_manager: TopicNameManager::new(kv_backend.clone()),
             topic_region_manager: TopicRegionManager::new(kv_backend.clone()),
@@ -566,6 +568,7 @@ impl TableMetadataManager {
             catalog_manager: CatalogManager::new(kv_backend.clone()),
             schema_manager: SchemaManager::new(kv_backend.clone()),
             table_route_manager: TableRouteManager::new(kv_backend.clone()),
+            table_repart_manager: TableRepartManager::new(kv_backend.clone()),
             tombstone_manager: TombstoneManager::new_with_prefix(
                 kv_backend.clone(),
                 tombstone_prefix,
@@ -622,6 +625,10 @@ impl TableMetadataManager {
 
     pub fn table_route_manager(&self) -> &TableRouteManager {
         &self.table_route_manager
+    }
+
+    pub fn table_repart_manager(&self) -> &TableRepartManager {
+        &self.table_repart_manager
     }
 
     pub fn topic_name_manager(&self) -> &TopicNameManager {
