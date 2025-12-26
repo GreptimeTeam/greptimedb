@@ -249,14 +249,7 @@ impl Memtable for SimpleBulkMemtable {
         let time_range = {
             let num_rows = self.num_rows.load(Ordering::Relaxed);
             if num_rows > 0 {
-                let ts_type = self
-                    .region_metadata
-                    .time_index_column()
-                    .column_schema
-                    .data_type
-                    .clone()
-                    .as_timestamp()
-                    .expect("Timestamp column must have timestamp type");
+                let ts_type = self.region_metadata.time_index_type();
                 let max_timestamp =
                     ts_type.create_timestamp(self.max_timestamp.load(Ordering::Relaxed));
                 let min_timestamp =
@@ -351,14 +344,7 @@ impl Memtable for SimpleBulkMemtable {
                 series_count: 0,
             };
         }
-        let ts_type = self
-            .region_metadata
-            .time_index_column()
-            .column_schema
-            .data_type
-            .clone()
-            .as_timestamp()
-            .expect("Timestamp column must have timestamp type");
+        let ts_type = self.region_metadata.time_index_type();
         let max_timestamp = ts_type.create_timestamp(self.max_timestamp.load(Ordering::Relaxed));
         let min_timestamp = ts_type.create_timestamp(self.min_timestamp.load(Ordering::Relaxed));
         MemtableStats {
