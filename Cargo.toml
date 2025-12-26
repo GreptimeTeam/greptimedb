@@ -103,6 +103,7 @@ aquamarine = "0.6"
 arrow = { version = "56.2", features = ["prettyprint"] }
 arrow-array = { version = "56.2", default-features = false, features = ["chrono-tz"] }
 arrow-buffer = "56.2"
+arrow-cast = "56.2"
 arrow-flight = "56.2"
 arrow-ipc = { version = "56.2", default-features = false, features = ["lz4", "zstd"] }
 arrow-schema = { version = "56.2", features = ["serde"] }
