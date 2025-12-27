@@ -18,6 +18,7 @@ default = [
 ]
 enterprise = ["common-meta/enterprise", "frontend/enterprise", "meta-srv/enterprise"]
 tokio-console = ["common-telemetry/tokio-console"]
+vector_index = ["mito2/vector_index"]
 
 [lints]
 workspace = true

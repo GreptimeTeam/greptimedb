@@ -742,6 +742,8 @@ mod tests {
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
             bloom_filter_index_config: Default::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         };
 
         let mut metrics = Metrics::new(WriteType::Flush);
@@ -1152,6 +1154,8 @@ mod tests {
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
             bloom_filter_index_config: Default::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         }
     }
 
@@ -1271,6 +1275,8 @@ mod tests {
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
             bloom_filter_index_config: Default::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         };
 
         let mut metrics = Metrics::new(WriteType::Flush);

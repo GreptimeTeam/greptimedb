@@ -313,6 +313,8 @@ impl AccessLayer {
                 inverted_index_config: request.inverted_index_config,
                 fulltext_index_config: request.fulltext_index_config,
                 bloom_filter_index_config: request.bloom_filter_index_config,
+                #[cfg(feature = "vector_index")]
+                vector_index_config: request.vector_index_config,
             };
             // We disable write cache on file system but we still use atomic write.
             // TODO(yingwen): If we support other non-fs stores without the write cache, then
@@ -467,6 +469,8 @@ pub struct SstWriteRequest {
     pub inverted_index_config: InvertedIndexConfig,
     pub fulltext_index_config: FulltextIndexConfig,
     pub bloom_filter_index_config: BloomFilterConfig,
+    #[cfg(feature = "vector_index")]
+    pub vector_index_config: crate::config::VectorIndexConfig,
 }
 
 /// Cleaner to remove temp files on the atomic write dir.

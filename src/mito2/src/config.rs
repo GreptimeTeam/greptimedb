@@ -158,6 +158,9 @@ pub struct MitoConfig {
     pub fulltext_index: FulltextIndexConfig,
     /// Bloom filter index configs.
     pub bloom_filter_index: BloomFilterConfig,
+    /// Vector index configs (HNSW).
+    #[cfg(feature = "vector_index")]
+    pub vector_index: VectorIndexConfig,
 
     /// Memtable config
     pub memtable: MemtableConfig,
@@ -214,6 +217,8 @@ impl Default for MitoConfig {
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),
             bloom_filter_index: BloomFilterConfig::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index: VectorIndexConfig::default(),
             memtable: MemtableConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
             default_experimental_flat_format: false,
@@ -628,6 +633,51 @@ impl Default for BloomFilterConfig {
 }
 
 impl BloomFilterConfig {
+    pub fn mem_threshold_on_create(&self) -> Option<usize> {
+        match self.mem_threshold_on_create {
+            MemoryThreshold::Auto => {
+                if let Some(sys_memory) = get_total_memory_readable() {
+                    Some((sys_memory / INDEX_CREATE_MEM_THRESHOLD_FACTOR).as_bytes() as usize)
+                } else {
+                    Some(ReadableSize::mb(64).as_bytes() as usize)
+                }
+            }
+            MemoryThreshold::Unlimited => None,
+            MemoryThreshold::Size(size) => Some(size.as_bytes() as usize),
+        }
+    }
+}
+
+/// Configuration options for the vector index (HNSW).
+#[cfg(feature = "vector_index")]
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct VectorIndexConfig {
+    /// Whether to create the index on flush: automatically or never.
+    pub create_on_flush: Mode,
+    /// Whether to create the index on compaction: automatically or never.
+    pub create_on_compaction: Mode,
+    /// Whether to apply the index on query: automatically or never.
+    pub apply_on_query: Mode,
+    /// Memory threshold for creating the index.
+    pub mem_threshold_on_create: MemoryThreshold,
+}
+
+#[cfg(feature = "vector_index")]
+impl Default for VectorIndexConfig {
+    fn default() -> Self {
+        Self {
+            create_on_flush: Mode::Auto,
+            create_on_compaction: Mode::Auto,
+            apply_on_query: Mode::Auto,
+            mem_threshold_on_create: MemoryThreshold::Auto,
+        }
+    }
+}
+
+#[cfg(feature = "vector_index")]
+impl VectorIndexConfig {
     pub fn mem_threshold_on_create(&self) -> Option<usize> {
         match self.mem_threshold_on_create {
             MemoryThreshold::Auto => {

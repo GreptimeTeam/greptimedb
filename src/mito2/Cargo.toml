@@ -8,6 +8,7 @@ license.workspace = true
 default = []
 test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
 enterprise = []
+vector_index = ["dep:usearch", "dep:roaring", "index/vector_index"]
 
 [lints]
 workspace = true
@@ -28,9 +29,10 @@ common-datasource.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true
 common-grpc.workspace = true
+common-function.workspace = true
 common-macro.workspace = true
-common-meta.workspace = true
 common-memory-manager.workspace = true
+common-meta.workspace = true
 common-query.workspace = true
 common-recordbatch.workspace = true
 common-runtime.workspace = true
@@ -49,7 +51,6 @@ dotenv.workspace = true
 either.workspace = true
 futures.workspace = true
 humantime-serde.workspace = true
-humantime.workspace = true
 index.workspace = true
 itertools.workspace = true
 greptime-proto.workspace = true
@@ -67,6 +68,7 @@ partition.workspace = true
 puffin.workspace = true
 rand.workspace = true
 rayon = "1.10"
+roaring = { version = "0.10", optional = true }
 regex.workspace = true
 rskafka = { workspace = true, optional = true }
 rstest = { workspace = true, optional = true }
@@ -84,6 +86,7 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+usearch = { version = "2.21", default-features = false, features = ["fp16lib"], optional = true }
 uuid.workspace = true
 
 [dev-dependencies]
