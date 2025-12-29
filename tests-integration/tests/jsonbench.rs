@@ -56,6 +56,47 @@ async fn query_data(frontend: &Arc<Instance>) -> io::Result<()> {
     ))?;
     execute_sql_and_expect(frontend, sql, &expected).await;
 
+    // query 1:
+    let sql = "\
+SELECT \
+    json_get_string(data, '$.commit.collection') AS event, count() AS count \
+FROM bluesky \
+GROUP BY event \
+ORDER BY count DESC, event ASC";
+    let expected = r#"
++-----------------------+-------+
+| event                 | count |
++-----------------------+-------+
+| app.bsky.feed.like    | 3     |
+| app.bsky.feed.post    | 3     |
+| app.bsky.graph.follow | 3     |
+| app.bsky.feed.repost  | 1     |
++-----------------------+-------+"#;
+    execute_sql_and_expect(frontend, sql, expected).await;
+
+    // query 2:
+    let sql = "\
+SELECT \
+    json_get_string(data, '$.commit.collection') AS event, \
+    count() AS count, \
+    count(DISTINCT json_get_string(data, '$.did')) AS users \
+FROM bluesky \
+WHERE \
+    (json_get_string(data, '$.kind') = 'commit') AND \
+    (json_get_string(data, '$.commit.operation') = 'create') \
+GROUP BY event \
+ORDER BY count DESC, event ASC";
+    let expected = r#"
++-----------------------+-------+-------+
+| event                 | count | users |
++-----------------------+-------+-------+
+| app.bsky.feed.like    | 3     | 3     |
+| app.bsky.feed.post    | 3     | 3     |
+| app.bsky.graph.follow | 3     | 3     |
+| app.bsky.feed.repost  | 1     | 1     |
++-----------------------+-------+-------+"#;
+    execute_sql_and_expect(frontend, sql, expected).await;
+
     Ok(())
 }
 
