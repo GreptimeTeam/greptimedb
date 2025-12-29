@@ -510,7 +510,7 @@ impl VectorIndexer {
 
     /// Finishes a single column's vector index.
     ///
-    /// The blob format v1:
+    /// The blob format v1 (header = 33 bytes):
     /// ```text
     /// +------------------+
     /// | Version          | 1 byte (u8, = 1)
@@ -520,6 +520,16 @@ impl VectorIndexer {
     /// | Dimension        | 4 bytes (u32, little-endian)
     /// +------------------+
     /// | Metric           | 1 byte (u8, distance metric)
+    /// +------------------+
+    /// | Connectivity     | 2 bytes (u16, little-endian, HNSW M parameter)
+    /// +------------------+
+    /// | Expansion add    | 2 bytes (u16, little-endian, ef_construction)
+    /// +------------------+
+    /// | Expansion search | 2 bytes (u16, little-endian, ef_search)
+    /// +------------------+
+    /// | Total rows       | 8 bytes (u64, little-endian, total rows in SST)
+    /// +------------------+
+    /// | Indexed rows     | 8 bytes (u64, little-endian, non-NULL rows indexed)
     /// +------------------+
     /// | NULL bitmap len  | 4 bytes (u32, little-endian)
     /// +------------------+

@@ -15,7 +15,6 @@
 //! USearch HNSW implementation of VectorIndexEngine.
 
 use common_error::ext::BoxedError;
-use snafu::IntoError;
 use store_api::storage::{VectorIndexEngine, VectorSearchMatches};
 use usearch::{Index, IndexOptions, ScalarKind};
 
@@ -92,7 +91,7 @@ impl VectorIndexEngine for UsearchEngine {
                     VectorIndexBuildSnafu {
                         reason: format!("Failed to reserve capacity: {}", e),
                     }
-                    .into_error(snafu::NoneError),
+                    .build(),
                 )
             })?;
         }
@@ -102,7 +101,7 @@ impl VectorIndexEngine for UsearchEngine {
                 VectorIndexBuildSnafu {
                     reason: format!("Failed to add vector: {}", e),
                 }
-                .into_error(snafu::NoneError),
+                .build(),
             )
         })
     }
@@ -113,7 +112,7 @@ impl VectorIndexEngine for UsearchEngine {
                 VectorIndexBuildSnafu {
                     reason: format!("Failed to search: {}", e),
                 }
-                .into_error(snafu::NoneError),
+                .build(),
             )
         })?;
 
@@ -133,7 +132,7 @@ impl VectorIndexEngine for UsearchEngine {
                 VectorIndexBuildSnafu {
                     reason: format!("Failed to save to buffer: {}", e),
                 }
-                .into_error(snafu::NoneError),
+                .build(),
             )
         })
     }
@@ -144,7 +143,7 @@ impl VectorIndexEngine for UsearchEngine {
                 VectorIndexBuildSnafu {
                     reason: format!("Failed to reserve: {}", e),
                 }
-                .into_error(snafu::NoneError),
+                .build(),
             )
         })
     }
