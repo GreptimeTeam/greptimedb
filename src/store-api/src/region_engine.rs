@@ -761,7 +761,7 @@ pub struct RemapManifestsRequest {
 pub struct RemapManifestsResponse {
     /// Maps each new region to its staging manifest path.
     ///
-    /// These paths are relative paths within the central region's staging blob storage,
+    /// These paths are relative paths within the central region's staging data storage,
     /// and should be passed to [`ApplyStagingManifestRequest`](RegionRequest::ApplyStagingManifest) to finalize the repartition.
     pub manifest_paths: HashMap<RegionId, String>,
 }

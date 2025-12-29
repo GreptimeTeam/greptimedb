@@ -1461,10 +1461,10 @@ pub struct EnterStagingRequest {
 /// In practice, this means:
 /// - The `partition_expr` identifies the staging region rule that the manifest
 ///   was generated for.
-/// - `central_region_id` specifies which region holds the staging blob storage
+/// - `central_region_id` specifies which region holds the staging data storage
 ///   where the manifest was written during the `remap_manifests` operation.
 /// - `manifest_path` is the relative path within the central region's staging
-///   blob storage to fetch the generated manifest.
+///   data storage to fetch the generated manifest.
 ///
 /// It should typically be called **after** the staging region has been
 /// initialized by [`EnterStagingRequest`] and the new file layout has been
@@ -1473,10 +1473,10 @@ pub struct EnterStagingRequest {
 pub struct ApplyStagingManifestRequest {
     /// The partition expression of the staging region.
     pub partition_expr: String,
-    /// The region that stores the staging manifests in its staging blob storage.
+    /// The region that stores the staging manifests in its staging data storage.
     pub central_region_id: RegionId,
     /// The relative path to the staging manifest within the central region's
-    /// staging blob storage.
+    /// staging data storage.
     pub manifest_path: String,
 }
 
