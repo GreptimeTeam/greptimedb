@@ -205,7 +205,7 @@ impl PipelineOperator {
         name: &str,
         version: PipelineVersion,
         query_ctx: QueryContextRef,
-    ) -> Result<((String, TimestampNanosecond), String)> {
+    ) -> Result<(String, TimestampNanosecond)> {
         let schema = query_ctx.current_schema();
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
@@ -220,6 +220,7 @@ impl PipelineOperator {
                     .observe(timer.elapsed().as_secs_f64())
             })
             .await
+            .map(|(p, _)| p)
     }
 
     /// Insert a pipeline into the pipeline table.

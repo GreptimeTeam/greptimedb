@@ -114,7 +114,6 @@ impl PipelineHandler for Instance {
             .get_pipeline_str(name, version, query_ctx)
             .await
             .context(PipelineSnafu)
-            .map(|(p, _)| p)
     }
 }
 

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use api::v1::value::ValueData;
@@ -262,8 +263,8 @@ impl PipelineTable {
         name: &str,
         version: PipelineVersion,
     ) -> Result<Arc<Pipeline>> {
-        if let Some(pipeline) = self.cache.get_pipeline_cache(schema, name, version)? {
-            return Ok(pipeline.0);
+        if let Some((pipeline, _)) = self.cache.get_pipeline_cache(schema, name, version)? {
+            return Ok(pipeline);
         }
 
         let (pipeline, found_schema) = self.get_pipeline_str(schema, name, version).await?;
@@ -281,12 +282,12 @@ impl PipelineTable {
 
     /// Get a original pipeline by name.
     /// If the pipeline is not in the cache, it will be get from table and compiled and inserted into the cache.
-    pub async fn get_pipeline_str(
+    pub async fn get_pipeline_str<'a>(
         &self,
-        schema: &str,
+        schema: &'a str,
         name: &str,
         input_version: PipelineVersion,
-    ) -> Result<((String, TimestampNanosecond), String)> {
+    ) -> Result<((String, TimestampNanosecond), Cow<'a, str>)> {
         if let Some(pipeline) = self
             .cache
             .get_pipeline_str_cache(schema, name, input_version)?
@@ -347,15 +348,16 @@ impl PipelineTable {
                 p.clone(),
                 input_version.is_none(),
             );
-            return Ok((p, found_schema));
+            return Ok((p, Cow::Owned(found_schema)));
         }
 
         // check if there's empty schema pipeline
         // if there isn't, check current schema
         let pipeline = pipeline_vec
             .iter()
-            .find(|v| v.1 == EMPTY_SCHEMA_NAME)
-            .or_else(|| pipeline_vec.iter().find(|v| v.1 == schema));
+            .position(|v| v.1 == EMPTY_SCHEMA_NAME)
+            .or_else(|| pipeline_vec.iter().position(|v| v.1 == schema))
+            .map(|idx| pipeline_vec.remove(idx));
 
         // multiple pipeline with no empty or current schema
         // throw an error
@@ -366,17 +368,17 @@ impl PipelineTable {
                 schemas: pipeline_vec.iter().map(|v| v.1.clone()).join(","),
             })?;
 
-        let v = *version;
+        let v = version;
         let p = (pipeline_content.clone(), v);
 
         self.cache.insert_pipeline_str_cache(
-            found_schema,
+            &found_schema,
             name,
             Some(v),
             p.clone(),
             input_version.is_none(),
         );
-        Ok((p, found_schema.clone()))
+        Ok((p, Cow::Owned(found_schema)))
     }
 
     /// Insert a pipeline into the pipeline table and compile it.
