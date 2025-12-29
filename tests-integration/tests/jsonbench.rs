@@ -62,13 +62,13 @@ SELECT \
     json_get_string(data, '$.commit.collection') AS event, count() AS count \
 FROM bluesky \
 GROUP BY event \
-ORDER BY event ASC, count DESC";
+ORDER BY count DESC, event ASC";
     let expected = r#"
 +-----------------------+-------+
 | event                 | count |
 +-----------------------+-------+
-| app.bsky.feed.post    | 3     |
 | app.bsky.feed.like    | 3     |
+| app.bsky.feed.post    | 3     |
 | app.bsky.graph.follow | 3     |
 | app.bsky.feed.repost  | 1     |
 +-----------------------+-------+"#;
@@ -85,13 +85,13 @@ WHERE \
     (json_get_string(data, '$.kind') = 'commit') AND \
     (json_get_string(data, '$.commit.operation') = 'create') \
 GROUP BY event \
-ORDER BY event ASC, count DESC";
+ORDER BY count DESC, event ASC";
     let expected = r#"
 +-----------------------+-------+-------+
 | event                 | count | users |
 +-----------------------+-------+-------+
-| app.bsky.feed.post    | 3     | 3     |
 | app.bsky.feed.like    | 3     | 3     |
+| app.bsky.feed.post    | 3     | 3     |
 | app.bsky.graph.follow | 3     | 3     |
 | app.bsky.feed.repost  | 1     | 1     |
 +-----------------------+-------+-------+"#;
