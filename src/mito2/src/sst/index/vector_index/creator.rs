@@ -19,10 +19,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use common_telemetry::warn;
+use datatypes::arrow::array::{Array, BinaryArray};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::ValueRef;
-use datatypes::vectors::Helper;
 use index::vector::{VectorDistanceMetric, VectorIndexOptions, distance_metric_to_usearch};
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use roaring::RoaringBitmap;
@@ -33,8 +33,8 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 use usearch::MetricKind;
 
 use crate::error::{
-    BiErrorsSnafu, ConvertVectorSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, Result,
-    VectorIndexBuildSnafu, VectorIndexFinishSnafu,
+    BiErrorsSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, Result, VectorIndexBuildSnafu,
+    VectorIndexFinishSnafu,
 };
 use crate::metrics::{INDEX_CREATE_BYTES_TOTAL, INDEX_CREATE_ROWS_TOTAL};
 use crate::read::Batch;
@@ -148,6 +148,14 @@ impl VectorIndexCreator {
     fn add_null(&mut self) {
         self.null_bitmap.insert(self.current_row_offset as u32);
         self.current_row_offset += 1;
+    }
+
+    /// Records multiple NULL vectors starting at the current row offset.
+    fn add_nulls(&mut self, n: usize) {
+        let start = self.current_row_offset as u32;
+        let end = start + n as u32;
+        self.null_bitmap.insert_range(start..end);
+        self.current_row_offset += n as u64;
     }
 
     /// Returns the serialized size of the index.
@@ -349,8 +357,8 @@ impl VectorIndexer {
                 let current_usage = creator.memory_usage();
                 if current_usage > threshold {
                     warn!(
-                        "Vector index memory usage {} exceeds threshold {}, aborting index creation",
-                        current_usage, threshold
+                        "Vector index memory usage {} exceeds threshold {}, aborting index creation, region_id: {}",
+                        current_usage, threshold, self.metadata.region_id
                     );
                     return VectorIndexBuildSnafu {
                         reason: format!(
@@ -373,28 +381,44 @@ impl VectorIndexer {
         guard.inc_row_count(n);
 
         for (col_id, creator) in &mut self.creators {
-            let Some(column_meta) = self.metadata.column_by_id(*col_id) else {
-                for _ in 0..n {
-                    creator.add_null();
+            // This should never happen: creator exists but column not in metadata
+            let column_meta = self.metadata.column_by_id(*col_id).ok_or_else(|| {
+                VectorIndexBuildSnafu {
+                    reason: format!(
+                        "Column {} not found in region metadata, this is a bug",
+                        col_id
+                    ),
                 }
-                continue;
-            };
+                .build()
+            })?;
 
             let column_name = &column_meta.column_schema.name;
+            // Column not in batch is normal for flat format - treat as NULLs
             let Some(column_array) = batch.column_by_name(column_name) else {
-                for _ in 0..n {
-                    creator.add_null();
-                }
+                creator.add_nulls(n);
                 continue;
             };
 
-            let vector =
-                Helper::try_into_vector(column_array.clone()).context(ConvertVectorSnafu)?;
+            // Vector type must be stored as binary array
+            let binary_array = column_array
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| {
+                    VectorIndexBuildSnafu {
+                        reason: format!(
+                            "Column {} is not a binary array, got {:?}",
+                            column_name,
+                            column_array.data_type()
+                        ),
+                    }
+                    .build()
+                })?;
+
             for i in 0..n {
-                let value_ref = vector.get_ref(i);
-                if value_ref.is_null() {
+                if !binary_array.is_valid(i) {
                     creator.add_null();
-                } else if let ValueRef::Binary(bytes) = value_ref {
+                } else {
+                    let bytes = binary_array.value(i);
                     let floats = bytes_to_f32_slice(bytes);
                     if floats.len() != creator.config.dim {
                         return VectorIndexBuildSnafu {
@@ -407,8 +431,6 @@ impl VectorIndexer {
                         .fail();
                     }
                     creator.add_vector(&floats)?;
-                } else {
-                    creator.add_null();
                 }
             }
 
@@ -416,8 +438,8 @@ impl VectorIndexer {
                 let current_usage = creator.memory_usage();
                 if current_usage > threshold {
                     warn!(
-                        "Vector index memory usage {} exceeds threshold {}, aborting index creation",
-                        current_usage, threshold
+                        "Vector index memory usage {} exceeds threshold {}, aborting index creation, region_id: {}",
+                        current_usage, threshold, self.metadata.region_id
                     );
                     return VectorIndexBuildSnafu {
                         reason: format!(
@@ -531,8 +553,13 @@ impl VectorIndexer {
         // Header size: version(1) + engine(1) + dim(4) + metric(1) +
         //              connectivity(2) + expansion_add(2) + expansion_search(2) +
         //              total_rows(8) + indexed_rows(8) + bitmap_len(4) = 33 bytes
-        let header_size = 33;
-        let total_size = header_size + null_bitmap_bytes.len() + index_bytes.len();
+        /// Size of the vector index blob header in bytes.
+        /// Header format: version(1) + engine(1) + dim(4) + metric(1) +
+        /// connectivity(2) + expansion_add(2) + expansion_search(2) +
+        /// total_rows(8) + indexed_rows(8) + bitmap_len(4) = 33 bytes
+        const VECTOR_INDEX_BLOB_HEADER_SIZE: usize = 33;
+        let total_size =
+            VECTOR_INDEX_BLOB_HEADER_SIZE + null_bitmap_bytes.len() + index_bytes.len();
         let mut blob_data = Vec::with_capacity(total_size);
 
         // Write version (1 byte)
@@ -554,7 +581,17 @@ impl VectorIndexer {
         // Write indexed_rows (8 bytes, little-endian)
         blob_data.extend_from_slice(&creator.next_hnsw_key.to_le_bytes());
         // Write NULL bitmap length (4 bytes, little-endian)
-        blob_data.extend_from_slice(&(null_bitmap_bytes.len() as u32).to_le_bytes());
+        let bitmap_len: u32 = null_bitmap_bytes.len().try_into().map_err(|_| {
+            VectorIndexBuildSnafu {
+                reason: format!(
+                    "NULL bitmap size {} exceeds maximum allowed size {}",
+                    null_bitmap_bytes.len(),
+                    u32::MAX
+                ),
+            }
+            .build()
+        })?;
+        blob_data.extend_from_slice(&bitmap_len.to_le_bytes());
         // Write NULL bitmap
         blob_data.extend_from_slice(&null_bitmap_bytes);
         // Write vector index
@@ -704,8 +741,7 @@ mod tests {
         creator.add_vector(&[1.0, 0.0, 0.0, 0.0]).unwrap();
         creator.add_null();
         creator.add_vector(&[0.0, 1.0, 0.0, 0.0]).unwrap();
-        creator.add_null();
-        creator.add_null();
+        creator.add_nulls(2);
         creator.add_vector(&[0.0, 0.0, 1.0, 0.0]).unwrap();
 
         assert_eq!(creator.size(), 3); // 3 vectors
@@ -806,7 +842,8 @@ mod tests {
         blob_data.extend_from_slice(&(creator.config.expansion_search as u16).to_le_bytes());
         blob_data.extend_from_slice(&creator.current_row_offset.to_le_bytes()); // total_rows
         blob_data.extend_from_slice(&creator.next_hnsw_key.to_le_bytes()); // indexed_rows
-        blob_data.extend_from_slice(&(null_bitmap_bytes.len() as u32).to_le_bytes());
+        let bitmap_len: u32 = null_bitmap_bytes.len().try_into().unwrap();
+        blob_data.extend_from_slice(&bitmap_len.to_le_bytes());
         blob_data.extend_from_slice(&null_bitmap_bytes);
         blob_data.extend_from_slice(&index_bytes);
 
