@@ -26,18 +26,85 @@ use crate::manifest::storage::size_tracker::NoopTracker;
 use crate::manifest::storage::utils::sort_manifests;
 use crate::manifest::storage::{file_version, is_delta_file};
 
+/// A simple key-value storage for arbitrary data in the staging directory.
+///
+/// This is primarily used during repartition operations to store generated
+/// manifests that will be consumed by other regions via [`ApplyStagingManifestRequest`](store_api::region_request::ApplyStagingManifestRequest).
+/// The data is stored in `{staging_path}/data/` directory.
+#[derive(Debug, Clone)]
+pub(crate) struct StagingDataStorage {
+    object_store: ObjectStore,
+    path: String,
+}
+
+impl StagingDataStorage {
+    pub fn new(path: String, object_store: ObjectStore) -> Self {
+        let path = util::normalize_dir(&format!("{}/data/", path));
+        common_telemetry::debug!(
+            "Staging data storage path: {}, root: {}",
+            path,
+            object_store.info().root()
+        );
+        Self { object_store, path }
+    }
+
+    /// Put the bytes to the data storage.
+    pub async fn put(&self, path: &str, bytes: Vec<u8>) -> Result<()> {
+        let path = format!("{}{}", self.path, path);
+        common_telemetry::debug!(
+            "Putting data to staging data storage, path: {}, root: {}, bytes: {}",
+            path,
+            self.object_store.info().root(),
+            bytes.len()
+        );
+        self.object_store
+            .write(&path, bytes)
+            .await
+            .context(OpenDalSnafu)?;
+        Ok(())
+    }
+
+    /// Get the bytes from the data storage.
+    pub async fn get(&self, path: &str) -> Result<Vec<u8>> {
+        let path = format!("{}{}", self.path, path);
+        common_telemetry::debug!(
+            "Reading data from staging data storage, path: {}, root: {}",
+            path,
+            self.object_store.info().root()
+        );
+        let bytes = self.object_store.read(&path).await.context(OpenDalSnafu)?;
+
+        Ok(bytes.to_vec())
+    }
+}
+
+/// Storage for staging manifest files and data during repartition operations.
+///
+/// Contains:
+/// - `delta_storage`: Stores incremental manifest delta files for the staging region.
+/// - `data_storage`: Stores arbitrary data (e.g., generated manifests for regions).
 #[derive(Debug, Clone)]
 pub(crate) struct StagingStorage {
     delta_storage: DeltaStorage<NoopTracker>,
+    data_storage: StagingDataStorage,
+}
+
+/// Returns the staging path from the manifest path.
+///
+/// # Example
+/// - Input: `"data/table/region_0001/manifest/"`
+/// - Output: `"data/table/region_0001/staging/manifest/"`
+pub fn staging_path(manifest_path: &str) -> String {
+    let parent_dir = manifest_path
+        .trim_end_matches("manifest/")
+        .trim_end_matches('/');
+    util::normalize_dir(&format!("{}/staging/manifest", parent_dir))
 }
 
 impl StagingStorage {
     pub fn new(path: String, object_store: ObjectStore, compress_type: CompressionType) -> Self {
-        let staging_path = {
-            // Convert "region_dir/manifest/" to "region_dir/staging/manifest/"
-            let parent_dir = path.trim_end_matches("manifest/").trim_end_matches('/');
-            util::normalize_dir(&format!("{}/staging/manifest", parent_dir))
-        };
+        let staging_path = staging_path(&path);
+        let data_storage = StagingDataStorage::new(staging_path.clone(), object_store.clone());
         let delta_storage = DeltaStorage::new(
             staging_path.clone(),
             object_store.clone(),
@@ -48,7 +115,16 @@ impl StagingStorage {
             // deleted after exiting staging mode.
             Arc::new(NoopTracker),
         );
-        Self { delta_storage }
+
+        Self {
+            delta_storage,
+            data_storage,
+        }
+    }
+
+    /// Returns the data storage.
+    pub(crate) fn data_storage(&self) -> &StagingDataStorage {
+        &self.data_storage
     }
 
     /// Returns an iterator of manifests from staging directory.
@@ -105,5 +181,17 @@ impl StagingStorage {
 impl StagingStorage {
     pub fn set_compress_type(&mut self, compress_type: CompressionType) {
         self.delta_storage.set_compress_type(compress_type);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::manifest::storage::staging::staging_path;
+
+    #[test]
+    fn test_staging_path() {
+        let path = "/data/table/region_0001/manifest/";
+        let expected = "/data/table/region_0001/staging/manifest/";
+        assert_eq!(staging_path(path), expected);
     }
 }

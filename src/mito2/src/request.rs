@@ -50,7 +50,7 @@ use crate::error::{
     FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, MissingPartitionExprSnafu,
     Result, UnexpectedSnafu,
 };
-use crate::manifest::action::{RegionEdit, RegionManifest, TruncateKind};
+use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
@@ -796,10 +796,7 @@ impl WorkerRequest {
             region_mapping,
             new_partition_exprs,
         }: store_api::region_engine::RemapManifestsRequest,
-    ) -> Result<(
-        WorkerRequest,
-        Receiver<Result<HashMap<RegionId, RegionManifest>>>,
-    )> {
+    ) -> Result<(WorkerRequest, Receiver<Result<HashMap<RegionId, String>>>)> {
         let (sender, receiver) = oneshot::channel();
         let new_partition_exprs = new_partition_exprs
             .into_iter()
@@ -1117,7 +1114,7 @@ pub(crate) struct RemapManifestsRequest {
     /// New partition expressions for the new regions.
     pub(crate) new_partition_exprs: HashMap<RegionId, PartitionExpr>,
     /// Result sender.
-    pub(crate) sender: Sender<Result<HashMap<RegionId, RegionManifest>>>,
+    pub(crate) sender: Sender<Result<HashMap<RegionId, String>>>,
 }
 
 #[derive(Debug)]

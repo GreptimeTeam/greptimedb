@@ -21,12 +21,14 @@ use store_api::storage::RegionId;
 use tokio::sync::oneshot;
 
 use crate::error::{
-    RegionStateSnafu, SerdeJsonSnafu, StagingPartitionExprMismatchSnafu, UnexpectedSnafu,
+    RegionStateSnafu, Result, SerdeJsonSnafu, StagingPartitionExprMismatchSnafu, UnexpectedSnafu,
 };
-use crate::manifest::action::RegionEdit;
-use crate::region::{RegionLeaderState, RegionRoleState};
-use crate::request::{OptionOutputTx, RegionEditRequest};
-use crate::sst::file::FileMeta;
+use crate::manifest::action::{RegionEdit, RegionManifest};
+use crate::manifest::storage::manifest_dir;
+use crate::manifest::storage::staging::{StagingDataStorage, staging_path};
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::request::{OptionOutputTx, RegionEditRequest, WorkerRequest, WorkerRequestWithTime};
+use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -86,21 +88,32 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        let (tx, rx) = oneshot::channel();
-        let files_to_add = match serde_json::from_slice::<Vec<FileMeta>>(&request.files_to_add)
-            .context(SerdeJsonSnafu)
-        {
-            Ok(files_to_add) => files_to_add,
-            Err(e) => {
-                sender.send(Err(e));
+        let worker_sender = self.sender.clone();
+        common_runtime::spawn_global(async move {
+            let staging_manifest = match Self::fetch_staging_manifest(
+                &region,
+                request.central_region_id,
+                &request.manifest_path,
+            )
+            .await
+            {
+                Ok(staging_manifest) => staging_manifest,
+                Err(e) => {
+                    sender.send(Err(e));
+                    return;
+                }
+            };
+            if staging_manifest.metadata.partition_expr.as_ref() != Some(&request.partition_expr) {
+                sender.send(Err(StagingPartitionExprMismatchSnafu {
+                    manifest_expr: staging_manifest.metadata.partition_expr.clone(),
+                    request_expr: request.partition_expr,
+                }
+                .build()));
                 return;
             }
-        };
 
-        info!("Applying staging manifest request to region {}", region_id);
-        self.handle_region_edit(RegionEditRequest {
-            region_id,
-            edit: RegionEdit {
+            let files_to_add = staging_manifest.files.values().cloned().collect::<Vec<_>>();
+            let edit = RegionEdit {
                 files_to_add,
                 files_to_remove: vec![],
                 timestamp_ms: Some(Utc::now().timestamp_millis()),
@@ -108,11 +121,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
-            },
-            tx,
-        });
+            };
 
-        common_runtime::spawn_global(async move {
+            let (tx, rx) = oneshot::channel();
+            info!(
+                "Applying staging manifest request to region {}",
+                region.region_id,
+            );
+            let _ = worker_sender
+                .send(WorkerRequestWithTime::new(WorkerRequest::EditRegion(
+                    RegionEditRequest {
+                        region_id: region.region_id,
+                        edit,
+                        tx,
+                    },
+                )))
+                .await;
+
             // Await the result from the region edit and forward the outcome to the original sender.
             // If the operation completes successfully, respond with Ok(0); otherwise, respond with an appropriate error.
             if let Ok(result) = rx.await {
@@ -136,5 +161,25 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 );
             }
         });
+    }
+
+    /// Fetches the staging manifest from the central region's staging data storage.
+    ///
+    /// The `central_region_id` is used to locate the staging directory because the staging
+    /// manifest was created by the central region during `remap_manifests` operation.
+    async fn fetch_staging_manifest(
+        region: &MitoRegionRef,
+        central_region_id: RegionId,
+        manifest_path: &str,
+    ) -> Result<RegionManifest> {
+        let region_dir =
+            region_dir_from_table_dir(region.table_dir(), central_region_id, region.path_type());
+        let staging_path = staging_path(&manifest_dir(&region_dir));
+        common_telemetry::debug!("staging_path: {}", staging_path);
+        let manifest_data_storage =
+            StagingDataStorage::new(staging_path, region.access_layer().object_store().clone());
+        let staging_manifest = manifest_data_storage.get(manifest_path).await?;
+
+        serde_json::from_slice::<RegionManifest>(&staging_manifest).context(SerdeJsonSnafu)
     }
 }
