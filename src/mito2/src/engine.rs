@@ -81,7 +81,7 @@ mod apply_staging_manifest_test;
 mod puffin_index;
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -303,7 +303,7 @@ impl MitoEngine {
     pub async fn get_snapshot_of_file_refs(
         &self,
         file_handle_regions: impl IntoIterator<Item = RegionId>,
-        manifest_regions: HashMap<RegionId, Vec<RegionId>>,
+        manifest_regions: HashMap<RegionId, HashSet<RegionId>>,
     ) -> Result<FileRefsManifest> {
         let file_ref_mgr = self.file_ref_manager();
 
@@ -315,7 +315,7 @@ impl MitoEngine {
             .filter_map(|region_id| self.find_region(region_id))
             .collect();
 
-        let related_regions: Vec<(MitoRegionRef, Vec<RegionId>)> = manifest_regions
+        let related_regions: Vec<(MitoRegionRef, HashSet<RegionId>)> = manifest_regions
             .into_iter()
             .filter_map(|(related_region, queries)| {
                 self.find_region(related_region).map(|r| (r, queries))

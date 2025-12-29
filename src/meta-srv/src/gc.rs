@@ -29,6 +29,7 @@ mod options;
 mod procedure;
 mod scheduler;
 mod tracker;
+mod util;
 
 pub use options::GcSchedulerOptions;
 pub use procedure::BatchGcProcedure;

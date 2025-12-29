@@ -19,6 +19,8 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_meta::instruction::{self, GcRegions, GetFileRefs, GetFileRefsReply, InstructionReply};
+use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::lock_key::RegionLock;
 use common_meta::peer::Peer;
 use common_procedure::error::ToJsonSnafu;
@@ -31,9 +33,12 @@ use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
 use store_api::storage::{FileRefsManifest, GcReport, RegionId};
+use table::metadata::TableId;
 
-use crate::error::{self, Result, SerializeToJsonSnafu};
-use crate::gc::Region2Peers;
+use crate::cluster::MetaPeerClientRef;
+use crate::error::{self, Result, SerializeToJsonSnafu, TableMetadataManagerSnafu};
+use crate::gc::util::table_route_to_region;
+use crate::gc::{Peer2Regions, Region2Peers};
 use crate::handler::HeartbeatMailbox;
 use crate::service::mailbox::{Channel, MailboxRef};
 
@@ -249,23 +254,26 @@ impl Procedure for GcRegionProcedure {
     }
 }
 
-/// Procedure to perform get file refs then batch GC for multiple regions, should only be used by admin function
-/// for triggering manual gc, as it holds locks for too long and for all regions during the procedure.
+/// Procedure to perform get file refs then batch GC for multiple regions,
+/// it holds locks for all regions during the whole procedure.
 pub struct BatchGcProcedure {
     mailbox: MailboxRef,
+    meta_peer_client: MetaPeerClientRef,
+    table_metadata_manager: TableMetadataManagerRef,
     data: BatchGcData,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct BatchGcData {
     state: State,
+    /// Meta server address
     server_addr: String,
     /// The regions to be GC-ed
     regions: Vec<RegionId>,
     full_file_listing: bool,
     region_routes: Region2Peers,
-    /// Related regions (e.g., for shared files). Map: RegionId -> List of related RegionIds.
-    related_regions: HashMap<RegionId, Vec<RegionId>>,
+    /// Related regions (e.g., for shared files). Map: RegionId -> List of related RegionIds to look for in keys' manifest.
+    related_regions: HashMap<RegionId, HashSet<RegionId>>,
     /// Acquired file references (Populated in Acquiring state)
     file_refs: FileRefsManifest,
     /// mailbox timeout duration
@@ -287,31 +295,122 @@ impl BatchGcProcedure {
 
     pub fn new(
         mailbox: MailboxRef,
+        meta_peer_client: MetaPeerClientRef,
+        table_metadata_manager: TableMetadataManagerRef,
         server_addr: String,
         regions: Vec<RegionId>,
         full_file_listing: bool,
-        region_routes: Region2Peers,
-        related_regions: HashMap<RegionId, Vec<RegionId>>,
         timeout: Duration,
     ) -> Self {
         Self {
             mailbox,
+            meta_peer_client,
+            table_metadata_manager,
             data: BatchGcData {
                 state: State::Start,
                 server_addr,
                 regions,
                 full_file_listing,
-                region_routes,
-                related_regions,
-                file_refs: FileRefsManifest::default(),
                 timeout,
+                region_routes: HashMap::new(),
+                related_regions: HashMap::new(),
+                file_refs: FileRefsManifest::default(),
             },
         }
     }
 
+    async fn get_table_route(
+        &self,
+        table_id: TableId,
+    ) -> Result<(TableId, PhysicalTableRouteValue)> {
+        self.table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(table_id)
+            .await
+            .context(TableMetadataManagerSnafu)
+    }
+
+    /// Return related regions for the given regions.
+    /// key is the region which manifest need to be read, values is the reigon id list to look for while reading key region's manifest.
+    async fn find_related_regions(
+        &self,
+        regions: &[RegionId],
+    ) -> Result<HashMap<RegionId, HashSet<RegionId>>> {
+        // TODO(discord9): implement logic to find related regions
+        Ok(regions.iter().map(|&r| (r, [r].into())).collect())
+    }
+
+    async fn discover_route_for_regions(
+        &self,
+        regions: &[RegionId],
+    ) -> Result<(Region2Peers, Peer2Regions)> {
+        let all_related_regions = self
+            .find_related_regions(regions)
+            .await?
+            .into_iter()
+            .flat_map(|(k, v)| {
+                let mut v = v.clone();
+                v.insert(k);
+                v
+            })
+            .collect::<HashSet<RegionId>>();
+
+        let mut region_to_peer = HashMap::new();
+        let mut peer_to_regions = HashMap::new();
+
+        // Group regions by table ID for batch processing
+        let mut table_to_regions: HashMap<TableId, Vec<RegionId>> = HashMap::new();
+        for region_id in all_related_regions {
+            let table_id = region_id.table_id();
+            table_to_regions
+                .entry(table_id)
+                .or_default()
+                .push(region_id);
+        }
+
+        // Process each table's regions together for efficiency
+        for (table_id, table_regions) in table_to_regions {
+            match self.get_table_route(table_id).await {
+                Ok((_phy_table_id, table_route)) => {
+                    table_route_to_region(
+                        &table_route,
+                        &table_regions,
+                        &mut region_to_peer,
+                        &mut peer_to_regions,
+                    );
+                }
+                Err(e) => {
+                    // Continue with other tables instead of failing completely
+                    // TODO(discord9): consider failing here instead
+                    warn!(
+                        "Failed to get table route for table {}: {}, skipping its regions",
+                        table_id, e
+                    );
+                    continue;
+                }
+            }
+        }
+
+        Ok((region_to_peer, peer_to_regions))
+    }
+
+    /// Set region routes and related regions for GC procedure
+    async fn set_routes_and_related_regions(&mut self) -> Result<()> {
+        let related_regions = self.find_related_regions(&self.data.regions).await?;
+
+        self.data.related_regions = related_regions.clone();
+
+        let (region_to_peer, _) = self
+            .discover_route_for_regions(&related_regions.keys().cloned().collect_vec())
+            .await?;
+        self.data.region_routes = region_to_peer;
+
+        Ok(())
+    }
+
     /// Get file references from all datanodes that host the regions
-    async fn get_file_references(&self) -> Result<FileRefsManifest> {
-        use std::collections::{HashMap, HashSet};
+    async fn get_file_references(&mut self) -> Result<FileRefsManifest> {
+        self.set_routes_and_related_regions().await?;
 
         let query_regions = &self.data.regions;
         let related_regions = &self.data.related_regions;
@@ -344,7 +443,7 @@ impl BatchGcProcedure {
             }
         }
 
-        let mut datanode2related_regions: HashMap<Peer, HashMap<RegionId, Vec<RegionId>>> =
+        let mut datanode2related_regions: HashMap<Peer, HashMap<RegionId, HashSet<RegionId>>> =
             HashMap::new();
         for (related_region, queries) in related_regions {
             if let Some((leader, _followers)) = region_routes.get(related_region) {

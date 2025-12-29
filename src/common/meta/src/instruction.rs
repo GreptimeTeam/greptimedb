@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
@@ -436,7 +436,7 @@ pub struct GetFileRefs {
     /// the target region IDs (whose file references to look for).
     /// Key: The region ID of the manifest.
     /// Value: The list of region IDs to find references for in that manifest.
-    pub related_regions: HashMap<RegionId, Vec<RegionId>>,
+    pub related_regions: HashMap<RegionId, HashSet<RegionId>>,
 }
 
 impl Display for GetFileRefs {

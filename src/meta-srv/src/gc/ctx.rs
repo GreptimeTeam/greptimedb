@@ -31,8 +31,8 @@ use table::metadata::TableId;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result, TableMetadataManagerSnafu, UnexpectedSnafu};
-use crate::gc::Region2Peers;
 use crate::gc::procedure::{BatchGcProcedure, GcRegionProcedure};
+use crate::gc::{Peer2Regions, Region2Peers};
 use crate::handler::HeartbeatMailbox;
 use crate::service::mailbox::{Channel, MailboxRef};
 
@@ -182,14 +182,14 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
                 .fail();
             }
         }
-        let mut datanode2related_regions: HashMap<Peer, HashMap<RegionId, Vec<RegionId>>> =
+        let mut datanode2related_regions: HashMap<Peer, HashMap<RegionId, HashSet<RegionId>>> =
             HashMap::new();
         for (related_region, queries) in related_regions {
             if let Some((leader, followers)) = region_routes.get(&related_region) {
                 datanode2related_regions
                     .entry(leader.clone())
                     .or_default()
-                    .insert(related_region, queries.clone());
+                    .insert(related_region, queries.into_iter().collect());
             } // since read from manifest, no need to send to followers
         }
 
@@ -296,7 +296,7 @@ impl DefaultGcSchedulerCtx {
         &self,
         peer: &Peer,
         query_regions: &[RegionId],
-        related_regions: HashMap<RegionId, Vec<RegionId>>,
+        related_regions: HashMap<RegionId, HashSet<RegionId>>,
         timeout: Duration,
     ) -> Result<FileRefsManifest> {
         debug!(
