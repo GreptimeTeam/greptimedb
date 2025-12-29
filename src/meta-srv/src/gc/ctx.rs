@@ -254,6 +254,8 @@ impl DefaultGcSchedulerCtx {
             full_file_listing
         );
 
+        // TODO: change to BatchGcProcedure instead
+
         let gc_regions = GcRegions {
             regions: region_ids.to_vec(),
             file_refs_manifest: file_refs_manifest.clone(),
