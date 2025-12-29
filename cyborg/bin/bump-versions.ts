@@ -57,6 +57,20 @@ const REPO_CONFIGS: Record<string, RepoConfig> = {
         return ['bump-nightly-version.yml', version];
       }
 
+      // Check for prerelease versions (e.g., 1.0.0-beta.3, 1.0.0-rc.1)
+      const prereleaseMatch = version.match(/^(\d+)\.(\d+)\.(\d+)-(beta|rc)\.(\d+)$/);
+      if (prereleaseMatch) {
+        const [, major, minor, patch, prereleaseType, prereleaseNum] = prereleaseMatch;
+
+        // If it's beta.1 and patch version is 0, treat as major version
+        if (prereleaseType === 'beta' && prereleaseNum === '1' && patch === '0') {
+          return ['bump-version.yml', `${major}.${minor}`];
+        }
+
+        // Otherwise (beta.x where x > 1, or rc.x), treat as patch version
+        return ['bump-patch-version.yml', version];
+      }
+
       const parts = version.split('.');
       if (parts.length !== 3) {
         throw new Error('Invalid version format');
