@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(discord9): remove this once gc scheduler is fully merged
-#![allow(unused)]
-
 use std::collections::{HashMap, HashSet};
 
 use common_meta::peer::Peer;
@@ -29,6 +26,7 @@ mod options;
 mod procedure;
 mod scheduler;
 mod tracker;
+mod util;
 
 pub use options::GcSchedulerOptions;
 pub use procedure::BatchGcProcedure;

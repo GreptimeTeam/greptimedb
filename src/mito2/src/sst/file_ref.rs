@@ -104,7 +104,11 @@ impl FileReferenceManager {
             let queries = queries.iter().cloned().collect::<HashSet<_>>();
             let manifest = related_region.manifest_ctx.manifest().await;
             for meta in manifest.files.values() {
-                if queries.contains(&meta.region_id) {
+                if src_regions.contains(&meta.region_id) {
+                    cross_region_refs
+                        .entry(meta.region_id)
+                        .or_insert_with(HashSet::new)
+                        .insert(dst_region.region_id());
                     // since gc couldn't happen together with repartition
                     // (both the queries and related_region acquire region read lock), no need to worry about
                     // staging manifest in repartition here.
@@ -119,7 +123,7 @@ impl FileReferenceManager {
                 }
             }
             // not sure if related region's manifest version is needed, but record it for now.
-            manifest_version.insert(related_region.region_id(), manifest.manifest_version);
+            manifest_version.insert(dst_region.region_id(), manifest.manifest_version);
         }
 
         for r in &query_regions_for_mem {
@@ -138,6 +142,7 @@ impl FileReferenceManager {
         Ok(FileRefsManifest {
             file_refs: ref_files,
             manifest_version,
+            cross_region_refs,
         })
     }
 
