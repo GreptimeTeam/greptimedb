@@ -212,7 +212,7 @@ checksum = "d301b3b94cb4b2f23d7917810addbbaff90738e0ca2be692bd027e70d7e0330c"
 
 [[package]]
 name = "api"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "arrow-schema",
  "common-base",
@@ -733,7 +733,7 @@ dependencies = [
 
 [[package]]
 name = "auth"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "async-trait",
@@ -1383,7 +1383,7 @@ dependencies = [
 
 [[package]]
 name = "cache"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "catalog",
  "common-error",
@@ -1418,7 +1418,7 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "catalog"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "arrow",
@@ -1763,7 +1763,7 @@ checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 
 [[package]]
 name = "cli"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1817,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "client"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "arc-swap",
@@ -1850,7 +1850,7 @@ dependencies = [
  "snafu 0.8.6",
  "store-api",
  "substrait 0.37.3",
- "substrait 1.0.0-beta.3",
+ "substrait 1.0.0-beta.4",
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",
@@ -1890,7 +1890,7 @@ dependencies = [
 
 [[package]]
 name = "cmd"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "async-trait",
  "auth",
@@ -2024,7 +2024,7 @@ checksum = "55b672471b4e9f9e95499ea597ff64941a309b2cdbffcc46f2cc5e2d971fd335"
 
 [[package]]
 name = "common-base"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "anymap2",
  "async-trait",
@@ -2048,14 +2048,14 @@ dependencies = [
 
 [[package]]
 name = "common-catalog"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "const_format",
 ]
 
 [[package]]
 name = "common-config"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "common-base",
  "common-error",
@@ -2080,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "common-datasource"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -2115,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "common-decimal"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "bigdecimal 0.4.8",
  "common-error",
@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "common-error"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "common-macro",
  "http 1.3.1",
@@ -2139,7 +2139,7 @@ dependencies = [
 
 [[package]]
 name = "common-event-recorder"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "async-trait",
@@ -2161,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "common-frontend"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "async-trait",
@@ -2183,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "common-function"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "ahash 0.8.12",
  "api",
@@ -2243,7 +2243,7 @@ dependencies = [
 
 [[package]]
 name = "common-greptimedb-telemetry"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "async-trait",
  "common-runtime",
@@ -2260,7 +2260,7 @@ dependencies = [
 
 [[package]]
 name = "common-grpc"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "arrow-flight",
@@ -2295,7 +2295,7 @@ dependencies = [
 
 [[package]]
 name = "common-grpc-expr"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "common-base",
@@ -2315,7 +2315,7 @@ dependencies = [
 
 [[package]]
 name = "common-macro"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "greptime-proto",
  "once_cell",
@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "common-mem-prof"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "anyhow",
  "common-error",
@@ -2342,7 +2342,7 @@ dependencies = [
 
 [[package]]
 name = "common-memory-manager"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "common-error",
  "common-macro",
@@ -2355,7 +2355,7 @@ dependencies = [
 
 [[package]]
 name = "common-meta"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "anymap2",
  "api",
@@ -2427,7 +2427,7 @@ dependencies = [
 
 [[package]]
 name = "common-options"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "common-grpc",
  "humantime-serde",
@@ -2436,11 +2436,11 @@ dependencies = [
 
 [[package]]
 name = "common-plugins"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 
 [[package]]
 name = "common-pprof"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "common-error",
  "common-macro",
@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "common-procedure"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "async-stream",
@@ -2481,7 +2481,7 @@ dependencies = [
 
 [[package]]
 name = "common-procedure-test"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "async-trait",
  "common-procedure",
@@ -2491,7 +2491,7 @@ dependencies = [
 
 [[package]]
 name = "common-query"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "async-trait",
@@ -2517,7 +2517,7 @@ dependencies = [
 
 [[package]]
 name = "common-recordbatch"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "arc-swap",
  "common-base",
@@ -2541,7 +2541,7 @@ dependencies = [
 
 [[package]]
 name = "common-runtime"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "async-trait",
  "clap 4.5.40",
@@ -2570,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "common-session"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "serde",
  "strum 0.27.1",
@@ -2578,7 +2578,7 @@ dependencies = [
 
 [[package]]
 name = "common-sql"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "arrow-schema",
  "common-base",
@@ -2598,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "common-stat"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "common-base",
  "common-runtime",
@@ -2613,7 +2613,7 @@ dependencies = [
 
 [[package]]
 name = "common-telemetry"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "backtrace",
  "common-base",
@@ -2642,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "common-test-util"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "client",
  "common-grpc",
@@ -2655,7 +2655,7 @@ dependencies = [
 
 [[package]]
 name = "common-time"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "arrow",
  "chrono",
@@ -2673,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "common-version"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "build-data",
  "cargo-manifest",
@@ -2684,7 +2684,7 @@ dependencies = [
 
 [[package]]
 name = "common-wal"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "common-base",
  "common-error",
@@ -2707,7 +2707,7 @@ dependencies = [
 
 [[package]]
 name = "common-workload"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "common-telemetry",
  "serde",
@@ -4015,7 +4015,7 @@ dependencies = [
 
 [[package]]
 name = "datanode"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "arrow-flight",
@@ -4079,7 +4079,7 @@ dependencies = [
 
 [[package]]
 name = "datatypes"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -4754,7 +4754,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "file-engine"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "async-trait",
@@ -4886,7 +4886,7 @@ checksum = "8bf7cc16383c4b8d58b9905a8509f02926ce3058053c056376248d958c9df1e8"
 
 [[package]]
 name = "flow"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "arrow",
@@ -4955,7 +4955,7 @@ dependencies = [
  "sql",
  "store-api",
  "strum 0.27.1",
- "substrait 1.0.0-beta.3",
+ "substrait 1.0.0-beta.4",
  "table",
  "tokio",
  "tonic 0.13.1",
@@ -5016,7 +5016,7 @@ checksum = "28dd6caf6059519a65843af8fe2a3ae298b14b80179855aeb4adc2c1934ee619"
 
 [[package]]
 name = "frontend"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "arc-swap",
@@ -6232,7 +6232,7 @@ dependencies = [
 
 [[package]]
 name = "index"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "async-trait",
  "asynchronous-codec",
@@ -7173,7 +7173,7 @@ checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 
 [[package]]
 name = "log-query"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "chrono",
  "common-error",
@@ -7185,7 +7185,7 @@ dependencies = [
 
 [[package]]
 name = "log-store"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -7486,7 +7486,7 @@ dependencies = [
 
 [[package]]
 name = "meta-client"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "async-trait",
@@ -7514,7 +7514,7 @@ dependencies = [
 
 [[package]]
 name = "meta-srv"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "async-trait",
@@ -7614,7 +7614,7 @@ dependencies = [
 
 [[package]]
 name = "metric-engine"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "aquamarine",
@@ -7712,7 +7712,7 @@ dependencies = [
 
 [[package]]
 name = "mito-codec"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "bytes",
@@ -7737,7 +7737,7 @@ dependencies = [
 
 [[package]]
 name = "mito2"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "aquamarine",
@@ -8477,7 +8477,7 @@ dependencies = [
 
 [[package]]
 name = "object-store"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -8762,7 +8762,7 @@ dependencies = [
 
 [[package]]
 name = "operator"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "ahash 0.8.12",
  "api",
@@ -8822,7 +8822,7 @@ dependencies = [
  "sql",
  "sqlparser",
  "store-api",
- "substrait 1.0.0-beta.3",
+ "substrait 1.0.0-beta.4",
  "table",
  "tokio",
  "tokio-util",
@@ -9108,7 +9108,7 @@ dependencies = [
 
 [[package]]
 name = "partition"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "async-trait",
@@ -9466,7 +9466,7 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "pipeline"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "ahash 0.8.12",
  "api",
@@ -9622,7 +9622,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "auth",
  "catalog",
@@ -9924,7 +9924,7 @@ dependencies = [
 
 [[package]]
 name = "promql"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "ahash 0.8.12",
  "async-trait",
@@ -10207,7 +10207,7 @@ dependencies = [
 
 [[package]]
 name = "puffin"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "async-compression 0.4.19",
  "async-trait",
@@ -10249,7 +10249,7 @@ dependencies = [
 
 [[package]]
 name = "query"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "ahash 0.8.12",
  "api",
@@ -10316,7 +10316,7 @@ dependencies = [
  "sql",
  "sqlparser",
  "store-api",
- "substrait 1.0.0-beta.3",
+ "substrait 1.0.0-beta.4",
  "table",
  "tokio",
  "tokio-stream",
@@ -11668,7 +11668,7 @@ dependencies = [
 
 [[package]]
 name = "servers"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "ahash 0.8.12",
  "api",
@@ -11797,7 +11797,7 @@ dependencies = [
 
 [[package]]
 name = "session"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "ahash 0.8.12",
  "api",
@@ -12141,7 +12141,7 @@ dependencies = [
 
 [[package]]
 name = "sql"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "arrow-buffer",
@@ -12201,7 +12201,7 @@ dependencies = [
 
 [[package]]
 name = "sqlness-runner"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "async-trait",
  "clap 4.5.40",
@@ -12478,7 +12478,7 @@ dependencies = [
 
 [[package]]
 name = "standalone"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "async-trait",
  "catalog",
@@ -12520,7 +12520,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "store-api"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "aquamarine",
@@ -12733,7 +12733,7 @@ dependencies = [
 
 [[package]]
 name = "substrait"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -12856,7 +12856,7 @@ dependencies = [
 
 [[package]]
 name = "table"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "async-trait",
@@ -13125,7 +13125,7 @@ checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 
 [[package]]
 name = "tests-fuzz"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "arbitrary",
  "async-trait",
@@ -13169,7 +13169,7 @@ dependencies = [
 
 [[package]]
 name = "tests-integration"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "api",
  "arrow-flight",
@@ -13245,7 +13245,7 @@ dependencies = [
  "sqlx",
  "standalone",
  "store-api",
- "substrait 1.0.0-beta.3",
+ "substrait 1.0.0-beta.4",
  "table",
  "tempfile",
  "time",
