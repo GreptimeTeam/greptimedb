@@ -135,14 +135,8 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         full_file_listing: bool,
         timeout: Duration,
     ) -> Result<GcReport> {
-        self.gc_regions_inner(
-            peer,
-            region_ids,
-            file_refs_manifest,
-            full_file_listing,
-            timeout,
-        )
-        .await
+        self.gc_regions_inner(region_ids, full_file_listing, timeout)
+            .await
     }
 
     async fn get_file_references(
@@ -241,32 +235,23 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
 impl DefaultGcSchedulerCtx {
     async fn gc_regions_inner(
         &self,
-        peer: Peer,
         region_ids: &[RegionId],
-        file_refs_manifest: &FileRefsManifest,
         full_file_listing: bool,
         timeout: Duration,
     ) -> Result<GcReport> {
         debug!(
-            "Sending GC instruction to datanode {} for {} regions (full_file_listing: {})",
-            peer,
+            "Sending GC instruction for {} regions (full_file_listing: {})",
             region_ids.len(),
             full_file_listing
         );
 
-        // TODO: change to BatchGcProcedure instead
-
-        let gc_regions = GcRegions {
-            regions: region_ids.to_vec(),
-            file_refs_manifest: file_refs_manifest.clone(),
-            full_file_listing,
-        };
-        let procedure = GcRegionProcedure::new(
+        let procedure = BatchGcProcedure::new(
             self.mailbox.clone(),
+            self.meta_peer_client.clone(),
+            self.table_metadata_manager.clone(),
             self.server_addr.clone(),
-            peer,
-            gc_regions,
-            format!("GC for {} regions", region_ids.len()),
+            region_ids.to_vec(),
+            full_file_listing,
             timeout,
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
