@@ -243,7 +243,7 @@ fn json_struct_get_string(jsons: &StructArray, paths: &StringViewArray) -> Resul
         let path = paths.value(i);
 
         // naively assume the JSON path is our kind of indexing to the field, by removing its "root"
-        let field_path = path.replace("$.", "");
+        let field_path = path.trim().replace("$.", "");
         let column = jsons.column_by_name(&field_path);
 
         if let Some(column) = column {
