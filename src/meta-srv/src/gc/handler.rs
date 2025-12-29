@@ -15,24 +15,17 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::peer::Peer;
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
 use itertools::Itertools;
-use store_api::storage::{FileRefsManifest, GcReport, RegionId};
+use store_api::storage::{GcReport, RegionId};
 use table::metadata::TableId;
-use tokio::time::sleep;
 
 use crate::error::Result;
 use crate::gc::candidate::GcCandidate;
 use crate::gc::scheduler::{GcJobReport, GcScheduler};
 use crate::gc::tracker::RegionGcInfo;
-use crate::region;
-
-pub(crate) type Region2Peers = HashMap<RegionId, (Peer, Vec<Peer>)>;
-
-pub(crate) type Peer2Regions = HashMap<Peer, HashSet<RegionId>>;
 
 impl GcScheduler {
     /// Iterate through all region stats, find region that might need gc, and send gc instruction to
@@ -81,17 +74,6 @@ impl GcScheduler {
         debug!("Detailed GC Job Report: {report:#?}");
 
         Ok(report)
-    }
-
-    /// Find related regions that might share files with the candidate regions.
-    /// Currently returns the same regions since repartition is not implemented yet.
-    /// TODO(discord9): When repartition is implemented, this should also find src/dst regions
-    /// that might share files with the candidate regions.
-    pub(crate) async fn find_related_regions(
-        &self,
-        candidate_region_ids: &[RegionId],
-    ) -> Result<HashMap<RegionId, Vec<RegionId>>> {
-        Ok(candidate_region_ids.iter().map(|&r| (r, vec![r])).collect())
     }
 
     /// Aggregate GC candidates by their corresponding datanode peer.
@@ -210,28 +192,11 @@ impl GcScheduler {
 
         let all_region_ids: Vec<RegionId> = candidates.iter().map(|(_, c)| c.region_id).collect();
 
-        let all_related_regions = self.find_related_regions(&all_region_ids).await?;
-
-        let (region_to_peer, _) = self
-            .discover_datanodes_for_regions(&all_related_regions.keys().cloned().collect_vec())
-            .await?;
-
-        // Step 1: Get file references for all regions on this datanode
-        let file_refs_manifest = self
-            .ctx
-            .get_file_references(
-                &all_region_ids,
-                all_related_regions,
-                &region_to_peer,
-                self.config.mailbox_timeout,
-            )
-            .await?;
-
         // Step 2: Create a single GcRegionProcedure for all regions on this datanode
         let (gc_report, fully_listed_regions) = {
             // Partition regions into full listing and fast listing in a single pass
 
-            let mut batch_full_listing_decisions =
+            let batch_full_listing_decisions =
                 self.batch_should_use_full_listing(&all_region_ids).await;
 
             let need_full_list_regions = batch_full_listing_decisions
@@ -242,7 +207,7 @@ impl GcScheduler {
                     },
                 )
                 .collect_vec();
-            let mut fast_list_regions = batch_full_listing_decisions
+            let fast_list_regions = batch_full_listing_decisions
                 .iter()
                 .filter_map(
                     |(&region_id, &need_full)| {
@@ -257,13 +222,7 @@ impl GcScheduler {
             if !fast_list_regions.is_empty() {
                 match self
                     .ctx
-                    .gc_regions(
-                        peer.clone(),
-                        &fast_list_regions,
-                        &file_refs_manifest,
-                        false,
-                        self.config.mailbox_timeout,
-                    )
+                    .gc_regions(&fast_list_regions, false, self.config.mailbox_timeout)
                     .await
                 {
                     Ok(report) => combined_report.merge(report),
@@ -284,13 +243,7 @@ impl GcScheduler {
             if !need_full_list_regions.is_empty() {
                 match self
                     .ctx
-                    .gc_regions(
-                        peer.clone(),
-                        &need_full_list_regions,
-                        &file_refs_manifest,
-                        true,
-                        self.config.mailbox_timeout,
-                    )
+                    .gc_regions(&need_full_list_regions, true, self.config.mailbox_timeout)
                     .await
                 {
                     Ok(report) => combined_report.merge(report),
@@ -328,98 +281,6 @@ impl GcScheduler {
         );
 
         Ok(gc_report)
-    }
-
-    /// Discover datanodes for the given regions(and it's related regions) by fetching table routes in batches.
-    /// Returns mappings from region to peer(leader, Vec<followers>) and peer to regions.
-    async fn discover_datanodes_for_regions(
-        &self,
-        regions: &[RegionId],
-    ) -> Result<(Region2Peers, Peer2Regions)> {
-        let all_related_regions = self
-            .find_related_regions(regions)
-            .await?
-            .into_iter()
-            .flat_map(|(k, mut v)| {
-                v.push(k);
-                v
-            })
-            .collect_vec();
-        let mut region_to_peer = HashMap::new();
-        let mut peer_to_regions = HashMap::new();
-
-        // Group regions by table ID for batch processing
-        let mut table_to_regions: HashMap<TableId, Vec<RegionId>> = HashMap::new();
-        for region_id in all_related_regions {
-            let table_id = region_id.table_id();
-            table_to_regions
-                .entry(table_id)
-                .or_default()
-                .push(region_id);
-        }
-
-        // Process each table's regions together for efficiency
-        for (table_id, table_regions) in table_to_regions {
-            match self.ctx.get_table_route(table_id).await {
-                Ok((_phy_table_id, table_route)) => {
-                    self.get_table_regions_peer(
-                        &table_route,
-                        &table_regions,
-                        &mut region_to_peer,
-                        &mut peer_to_regions,
-                    );
-                }
-                Err(e) => {
-                    // Continue with other tables instead of failing completely
-                    // TODO(discord9): consider failing here instead
-                    warn!(
-                        "Failed to get table route for table {}: {}, skipping its regions",
-                        table_id, e
-                    );
-                    continue;
-                }
-            }
-        }
-
-        Ok((region_to_peer, peer_to_regions))
-    }
-
-    /// Process regions for a single table to find their current leader peers.
-    fn get_table_regions_peer(
-        &self,
-        table_route: &PhysicalTableRouteValue,
-        table_regions: &[RegionId],
-        region_to_peer: &mut Region2Peers,
-        peer_to_regions: &mut Peer2Regions,
-    ) {
-        for &region_id in table_regions {
-            let mut found = false;
-
-            // Find the region in the table route
-            for region_route in &table_route.region_routes {
-                if region_route.region.id == region_id
-                    && let Some(leader_peer) = &region_route.leader_peer
-                {
-                    region_to_peer.insert(
-                        region_id,
-                        (leader_peer.clone(), region_route.follower_peers.clone()),
-                    );
-                    peer_to_regions
-                        .entry(leader_peer.clone())
-                        .or_default()
-                        .insert(region_id);
-                    found = true;
-                    break;
-                }
-            }
-
-            if !found {
-                warn!(
-                    "Failed to find region {} in table route or no leader peer found",
-                    region_id,
-                );
-            }
-        }
     }
 
     async fn batch_should_use_full_listing(

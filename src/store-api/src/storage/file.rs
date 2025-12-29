@@ -95,8 +95,15 @@ impl FileRef {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRefsManifest {
     pub file_refs: HashMap<RegionId, HashSet<FileRef>>,
-    /// Manifest version when this manifest is read for it's files
+    /// Manifest version when this manifest is read for its files
     pub manifest_version: HashMap<RegionId, ManifestVersion>,
+    /// Cross-region file ownership mapping.
+    ///
+    /// Key is the source/original region id (before repartition); value is the set of
+    /// target/destination region ids (after repartition) that currently hold files
+    /// originally coming from that source region.
+    ///
+    pub cross_region_refs: HashMap<RegionId, HashSet<RegionId>>,
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +186,8 @@ mod tests {
             .insert(r1, [FileRef::new(r1, FileId::random(), None)].into());
         manifest.manifest_version.insert(r0, 10);
         manifest.manifest_version.insert(r1, 20);
+        manifest.cross_region_refs.insert(r0, [r1].into());
+        manifest.cross_region_refs.insert(r1, [r0].into());
 
         let json = serde_json::to_string(&manifest).unwrap();
         let parsed: FileRefsManifest = serde_json::from_str(&json).unwrap();
