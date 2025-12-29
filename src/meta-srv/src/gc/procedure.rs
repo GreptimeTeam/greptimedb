@@ -331,7 +331,7 @@ impl BatchGcProcedure {
     }
 
     /// Return related regions for the given regions.
-    /// key is the region which manifest need to be read, values is the reigon id list to look for while reading key region's manifest.
+    /// key is the region which manifest need to be read, values is the region id list to look for while reading key region's manifest.
     async fn find_related_regions(
         &self,
         regions: &[RegionId],
