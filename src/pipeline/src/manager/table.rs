@@ -261,21 +261,22 @@ impl PipelineTable {
         &self,
         schema: &str,
         name: &str,
-        version: PipelineVersion,
+        input_version: PipelineVersion,
     ) -> Result<Arc<Pipeline>> {
-        if let Some((pipeline, _)) = self.cache.get_pipeline_cache(schema, name, version)? {
+        if let Some((pipeline, _)) = self.cache.get_pipeline_cache(schema, name, input_version)? {
             return Ok(pipeline);
         }
 
-        let (pipeline, found_schema) = self.get_pipeline_str(schema, name, version).await?;
-        let compiled_pipeline = Arc::new(Self::compile_pipeline(&pipeline.0)?);
+        let ((pipeline, version), found_schema) =
+            self.get_pipeline_str(schema, name, input_version).await?;
+        let compiled_pipeline = Arc::new(Self::compile_pipeline(&pipeline)?);
 
         self.cache.insert_pipeline_cache(
             &found_schema,
             name,
-            version,
+            Some(version),
             compiled_pipeline.clone(),
-            version.is_none(),
+            input_version.is_none(),
         );
         Ok(compiled_pipeline)
     }
@@ -369,7 +370,7 @@ impl PipelineTable {
             })?;
 
         let v = version;
-        let p = (pipeline_content.clone(), v);
+        let p = (pipeline_content, v);
 
         self.cache.insert_pipeline_str_cache(
             &found_schema,
