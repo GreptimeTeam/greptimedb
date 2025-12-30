@@ -113,6 +113,7 @@ pub mod utils;
 use result::HttpOutputWriter;
 pub(crate) use timeout::DynamicTimeoutLayer;
 
+mod client_ip;
 mod hints;
 mod read_preference;
 #[cfg(any(test, feature = "testing"))]
@@ -896,6 +897,7 @@ impl HttpServer {
                         authorize::check_http_auth,
                     ))
                     .layer(middleware::from_fn(hints::extract_hints))
+                    .layer(middleware::from_fn(client_ip::log_error_with_client_ip))
                     .layer(middleware::from_fn(
                         read_preference::extract_read_preference,
                     )),
@@ -1239,7 +1241,10 @@ impl Server for HttpServer {
                         error!(e; "Failed to set TCP_NODELAY on incoming connection");
                     }
                 });
-            let serve = axum::serve(listener, app.into_make_service());
+            let serve = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            );
 
             // FIXME(yingwen): Support keepalive.
             // See:

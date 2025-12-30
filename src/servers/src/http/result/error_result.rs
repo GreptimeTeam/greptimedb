@@ -32,17 +32,15 @@ pub struct ErrorResponse {
 impl ErrorResponse {
     pub fn from_error(error: impl ErrorExt) -> Self {
         let code = error.status_code();
-
-        if code.should_log_error() {
-            error!(error; "Failed to handle HTTP request");
-        } else {
-            debug!("Failed to handle HTTP request, err: {:?}", error);
-        }
-
         Self::from_error_message(code, error.output_msg())
     }
 
     pub fn from_error_message(code: StatusCode, msg: String) -> Self {
+        if code.should_log_error() {
+            error!("Failed to handle HTTP request: {}", msg);
+        } else {
+            debug!("Failed to handle HTTP request: {}", msg);
+        }
         ErrorResponse {
             code: code as u32,
             error: msg,
