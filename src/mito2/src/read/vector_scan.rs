@@ -18,16 +18,17 @@ use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
+use api::v1::OpType;
 use common_error::ext::BoxedError;
 use common_recordbatch::filter::batch_filter;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::{debug, warn};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
-use datatypes::prelude::{ScalarVector, ScalarVectorBuilder};
+use datatypes::prelude::{ScalarVector, ScalarVectorBuilder, Vector};
 use datatypes::schema::SchemaRef;
 use datatypes::value::OrderedFloat;
-use datatypes::vectors::{BinaryVector, BooleanVectorBuilder};
+use datatypes::vectors::{BinaryVector, BooleanVector, BooleanVectorBuilder};
 use futures::StreamExt;
 use index::vector::compute_distance;
 use smallvec::SmallVec;
@@ -50,7 +51,7 @@ use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 
 /// Source of a vector candidate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum CandidateSource {
     /// From an SST file (index is file index in input.files).
     SstFile(usize),
@@ -67,6 +68,14 @@ struct VectorCandidate {
     row_offset: u64,
     /// Distance to the query vector.
     distance: f32,
+}
+
+/// A fetched batch with its source and row offsets.
+#[derive(Debug)]
+struct CandidateBatch {
+    source: CandidateSource,
+    row_offsets: Vec<u64>,
+    batch: Batch,
 }
 
 impl PartialEq for VectorCandidate {
@@ -396,7 +405,8 @@ impl VectorScan {
 
             // Partition candidates by source type
             let (sst_candidates, memtable_candidates): (Vec<_>, Vec<_>) = candidates
-                .into_iter()
+                .iter()
+                .cloned()
                 .partition(|c| matches!(c.source, CandidateSource::SstFile(_)));
 
             // Group SST candidates by file index
@@ -415,6 +425,10 @@ impl VectorScan {
                     .map_err(BoxedError::new)?;
                 all_batches.extend(memtable_batches);
             }
+
+            // Re-order by candidate order because grouping and batch fetch
+            // lose the distance ordering from merge_topk().
+            let all_batches = Self::sort_batches_by_candidates(all_batches, &candidates);
 
             // Convert Batch to RecordBatch using the projection mapper
             let mapper = self.input.mapper.as_primary_key().ok_or_else(|| {
@@ -534,6 +548,80 @@ impl VectorScan {
         Ok(result)
     }
 
+    /// Sorts rows by the candidate order from vector index results.
+    /// Returns batches with adjacent rows merged when possible.
+    fn sort_batches_by_candidates(
+        batches: Vec<CandidateBatch>,
+        candidates: &[VectorCandidate],
+    ) -> Vec<Batch> {
+        if batches.is_empty() || candidates.is_empty() {
+            return Vec::new();
+        }
+
+        let mut order_map = HashMap::with_capacity(candidates.len());
+        for (idx, candidate) in candidates.iter().enumerate() {
+            order_map.insert((candidate.source, candidate.row_offset), idx);
+        }
+
+        let mut rows_with_order: Vec<(usize, usize, usize)> = Vec::new();
+        for (batch_idx, candidate_batch) in batches.iter().enumerate() {
+            for (row_idx, row_offset) in candidate_batch.row_offsets.iter().enumerate() {
+                if let Some(order) = order_map.get(&(candidate_batch.source, *row_offset)) {
+                    rows_with_order.push((*order, batch_idx, row_idx));
+                }
+            }
+        }
+
+        rows_with_order.sort_by_key(|(order, _, _)| *order);
+
+        let mut result = Vec::new();
+        let mut idx = 0;
+        while idx < rows_with_order.len() {
+            let (_, batch_idx, row_idx) = rows_with_order[idx];
+            let start = row_idx;
+            let mut end = row_idx + 1;
+            idx += 1;
+
+            while idx < rows_with_order.len() {
+                let (_, next_batch_idx, next_row_idx) = rows_with_order[idx];
+                if next_batch_idx != batch_idx || next_row_idx != end {
+                    break;
+                }
+                end += 1;
+                idx += 1;
+            }
+
+            let batch = &batches[batch_idx].batch;
+            result.push(batch.slice(start, end - start));
+        }
+
+        result
+    }
+
+    /// Builds a mask that keeps non-deleted rows.
+    fn build_not_deleted_mask(batch: &Batch) -> BooleanVector {
+        let op_types = batch.op_types().as_arrow();
+        let mut builder = BooleanVectorBuilder::with_capacity(op_types.len());
+        for value in op_types.values() {
+            builder.push(Some(*value != OpType::Delete as u8));
+        }
+        builder.finish()
+    }
+
+    /// Filters row offsets by a boolean mask.
+    fn filter_row_offsets(row_offsets: Vec<u64>, mask: &BooleanVector) -> Vec<u64> {
+        debug_assert_eq!(
+            row_offsets.len(),
+            mask.len(),
+            "row_offsets and mask length must match"
+        );
+        row_offsets
+            .into_iter()
+            .zip(mask.as_boolean_array().iter())
+            .filter_map(|(offset, keep)| keep.unwrap_or(false).then_some(offset))
+            .collect()
+    }
+
     /// Limits the total number of rows across all batches to `limit`.
     fn limit_rows(
         batches: Vec<datatypes::arrow::array::RecordBatch>,
@@ -583,7 +671,7 @@ impl VectorScan {
     async fn fetch_rows_from_files(
         &self,
         grouped: HashMap<usize, Vec<VectorCandidate>>,
-    ) -> Result<Vec<Batch>> {
+    ) -> Result<Vec<CandidateBatch>> {
         let mut all_batches = Vec::new();
         let mut reader_metrics = ReaderMetrics::default();
         let filter_deleted = self.input.filter_deleted;
@@ -612,6 +700,20 @@ impl VectorScan {
                 continue;
             };
 
+            let mut row_ids_by_group: HashMap<usize, Vec<u32>> = HashMap::new();
+            for candidate in &candidates {
+                let row_offset = candidate.row_offset as usize;
+                let row_group_id = row_offset / row_group_size;
+                let row_id_in_group = (row_offset % row_group_size) as u32;
+                row_ids_by_group
+                    .entry(row_group_id)
+                    .or_default()
+                    .push(row_id_in_group);
+            }
+            for row_ids in row_ids_by_group.values_mut() {
+                row_ids.sort_unstable();
+            }
+
             // Convert row offsets to BTreeSet for RowGroupSelection
             let row_ids: BTreeSet<u32> = candidates.iter().map(|c| c.row_offset as u32).collect();
 
@@ -633,6 +735,11 @@ impl VectorScan {
                     continue;
                 }
 
+                let Some(row_ids_in_group) = row_ids_by_group.get(row_group_idx) else {
+                    continue;
+                };
+                let mut row_ids_iter = row_ids_in_group.iter().copied();
+
                 let file_range =
                     FileRange::new(context.clone(), *row_group_idx, Some(row_selection.clone()));
 
@@ -642,15 +749,34 @@ impl VectorScan {
                 };
                 let mut source = Source::PruneReader(reader);
                 while let Some(mut batch) = source.next_batch().await? {
+                    let mut batch_row_offsets = Vec::with_capacity(batch.num_rows());
+                    for _ in 0..batch.num_rows() {
+                        if let Some(row_id_in_group) = row_ids_iter.next() {
+                            let absolute_offset = (*row_group_idx as u64) * row_group_size as u64
+                                + row_id_in_group as u64;
+                            batch_row_offsets.push(absolute_offset);
+                        }
+                    }
                     // Filter deleted rows if required
                     if filter_deleted {
+                        let mask = Self::build_not_deleted_mask(&batch);
+                        let filtered_offsets = Self::filter_row_offsets(batch_row_offsets, &mask);
                         batch.filter_deleted()?;
+                        batch_row_offsets = filtered_offsets;
                     }
                     // Only add non-empty batches
                     if !batch.is_empty() {
-                        all_batches.push(batch);
+                        all_batches.push(CandidateBatch {
+                            source: CandidateSource::SstFile(file_index),
+                            row_offsets: batch_row_offsets,
+                            batch,
+                        });
                     }
                 }
+                debug_assert!(
+                    row_ids_iter.next().is_none(),
+                    "row_ids_iter should be exhausted"
+                );
             }
         }
 
@@ -661,7 +787,10 @@ impl VectorScan {
     ///
     /// Unlike SST files, we need to re-iterate through memtables to fetch
     /// the actual row data since memtables don't support random row access.
-    fn fetch_rows_from_memtables(&self, candidates: Vec<VectorCandidate>) -> Result<Vec<Batch>> {
+    fn fetch_rows_from_memtables(
+        &self,
+        candidates: Vec<VectorCandidate>,
+    ) -> Result<Vec<CandidateBatch>> {
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
@@ -707,6 +836,11 @@ impl VectorScan {
                         .collect();
 
                     if !rows_in_batch.is_empty() {
+                        let mut batch_row_offsets: Vec<u64> = rows_in_batch
+                            .iter()
+                            .map(|&row_idx| current_row_offset + row_idx as u64)
+                            .collect();
+
                         // Create a boolean mask for the target rows
                         let mut mask_builder = BooleanVectorBuilder::with_capacity(batch_rows);
                         let rows_set: std::collections::HashSet<usize> =
@@ -721,11 +855,19 @@ impl VectorScan {
 
                         // Filter deleted rows if required
                         if filter_deleted {
+                            let mask = Self::build_not_deleted_mask(&batch);
+                            let filtered_offsets =
+                                Self::filter_row_offsets(batch_row_offsets, &mask);
                             batch.filter_deleted()?;
+                            batch_row_offsets = filtered_offsets;
                         }
 
                         if !batch.is_empty() {
-                            all_batches.push(batch);
+                            all_batches.push(CandidateBatch {
+                                source: CandidateSource::Memtable(memtable_index),
+                                row_offsets: batch_row_offsets,
+                                batch,
+                            });
                         }
                     }
 
@@ -881,16 +1023,46 @@ impl VectorScan {
 mod tests {
     use std::sync::Arc;
 
+    use api::v1::OpType;
     use datatypes::arrow::array::{Int32Array, RecordBatch};
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
 
     use super::*;
+    use crate::test_util::new_batch_builder;
 
     /// Helper function to create a simple RecordBatch for testing.
     fn create_test_batch(num_rows: usize) -> datatypes::arrow::array::RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let array = Int32Array::from_iter_values(0..num_rows as i32);
         RecordBatch::try_new(schema, vec![Arc::new(array)]).unwrap()
+    }
+
+    fn create_test_batch_with_sequences(sequences: &[u64]) -> Batch {
+        let timestamps: Vec<i64> = (0..sequences.len() as i64).collect();
+        let op_types: Vec<OpType> = vec![OpType::Put; sequences.len()];
+        let field: Vec<u64> = sequences.to_vec();
+        new_batch_builder(b"test", &timestamps, sequences, &op_types, 1, &field)
+            .build()
+            .unwrap()
+    }
+
+    fn create_test_batch_with_op_types(sequences: &[u64], op_types: &[OpType]) -> Batch {
+        let timestamps: Vec<i64> = (0..sequences.len() as i64).collect();
+        let field: Vec<u64> = sequences.to_vec();
+        new_batch_builder(b"test", &timestamps, sequences, op_types, 1, &field)
+            .build()
+            .unwrap()
+    }
+
+    fn collect_sequences(batches: &[Batch]) -> Vec<u64> {
+        let mut sequences = Vec::new();
+        for batch in batches {
+            let array = batch.sequences().as_arrow();
+            for row_idx in 0..array.len() {
+                sequences.push(array.value(row_idx));
+            }
+        }
+        sequences
     }
 
     #[test]
@@ -1144,5 +1316,112 @@ mod tests {
         assert!(c1 < c2);
         // c1 == c3 because distances are equal
         assert!(c1 == c3);
+    }
+
+    #[test]
+    fn test_sort_batches_by_candidates() {
+        let sst_batch = create_test_batch_with_sequences(&[10, 20]);
+        let mem_batch = create_test_batch_with_sequences(&[5]);
+
+        let batches = vec![
+            CandidateBatch {
+                source: CandidateSource::SstFile(0),
+                row_offsets: vec![10, 20],
+                batch: sst_batch,
+            },
+            CandidateBatch {
+                source: CandidateSource::Memtable(0),
+                row_offsets: vec![5],
+                batch: mem_batch,
+            },
+        ];
+
+        let candidates = vec![
+            VectorCandidate {
+                source: CandidateSource::Memtable(0),
+                row_offset: 5,
+                distance: 0.1,
+            },
+            VectorCandidate {
+                source: CandidateSource::SstFile(0),
+                row_offset: 20,
+                distance: 0.2,
+            },
+            VectorCandidate {
+                source: CandidateSource::SstFile(0),
+                row_offset: 10,
+                distance: 0.3,
+            },
+        ];
+
+        let sorted = VectorScan::sort_batches_by_candidates(batches, &candidates);
+        let sequences = collect_sequences(&sorted);
+
+        assert_eq!(sequences, vec![5, 20, 10]);
+    }
+
+    #[test]
+    fn test_sort_batches_by_candidates_multi_batch() {
+        let first_batch = create_test_batch_with_sequences(&[1, 2, 3]);
+        let second_batch = create_test_batch_with_sequences(&[4, 5]);
+
+        let batches = vec![
+            CandidateBatch {
+                source: CandidateSource::SstFile(0),
+                row_offsets: vec![100, 101, 102],
+                batch: first_batch,
+            },
+            CandidateBatch {
+                source: CandidateSource::SstFile(0),
+                row_offsets: vec![200, 201],
+                batch: second_batch,
+            },
+        ];
+
+        let candidates = vec![
+            VectorCandidate {
+                source: CandidateSource::SstFile(0),
+                row_offset: 101,
+                distance: 0.1,
+            },
+            VectorCandidate {
+                source: CandidateSource::SstFile(0),
+                row_offset: 102,
+                distance: 0.2,
+            },
+            VectorCandidate {
+                source: CandidateSource::SstFile(0),
+                row_offset: 200,
+                distance: 0.3,
+            },
+            VectorCandidate {
+                source: CandidateSource::SstFile(0),
+                row_offset: 201,
+                distance: 0.4,
+            },
+            VectorCandidate {
+                source: CandidateSource::SstFile(0),
+                row_offset: 100,
+                distance: 0.5,
+            },
+        ];
+
+        let sorted = VectorScan::sort_batches_by_candidates(batches, &candidates);
+        let sequences = collect_sequences(&sorted);
+
+        assert_eq!(sequences, vec![2, 3, 4, 5, 1]);
+    }
+
+    #[test]
+    fn test_filter_row_offsets_with_deleted_rows() {
+        let batch = create_test_batch_with_op_types(
+            &[1, 2, 3],
+            &[OpType::Put, OpType::Delete, OpType::Put],
+        );
+        let row_offsets = vec![10, 11, 12];
+        let mask = VectorScan::build_not_deleted_mask(&batch);
+        let filtered = VectorScan::filter_row_offsets(row_offsets, &mask);
+
+        assert_eq!(filtered, vec![10, 12]);
     }
 }

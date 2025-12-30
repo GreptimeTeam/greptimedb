@@ -248,6 +248,7 @@ pub(crate) struct ScanRegion {
     /// Whether to ignore bloom filter.
     ignore_bloom_filter: bool,
     /// Whether to ignore vector index.
+    #[cfg(feature = "vector_index")]
     ignore_vector_index: bool,
     /// Start time of the scan task.
     start_time: Option<Instant>,
@@ -276,6 +277,7 @@ impl ScanRegion {
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
             ignore_bloom_filter: false,
+            #[cfg(feature = "vector_index")]
             ignore_vector_index: false,
             start_time: None,
             filter_deleted: true,
@@ -327,6 +329,7 @@ impl ScanRegion {
 
     /// Sets whether to ignore vector index.
     #[must_use]
+    #[cfg(feature = "vector_index")]
     pub(crate) fn with_ignore_vector_index(mut self, ignore: bool) -> Self {
         self.ignore_vector_index = ignore;
         self
@@ -374,7 +377,8 @@ impl ScanRegion {
         // Vector search takes highest priority when requested
         #[cfg(feature = "vector_index")]
         if self.use_vector_scan() {
-            return self.vector_scan()
+            return self
+                .vector_scan()
                 .await
                 .map(|scanner| Box::new(scanner) as _);
         }
@@ -567,7 +571,8 @@ impl ScanRegion {
             .with_fulltext_index_appliers(fulltext_index_appliers);
         #[cfg(feature = "vector_index")]
         let input = input.with_vector_index_applier(vector_index_applier);
-        let input = input.with_parallel_scan_channel_size(self.parallel_scan_channel_size)
+        let input = input
+            .with_parallel_scan_channel_size(self.parallel_scan_channel_size)
             .with_max_concurrent_scan_files(self.max_concurrent_scan_files)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)

@@ -994,8 +994,8 @@ impl EngineInner {
         .with_start_time(query_start);
 
         #[cfg(feature = "vector_index")]
-        let scan_region =
-            scan_region.with_ignore_vector_index(self.config.vector_index.apply_on_query.disabled());
+        let scan_region = scan_region
+            .with_ignore_vector_index(self.config.vector_index.apply_on_query.disabled());
 
         #[cfg(feature = "enterprise")]
         let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);

@@ -409,6 +409,7 @@ impl FileRangeBuilder {
     }
 
     /// Returns the context of the file.
+    #[cfg(feature = "vector_index")]
     pub(crate) fn context(&self) -> Option<FileRangeContextRef> {
         self.context.clone()
     }
