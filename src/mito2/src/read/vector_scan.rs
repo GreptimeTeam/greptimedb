@@ -256,7 +256,7 @@ impl VectorScan {
                             if bytes.len() % 4 != 0 {
                                 return ApplyVectorIndexSnafu {
                                     reason: format!(
-                                        "Invalid vector data: bytes length {} is not a multiple of 4 at row {}",
+                                        "Invalid vector data: bytes length must be a multiple of 4 (got {}, row {})",
                                         bytes.len(),
                                         row_offset_in_memtable
                                     ),
@@ -336,7 +336,7 @@ impl VectorScan {
 
     /// Over-fetch multiplier for post-filtering.
     /// We fetch more candidates than requested to account for rows that may be
-    /// filtered out by predicates. This follows the design in vector-index-usearch.md.
+    /// filtered out by predicates.
     ///
     /// The value 2 is chosen as a balance between:
     /// - Too small (e.g., 1.5): May require more iterations when selectivity is low
@@ -757,6 +757,11 @@ impl VectorScan {
                             batch_row_offsets.push(absolute_offset);
                         }
                     }
+                    debug_assert_eq!(
+                        batch_row_offsets.len(),
+                        batch.num_rows(),
+                        "batch_row_offsets should match batch rows"
+                    );
                     // Filter deleted rows if required
                     if filter_deleted {
                         let mask = Self::build_not_deleted_mask(&batch);

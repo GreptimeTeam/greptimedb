@@ -36,7 +36,6 @@ pub struct VectorIndexCacheKey {
     pub column_id: ColumnId,
 }
 
-#[allow(dead_code)]
 impl VectorIndexCacheKey {
     pub fn new(file_id: FileId, column_id: ColumnId) -> Self {
         Self { file_id, column_id }
@@ -44,7 +43,6 @@ impl VectorIndexCacheKey {
 }
 
 /// Cached vector index entry containing the loaded vector index and NULL bitmap.
-#[allow(dead_code)]
 pub struct CachedVectorIndex {
     /// The loaded vector index engine.
     pub engine: Box<dyn VectorIndexEngine>,
@@ -54,7 +52,6 @@ pub struct CachedVectorIndex {
     pub size_bytes: usize,
 }
 
-#[allow(dead_code)]
 impl CachedVectorIndex {
     /// Creates a new cached vector index.
     pub fn new(engine: Box<dyn VectorIndexEngine>, null_bitmap: RoaringBitmap) -> Self {
@@ -76,11 +73,9 @@ impl CachedVectorIndex {
 
 /// Cache for loaded vector indexes.
 pub type VectorIndexCache = moka::sync::Cache<VectorIndexCacheKey, Arc<CachedVectorIndex>>;
-#[allow(dead_code)]
 pub type VectorIndexCacheRef = Arc<VectorIndexCache>;
 
 /// Creates a new vector index cache with the given capacity in bytes.
-#[allow(dead_code)]
 pub fn new_vector_index_cache(capacity_bytes: u64) -> VectorIndexCache {
     moka::sync::CacheBuilder::new(capacity_bytes)
         .name("vector_index")
@@ -94,7 +89,6 @@ pub fn new_vector_index_cache(capacity_bytes: u64) -> VectorIndexCache {
 }
 
 /// Extension trait for VectorIndexCache.
-#[allow(dead_code)]
 pub trait VectorIndexCacheExt {
     /// Gets or loads a vector index from the cache.
     ///

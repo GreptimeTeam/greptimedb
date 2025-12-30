@@ -648,7 +648,13 @@ fn hnsw_key_to_row_offset(hnsw_key: u64, null_bitmap: &RoaringBitmap) -> u64 {
 
 /// Checks if the error indicates a blob was not found.
 fn is_blob_not_found(err: &crate::error::Error) -> bool {
-    err.to_string().contains("not found")
+    matches!(
+        err,
+        crate::error::Error::PuffinReadBlob {
+            source: puffin::error::Error::BlobNotFound { .. },
+            ..
+        }
+    ) || err.is_object_not_found()
 }
 
 #[cfg(test)]
