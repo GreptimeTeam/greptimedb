@@ -251,15 +251,15 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
     let region = engine.get_region(region_id).unwrap();
     let manager = region.manifest_ctx.manifest_manager.write().await;
     let manifest_storage = manager.store();
-    let data_store = manifest_storage.staging_storage().data_storage();
+    let blob_store = manifest_storage.staging_storage().blob_storage();
 
     assert_eq!(result.manifest_paths.len(), 2);
     common_telemetry::debug!("manifest paths: {:?}", result.manifest_paths);
-    let new_manifest_1 = data_store
+    let new_manifest_1 = blob_store
         .get(&result.manifest_paths[&new_region_id_1])
         .await
         .unwrap();
-    let new_manifest_2 = data_store
+    let new_manifest_2 = blob_store
         .get(&result.manifest_paths[&new_region_id_2])
         .await
         .unwrap();
@@ -334,9 +334,9 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
     let region = engine.get_region(region_id).unwrap();
     let manager = region.manifest_ctx.manifest_manager.write().await;
     let manifest_storage = manager.store();
-    let data_store = manifest_storage.staging_storage().data_storage();
+    let blob_store = manifest_storage.staging_storage().blob_storage();
 
-    let new_manifest_1 = data_store
+    let new_manifest_1 = blob_store
         .get(&result.manifest_paths[&new_region_id_1])
         .await
         .unwrap();
@@ -352,7 +352,7 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
             ..Default::default()
         },
     );
-    data_store
+    blob_store
         .put(
             &result.manifest_paths[&new_region_id_1],
             serde_json::to_vec(&new_manifest_1).unwrap(),
@@ -429,8 +429,8 @@ async fn test_apply_staging_manifest_invalid_files_to_add_with_format(flat_forma
     let region = engine.get_region(region_id).unwrap();
     let manager = region.manifest_ctx.manifest_manager.write().await;
     let manifest_storage = manager.store();
-    let data_store = manifest_storage.staging_storage().data_storage();
-    data_store
+    let blob_store = manifest_storage.staging_storage().blob_storage();
+    blob_store
         .put("invalid_bytes", b"invalid_bytes".to_vec())
         .await
         .unwrap();

@@ -115,10 +115,10 @@ impl<S> RegionWorkerLoop<S> {
         let mut mapper = RemapManifest::new(manifests, new_partition_exprs, region_mapping);
         let remap_result = mapper.remap_manifests()?;
 
-        // Write new manifests to staging data storage.
+        // Write new manifests to staging blob storage.
         let manifest_manager = region.manifest_ctx.manifest_manager.write().await;
         let manifest_storage = manifest_manager.store();
-        let staging_data_storage = manifest_storage.staging_storage().data_storage().clone();
+        let staging_blob_storage = manifest_storage.staging_storage().blob_storage().clone();
         let mut tasks = Vec::with_capacity(remap_result.new_manifests.len());
 
         for (remap_region_id, manifest) in &remap_result.new_manifests {
@@ -128,10 +128,10 @@ impl<S> RegionWorkerLoop<S> {
             let key = remap_region_id.as_u64().to_string();
             tasks.push(async {
                 debug!(
-                    "Putting manifest to staging data storage, region_id: {}, key: {}",
+                    "Putting manifest to staging blob storage, region_id: {}, key: {}",
                     *remap_region_id, key
                 );
-                staging_data_storage.put(&key, bytes).await?;
+                staging_blob_storage.put(&key, bytes).await?;
                 Ok((*remap_region_id, key))
             });
         }

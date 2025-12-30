@@ -25,7 +25,7 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionManifest};
 use crate::manifest::storage::manifest_dir;
-use crate::manifest::storage::staging::{StagingDataStorage, staging_path};
+use crate::manifest::storage::staging::{StagingBlobStorage, staging_blob_path};
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{OptionOutputTx, RegionEditRequest, WorkerRequest, WorkerRequestWithTime};
 use crate::sst::location::region_dir_from_table_dir;
@@ -163,7 +163,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         });
     }
 
-    /// Fetches the staging manifest from the central region's staging data storage.
+    /// Fetches the staging manifest from the central region's staging blob storage.
     ///
     /// The `central_region_id` is used to locate the staging directory because the staging
     /// manifest was created by the central region during `remap_manifests` operation.
@@ -174,11 +174,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     ) -> Result<RegionManifest> {
         let region_dir =
             region_dir_from_table_dir(region.table_dir(), central_region_id, region.path_type());
-        let staging_path = staging_path(&manifest_dir(&region_dir));
-        common_telemetry::debug!("staging_path: {}", staging_path);
-        let manifest_data_storage =
-            StagingDataStorage::new(staging_path, region.access_layer().object_store().clone());
-        let staging_manifest = manifest_data_storage.get(manifest_path).await?;
+        let staging_blob_path = staging_blob_path(&manifest_dir(&region_dir));
+        let staging_blob_storage = StagingBlobStorage::new(
+            staging_blob_path,
+            region.access_layer().object_store().clone(),
+        );
+        let staging_manifest = staging_blob_storage.get(manifest_path).await?;
 
         serde_json::from_slice::<RegionManifest>(&staging_manifest).context(SerdeJsonSnafu)
     }
