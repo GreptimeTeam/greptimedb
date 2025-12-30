@@ -868,6 +868,8 @@ impl PgStore {
         let client = match pool.get().await {
             Ok(client) => client,
             Err(e) => {
+                // We need to log the debug for the error to help diagnose the issue.
+                common_telemetry::error!("Failed to get Postgres connection: {:?}", e);
                 return GetPostgresConnectionSnafu {
                     reason: e.to_string(),
                 }
