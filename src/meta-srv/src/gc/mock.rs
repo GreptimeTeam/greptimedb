@@ -67,12 +67,10 @@ pub struct MockSchedulerCtx {
     pub gc_reports: Arc<Mutex<HashMap<RegionId, GcReport>>>,
     pub candidates: Arc<Mutex<Option<HashMap<TableId, Vec<GcCandidate>>>>>,
     pub get_table_to_region_stats_calls: Arc<Mutex<usize>>,
-    pub get_file_references_calls: Arc<Mutex<usize>>,
     pub gc_regions_calls: Arc<Mutex<usize>>,
     // Error injection fields for testing
     pub get_table_to_region_stats_error: Arc<Mutex<Option<crate::error::Error>>>,
     pub get_table_route_error: Arc<Mutex<Option<crate::error::Error>>>,
-    pub get_file_references_error: Arc<Mutex<Option<crate::error::Error>>>,
     pub gc_regions_error: Arc<Mutex<Option<crate::error::Error>>>,
     // Retry testing fields
     pub gc_regions_retry_count: Arc<Mutex<HashMap<RegionId, usize>>>,
@@ -117,13 +115,6 @@ impl MockSchedulerCtx {
     /// Set an error to be returned by `get_table_route`
     pub fn set_table_route_error(&self, error: crate::error::Error) {
         *self.get_table_route_error.lock().unwrap() = Some(error);
-    }
-
-    /// Set an error to be returned by `get_file_references`
-    #[allow(dead_code)]
-    pub fn with_get_file_references_error(self, error: crate::error::Error) -> Self {
-        *self.get_file_references_error.lock().unwrap() = Some(error);
-        self
     }
 
     /// Set an error to be returned by `gc_regions`
