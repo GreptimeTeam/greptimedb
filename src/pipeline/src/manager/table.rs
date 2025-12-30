@@ -270,7 +270,7 @@ impl PipelineTable {
         let compiled_pipeline = Arc::new(Self::compile_pipeline(&pipeline_content.content)?);
 
         self.cache.insert_pipeline_cache(
-            schema,
+            &pipeline_content.schema,
             name,
             Some(pipeline_content.version),
             compiled_pipeline.clone(),
