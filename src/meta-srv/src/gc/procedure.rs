@@ -343,6 +343,7 @@ impl BatchGcProcedure {
         // primary GC regions and their related regions.
         let mut regions_set: HashSet<RegionId> = self.data.regions.iter().cloned().collect();
         regions_set.extend(related_regions.keys().cloned());
+        regions_set.extend(related_regions.values().flat_map(|v| v.iter()).cloned());
         let regions_to_discover = regions_set.into_iter().collect_vec();
 
         let (region_to_peer, _) = self
@@ -390,12 +391,12 @@ impl BatchGcProcedure {
 
         let mut datanode2related_regions: HashMap<Peer, HashMap<RegionId, HashSet<RegionId>>> =
             HashMap::new();
-        for (related_region, queries) in related_regions {
-            if let Some((leader, _followers)) = region_routes.get(related_region) {
+        for (src_region, dst_regions) in related_regions {
+            if let Some((leader, _followers)) = region_routes.get(src_region) {
                 datanode2related_regions
                     .entry(leader.clone())
                     .or_default()
-                    .insert(*related_region, queries.clone());
+                    .insert(*src_region, dst_regions.clone());
             } // since read from manifest, no need to send to followers
         }
 
