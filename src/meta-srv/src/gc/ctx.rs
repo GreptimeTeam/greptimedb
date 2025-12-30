@@ -12,29 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 
-use api::v1::meta::MailboxMessage;
 use common_meta::datanode::RegionStat;
-use common_meta::instruction::{
-    GcRegions, GetFileRefs, GetFileRefsReply, Instruction, InstructionReply,
-};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::PhysicalTableRouteValue;
-use common_meta::peer::Peer;
 use common_procedure::{ProcedureManagerRef, ProcedureWithId, watcher};
-use common_telemetry::{debug, error, warn};
+use common_telemetry::debug;
 use snafu::{OptionExt as _, ResultExt as _};
-use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
+use store_api::storage::{GcReport, RegionId};
 use table::metadata::TableId;
 
 use crate::cluster::MetaPeerClientRef;
-use crate::error::{self, Result, TableMetadataManagerSnafu, UnexpectedSnafu};
+use crate::error::{self, Result, TableMetadataManagerSnafu};
 use crate::gc::procedure::BatchGcProcedure;
-use crate::gc::{Peer2Regions, Region2Peers};
-use crate::handler::HeartbeatMailbox;
-use crate::service::mailbox::{Channel, MailboxRef};
+use crate::service::mailbox::MailboxRef;
 
 #[async_trait::async_trait]
 pub(crate) trait SchedulerCtx: Send + Sync {
@@ -90,7 +83,7 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         let dn_stats = self.meta_peer_client.get_all_dn_stat_kvs().await?;
         let mut table_to_region_stats: HashMap<TableId, Vec<RegionStat>> = HashMap::new();
         for (_dn_id, stats) in dn_stats {
-            let mut stats = stats.stats;
+            let stats = stats.stats;
 
             let Some(latest_stat) = stats.iter().max_by_key(|s| s.timestamp_millis).cloned() else {
                 continue;
@@ -170,93 +163,5 @@ impl DefaultGcSchedulerCtx {
         let gc_report = BatchGcProcedure::cast_result(res)?;
 
         Ok(gc_report)
-    }
-
-    /// TODO(discord9): add support to read manifest of related regions for file refs too
-    /// (now it's only reading  active FileHandles)
-    async fn send_get_file_refs_instruction(
-        &self,
-        peer: &Peer,
-        query_regions: &[RegionId],
-        related_regions: HashMap<RegionId, HashSet<RegionId>>,
-        timeout: Duration,
-    ) -> Result<FileRefsManifest> {
-        debug!(
-            "Sending GetFileRefs instruction to datanode {} for {} regions",
-            peer,
-            query_regions.len()
-        );
-
-        let instruction = Instruction::GetFileRefs(GetFileRefs {
-            query_regions: query_regions.to_vec(),
-            related_regions,
-        });
-
-        let reply = self
-            .send_instruction(peer, instruction, "Get file references", timeout)
-            .await?;
-
-        let InstructionReply::GetFileRefs(GetFileRefsReply {
-            file_refs_manifest,
-            success,
-            error,
-        }) = reply
-        else {
-            return error::UnexpectedInstructionReplySnafu {
-                mailbox_message: format!("{:?}", reply),
-                reason: "Unexpected reply of the GetFileRefs instruction",
-            }
-            .fail();
-        };
-
-        if !success {
-            return error::UnexpectedSnafu {
-                violated: format!(
-                    "Failed to get file references from datanode {}: {:?}",
-                    peer, error
-                ),
-            }
-            .fail();
-        }
-
-        Ok(file_refs_manifest)
-    }
-
-    async fn send_instruction(
-        &self,
-        peer: &Peer,
-        instruction: Instruction,
-        description: &str,
-        timeout: Duration,
-    ) -> Result<InstructionReply> {
-        let msg = MailboxMessage::json_message(
-            &format!("{}: {}", description, instruction),
-            &format!("Metasrv@{}", self.server_addr),
-            &format!("Datanode-{}@{}", peer.id, peer.addr),
-            common_time::util::current_time_millis(),
-            &instruction,
-        )
-        .with_context(|_| error::SerializeToJsonSnafu {
-            input: instruction.to_string(),
-        })?;
-
-        let mailbox_rx = self
-            .mailbox
-            .send(&Channel::Datanode(peer.id), msg, timeout)
-            .await?;
-
-        match mailbox_rx.await {
-            Ok(reply_msg) => {
-                let reply = HeartbeatMailbox::json_reply(&reply_msg)?;
-                Ok(reply)
-            }
-            Err(e) => {
-                error!(
-                    "Failed to receive reply from datanode {} for {}: {}",
-                    peer, description, e
-                );
-                Err(e)
-            }
-        }
     }
 }

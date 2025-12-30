@@ -36,10 +36,9 @@ use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 use tokio::sync::mpsc::Sender;
 
-use crate::error::{Result, UnexpectedSnafu};
+use crate::error::Result;
 use crate::gc::candidate::GcCandidate;
 use crate::gc::ctx::SchedulerCtx;
-use crate::gc::handler::Region2Peers;
 use crate::gc::options::GcSchedulerOptions;
 use crate::gc::scheduler::{Event, GcScheduler};
 
@@ -121,44 +120,6 @@ impl MockSchedulerCtx {
     pub fn with_gc_regions_error(self, error: crate::error::Error) -> Self {
         *self.gc_regions_error.lock().unwrap() = Some(error);
         self
-    }
-
-    /// Set a sequence of errors to be returned by `gc_regions` for retry testing
-    pub fn set_gc_regions_error_sequence(&self, errors: Vec<crate::error::Error>) {
-        *self.gc_regions_error_sequence.lock().unwrap() = errors;
-    }
-
-    /// Set success after a specific number of retries for a region
-    pub fn set_gc_regions_success_after_retries(&self, region_id: RegionId, retries: usize) {
-        self.gc_regions_success_after_retries
-            .lock()
-            .unwrap()
-            .insert(region_id, retries);
-    }
-
-    /// Get the retry count for a specific region
-    pub fn get_retry_count(&self, region_id: RegionId) -> usize {
-        self.gc_regions_retry_count
-            .lock()
-            .unwrap()
-            .get(&region_id)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// Reset all retry tracking
-    pub fn reset_retry_tracking(&self) {
-        *self.gc_regions_retry_count.lock().unwrap() = HashMap::new();
-        *self.gc_regions_error_sequence.lock().unwrap() = Vec::new();
-        *self.gc_regions_success_after_retries.lock().unwrap() = HashMap::new();
-    }
-
-    /// Set an error to be returned for a specific region
-    pub fn set_gc_regions_error_for_region(&self, region_id: RegionId, error: crate::error::Error) {
-        self.gc_regions_per_region_errors
-            .lock()
-            .unwrap()
-            .insert(region_id, error);
     }
 
     /// Clear per-region errors

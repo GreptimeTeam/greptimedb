@@ -28,19 +28,17 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
-use common_telemetry::{debug, error, info, warn};
+use common_telemetry::{error, info, warn};
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
 use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 
-use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, KvBackendSnafu, Result, SerializeToJsonSnafu, TableMetadataManagerSnafu};
 use crate::gc::util::table_route_to_region;
 use crate::gc::{Peer2Regions, Region2Peers};
 use crate::handler::HeartbeatMailbox;
-use crate::region;
 use crate::service::mailbox::{Channel, MailboxRef};
 
 /// Helper function to send GetFileRefs instruction and wait for reply.
@@ -279,6 +277,7 @@ impl BatchGcProcedure {
         Ok(())
     }
 
+    /// Discover region routes for the given regions.
     async fn discover_route_for_regions(
         &self,
         regions: &[RegionId],

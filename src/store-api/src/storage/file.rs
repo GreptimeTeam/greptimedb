@@ -95,7 +95,7 @@ impl FileRef {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRefsManifest {
     pub file_refs: HashMap<RegionId, HashSet<FileRef>>,
-    /// Manifest version when this manifest is read for it's files
+    /// Manifest version when this manifest is read for its files
     pub manifest_version: HashMap<RegionId, ManifestVersion>,
     /// Cross-region file ownership mapping.
     ///
