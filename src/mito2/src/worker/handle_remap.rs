@@ -16,14 +16,13 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use common_error::ext::BoxedError;
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use futures::future::try_join_all;
 use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
-use crate::error::{FetchManifestsSnafu, InvalidRequestSnafu, MissingManifestSnafu, Result};
-use crate::manifest::action::RegionManifest;
+use crate::error::{self, FetchManifestsSnafu, InvalidRequestSnafu, MissingManifestSnafu, Result};
 use crate::region::{MitoRegionRef, RegionMetadataLoader};
 use crate::remap_manifest::RemapManifest;
 use crate::request::RemapManifestsRequest;
@@ -75,13 +74,17 @@ impl<S> RegionWorkerLoop<S> {
         });
     }
 
+    // Fetches manifests for input regions, remaps them according to the provided
+    // mapping and partition expressions.
+    //
+    // Returns a map from each new region to its relative staging manifest path.
     async fn fetch_and_remap_manifests(
         region: MitoRegionRef,
         region_metadata_loader: RegionMetadataLoader,
         input_regions: Vec<RegionId>,
         new_partition_exprs: HashMap<RegionId, PartitionExpr>,
         region_mapping: HashMap<RegionId, Vec<RegionId>>,
-    ) -> Result<HashMap<RegionId, RegionManifest>> {
+    ) -> Result<HashMap<RegionId, String>> {
         let mut tasks = Vec::with_capacity(input_regions.len());
         let region_options = region.version().options.clone();
         let table_dir = region.table_dir();
@@ -97,7 +100,6 @@ impl<S> RegionWorkerLoop<S> {
                     .await
             });
         }
-
         let results = try_join_all(tasks)
             .await
             .map_err(BoxedError::new)
@@ -112,12 +114,38 @@ impl<S> RegionWorkerLoop<S> {
             .collect::<Result<HashMap<_, _>>>()?;
         let mut mapper = RemapManifest::new(manifests, new_partition_exprs, region_mapping);
         let remap_result = mapper.remap_manifests()?;
+
+        // Write new manifests to staging blob storage.
+        let manifest_manager = region.manifest_ctx.manifest_manager.write().await;
+        let manifest_storage = manifest_manager.store();
+        let staging_blob_storage = manifest_storage.staging_storage().blob_storage().clone();
+        let mut tasks = Vec::with_capacity(remap_result.new_manifests.len());
+
+        for (remap_region_id, manifest) in &remap_result.new_manifests {
+            let bytes = serde_json::to_vec(&manifest).context(error::SerializeManifestSnafu {
+                region_id: *remap_region_id,
+            })?;
+            let key = remap_manifest_key(remap_region_id);
+            tasks.push(async {
+                debug!(
+                    "Putting manifest to staging blob storage, region_id: {}, key: {}",
+                    *remap_region_id, key
+                );
+                staging_blob_storage.put(&key, bytes).await?;
+                Ok((*remap_region_id, key))
+            });
+        }
+        let r = try_join_all(tasks).await?;
         info!(
             "Remap manifests cost: {:?}, region: {}",
             now.elapsed(),
             region.region_id
         );
 
-        Ok(remap_result.new_manifests)
+        Ok(r.into_iter().collect::<HashMap<_, _>>())
     }
+}
+
+fn remap_manifest_key(region_id: &RegionId) -> String {
+    format!("remap_manifest_{}", region_id.as_u64())
 }

@@ -378,6 +378,11 @@ impl ManifestObjectStore {
     pub async fn clear_staging_manifests(&mut self) -> Result<()> {
         self.staging_storage.clear().await
     }
+
+    /// Returns the staging storage.
+    pub(crate) fn staging_storage(&self) -> &StagingStorage {
+        &self.staging_storage
+    }
 }
 
 #[cfg(test)]

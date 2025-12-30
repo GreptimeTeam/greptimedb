@@ -26,20 +26,104 @@ use crate::manifest::storage::size_tracker::NoopTracker;
 use crate::manifest::storage::utils::sort_manifests;
 use crate::manifest::storage::{file_version, is_delta_file};
 
+/// A simple blob storage for arbitrary binary data in the staging directory.
+///
+/// This is primarily used during repartition operations to store generated
+/// manifests that will be consumed by other regions via [`ApplyStagingManifestRequest`](store_api::region_request::ApplyStagingManifestRequest).
+/// The blobs are stored in `{region_dir}/staging/blob/` directory.
+#[derive(Debug, Clone)]
+pub(crate) struct StagingBlobStorage {
+    object_store: ObjectStore,
+    path: String,
+}
+
+/// Returns the staging path from the blob path.
+///
+/// # Example
+/// - Input: `"data/table/region_0001/manifest/"`
+/// - Output: `"data/table/region_0001/staging/blob/"`
+pub fn staging_blob_path(manifest_path: &str) -> String {
+    let parent_dir = manifest_path
+        .trim_end_matches("manifest/")
+        .trim_end_matches('/');
+    util::normalize_dir(&format!("{}/staging/blob", parent_dir))
+}
+
+impl StagingBlobStorage {
+    pub fn new(path: String, object_store: ObjectStore) -> Self {
+        let path = util::normalize_dir(&path);
+        common_telemetry::debug!(
+            "Staging blob storage path: {}, root: {}",
+            path,
+            object_store.info().root()
+        );
+        Self { object_store, path }
+    }
+
+    /// Put the bytes to the blob storage.
+    pub async fn put(&self, path: &str, bytes: Vec<u8>) -> Result<()> {
+        let path = format!("{}{}", self.path, path);
+        common_telemetry::debug!(
+            "Putting blob to staging blob storage, path: {}, root: {}, bytes: {}",
+            path,
+            self.object_store.info().root(),
+            bytes.len()
+        );
+        self.object_store
+            .write(&path, bytes)
+            .await
+            .context(OpenDalSnafu)?;
+        Ok(())
+    }
+
+    /// Get the bytes from the blob storage.
+    pub async fn get(&self, path: &str) -> Result<Vec<u8>> {
+        let path = format!("{}{}", self.path, path);
+        common_telemetry::debug!(
+            "Reading blob from staging blob storage, path: {}, root: {}",
+            path,
+            self.object_store.info().root()
+        );
+        let bytes = self.object_store.read(&path).await.context(OpenDalSnafu)?;
+
+        Ok(bytes.to_vec())
+    }
+}
+
+/// Storage for staging manifest files and blobs used during repartition operations.
+///
+/// Fields:
+/// - `delta_storage`: Manages incremental manifest delta files specific to the staging region.
+/// - `blob_storage`: Manages arbitrary blobs, such as generated manifests for regions.
+///
+/// Directory structure:
+/// - `{region_dir}/staging/manifest/` — for incremental manifest delta files for the staging region.
+/// - `{region_dir}/staging/blob/` — for arbitrary blobs (e.g., generated region manifests).
 #[derive(Debug, Clone)]
 pub(crate) struct StagingStorage {
     delta_storage: DeltaStorage<NoopTracker>,
+    blob_storage: StagingBlobStorage,
+}
+
+/// Returns the staging path from the manifest path.
+///
+/// # Example
+/// - Input: `"data/table/region_0001/manifest/"`
+/// - Output: `"data/table/region_0001/staging/manifest/"`
+pub fn staging_manifest_path(manifest_path: &str) -> String {
+    let parent_dir = manifest_path
+        .trim_end_matches("manifest/")
+        .trim_end_matches('/');
+    util::normalize_dir(&format!("{}/staging/manifest", parent_dir))
 }
 
 impl StagingStorage {
     pub fn new(path: String, object_store: ObjectStore, compress_type: CompressionType) -> Self {
-        let staging_path = {
-            // Convert "region_dir/manifest/" to "region_dir/staging/manifest/"
-            let parent_dir = path.trim_end_matches("manifest/").trim_end_matches('/');
-            util::normalize_dir(&format!("{}/staging/manifest", parent_dir))
-        };
+        let staging_blob_path = staging_blob_path(&path);
+        let blob_storage = StagingBlobStorage::new(staging_blob_path, object_store.clone());
+        let staging_manifest_path = staging_manifest_path(&path);
         let delta_storage = DeltaStorage::new(
-            staging_path.clone(),
+            staging_manifest_path.clone(),
             object_store.clone(),
             compress_type,
             // StagingStorage does not use a manifest cache; set to None.
@@ -48,7 +132,16 @@ impl StagingStorage {
             // deleted after exiting staging mode.
             Arc::new(NoopTracker),
         );
-        Self { delta_storage }
+
+        Self {
+            delta_storage,
+            blob_storage,
+        }
+    }
+
+    /// Returns the blob storage.
+    pub(crate) fn blob_storage(&self) -> &StagingBlobStorage {
+        &self.blob_storage
     }
 
     /// Returns an iterator of manifests from staging directory.
@@ -105,5 +198,24 @@ impl StagingStorage {
 impl StagingStorage {
     pub fn set_compress_type(&mut self, compress_type: CompressionType) {
         self.delta_storage.set_compress_type(compress_type);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::manifest::storage::staging::{staging_blob_path, staging_manifest_path};
+
+    #[test]
+    fn test_staging_path() {
+        let path = "/data/table/region_0001/manifest/";
+        let expected = "/data/table/region_0001/staging/manifest/";
+        assert_eq!(staging_manifest_path(path), expected);
+    }
+
+    #[test]
+    fn test_staging_blob_path() {
+        let path = "/data/table/region_0001/manifest/";
+        let expected = "/data/table/region_0001/staging/blob/";
+        assert_eq!(staging_blob_path(path), expected);
     }
 }
