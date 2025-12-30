@@ -241,8 +241,8 @@ impl BatchGcProcedure {
     }
 
     /// Return related regions for the given regions.
-    /// The returned map uses the source regions (where those files originally came from) as the key.
-    /// and the destination region (where files are currently stored) as the value
+    /// The returned map uses the source regions (where those files originally came from) as the key,
+    /// and the destination regions (where files are currently stored) as the value.
     async fn find_related_regions(
         &self,
         regions: &[RegionId],
