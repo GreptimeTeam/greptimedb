@@ -125,7 +125,7 @@ impl<S> RegionWorkerLoop<S> {
             let bytes = serde_json::to_vec(&manifest).context(error::SerializeManifestSnafu {
                 region_id: *remap_region_id,
             })?;
-            let key = remap_region_id.as_u64().to_string();
+            let key = remap_manifest_key(remap_region_id);
             tasks.push(async {
                 debug!(
                     "Putting manifest to staging blob storage, region_id: {}, key: {}",
@@ -144,4 +144,8 @@ impl<S> RegionWorkerLoop<S> {
 
         Ok(r.into_iter().collect::<HashMap<_, _>>())
     }
+}
+
+fn remap_manifest_key(region_id: &RegionId) -> String {
+    format!("remap_manifest_{}", region_id.as_u64())
 }

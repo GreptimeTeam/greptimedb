@@ -1113,7 +1113,9 @@ pub(crate) struct RemapManifestsRequest {
     pub(crate) region_mapping: HashMap<RegionId, Vec<RegionId>>,
     /// New partition expressions for the new regions.
     pub(crate) new_partition_exprs: HashMap<RegionId, PartitionExpr>,
-    /// Result sender.
+    /// Sender for the result of the remap operation.
+    ///
+    /// The result is a map from region IDs to their corresponding staging manifest paths.
     pub(crate) sender: Sender<Result<HashMap<RegionId, String>>>,
 }
 
