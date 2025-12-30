@@ -76,25 +76,6 @@ impl GcScheduler {
         Ok(())
     }
 
-    /// Determine if full file listing should be used for a region based on the last full listing time.
-    pub(crate) async fn should_use_full_listing(&self, region_id: RegionId) -> bool {
-        let gc_tracker = self.region_gc_tracker.lock().await;
-        let now = Instant::now();
-
-        if let Some(gc_info) = gc_tracker.get(&region_id) {
-            if let Some(last_full_listing) = gc_info.last_full_listing_time {
-                let elapsed = now.saturating_duration_since(last_full_listing);
-                elapsed >= self.config.full_file_listing_interval
-            } else {
-                // Never did full listing for this region, do it now
-                true
-            }
-        } else {
-            // First time GC for this region, do full listing
-            true
-        }
-    }
-
     pub(crate) async fn update_full_listing_time(
         &self,
         region_id: RegionId,
