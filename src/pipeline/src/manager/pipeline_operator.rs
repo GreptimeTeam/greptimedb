@@ -220,7 +220,7 @@ impl PipelineOperator {
                     .observe(timer.elapsed().as_secs_f64())
             })
             .await
-            .map(|(p, _)| p)
+            .map(|p| (p.content, p.version))
     }
 
     /// Insert a pipeline into the pipeline table.

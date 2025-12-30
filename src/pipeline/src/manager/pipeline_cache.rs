@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,14 +34,19 @@ const PIPELINES_CACHE_TTL: Duration = Duration::from_secs(10);
 /// to encapsulate inner cache. Only public methods are exposed.
 pub(crate) struct PipelineCache {
     pipelines: Cache<String, Arc<Pipeline>>,
-    original_pipelines: Cache<String, PipelineCacheValue>,
+    original_pipelines: Cache<String, PipelineContent>,
     /// If the pipeline table is invalid, we can use this cache to prevent failures when writing logs through the pipeline
     /// The failover cache never expires, but it will be updated when the pipelines cache is updated.
-    failover_cache: Cache<String, PipelineCacheValue>,
+    failover_cache: Cache<String, PipelineContent>,
 }
 
-// pipeline cache content(str), pipeline version
-pub type PipelineCacheValue = (String, TimestampNanosecond);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineContent {
+    pub name: String,
+    pub content: String,
+    pub version: TimestampNanosecond,
+    pub schema: String,
+}
 
 impl PipelineCache {
     pub(crate) fn new() -> Self {
@@ -82,19 +86,15 @@ impl PipelineCache {
         );
     }
 
-    pub(crate) fn insert_pipeline_str_cache(
-        &self,
-        schema: &str,
-        name: &str,
-        version: PipelineVersion,
-        pipeline: PipelineCacheValue,
-        with_latest: bool,
-    ) {
+    pub(crate) fn insert_pipeline_str_cache(&self, pipeline: &PipelineContent, with_latest: bool) {
+        let schema = pipeline.schema.as_str();
+        let name = pipeline.name.as_str();
+        let version = pipeline.version;
         insert_cache_generic(
             &self.original_pipelines,
             schema,
             name,
-            version,
+            Some(version),
             pipeline.clone(),
             with_latest,
         );
@@ -102,36 +102,36 @@ impl PipelineCache {
             &self.failover_cache,
             schema,
             name,
-            version,
-            pipeline,
+            Some(version),
+            pipeline.clone(),
             with_latest,
         );
     }
 
-    pub(crate) fn get_pipeline_cache<'a>(
+    pub(crate) fn get_pipeline_cache(
         &self,
-        schema: &'a str,
+        schema: &str,
         name: &str,
         version: PipelineVersion,
-    ) -> Result<Option<(Arc<Pipeline>, Cow<'a, str>)>> {
+    ) -> Result<Option<Arc<Pipeline>>> {
         get_cache_generic(&self.pipelines, schema, name, version)
     }
 
-    pub(crate) fn get_failover_cache<'a>(
+    pub(crate) fn get_failover_cache(
         &self,
-        schema: &'a str,
+        schema: &str,
         name: &str,
         version: PipelineVersion,
-    ) -> Result<Option<(PipelineCacheValue, Cow<'a, str>)>> {
+    ) -> Result<Option<PipelineContent>> {
         get_cache_generic(&self.failover_cache, schema, name, version)
     }
 
-    pub(crate) fn get_pipeline_str_cache<'a>(
+    pub(crate) fn get_pipeline_str_cache(
         &self,
-        schema: &'a str,
+        schema: &str,
         name: &str,
         version: PipelineVersion,
-    ) -> Result<Option<(PipelineCacheValue, Cow<'a, str>)>> {
+    ) -> Result<Option<PipelineContent>> {
         get_cache_generic(&self.original_pipelines, schema, name, version)
     }
 
@@ -177,21 +177,21 @@ fn insert_cache_generic<T: Clone + Send + Sync + 'static>(
     }
 }
 
-fn get_cache_generic<'a, T: Clone + Send + Sync + 'static>(
+fn get_cache_generic<T: Clone + Send + Sync + 'static>(
     cache: &Cache<String, T>,
-    schema: &'a str,
+    schema: &str,
     name: &str,
     version: PipelineVersion,
-) -> Result<Option<(T, Cow<'a, str>)>> {
+) -> Result<Option<T>> {
     // lets try empty schema first
     let emp_key = generate_pipeline_cache_key(EMPTY_SCHEMA_NAME, name, version);
     if let Some(value) = cache.get(&emp_key) {
-        return Ok(Some((value, Cow::Borrowed(EMPTY_SCHEMA_NAME))));
+        return Ok(Some(value));
     }
     // use input schema
     let schema_k = generate_pipeline_cache_key(schema, name, version);
     if let Some(value) = cache.get(&schema_k) {
-        return Ok(Some((value, Cow::Borrowed(schema))));
+        return Ok(Some(value));
     }
 
     // try all schemas
@@ -204,12 +204,8 @@ fn get_cache_generic<'a, T: Clone + Send + Sync + 'static>(
     match ks.len() {
         0 => Ok(None),
         1 => {
-            let (key, value) = ks.remove(0);
-            if let Some((key_schema, _)) = key.split_once("/") {
-                Ok(Some((value, Cow::Owned(key_schema.to_string()))))
-            } else {
-                Ok(Some((value, Cow::Borrowed(EMPTY_SCHEMA_NAME))))
-            }
+            let (_, value) = ks.remove(0);
+            Ok(Some(value))
         }
         _ => {
             debug!(
