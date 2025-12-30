@@ -36,7 +36,7 @@ use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 
 use crate::cluster::MetaPeerClientRef;
-use crate::error::{self, Result, SerializeToJsonSnafu, TableMetadataManagerSnafu};
+use crate::error::{self, KvBackendSnafu, Result, SerializeToJsonSnafu, TableMetadataManagerSnafu};
 use crate::gc::util::table_route_to_region;
 use crate::gc::{Peer2Regions, Region2Peers};
 use crate::handler::HeartbeatMailbox;
@@ -289,6 +289,8 @@ pub enum State {
     Acquiring,
     /// Sending GC instruction to the target datanode
     Gcing,
+    /// Cleaning up region repartition info in kvbackend after GC
+    UpdateRepartition,
 }
 
 impl BatchGcProcedure {
@@ -337,8 +339,40 @@ impl BatchGcProcedure {
         &self,
         regions: &[RegionId],
     ) -> Result<HashMap<RegionId, HashSet<RegionId>>> {
-        // TODO(discord9): implement logic to find related regions
-        Ok(regions.iter().map(|&r| (r, [r].into())).collect())
+        let repart_mgr = self.table_metadata_manager.table_repart_manager();
+        let mut related_regions: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
+        for src_region in regions {
+            // TODO: batch get?
+            let Some(dst_regions) = repart_mgr
+                .get_dst_regions(*src_region)
+                .await
+                .context(KvBackendSnafu)?
+            else {
+                continue;
+            };
+            for dst_region in dst_regions {
+                // notice the direction: dst_region holds files from src_region
+                related_regions
+                    .entry(dst_region)
+                    .or_default()
+                    .insert(*src_region);
+            }
+        }
+        Ok(related_regions)
+    }
+
+    /// Clean up region repartition info in kvbackend after GC
+    /// according to cross reference in `FileRefsManifest`.
+    async fn cleanup_region_repartition(&self) -> Result<()> {
+        for (src_region, dst_regions) in self.data.file_refs.cross_region_refs.iter() {
+            // TODO: batch update
+            self.table_metadata_manager
+                .table_repart_manager()
+                .update_mappings(*src_region, &dst_regions.clone().into_iter().collect_vec())
+                .await
+                .context(KvBackendSnafu)?;
+        }
+        Ok(())
     }
 
     async fn discover_route_for_regions(
@@ -629,6 +663,19 @@ impl Procedure for BatchGcProcedure {
                     }
                 }
             }
+            State::UpdateRepartition => match self.cleanup_region_repartition().await {
+                Ok(_) => {
+                    info!(
+                        "Cleanup region repartition info completed successfully for regions {:?}",
+                        self.data.regions
+                    );
+                    Ok(Status::done())
+                }
+                Err(e) => {
+                    error!("Failed to cleanup region repartition info: {}", e);
+                    Err(ProcedureError::external(e))
+                }
+            },
         }
     }
 
