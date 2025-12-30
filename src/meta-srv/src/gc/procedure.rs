@@ -272,7 +272,8 @@ pub struct BatchGcData {
     regions: Vec<RegionId>,
     full_file_listing: bool,
     region_routes: Region2Peers,
-    /// Related regions (e.g., for shared files). Map: RegionId -> List of related RegionIds to look for in keys' manifest.
+    /// Related regions (e.g., for shared files after repartition). Map where key is the region whose
+    /// manifest needs to be read, and value is the set of region IDs to look for in that manifest.
     related_regions: HashMap<RegionId, HashSet<RegionId>>,
     /// Acquired file references (Populated in Acquiring state)
     file_refs: FileRefsManifest,
@@ -365,7 +366,7 @@ impl BatchGcProcedure {
             // TODO: batch update
             self.table_metadata_manager
                 .table_repart_manager()
-                .update_mappings(*src_region, &dst_regions.clone().into_iter().collect_vec())
+                .update_mappings(*src_region, &dst_regions.iter().cloned().collect_vec())
                 .await
                 .context(KvBackendSnafu)?;
         }
@@ -381,7 +382,7 @@ impl BatchGcProcedure {
             .await?
             .into_iter()
             .flat_map(|(k, v)| {
-                let mut v = v.clone();
+                let mut v = v;
                 v.insert(k);
                 v
             })
@@ -432,8 +433,14 @@ impl BatchGcProcedure {
 
         self.data.related_regions = related_regions.clone();
 
+        // Discover routes for all regions involved in GC, including both the
+        // primary GC regions and their related regions.
+        let mut regions_set: HashSet<RegionId> = self.data.regions.iter().cloned().collect();
+        regions_set.extend(related_regions.keys().cloned());
+        let regions_to_discover = regions_set.into_iter().collect_vec();
+
         let (region_to_peer, _) = self
-            .discover_route_for_regions(&related_regions.keys().cloned().collect_vec())
+            .discover_route_for_regions(&regions_to_discover)
             .await?;
         self.data.region_routes = region_to_peer;
 
@@ -648,11 +655,8 @@ impl Procedure for BatchGcProcedure {
                 // TODO(discord9): handle need-retry regions
                 match self.send_gc_instructions().await {
                     Ok(_) => {
-                        info!(
-                            "Batch GC completed successfully for regions {:?}",
-                            self.data.regions
-                        );
-                        Ok(Status::done())
+                        self.data.state = State::UpdateRepartition;
+                        Ok(Status::executing(false))
                     }
                     Err(e) => {
                         error!("Failed to send GC instructions: {}", e);
@@ -664,6 +668,10 @@ impl Procedure for BatchGcProcedure {
                 Ok(_) => {
                     info!(
                         "Cleanup region repartition info completed successfully for regions {:?}",
+                        self.data.regions
+                    );
+                    info!(
+                        "Batch GC completed successfully for regions {:?}",
                         self.data.regions
                     );
                     Ok(Status::done())

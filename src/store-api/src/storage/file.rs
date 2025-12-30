@@ -97,9 +97,12 @@ pub struct FileRefsManifest {
     pub file_refs: HashMap<RegionId, HashSet<FileRef>>,
     /// Manifest version when this manifest is read for it's files
     pub manifest_version: HashMap<RegionId, ManifestVersion>,
-    /// Cross region references, key is source region, value is set of target regions that hold files from the source region.
+    /// Cross-region file ownership mapping.
     ///
-    /// After repartition, multiple target regions may hold files from the same source region.
+    /// Key is the source/original region id (before repartition); value is the set of
+    /// target/destination region ids (after repartition) that currently hold files
+    /// originally coming from that source region.
+    ///
     pub cross_region_refs: HashMap<RegionId, HashSet<RegionId>>,
 }
 
