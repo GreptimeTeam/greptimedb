@@ -45,19 +45,10 @@ pub(crate) trait SchedulerCtx: Send + Sync {
         table_id: TableId,
     ) -> Result<(TableId, PhysicalTableRouteValue)>;
 
-    async fn get_file_references(
-        &self,
-        query_regions: &[RegionId],
-        related_regions: HashMap<RegionId, Vec<RegionId>>,
-        region_routes: &Region2Peers,
-        timeout: Duration,
-    ) -> Result<FileRefsManifest>;
-
     async fn gc_regions(
         &self,
         peer: Peer,
         region_ids: &[RegionId],
-        file_refs_manifest: &FileRefsManifest,
         full_file_listing: bool,
         timeout: Duration,
     ) -> Result<GcReport>;
@@ -131,113 +122,11 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         &self,
         peer: Peer,
         region_ids: &[RegionId],
-        file_refs_manifest: &FileRefsManifest,
         full_file_listing: bool,
         timeout: Duration,
     ) -> Result<GcReport> {
         self.gc_regions_inner(region_ids, full_file_listing, timeout)
             .await
-    }
-
-    async fn get_file_references(
-        &self,
-        query_regions: &[RegionId],
-        related_regions: HashMap<RegionId, Vec<RegionId>>,
-        region_routes: &Region2Peers,
-        timeout: Duration,
-    ) -> Result<FileRefsManifest> {
-        debug!(
-            "Getting file references for {} regions",
-            query_regions.len()
-        );
-
-        // Group regions by datanode to minimize RPC calls
-        let mut datanode2query_regions: HashMap<Peer, Vec<RegionId>> = HashMap::new();
-
-        for region_id in query_regions {
-            if let Some((leader, followers)) = region_routes.get(region_id) {
-                datanode2query_regions
-                    .entry(leader.clone())
-                    .or_default()
-                    .push(*region_id);
-                // also need to send for follower regions for file refs in case query is running on follower
-                for follower in followers {
-                    datanode2query_regions
-                        .entry(follower.clone())
-                        .or_default()
-                        .push(*region_id);
-                }
-            } else {
-                return error::UnexpectedSnafu {
-                    violated: format!(
-                        "region_routes: {region_routes:?} does not contain region_id: {region_id}",
-                    ),
-                }
-                .fail();
-            }
-        }
-        let mut datanode2related_regions: HashMap<Peer, HashMap<RegionId, HashSet<RegionId>>> =
-            HashMap::new();
-        for (related_region, queries) in related_regions {
-            if let Some((leader, followers)) = region_routes.get(&related_region) {
-                datanode2related_regions
-                    .entry(leader.clone())
-                    .or_default()
-                    .insert(related_region, queries.into_iter().collect());
-            } // since read from manifest, no need to send to followers
-        }
-
-        // Send GetFileRefs instructions to each datanode
-        let mut all_file_refs: HashMap<RegionId, HashSet<_>> = HashMap::new();
-        let mut all_manifest_versions = HashMap::new();
-        let mut all_cross_region_refs = HashMap::new();
-
-        for (peer, regions) in datanode2query_regions {
-            let related_regions = datanode2related_regions.remove(&peer).unwrap_or_default();
-            match self
-                .send_get_file_refs_instruction(&peer, &regions, related_regions, timeout)
-                .await
-            {
-                Ok(manifest) => {
-                    // TODO(discord9): if other regions provide file refs for one region on other datanode, and no version,
-                    // is it correct to merge manifest_version directly?
-                    // FIXME: follower region how to merge version???
-
-                    for (region_id, file_refs) in manifest.file_refs {
-                        all_file_refs
-                            .entry(region_id)
-                            .or_default()
-                            .extend(file_refs);
-                    }
-                    // region manifest version should be the smallest one among all peers, so outdated region can be detected
-                    for (region_id, version) in manifest.manifest_version {
-                        let entry = all_manifest_versions.entry(region_id).or_insert(version);
-                        *entry = (*entry).min(version);
-                    }
-                    // merge repartition relations
-                    for (region_id, related_region_ids) in manifest.cross_region_refs {
-                        let entry = all_cross_region_refs
-                            .entry(region_id)
-                            .or_insert_with(HashSet::new);
-                        entry.extend(related_region_ids);
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to get file refs from datanode {}: {}. Skipping regions on this datanode.",
-                        peer, e
-                    );
-                    // Continue processing other datanodes instead of failing the entire operation
-                    continue;
-                }
-            }
-        }
-
-        Ok(FileRefsManifest {
-            file_refs: all_file_refs,
-            manifest_version: all_manifest_versions,
-            cross_region_refs: all_cross_region_refs,
-        })
     }
 }
 
@@ -256,7 +145,6 @@ impl DefaultGcSchedulerCtx {
 
         let procedure = BatchGcProcedure::new(
             self.mailbox.clone(),
-            self.meta_peer_client.clone(),
             self.table_metadata_manager.clone(),
             self.server_addr.clone(),
             region_ids.to_vec(),

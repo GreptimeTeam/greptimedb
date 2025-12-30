@@ -259,7 +259,6 @@ impl Procedure for GcRegionProcedure {
 /// it holds locks for all regions during the whole procedure.
 pub struct BatchGcProcedure {
     mailbox: MailboxRef,
-    meta_peer_client: MetaPeerClientRef,
     table_metadata_manager: TableMetadataManagerRef,
     data: BatchGcData,
 }
@@ -298,7 +297,6 @@ impl BatchGcProcedure {
 
     pub fn new(
         mailbox: MailboxRef,
-        meta_peer_client: MetaPeerClientRef,
         table_metadata_manager: TableMetadataManagerRef,
         server_addr: String,
         regions: Vec<RegionId>,
@@ -307,7 +305,6 @@ impl BatchGcProcedure {
     ) -> Self {
         Self {
             mailbox,
-            meta_peer_client,
             table_metadata_manager,
             data: BatchGcData {
                 state: State::Start,

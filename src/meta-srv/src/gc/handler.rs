@@ -216,17 +216,6 @@ impl GcScheduler {
             .discover_datanodes_for_regions(&all_related_regions.keys().cloned().collect_vec())
             .await?;
 
-        // Step 1: Get file references for all regions on this datanode
-        let file_refs_manifest = self
-            .ctx
-            .get_file_references(
-                &all_region_ids,
-                all_related_regions,
-                &region_to_peer,
-                self.config.mailbox_timeout,
-            )
-            .await?;
-
         // Step 2: Create a single GcRegionProcedure for all regions on this datanode
         let (gc_report, fully_listed_regions) = {
             // Partition regions into full listing and fast listing in a single pass
@@ -260,7 +249,6 @@ impl GcScheduler {
                     .gc_regions(
                         peer.clone(),
                         &fast_list_regions,
-                        &file_refs_manifest,
                         false,
                         self.config.mailbox_timeout,
                     )
@@ -287,7 +275,6 @@ impl GcScheduler {
                     .gc_regions(
                         peer.clone(),
                         &need_full_list_regions,
-                        &file_refs_manifest,
                         true,
                         self.config.mailbox_timeout,
                     )

@@ -213,39 +213,10 @@ impl SchedulerCtx for MockSchedulerCtx {
             .unwrap_or_else(|| (table_id, PhysicalTableRouteValue::default())))
     }
 
-    async fn get_file_references(
-        &self,
-        query_regions: &[RegionId],
-        _related_regions: HashMap<RegionId, Vec<RegionId>>,
-        region_to_peer: &Region2Peers,
-        _timeout: Duration,
-    ) -> Result<FileRefsManifest> {
-        *self.get_file_references_calls.lock().unwrap() += 1;
-
-        // Check if we should return an injected error
-        if let Some(error) = self.get_file_references_error.lock().unwrap().take() {
-            return Err(error);
-        }
-        if query_regions
-            .iter()
-            .any(|region_id| !region_to_peer.contains_key(region_id))
-        {
-            UnexpectedSnafu {
-                violated: format!(
-                    "region_to_peer{region_to_peer:?} does not contain all region_ids requested: {:?}",
-                    query_regions
-                ),
-            }.fail()?;
-        }
-
-        Ok(self.file_refs.lock().unwrap().clone().unwrap_or_default())
-    }
-
     async fn gc_regions(
         &self,
         _peer: Peer,
         region_ids: &[RegionId],
-        _file_refs_manifest: &FileRefsManifest,
         _full_file_listing: bool,
         _timeout: Duration,
     ) -> Result<GcReport> {

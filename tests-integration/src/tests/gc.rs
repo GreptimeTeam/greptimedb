@@ -196,7 +196,6 @@ async fn test_gc_basic(store_type: &StorageType) {
     // Step 6: Create and execute BatchGcProcedure
     let procedure = BatchGcProcedure::new(
         metasrv.mailbox().clone(),
-        metasrv.meta_peer_client().clone(),
         metasrv.table_metadata_manager().clone(),
         metasrv.options().grpc.server_addr.clone(),
         regions.clone(),
