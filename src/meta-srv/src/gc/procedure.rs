@@ -241,7 +241,7 @@ impl BatchGcProcedure {
     }
 
     /// Return related regions for the given regions.
-    /// The returned map use the source regions (where those files originally came from) as the key.
+    /// The returned map uses the source regions (where those files originally came from) as the key.
     /// and the destination region (where files are currently stored) as the value
     async fn find_related_regions(
         &self,
@@ -396,7 +396,9 @@ impl BatchGcProcedure {
                     datanode2related_regions
                         .entry(leader.clone())
                         .or_default()
-                        .insert(*src_region, dst_regions.clone());
+                        .entry(*src_region)
+                        .or_default()
+                        .insert(*dst_region);
                 } // since read from manifest, no need to send to followers
             }
         }
