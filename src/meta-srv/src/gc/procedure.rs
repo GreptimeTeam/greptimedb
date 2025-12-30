@@ -167,8 +167,8 @@ pub struct BatchGcData {
     regions: Vec<RegionId>,
     full_file_listing: bool,
     region_routes: Region2Peers,
-    /// Related regions (e.g., for shared files after repartition). the source regions (where those files originally came from) as the key.
-    /// and the destination region (where files are currently stored) as the value
+    /// Related regions (e.g., for shared files after repartition).
+    /// The source regions (where those files originally came from) are used as the key, and the destination regions (where files are currently stored) are used as the value.
     related_regions: HashMap<RegionId, HashSet<RegionId>>,
     /// Acquired file references (Populated in Acquiring state)
     file_refs: FileRefsManifest,
@@ -391,12 +391,14 @@ impl BatchGcProcedure {
         let mut datanode2related_regions: HashMap<Peer, HashMap<RegionId, HashSet<RegionId>>> =
             HashMap::new();
         for (src_region, dst_regions) in related_regions {
-            if let Some((leader, _followers)) = region_routes.get(src_region) {
-                datanode2related_regions
-                    .entry(leader.clone())
-                    .or_default()
-                    .insert(*src_region, dst_regions.clone());
-            } // since read from manifest, no need to send to followers
+            for dst_region in dst_regions {
+                if let Some((leader, _followers)) = region_routes.get(dst_region) {
+                    datanode2related_regions
+                        .entry(leader.clone())
+                        .or_default()
+                        .insert(*src_region, dst_regions.clone());
+                } // since read from manifest, no need to send to followers
+            }
         }
 
         // Send GetFileRefs instructions to each datanode

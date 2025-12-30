@@ -435,7 +435,7 @@ pub struct GetFileRefs {
     /// Mapping from the src region IDs (whose file references to look for) to
     /// the dst region ID (where to read the manifest).
     /// Key: region IDs to find references for in that manifest.
-    /// Value: The set of region ID whose manifests need to be read.
+    /// Value: The set of region IDs whose manifests need to be read.
     pub related_regions: HashMap<RegionId, HashSet<RegionId>>,
 }
 

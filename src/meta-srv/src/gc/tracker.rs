@@ -30,15 +30,6 @@ pub(crate) struct RegionGcInfo {
     pub(crate) last_full_listing_time: Option<Instant>,
 }
 
-impl RegionGcInfo {
-    pub(crate) fn new(last_gc_time: Instant) -> Self {
-        Self {
-            last_gc_time,
-            last_full_listing_time: None,
-        }
-    }
-}
-
 /// Tracks the last GC time for regions to implement cooldown.
 pub(crate) type RegionGcTracker = HashMap<RegionId, RegionGcInfo>;
 
