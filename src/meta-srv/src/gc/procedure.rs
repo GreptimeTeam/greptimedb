@@ -169,8 +169,8 @@ pub struct BatchGcData {
     regions: Vec<RegionId>,
     full_file_listing: bool,
     region_routes: Region2Peers,
-    /// Related regions (e.g., for shared files after repartition). Map where key is the region whose
-    /// manifest needs to be read, and value is the set of region IDs to look for in that manifest.
+    /// Related regions (e.g., for shared files after repartition). the source regions (where those files originally came from) as the key.
+    /// and the destination region (where files are currently stored) as the value
     related_regions: HashMap<RegionId, HashSet<RegionId>>,
     /// Acquired file references (Populated in Acquiring state)
     file_refs: FileRefsManifest,
@@ -187,7 +187,7 @@ pub enum State {
     Acquiring,
     /// Sending GC instruction to the target datanode
     Gcing,
-    /// Cleaning up region repartition info in kvbackend after GC
+    /// Updating region repartition info in kvbackend after GC based on the GC result
     UpdateRepartition,
 }
 
@@ -243,8 +243,8 @@ impl BatchGcProcedure {
     }
 
     /// Return related regions for the given regions.
-    /// The returned map uses the destination region (where files are currently stored) as the key
-    /// and the set of source regions (where those files originally came from) as the value.
+    /// The returned map use the source regions (where those files originally came from) as the key.
+    /// and the destination region (where files are currently stored) as the value
     async fn find_related_regions(
         &self,
         regions: &[RegionId],
@@ -260,13 +260,7 @@ impl BatchGcProcedure {
             else {
                 continue;
             };
-            for dst_region in dst_regions {
-                // notice the direction: dst_region holds files from src_region
-                related_regions
-                    .entry(dst_region)
-                    .or_default()
-                    .insert(*src_region);
-            }
+            related_regions.insert(*src_region, dst_regions.into_iter().collect());
         }
         Ok(related_regions)
     }

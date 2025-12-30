@@ -303,7 +303,7 @@ impl MitoEngine {
     pub async fn get_snapshot_of_file_refs(
         &self,
         file_handle_regions: impl IntoIterator<Item = RegionId>,
-        manifest_regions: HashMap<RegionId, HashSet<RegionId>>,
+        related_regions: HashMap<RegionId, HashSet<RegionId>>,
     ) -> Result<FileRefsManifest> {
         let file_ref_mgr = self.file_ref_manager();
 
@@ -315,15 +315,31 @@ impl MitoEngine {
             .filter_map(|region_id| self.find_region(region_id))
             .collect();
 
-        let related_regions: Vec<(MitoRegionRef, HashSet<RegionId>)> = manifest_regions
-            .into_iter()
-            .filter_map(|(related_region, queries)| {
-                self.find_region(related_region).map(|r| (r, queries))
-            })
-            .collect();
+        let dst_region_to_src_regions: Vec<(MitoRegionRef, HashSet<RegionId>)> = {
+            let dst2src = related_regions
+                .into_iter()
+                .map(|(src, dsts)| dsts.into_iter().map(move |dst| (dst, src)))
+                .flatten()
+                .fold(
+                    HashMap::<RegionId, HashSet<RegionId>>::new(),
+                    |mut acc, (k, v)| {
+                        let entry = acc.entry(k).or_default();
+                        entry.insert(v);
+                        acc
+                    },
+                );
+            let mut dst_region_to_src_regions = Vec::with_capacity(dst2src.len());
+            for (dst_region, srcs) in dst2src {
+                let dst_region = self.find_region(dst_region).context(RegionNotFoundSnafu {
+                    region_id: dst_region,
+                })?;
+                dst_region_to_src_regions.push((dst_region, srcs));
+            }
+            dst_region_to_src_regions
+        };
 
         file_ref_mgr
-            .get_snapshot_of_file_refs(query_regions, related_regions)
+            .get_snapshot_of_file_refs(query_regions, dst_region_to_src_regions)
             .await
     }
 
