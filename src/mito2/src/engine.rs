@@ -318,8 +318,7 @@ impl MitoEngine {
         let dst_region_to_src_regions: Vec<(MitoRegionRef, HashSet<RegionId>)> = {
             let dst2src = related_regions
                 .into_iter()
-                .map(|(src, dsts)| dsts.into_iter().map(move |dst| (dst, src)))
-                .flatten()
+                .flat_map(|(src, dsts)| dsts.into_iter().map(move |dst| (dst, src)))
                 .fold(
                     HashMap::<RegionId, HashSet<RegionId>>::new(),
                     |mut acc, (k, v)| {

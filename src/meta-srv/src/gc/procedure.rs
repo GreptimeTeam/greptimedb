@@ -283,7 +283,7 @@ impl BatchGcProcedure {
         &self,
         regions: &[RegionId],
     ) -> Result<(Region2Peers, Peer2Regions)> {
-        let all_related_regions = self
+        let all_involved_regions = self
             .find_related_regions(regions)
             .await?
             .into_iter()
@@ -299,7 +299,7 @@ impl BatchGcProcedure {
 
         // Group regions by table ID for batch processing
         let mut table_to_regions: HashMap<TableId, Vec<RegionId>> = HashMap::new();
-        for region_id in all_related_regions {
+        for region_id in all_involved_regions {
             let table_id = region_id.table_id();
             table_to_regions
                 .entry(table_id)
