@@ -1039,6 +1039,22 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "vector_index")]
+    #[snafu(display("Failed to build vector index: {}", reason))]
+    VectorIndexBuild {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "vector_index")]
+    #[snafu(display("Failed to finish vector index: {}", reason))]
+    VectorIndexFinish {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
 
@@ -1344,6 +1360,9 @@ impl ErrorExt for Error {
             PushBloomFilterValue { source, .. } | BloomFilterFinish { source, .. } => {
                 source.status_code()
             }
+
+            #[cfg(feature = "vector_index")]
+            VectorIndexBuild { .. } | VectorIndexFinish { .. } => StatusCode::Internal,
 
             ManualCompactionOverride {} => StatusCode::Cancelled,
 

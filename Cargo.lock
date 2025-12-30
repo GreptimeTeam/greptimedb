@@ -7779,7 +7779,6 @@ dependencies = [
  "either",
  "futures",
  "greptime-proto",
- "humantime",
  "humantime-serde",
  "index",
  "itertools 0.14.0",
@@ -7798,6 +7797,7 @@ dependencies = [
  "rand 0.9.1",
  "rayon",
  "regex",
+ "roaring",
  "rskafka",
  "rstest",
  "rstest_reuse",
@@ -7816,6 +7816,7 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tracing",
+ "usearch",
  "uuid",
 ]
 
