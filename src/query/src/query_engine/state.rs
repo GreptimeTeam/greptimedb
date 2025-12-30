@@ -54,6 +54,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::QueryEngineContext;
 use crate::dist_plan::{
     DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, MergeSortExtensionPlanner,
+    VectorScanExtensionPlanner,
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
@@ -66,6 +67,7 @@ use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
+use crate::optimizer::vector_search::VectorSearchRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
 use crate::options::QueryOptions as QueryOptionsNew;
 use crate::query_engine::DefaultSerializer;
@@ -152,6 +154,10 @@ impl QueryEngineState {
         analyzer
             .rules
             .insert(0, Arc::new(CountWildcardToTimeIndexRule));
+
+        // VectorSearchRule must run before DistPlannerAnalyzer so that the hint
+        // is set on DfTableProviderAdapter before DistPlannerAnalyzer reads it.
+        analyzer.rules.push(Arc::new(VectorSearchRule));
 
         if with_dist_planner {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
@@ -459,6 +465,11 @@ impl DfQueryPlanner {
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
             vec![Arc::new(PromExtensionPlanner), Arc::new(RangeSelectPlanner)];
+
+        // Always add VectorScanExtensionPlanner to handle VectorScanLogicalPlan
+        // in both standalone mode and distributed fallback mode.
+        planners.push(Arc::new(VectorScanExtensionPlanner));
+
         if let (Some(region_query_handler), Some(partition_rule_manager)) =
             (region_query_handler, partition_rule_manager)
         {

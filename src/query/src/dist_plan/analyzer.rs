@@ -31,10 +31,12 @@ use datafusion_optimizer::analyzer::AnalyzerRule;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use promql::extension_plan::SeriesDivide;
+use store_api::storage::VectorSearchRequest;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
+use crate::dist_plan::VectorScanLogicalPlan;
 use crate::dist_plan::analyzer::utils::{aliased_columns_for, rewrite_merge_sort_exprs};
 use crate::dist_plan::commutativity::{
     Categorizer, Commutativity, partial_commutative_transformer,
@@ -318,6 +320,9 @@ struct PlanRewriter {
     /// so that we can push down the `Sort` plan as much as possible.
     expand_on_next_part_cond_trans_commutative: bool,
     new_child_plan: Option<LogicalPlan>,
+    /// Vector search request extracted from the table adapter.
+    /// This is used to wrap the plan with `VectorScanLogicalPlan` for distributed execution.
+    vector_search_request: Option<VectorSearchRequest>,
 }
 
 impl PlanRewriter {
@@ -527,6 +532,11 @@ impl PlanRewriter {
                 .as_any()
                 .downcast_ref::<DfTableProviderAdapter>()
         {
+            // Extract vector search hint from the adapter if present.
+            if self.vector_search_request.is_none() {
+                self.vector_search_request = provider.get_vector_search_hint();
+            }
+
             let table = provider.table();
             if table.table_type() == TableType::Base {
                 let info = table.table_info();
@@ -613,9 +623,28 @@ impl PlanRewriter {
             self.partition_cols
         );
 
+        // If there's a vector search request, wrap the plan with VectorScanLogicalPlan.
+        // This allows the hint to be serialized via Substrait and transmitted to datanodes.
+        let inner_plan = if let Some(request) = self.vector_search_request.take() {
+            debug!(
+                "PlanRewriter: wrapping plan with VectorScanLogicalPlan for vector search: column_id={}, k={}",
+                request.column_id, request.k
+            );
+            VectorScanLogicalPlan::new(
+                on_node.clone(),
+                request.column_id,
+                request.query_vector,
+                request.k,
+                request.metric,
+            )
+            .into_logical_plan()
+        } else {
+            on_node.clone()
+        };
+
         // add merge scan as the new root
         let mut node = MergeScanLogicalPlan::new(
-            on_node.clone(),
+            inner_plan,
             false,
             // at this stage, the partition cols should be set
             // treat it as non-partitioned if None

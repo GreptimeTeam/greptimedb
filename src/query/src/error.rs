@@ -141,6 +141,14 @@ pub enum Error {
         source: sql::error::Error,
     },
 
+    #[snafu(display("Failed to deserialize protobuf"))]
+    Deserialize {
+        #[snafu(source)]
+        error: prost::DecodeError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to plan SQL"))]
     PlanSql {
         #[snafu(source)]
@@ -405,6 +413,7 @@ impl ErrorExt for Error {
 
             MissingTimestampColumn { .. } => StatusCode::EngineExecuteQuery,
             Sql { source, .. } => source.status_code(),
+            Deserialize { .. } => StatusCode::Internal,
 
             ConvertSqlType { source, .. } | ConvertSqlValue { source, .. } => source.status_code(),
 

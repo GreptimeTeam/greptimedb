@@ -26,7 +26,7 @@ use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDow
 use datafusion_expr::expr::Expr;
 use datafusion_physical_expr::PhysicalSortExpr;
 use datafusion_physical_expr::expressions::Column;
-use store_api::storage::ScanRequest;
+use store_api::storage::{ScanRequest, VectorSearchRequest};
 
 use crate::table::{TableRef, TableType};
 
@@ -50,6 +50,16 @@ impl DfTableProviderAdapter {
 
     pub fn with_ordering_hint(&self, order_opts: &[OrderOption]) {
         self.scan_req.lock().unwrap().output_ordering = Some(order_opts.to_vec());
+    }
+
+    /// Sets the vector search hint for KNN queries.
+    pub fn with_vector_search_hint(&self, request: VectorSearchRequest) {
+        self.scan_req.lock().unwrap().vector_search = Some(request);
+    }
+
+    /// Gets the vector search hint if set.
+    pub fn get_vector_search_hint(&self) -> Option<VectorSearchRequest> {
+        self.scan_req.lock().unwrap().vector_search.clone()
     }
 
     #[cfg(feature = "testing")]

@@ -31,7 +31,7 @@ use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, VectorSearchRequest};
 pub use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
@@ -40,6 +40,8 @@ use crate::dist_plan::PredicateExtractor;
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::dist_plan::region_pruner::ConstraintPruner;
+use crate::dist_plan::vector_scan::VectorScanLogicalPlan;
+use crate::dummy_catalog::DummyTableProvider;
 use crate::error::{CatalogSnafu, TableNotFoundSnafu};
 use crate::region_query::RegionQueryHandlerRef;
 
@@ -138,6 +140,19 @@ impl ExtensionPlanner for DistExtensionPlanner {
         };
 
         let input_plan = merge_scan.input();
+
+        // Check if input is a VectorScanLogicalPlan and extract the actual input.
+        // VectorScanLogicalPlan is a wrapper that carries vector search hints for distributed mode.
+        // In fallback (standalone) mode, we need to unwrap it and use the actual input plan.
+        // The vector search hint is already set on DfTableProviderAdapter by VectorSearchRule.
+        let actual_input = if let LogicalPlan::Extension(ext) = input_plan
+            && let Some(vector_scan) = ext.node.as_any().downcast_ref::<VectorScanLogicalPlan>()
+        {
+            vector_scan.input().clone()
+        } else {
+            input_plan.clone()
+        };
+
         let fallback = |logical_plan| async move {
             let optimized_plan = self.optimize_input_logical_plan(session_state, logical_plan)?;
             planner
@@ -148,22 +163,23 @@ impl ExtensionPlanner for DistExtensionPlanner {
 
         if merge_scan.is_placeholder() {
             // ignore placeholder
-            return fallback(input_plan).await;
+            return fallback(&actual_input).await;
         }
 
-        let optimized_plan = input_plan;
-        let Some(table_name) = Self::extract_full_table_name(input_plan)? else {
+        let Some(table_name) = Self::extract_full_table_name(&actual_input)? else {
             // no relation found in input plan, going to execute them locally
-            return fallback(optimized_plan).await;
+            return fallback(&actual_input).await;
         };
 
-        let Ok(regions) = self.get_regions(&table_name, input_plan).await else {
+        let Ok(regions) = self.get_regions(&table_name, &actual_input).await else {
             // no peers found, going to execute them locally
-            return fallback(optimized_plan).await;
+            return fallback(&actual_input).await;
         };
 
         // TODO(ruihang): generate different execution plans for different variant merge operation
-        let schema = optimized_plan.schema().as_arrow();
+        // For distributed mode, use the original input_plan which may contain VectorScanLogicalPlan.
+        // This allows the vector search hint to be serialized and sent to datanodes.
+        let schema = input_plan.schema().as_arrow();
         let query_ctx = session_state
             .config()
             .get_extension()
@@ -376,5 +392,82 @@ impl TreeNodeVisitor<'_> for TableNameExtractor {
             }
             _ => Ok(TreeNodeRecursion::Continue),
         }
+    }
+}
+
+/// Planner for handling VectorScanLogicalPlan in standalone/fallback mode.
+///
+/// When a `VectorScanLogicalPlan` is encountered during physical planning,
+/// this planner:
+/// 1. Extracts the vector search hint from the logical plan node
+/// 2. Finds the TableScan in the inner input and sets the hint on the provider
+/// 3. Creates the physical plan for the inner input (which now has the hint)
+///
+/// This is needed because `VectorScanLogicalPlan::inputs()` returns `vec![]`
+/// to prevent DataFusion from optimizing it, but that also means DataFusion
+/// cannot recursively plan its children. This planner handles that case.
+pub struct VectorScanExtensionPlanner;
+
+impl VectorScanExtensionPlanner {
+    /// Traverses the logical plan to find TableScan and set the vector search hint.
+    fn set_vector_hint_on_provider(plan: &LogicalPlan, hint: &VectorSearchRequest) -> Result<()> {
+        plan.apply(|node| {
+            if let LogicalPlan::TableScan(table_scan) = node
+                && let Some(source) = table_scan
+                    .source
+                    .as_any()
+                    .downcast_ref::<DefaultTableSource>()
+            {
+                // Case 1: DummyTableProvider (datanode mode)
+                if let Some(dummy_provider) = source
+                    .table_provider
+                    .as_any()
+                    .downcast_ref::<DummyTableProvider>()
+                {
+                    dummy_provider.with_vector_search_hint(hint.clone());
+                    return Ok(TreeNodeRecursion::Stop);
+                }
+
+                // Case 2: DfTableProviderAdapter (frontend/standalone mode)
+                if let Some(adapter) = source
+                    .table_provider
+                    .as_any()
+                    .downcast_ref::<DfTableProviderAdapter>()
+                {
+                    adapter.with_vector_search_hint(hint.clone());
+                    return Ok(TreeNodeRecursion::Stop);
+                }
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ExtensionPlanner for VectorScanExtensionPlanner {
+    async fn plan_extension(
+        &self,
+        planner: &dyn PhysicalPlanner,
+        node: &dyn UserDefinedLogicalNode,
+        _logical_inputs: &[&LogicalPlan],
+        _physical_inputs: &[Arc<dyn ExecutionPlan>],
+        session_state: &SessionState,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        let Some(vector_scan) = node.as_any().downcast_ref::<VectorScanLogicalPlan>() else {
+            return Ok(None);
+        };
+
+        // Extract the hint from VectorScanLogicalPlan
+        let hint = vector_scan.to_vector_search_request();
+
+        // Set hint on the table provider in the input plan
+        Self::set_vector_hint_on_provider(vector_scan.input(), &hint)?;
+
+        // Create physical plan for the inner input (which now has the hint set)
+        planner
+            .create_physical_plan(vector_scan.input(), session_state)
+            .await
+            .map(Some)
     }
 }

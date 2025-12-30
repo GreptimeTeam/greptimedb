@@ -27,7 +27,7 @@ use datafusion::execution::registry::SerializerRegistry;
 use datafusion::execution::{FunctionRegistry, SessionStateBuilder};
 use datafusion::logical_expr::LogicalPlan;
 use datafusion_expr::UserDefinedLogicalNode;
-use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
+use greptime_proto::substrait_extension::{MergeScan as PbMergeScan, VectorScan as PbVectorScan};
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
     Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
@@ -40,7 +40,7 @@ use snafu::ResultExt;
 use substrait::extension_serializer::ExtensionSerializer;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
-use crate::dist_plan::MergeScanLogicalPlan;
+use crate::dist_plan::{MergeScanLogicalPlan, VectorScanLogicalPlan, metric_to_u32};
 
 /// Extended [`substrait::extension_serializer::ExtensionSerializer`] but supports [`MergeScanLogicalPlan`] serialization.
 #[derive(Debug)]
@@ -66,6 +66,23 @@ impl SerializerRegistry for DefaultSerializer {
                 input,
             }
             .encode_to_vec())
+        } else if node.name() == VectorScanLogicalPlan::name() {
+            let vector_scan = node
+                .as_any()
+                .downcast_ref::<VectorScanLogicalPlan>()
+                .expect("Failed to downcast to VectorScanLogicalPlan");
+
+            // Only encode the vector search hint parameters.
+            // The input plan is handled automatically by Substrait since inputs() now
+            // returns the actual input (making this an ExtensionSingleRel).
+            Ok(PbVectorScan {
+                input: vec![], // Empty - Substrait handles the child plan
+                column_id: vector_scan.column_id(),
+                query_vector: vector_scan.query_vector().to_vec(),
+                k: vector_scan.k() as u32,
+                metric: metric_to_u32(vector_scan.metric()),
+            }
+            .encode_to_vec())
         } else {
             ExtensionSerializer.serialize_logical_plan(node)
         }
@@ -82,6 +99,13 @@ impl SerializerRegistry for DefaultSerializer {
             Err(DataFusionError::Substrait(format!(
                 "Unsupported plan node: {name}"
             )))
+        } else if name == VectorScanLogicalPlan::name() {
+            // Deserialize VectorScanLogicalPlan with a placeholder input.
+            // Since inputs() returns vec![&self.input], Substrait treats this as ExtensionSingleRel
+            // and will call with_exprs_and_inputs() with the deserialized child plan.
+            let vector_scan = VectorScanLogicalPlan::deserialize(bytes)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            Ok(Arc::new(vector_scan))
         } else {
             ExtensionSerializer.deserialize_logical_plan(name, bytes)
         }

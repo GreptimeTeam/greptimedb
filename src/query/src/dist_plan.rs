@@ -19,9 +19,11 @@ mod merge_sort;
 mod planner;
 mod predicate_extractor;
 mod region_pruner;
+mod vector_scan;
 
 pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
-pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};
+pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner, VectorScanExtensionPlanner};
 pub use predicate_extractor::PredicateExtractor;
 pub use region_pruner::ConstraintPruner;
+pub use vector_scan::{VectorScanLogicalPlan, metric_to_u32, u32_to_metric};

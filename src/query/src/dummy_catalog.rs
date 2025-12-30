@@ -35,7 +35,9 @@ use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
-use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
+use store_api::storage::{
+    RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector, VectorSearchRequest,
+};
 use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::RegionScanExec;
@@ -258,6 +260,11 @@ impl DummyTableProvider {
 
     pub fn with_sequence(&self, sequence: u64) {
         self.scan_request.lock().unwrap().memtable_max_sequence = Some(sequence);
+    }
+
+    /// Sets the vector search hint for KNN queries.
+    pub fn with_vector_search_hint(&self, request: VectorSearchRequest) {
+        self.scan_request.lock().unwrap().vector_search = Some(request);
     }
 
     /// Gets the scan request of the provider.

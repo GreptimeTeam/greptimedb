@@ -1055,6 +1055,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "vector_index")]
+    #[snafu(display("Failed to apply vector index: {}", reason))]
+    ApplyVectorIndex {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
 
@@ -1362,7 +1370,9 @@ impl ErrorExt for Error {
             }
 
             #[cfg(feature = "vector_index")]
-            VectorIndexBuild { .. } | VectorIndexFinish { .. } => StatusCode::Internal,
+            VectorIndexBuild { .. } | VectorIndexFinish { .. } | ApplyVectorIndex { .. } => {
+                StatusCode::Internal
+            }
 
             ManualCompactionOverride {} => StatusCode::Cancelled,
 
