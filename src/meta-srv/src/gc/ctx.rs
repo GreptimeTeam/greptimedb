@@ -31,7 +31,7 @@ use table::metadata::TableId;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result, TableMetadataManagerSnafu, UnexpectedSnafu};
-use crate::gc::procedure::{BatchGcProcedure, GcRegionProcedure};
+use crate::gc::procedure::BatchGcProcedure;
 use crate::gc::{Peer2Regions, Region2Peers};
 use crate::handler::HeartbeatMailbox;
 use crate::service::mailbox::{Channel, MailboxRef};
@@ -47,7 +47,6 @@ pub(crate) trait SchedulerCtx: Send + Sync {
 
     async fn gc_regions(
         &self,
-        peer: Peer,
         region_ids: &[RegionId],
         full_file_listing: bool,
         timeout: Duration,
@@ -120,7 +119,6 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
 
     async fn gc_regions(
         &self,
-        peer: Peer,
         region_ids: &[RegionId],
         full_file_listing: bool,
         timeout: Duration,
@@ -169,7 +167,7 @@ impl DefaultGcSchedulerCtx {
                 ),
             })?;
 
-        let gc_report = GcRegionProcedure::cast_result(res)?;
+        let gc_report = BatchGcProcedure::cast_result(res)?;
 
         Ok(gc_report)
     }

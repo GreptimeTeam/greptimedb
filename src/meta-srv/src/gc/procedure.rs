@@ -152,109 +152,6 @@ async fn send_gc_regions(
     }
 }
 
-/// TODO(discord9): another procedure which do both get file refs and gc regions.
-pub struct GcRegionProcedure {
-    mailbox: MailboxRef,
-    data: GcRegionData,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct GcRegionData {
-    server_addr: String,
-    peer: Peer,
-    gc_regions: GcRegions,
-    description: String,
-    timeout: Duration,
-}
-
-impl GcRegionProcedure {
-    pub const TYPE_NAME: &'static str = "metasrv-procedure::GcRegionProcedure";
-
-    pub fn new(
-        mailbox: MailboxRef,
-        server_addr: String,
-        peer: Peer,
-        gc_regions: GcRegions,
-        description: String,
-        timeout: Duration,
-    ) -> Self {
-        Self {
-            mailbox,
-            data: GcRegionData {
-                peer,
-                server_addr,
-                gc_regions,
-                description,
-                timeout,
-            },
-        }
-    }
-
-    async fn send_gc_instr(&self) -> Result<GcReport> {
-        send_gc_regions(
-            &self.mailbox,
-            &self.data.peer,
-            self.data.gc_regions.clone(),
-            &self.data.server_addr,
-            self.data.timeout,
-            &self.data.description,
-        )
-        .await
-    }
-
-    pub fn cast_result(res: Arc<dyn Any>) -> Result<GcReport> {
-        res.downcast_ref::<GcReport>().cloned().ok_or_else(|| {
-            error::UnexpectedSnafu {
-                violated: format!(
-                    "Failed to downcast procedure result to GcReport, got {:?}",
-                    std::any::type_name_of_val(&res.as_ref())
-                ),
-            }
-            .build()
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl Procedure for GcRegionProcedure {
-    fn type_name(&self) -> &str {
-        Self::TYPE_NAME
-    }
-
-    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        // Send GC instruction to the datanode. This procedure only handle lock&send, results or other kind of
-        // errors will be reported back via the oneshot channel.
-        let reply = self
-            .send_gc_instr()
-            .await
-            .map_err(ProcedureError::external)?;
-
-        Ok(Status::done_with_output(reply))
-    }
-
-    fn dump(&self) -> ProcedureResult<String> {
-        serde_json::to_string(&self.data).context(ToJsonSnafu)
-    }
-
-    /// Read lock all regions involved in this GC procedure.
-    /// So i.e. region migration won't happen during GC and cause race conditions.
-    ///
-    /// only read lock the regions not catatlog/schema because it can run concurrently with other procedures(i.e. drop database/table)
-    /// TODO:(discord9): integration test to verify this
-    fn lock_key(&self) -> LockKey {
-        let lock_key: Vec<_> = self
-            .data
-            .gc_regions
-            .regions
-            .iter()
-            .sorted() // sort to have a deterministic lock order
-            .map(|id| RegionLock::Read(*id).into())
-            .collect();
-
-        LockKey::new(lock_key)
-    }
-}
-
 /// Procedure to perform get file refs then batch GC for multiple regions,
 /// it holds locks for all regions during the whole procedure.
 pub struct BatchGcProcedure {
@@ -279,6 +176,7 @@ pub struct BatchGcData {
     file_refs: FileRefsManifest,
     /// mailbox timeout duration
     timeout: Duration,
+    gc_report: Option<GcReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -316,8 +214,21 @@ impl BatchGcProcedure {
                 region_routes: HashMap::new(),
                 related_regions: HashMap::new(),
                 file_refs: FileRefsManifest::default(),
+                gc_report: None,
             },
         }
+    }
+
+    pub fn cast_result(res: Arc<dyn Any>) -> Result<GcReport> {
+        res.downcast_ref::<GcReport>().cloned().ok_or_else(|| {
+            error::UnexpectedSnafu {
+                violated: format!(
+                    "Failed to downcast procedure result to GcReport, got {:?}",
+                    std::any::type_name_of_val(&res.as_ref())
+                ),
+            }
+            .build()
+        })
     }
 
     async fn get_table_route(
@@ -332,7 +243,8 @@ impl BatchGcProcedure {
     }
 
     /// Return related regions for the given regions.
-    /// key is the region which manifest need to be read, values is the region id list to look for while reading key region's manifest.
+    /// The returned map uses the destination region (where files are currently stored) as the key
+    /// and the set of source regions (where those files originally came from) as the value.
     async fn find_related_regions(
         &self,
         regions: &[RegionId],
@@ -557,7 +469,7 @@ impl BatchGcProcedure {
 
     /// Send GC instruction to all datanodes that host the regions,
     /// returns regions that need retry.
-    async fn send_gc_instructions(&self) -> Result<Vec<RegionId>> {
+    async fn send_gc_instructions(&self) -> Result<GcReport> {
         let regions = &self.data.regions;
         let region_routes = &self.data.region_routes;
         let file_refs = &self.data.file_refs;
@@ -565,6 +477,7 @@ impl BatchGcProcedure {
 
         // Group regions by datanode
         let mut datanode2regions: HashMap<Peer, Vec<RegionId>> = HashMap::new();
+        let mut all_report = GcReport::default();
 
         for region_id in regions {
             if let Some((leader, _followers)) = region_routes.get(region_id) {
@@ -616,10 +529,13 @@ impl BatchGcProcedure {
                     peer, success, need_retry
                 );
             }
-            all_need_retry.extend(report.need_retry_regions);
+            all_need_retry.extend(report.need_retry_regions.clone());
+            all_report.merge(report);
         }
 
-        Ok(all_need_retry.into_iter().collect())
+        warn!("Regions need retry after batch GC: {:?}", all_need_retry);
+
+        Ok(all_report)
     }
 }
 
@@ -654,8 +570,9 @@ impl Procedure for BatchGcProcedure {
                 // Send GC instructions to all datanodes
                 // TODO(discord9): handle need-retry regions
                 match self.send_gc_instructions().await {
-                    Ok(_) => {
+                    Ok(report) => {
                         self.data.state = State::UpdateRepartition;
+                        self.data.gc_report = Some(report);
                         Ok(Status::executing(false))
                     }
                     Err(e) => {
@@ -665,7 +582,7 @@ impl Procedure for BatchGcProcedure {
                 }
             }
             State::UpdateRepartition => match self.cleanup_region_repartition().await {
-                Ok(_) => {
+                Ok(()) => {
                     info!(
                         "Cleanup region repartition info completed successfully for regions {:?}",
                         self.data.regions
@@ -674,7 +591,13 @@ impl Procedure for BatchGcProcedure {
                         "Batch GC completed successfully for regions {:?}",
                         self.data.regions
                     );
-                    Ok(Status::done())
+                    let Some(report) = self.data.gc_report.clone() else {
+                        return common_procedure::error::UnexpectedSnafu {
+                            err_msg: "GC report should be present after GC completion".to_string(),
+                        }
+                        .fail();
+                    };
+                    Ok(Status::done_with_output(report))
                 }
                 Err(e) => {
                     error!("Failed to cleanup region repartition info: {}", e);

@@ -246,12 +246,7 @@ impl GcScheduler {
             if !fast_list_regions.is_empty() {
                 match self
                     .ctx
-                    .gc_regions(
-                        peer.clone(),
-                        &fast_list_regions,
-                        false,
-                        self.config.mailbox_timeout,
-                    )
+                    .gc_regions(&fast_list_regions, false, self.config.mailbox_timeout)
                     .await
                 {
                     Ok(report) => combined_report.merge(report),
@@ -272,12 +267,7 @@ impl GcScheduler {
             if !need_full_list_regions.is_empty() {
                 match self
                     .ctx
-                    .gc_regions(
-                        peer.clone(),
-                        &need_full_list_regions,
-                        true,
-                        self.config.mailbox_timeout,
-                    )
+                    .gc_regions(&need_full_list_regions, true, self.config.mailbox_timeout)
                     .await
                 {
                     Ok(report) => combined_report.merge(report),

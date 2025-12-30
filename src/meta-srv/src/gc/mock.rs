@@ -206,7 +206,6 @@ impl SchedulerCtx for MockSchedulerCtx {
 
     async fn gc_regions(
         &self,
-        _peer: Peer,
         region_ids: &[RegionId],
         _full_file_listing: bool,
         _timeout: Duration,
