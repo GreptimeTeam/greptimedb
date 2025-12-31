@@ -12,27 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod apply_staging_manifest;
 pub(crate) mod enter_staging_region;
+pub(crate) mod remap_manifest;
+pub(crate) mod repartition_end;
 pub(crate) mod repartition_start;
 pub(crate) mod update_metadata;
 pub(crate) mod utils;
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::time::Duration;
 
 use common_error::ext::BoxedError;
-use common_meta::DatanodeId;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue, RegionInfo};
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
+use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock};
+use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
+use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
-    Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
-    UserMetadata,
+    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
+    Result as ProcedureResult, Status, StringKey, UserMetadata,
 };
+use common_telemetry::error;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
@@ -71,6 +78,12 @@ impl RepartitionGroupProcedure {
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct RepartitionGroupData<'a> {
+    persistent_ctx: &'a PersistentContext,
+    state: &'a dyn State,
+}
+
 #[async_trait::async_trait]
 impl Procedure for RepartitionGroupProcedure {
     fn type_name(&self) -> &str {
@@ -78,27 +91,48 @@ impl Procedure for RepartitionGroupProcedure {
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        todo!()
-    }
+        let state = &mut self.state;
 
-    async fn rollback(&mut self, _: &ProcedureContext) -> ProcedureResult<()> {
-        todo!()
+        match state.next(&mut self.context, _ctx).await {
+            Ok((next, status)) => {
+                *state = next;
+                Ok(status)
+            }
+            Err(e) => {
+                if e.is_retryable() {
+                    Err(ProcedureError::retry_later(e))
+                } else {
+                    error!(
+                        e;
+                        "Repartition group procedure failed, group id: {}, table id: {}",
+                        self.context.persistent_ctx.group_id,
+                        self.context.persistent_ctx.table_id,
+                    );
+                    Err(ProcedureError::external(e))
+                }
+            }
+        }
     }
 
     fn rollback_supported(&self) -> bool {
-        true
+        false
     }
 
     fn dump(&self) -> ProcedureResult<String> {
-        todo!()
+        let data = RepartitionGroupData {
+            persistent_ctx: &self.context.persistent_ctx,
+            state: self.state.as_ref(),
+        };
+        serde_json::to_string(&data).context(ToJsonSnafu)
     }
 
     fn lock_key(&self) -> LockKey {
-        todo!()
+        LockKey::new(self.context.persistent_ctx.lock_key())
     }
 
     fn user_metadata(&self) -> Option<UserMetadata> {
-        todo!()
+        // TODO(weny): support user metadata.
+        None
     }
 }
 
@@ -123,8 +157,8 @@ pub struct GroupPrepareResult {
     pub target_routes: Vec<RegionRoute>,
     /// The primary source region id (first source region), used for retrieving region options.
     pub central_region: RegionId,
-    /// The datanode id where the primary source region is located.
-    pub central_region_datanode_id: DatanodeId,
+    /// The peer where the primary source region is located.
+    pub central_region_datanode: Peer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -132,29 +166,58 @@ pub struct PersistentContext {
     pub group_id: GroupId,
     /// The table id of the repartition group.
     pub table_id: TableId,
+    /// The catalog name of the repartition group.
+    pub catalog_name: String,
+    /// The schema name of the repartition group.
+    pub schema_name: String,
     /// The source regions of the repartition group.
     pub sources: Vec<RegionDescriptor>,
     /// The target regions of the repartition group.
     pub targets: Vec<RegionDescriptor>,
+    /// For each `source region`, the corresponding
+    /// `target regions` that overlap with it.
+    pub region_mapping: HashMap<RegionId, Vec<RegionId>>,
     /// The result of group prepare.
     /// The value will be set in [RepartitionStart](crate::procedure::repartition::group::repartition_start::RepartitionStart) state.
     pub group_prepare_result: Option<GroupPrepareResult>,
+    /// The staging manifest paths of the repartition group.
+    /// The value will be set in [RemapManifest](crate::procedure::repartition::group::remap_manifest::RemapManifest) state.
+    pub staging_manifest_paths: HashMap<RegionId, String>,
 }
 
 impl PersistentContext {
     pub fn new(
         group_id: GroupId,
         table_id: TableId,
+        catalog_name: String,
+        schema_name: String,
         sources: Vec<RegionDescriptor>,
         targets: Vec<RegionDescriptor>,
+        region_mapping: HashMap<RegionId, Vec<RegionId>>,
     ) -> Self {
         Self {
             group_id,
             table_id,
+            catalog_name,
+            schema_name,
             sources,
             targets,
+            region_mapping,
             group_prepare_result: None,
+            staging_manifest_paths: HashMap::new(),
         }
+    }
+
+    pub fn lock_key(&self) -> Vec<StringKey> {
+        let mut lock_keys = Vec::with_capacity(2 + self.sources.len());
+        lock_keys.extend([
+            CatalogLock::Read(&self.catalog_name).into(),
+            SchemaLock::read(&self.catalog_name, &self.schema_name).into(),
+        ]);
+        for source in &self.sources {
+            lock_keys.push(RegionLock::Write(source.region_id).into());
+        }
+        lock_keys
     }
 }
 
@@ -253,7 +316,7 @@ impl Context {
         // Safety: prepare result is set in [RepartitionStart] state.
         let prepare_result = self.persistent_ctx.group_prepare_result.as_ref().unwrap();
         let central_region_datanode_table_value = self
-            .get_datanode_table_value(table_id, prepare_result.central_region_datanode_id)
+            .get_datanode_table_value(table_id, prepare_result.central_region_datanode.id)
             .await?;
         let RegionInfo {
             region_options,

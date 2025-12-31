@@ -41,6 +41,9 @@ pub struct AllocationPlanEntry {
     pub regions_to_allocate: usize,
     /// The number of regions that need to be deallocated (source count - target count, if positive).
     pub regions_to_deallocate: usize,
+    /// For each `source_regions[k]`, the corresponding vector contains global
+    /// `target_partition_exprs` that overlap with it.
+    pub transition_map: Vec<Vec<usize>>,
 }
 
 /// A plan entry for the dispatch phase after region allocation,
@@ -57,6 +60,9 @@ pub struct RepartitionPlanEntry {
     pub allocated_region_ids: Vec<RegionId>,
     /// The region ids of the regions that are pending deallocation.
     pub pending_deallocate_region_ids: Vec<RegionId>,
+    /// For each `source_regions[k]`, the corresponding vector contains global
+    /// `target_regions` that overlap with it.
+    pub transition_map: Vec<Vec<usize>>,
 }
 
 impl RepartitionPlanEntry {
@@ -71,6 +77,7 @@ impl RepartitionPlanEntry {
             target_partition_exprs,
             regions_to_allocate,
             regions_to_deallocate,
+            transition_map,
         }: &AllocationPlanEntry,
     ) -> Self {
         debug_assert!(*regions_to_allocate == 0 && *regions_to_deallocate == 0);
@@ -89,6 +96,7 @@ impl RepartitionPlanEntry {
             target_regions,
             allocated_region_ids: vec![],
             pending_deallocate_region_ids: vec![],
+            transition_map: transition_map.clone(),
         }
     }
 }
