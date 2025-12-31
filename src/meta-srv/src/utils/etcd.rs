@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_meta::kv_backend::etcd::create_etcd_tls_options;
+use common_telemetry::warn;
 use etcd_client::{Client, ConnectOptions};
 use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
@@ -38,6 +39,8 @@ pub async fn create_etcd_client_with_tls(
             client_options.keep_alive_interval,
             client_options.keep_alive_timeout,
         );
+
+    let is_tls_prefer = matches!(tls_config.as_ref().map(|x| x.mode), Some(TlsMode::Prefer));
     if let Some(tls_config) = tls_config
         && let Some(tls_options) = create_etcd_tls_options(&convert_tls_option(tls_config))
             .context(BuildTlsOptionsSnafu)?
@@ -45,9 +48,34 @@ pub async fn create_etcd_client_with_tls(
         connect_options = connect_options.with_tls(tls_options);
     }
 
-    Client::connect(&etcd_endpoints, Some(connect_options))
+    let client = Client::connect(&etcd_endpoints, Some(connect_options))
         .await
-        .context(error::ConnectEtcdSnafu)
+        .context(error::ConnectEtcdSnafu);
+
+    match client {
+        Ok(client) => Ok(client),
+        Err(e) => {
+            if is_tls_prefer {
+                warn!(
+                    "Failed to connect to etcd with TLS prefer mode, trying to connect without TLS, error: {:?}",
+                    e
+                );
+                let connect_options = ConnectOptions::new()
+                    .with_keep_alive_while_idle(true)
+                    .with_keep_alive(
+                        client_options.keep_alive_interval,
+                        client_options.keep_alive_timeout,
+                    );
+
+                let client_no_tls = Client::connect(&etcd_endpoints, Some(connect_options))
+                    .await
+                    .context(error::ConnectEtcdSnafu);
+
+                return client_no_tls;
+            }
+            Err(e)
+        }
+    }
 }
 
 fn convert_tls_option(tls_option: &TlsOption) -> common_meta::kv_backend::etcd::TlsOption {

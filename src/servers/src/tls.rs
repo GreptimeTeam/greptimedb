@@ -29,7 +29,7 @@ use strum::EnumString;
 use crate::error::{InternalIoSnafu, Result};
 
 /// TlsMode is used for Mysql and Postgres server start up.
-#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq, EnumString)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, EnumString)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsMode {
     #[default]
