@@ -40,47 +40,36 @@ pub async fn create_etcd_client_with_tls(
             client_options.keep_alive_timeout,
         );
 
-    let is_tls_prefer = matches!(tls_config.as_ref().map(|x| x.mode), Some(TlsMode::Prefer));
+    let all_endpoints_use_https = etcd_endpoints.iter().all(|e| e.starts_with("https"));
     if let Some(tls_config) = tls_config
-        && let Some(tls_options) = create_etcd_tls_options(&convert_tls_option(tls_config))
-            .context(BuildTlsOptionsSnafu)?
+        && let Some(tls_options) =
+            create_etcd_tls_options(&convert_tls_option(all_endpoints_use_https, tls_config))
+                .context(BuildTlsOptionsSnafu)?
     {
         connect_options = connect_options.with_tls(tls_options);
     }
 
-    let client = Client::connect(&etcd_endpoints, Some(connect_options))
+    Client::connect(&etcd_endpoints, Some(connect_options))
         .await
-        .context(error::ConnectEtcdSnafu);
-
-    match client {
-        Ok(client) => Ok(client),
-        Err(e) => {
-            if is_tls_prefer {
-                warn!(
-                    "Failed to connect to etcd with TLS prefer mode, trying to connect without TLS, error: {:?}",
-                    e
-                );
-                let connect_options = ConnectOptions::new()
-                    .with_keep_alive_while_idle(true)
-                    .with_keep_alive(
-                        client_options.keep_alive_interval,
-                        client_options.keep_alive_timeout,
-                    );
-
-                let client_no_tls = Client::connect(&etcd_endpoints, Some(connect_options))
-                    .await
-                    .context(error::ConnectEtcdSnafu);
-
-                return client_no_tls;
-            }
-            Err(e)
-        }
-    }
+        .context(error::ConnectEtcdSnafu)
 }
 
-fn convert_tls_option(tls_option: &TlsOption) -> common_meta::kv_backend::etcd::TlsOption {
+fn convert_tls_option(
+    all_endpoints_use_https: bool,
+    tls_option: &TlsOption,
+) -> common_meta::kv_backend::etcd::TlsOption {
     let mode = match tls_option.mode {
         TlsMode::Disable => common_meta::kv_backend::etcd::TlsMode::Disable,
+        TlsMode::Prefer => {
+            if all_endpoints_use_https {
+                common_meta::kv_backend::etcd::TlsMode::Require
+            } else {
+                warn!(
+                    "All endpoints use HTTP, TLS prefer mode is not supported, using disable mode"
+                );
+                common_meta::kv_backend::etcd::TlsMode::Disable
+            }
+        }
         _ => common_meta::kv_backend::etcd::TlsMode::Require,
     };
     common_meta::kv_backend::etcd::TlsOption {
