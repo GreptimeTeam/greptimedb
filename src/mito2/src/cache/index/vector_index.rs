@@ -97,6 +97,7 @@ pub trait VectorIndexCacheExt {
     ///
     /// This method is thread-safe and uses atomic get-or-insert semantics to avoid
     /// loading the same index multiple times when concurrent requests arrive.
+    #[allow(dead_code)]
     fn get_or_try_insert_with<E, F>(
         &self,
         key: VectorIndexCacheKey,
