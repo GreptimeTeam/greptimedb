@@ -75,6 +75,9 @@ allow_region_failover_on_local_wal = false
 ## Max allowed idle time before removing node info from metasrv memory.
 node_max_idle_time = "24hours"
 
+## Whether to enable greptimedb telemetry. Enabled by default.
+#+ enable_telemetry = true
+
 ## Heartbeat configuration that Metasrv sends to nodes during handshake.
 ## Metasrv centrally manages heartbeat intervals for all node types.
 ## Nodes will receive these configurations when they first connect to Metasrv.
@@ -95,9 +98,6 @@ node_max_idle_time = "24hours"
 #+ interval = "3s"
 ## Retry interval when heartbeat connection fails for flownode.
 #+ retry_interval = "3s"
-
-## Whether to enable greptimedb telemetry. Enabled by default.
-#+ enable_telemetry = true
 
 ## The runtime options.
 #+ [runtime]
