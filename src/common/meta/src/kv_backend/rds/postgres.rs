@@ -869,7 +869,7 @@ impl PgStore {
             Ok(client) => client,
             Err(e) => {
                 // We need to log the debug for the error to help diagnose the issue.
-                common_telemetry::error!("Failed to get Postgres connection: {:?}", e);
+                common_telemetry::error!(e; "Failed to get Postgres connection.");
                 return GetPostgresConnectionSnafu {
                     reason: e.to_string(),
                 }
