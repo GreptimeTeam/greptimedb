@@ -361,7 +361,7 @@
 | `heartbeat_config.flownode` | -- | -- | -- |
 | `heartbeat_config.flownode.interval` | String | `3s` | Heartbeat interval for flownode. |
 | `heartbeat_config.flownode.retry_interval` | String | `3s` | Retry interval when heartbeat connection fails for flownode. |
-| `heartbeat_config.flownode.enable_telemetry` | Bool | `true` | Whether to enable greptimedb telemetry. Enabled by default. |
+| `enable_telemetry` | Bool | `true` | Whether to enable greptimedb telemetry. Enabled by default. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
