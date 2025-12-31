@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_meta::kv_backend::etcd::create_etcd_tls_options;
+use common_telemetry::warn;
 use etcd_client::{Client, ConnectOptions};
 use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
@@ -38,9 +39,12 @@ pub async fn create_etcd_client_with_tls(
             client_options.keep_alive_interval,
             client_options.keep_alive_timeout,
         );
+
+    let all_endpoints_use_https = etcd_endpoints.iter().all(|e| e.starts_with("https"));
     if let Some(tls_config) = tls_config
-        && let Some(tls_options) = create_etcd_tls_options(&convert_tls_option(tls_config))
-            .context(BuildTlsOptionsSnafu)?
+        && let Some(tls_options) =
+            create_etcd_tls_options(&convert_tls_option(all_endpoints_use_https, tls_config))
+                .context(BuildTlsOptionsSnafu)?
     {
         connect_options = connect_options.with_tls(tls_options);
     }
@@ -50,9 +54,22 @@ pub async fn create_etcd_client_with_tls(
         .context(error::ConnectEtcdSnafu)
 }
 
-fn convert_tls_option(tls_option: &TlsOption) -> common_meta::kv_backend::etcd::TlsOption {
+fn convert_tls_option(
+    all_endpoints_use_https: bool,
+    tls_option: &TlsOption,
+) -> common_meta::kv_backend::etcd::TlsOption {
     let mode = match tls_option.mode {
         TlsMode::Disable => common_meta::kv_backend::etcd::TlsMode::Disable,
+        TlsMode::Prefer => {
+            if all_endpoints_use_https {
+                common_meta::kv_backend::etcd::TlsMode::Require
+            } else {
+                warn!(
+                    "All endpoints use HTTP, TLS prefer mode is not supported, using disable mode"
+                );
+                common_meta::kv_backend::etcd::TlsMode::Disable
+            }
+        }
         _ => common_meta::kv_backend::etcd::TlsMode::Require,
     };
     common_meta::kv_backend::etcd::TlsOption {
