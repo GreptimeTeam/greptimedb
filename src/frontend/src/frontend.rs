@@ -25,7 +25,6 @@ use meta_client::MetaClientOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
-use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::server::ServerHandlers;
 use snafu::ResultExt;
@@ -45,7 +44,6 @@ pub struct FrontendOptions {
     pub node_id: Option<String>,
     pub default_timezone: Option<String>,
     pub default_column_prefix: Option<String>,
-    pub heartbeat: HeartbeatOptions,
     /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
     /// Set to 0 to disable the limit. Default: "0" (unlimited)
     pub max_in_flight_write_bytes: ReadableSize,
@@ -82,7 +80,6 @@ impl Default for FrontendOptions {
             node_id: None,
             default_timezone: None,
             default_column_prefix: None,
-            heartbeat: HeartbeatOptions::frontend_default(),
             max_in_flight_write_bytes: ReadableSize(0),
             write_bytes_exhausted_policy: OnExhaustedPolicy::default(),
             http: HttpOptions::default(),
@@ -406,10 +403,6 @@ mod tests {
                 ..Default::default()
             },
             meta_client: Some(meta_client_options.clone()),
-            heartbeat: HeartbeatOptions {
-                interval: Duration::from_secs(1),
-                ..Default::default()
-            },
             ..Default::default()
         };
 
@@ -419,7 +412,11 @@ mod tests {
         let meta_client = create_meta_client(&meta_client_options, server.clone()).await;
         let frontend = create_frontend(&options, meta_client).await?;
 
-        let frontend_heartbeat_interval = options.heartbeat.interval;
+        use common_meta::distributed_time_constants::{
+            BASE_HEARTBEAT_INTERVAL, frontend_heartbeat_interval,
+        };
+        let frontend_heartbeat_interval =
+            frontend_heartbeat_interval(BASE_HEARTBEAT_INTERVAL) + Duration::from_secs(1);
         tokio::time::sleep(frontend_heartbeat_interval).await;
         // initial state: not suspend:
         assert!(!frontend.instance.is_suspended());

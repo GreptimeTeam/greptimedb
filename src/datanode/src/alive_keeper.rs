@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use api::v1::meta::GrantedRegion;
 use async_trait::async_trait;
@@ -50,7 +50,7 @@ use crate::region_server::RegionServer;
 pub struct RegionAliveKeeper {
     region_server: RegionServer,
     tasks: Arc<Mutex<HashMap<RegionId, Arc<CountdownTaskHandle>>>>,
-    heartbeat_interval_millis: u64,
+    heartbeat_interval_millis: Arc<AtomicU64>,
     started: Arc<AtomicBool>,
 
     /// The epoch when [RegionAliveKeeper] is created. It's used to get a monotonically non-decreasing
@@ -72,11 +72,17 @@ impl RegionAliveKeeper {
         Self {
             region_server,
             tasks: Arc::new(Mutex::new(HashMap::new())),
-            heartbeat_interval_millis,
+            heartbeat_interval_millis: Arc::new(AtomicU64::new(heartbeat_interval_millis)),
             started: Arc::new(AtomicBool::new(false)),
             epoch: Instant::now(),
             countdown_task_handler_ext,
         }
+    }
+
+    /// Update the heartbeat interval with the value received from Metasrv.
+    pub fn update_heartbeat_interval(&self, heartbeat_interval_millis: u64) {
+        self.heartbeat_interval_millis
+            .store(heartbeat_interval_millis, Ordering::Relaxed);
     }
 
     async fn find_handle(&self, region_id: RegionId) -> Option<Arc<CountdownTaskHandle>> {
@@ -108,7 +114,9 @@ impl RegionAliveKeeper {
         };
 
         if should_start {
-            handle.start(self.heartbeat_interval_millis).await;
+            handle
+                .start(self.heartbeat_interval_millis.load(Ordering::Relaxed))
+                .await;
             info!("Region alive countdown for region {region_id} is started!");
         } else {
             info!(
@@ -230,8 +238,9 @@ impl RegionAliveKeeper {
         }
 
         let tasks = self.tasks.lock().await;
+        let interval = self.heartbeat_interval_millis.load(Ordering::Relaxed);
         for task in tasks.values() {
-            task.start(self.heartbeat_interval_millis).await;
+            task.start(interval).await;
         }
 
         info!(

@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use api::v1::meta::Role;
 use clap::ValueEnum;
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
@@ -117,6 +118,78 @@ impl Default for StatsPersistenceOptions {
         Self {
             ttl: Duration::ZERO,
             interval: Duration::from_mins(10),
+        }
+    }
+}
+
+/// Heartbeat configuration for a single node type.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct HeartbeatOptions {
+    /// Heartbeat interval.
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
+    /// Retry interval when heartbeat connection fails.
+    #[serde(with = "humantime_serde")]
+    pub retry_interval: Duration,
+}
+
+impl HeartbeatOptions {
+    pub fn datanode_default() -> Self {
+        use common_meta::distributed_time_constants::*;
+        Self {
+            interval: BASE_HEARTBEAT_INTERVAL,
+            retry_interval: Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS),
+        }
+    }
+
+    pub fn frontend_default() -> Self {
+        use common_meta::distributed_time_constants::*;
+        Self {
+            interval: frontend_heartbeat_interval(BASE_HEARTBEAT_INTERVAL),
+            retry_interval: BASE_HEARTBEAT_INTERVAL,
+        }
+    }
+
+    pub fn flownode_default() -> Self {
+        use common_meta::distributed_time_constants::*;
+        Self {
+            interval: BASE_HEARTBEAT_INTERVAL,
+            retry_interval: BASE_HEARTBEAT_INTERVAL,
+        }
+    }
+}
+
+impl From<&HeartbeatOptions> for api::v1::meta::HeartbeatConfig {
+    fn from(opts: &HeartbeatOptions) -> Self {
+        Self {
+            heartbeat_interval_ms: opts.interval.as_millis() as u64,
+            retry_interval_ms: opts.retry_interval.as_millis() as u64,
+        }
+    }
+}
+
+impl Default for HeartbeatOptions {
+    fn default() -> Self {
+        Self::datanode_default()
+    }
+}
+
+/// Heartbeat configuration that Metasrv manages for all node types.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct MetasrvHeartbeatOptions {
+    pub datanode: HeartbeatOptions,
+    pub frontend: HeartbeatOptions,
+    pub flownode: HeartbeatOptions,
+}
+
+impl Default for MetasrvHeartbeatOptions {
+    fn default() -> Self {
+        Self {
+            datanode: HeartbeatOptions::datanode_default(),
+            frontend: HeartbeatOptions::frontend_default(),
+            flownode: HeartbeatOptions::flownode_default(),
         }
     }
 }
@@ -242,6 +315,10 @@ pub struct MetasrvOptions {
     pub stats_persistence: StatsPersistenceOptions,
     /// The GC scheduler options.
     pub gc: GcSchedulerOptions,
+    /// Heartbeat configuration to send to nodes.
+    /// Metasrv will send these intervals to nodes during handshake.
+    #[serde(default)]
+    pub heartbeat_config: MetasrvHeartbeatOptions,
 }
 
 impl fmt::Debug for MetasrvOptions {
@@ -343,6 +420,7 @@ impl Default for MetasrvOptions {
             stats_persistence: StatsPersistenceOptions::default(),
             gc: GcSchedulerOptions::default(),
             backend_client: BackendClientOptions::default(),
+            heartbeat_config: MetasrvHeartbeatOptions::default(),
         }
     }
 }
@@ -379,12 +457,27 @@ pub struct Context {
     pub cache_invalidator: CacheInvalidatorRef,
     pub leader_region_registry: LeaderRegionRegistryRef,
     pub topic_stats_registry: TopicStatsRegistryRef,
+    pub heartbeat_config: MetasrvHeartbeatOptions,
+    pub is_handshake: bool,
 }
 
 impl Context {
     pub fn reset_in_memory(&self) {
         self.in_memory.reset();
         self.leader_region_registry.reset();
+    }
+
+    pub fn with_handshake(mut self, is_handshake: bool) -> Self {
+        self.is_handshake = is_handshake;
+        self
+    }
+
+    pub fn heartbeat_options_for(&self, role: Role) -> &HeartbeatOptions {
+        match role {
+            Role::Datanode => &self.heartbeat_config.datanode,
+            Role::Frontend => &self.heartbeat_config.frontend,
+            Role::Flownode => &self.heartbeat_config.flownode,
+        }
     }
 }
 
@@ -903,6 +996,8 @@ impl Metasrv {
             cache_invalidator,
             leader_region_registry,
             topic_stats_registry,
+            heartbeat_config: self.options().heartbeat_config.clone(),
+            is_handshake: false,
         }
     }
 }

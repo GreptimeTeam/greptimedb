@@ -66,7 +66,8 @@ impl heartbeat_server::Heartbeat for Metasrv {
                             break;
                         };
 
-                        if pusher_id.is_none() {
+                        let is_handshake = pusher_id.is_none();
+                        if is_handshake {
                             pusher_id =
                                 Some(register_pusher(&handler_group, header, tx.clone()).await);
                         }
@@ -77,7 +78,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
                         }
 
                         let res = handler_group
-                            .handle(req, ctx.clone())
+                            .handle(req, ctx.clone().with_handshake(is_handshake))
                             .await
                             .inspect_err(|e| warn!(e; "Failed to handle heartbeat request, pusher: {pusher_id:?}", ))
                             .map_err(|e| e.into());

@@ -77,6 +77,8 @@ impl TestEnv {
 
     /// Returns a new context for testing.
     pub fn ctx(&self) -> Context {
+        use crate::metasrv::MetasrvHeartbeatOptions;
+
         Context {
             in_memory: self.in_memory.clone(),
             kv_backend: self.kv_backend.clone(),
@@ -90,6 +92,8 @@ impl TestEnv {
             cache_invalidator: self.cache_invalidator.clone(),
             leader_region_registry: self.leader_region_registry.clone(),
             topic_stats_registry: self.topic_stats_registry.clone(),
+            heartbeat_config: MetasrvHeartbeatOptions::default(),
+            is_handshake: false,
         }
     }
 }

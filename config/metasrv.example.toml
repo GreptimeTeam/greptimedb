@@ -75,12 +75,26 @@ allow_region_failover_on_local_wal = false
 ## Max allowed idle time before removing node info from metasrv memory.
 node_max_idle_time = "24hours"
 
-## Base heartbeat interval for calculating distributed time constants.
-## The frontend heartbeat interval is 6 times of the base heartbeat interval.
-## The flownode/datanode heartbeat interval is 1 times of the base heartbeat interval.
-## e.g., If the base heartbeat interval is 3s, the frontend heartbeat interval is 18s, the flownode/datanode heartbeat interval is 3s.
-## If you change this value, you need to change the heartbeat interval of the flownode/frontend/datanode accordingly.
-#+ heartbeat_interval = "3s"
+## Heartbeat configuration that Metasrv sends to nodes during handshake.
+## Metasrv centrally manages heartbeat intervals for all node types.
+## Nodes will receive these configurations when they first connect to Metasrv.
+#+ [heartbeat_config.datanode]
+## Heartbeat interval for datanode.
+#+ interval = "3s"
+## Retry interval when heartbeat connection fails for datanode.
+#+ retry_interval = "2s"
+
+#+ [heartbeat_config.frontend]
+## Heartbeat interval for frontend (6x base interval to reduce overhead).
+#+ interval = "18s"
+## Retry interval when heartbeat connection fails for frontend.
+#+ retry_interval = "3s"
+
+#+ [heartbeat_config.flownode]
+## Heartbeat interval for flownode.
+#+ interval = "3s"
+## Retry interval when heartbeat connection fails for flownode.
+#+ retry_interval = "3s"
 
 ## Whether to enable greptimedb telemetry. Enabled by default.
 #+ enable_telemetry = true

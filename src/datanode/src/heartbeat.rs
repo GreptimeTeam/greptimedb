@@ -22,7 +22,7 @@ use api::v1::meta::{DatanodeWorkloads, HeartbeatRequest, NodeInfo, Peer, RegionR
 use common_base::Plugins;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::datanode::REGION_STATISTIC_KEY;
-use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
+use common_meta::distributed_time_constants::BASE_HEARTBEAT_INTERVAL;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::suspend::SuspendHandler;
@@ -35,6 +35,7 @@ use common_stat::ResourceStatRef;
 use common_telemetry::{debug, error, info, trace, warn};
 use common_workload::DatanodeWorkloadType;
 use meta_client::MetaClientRef;
+use meta_client::client::heartbeat::HeartbeatConfig;
 use meta_client::client::{HeartbeatSender, MetaClient};
 use servers::addrs;
 use snafu::{OptionExt as _, ResultExt};
@@ -61,7 +62,6 @@ pub struct HeartbeatTask {
     running: Arc<AtomicBool>,
     meta_client: MetaClientRef,
     region_server: RegionServer,
-    interval: u64,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     region_alive_keeper: Arc<RegionAliveKeeper>,
     resource_stat: ResourceStatRef,
@@ -87,7 +87,7 @@ impl HeartbeatTask {
         let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
             region_server.clone(),
             countdown_task_handler_ext,
-            opts.heartbeat.interval.as_millis() as u64,
+            BASE_HEARTBEAT_INTERVAL.as_millis() as u64,
         ));
         let resp_handler_executor = Arc::new(HandlerGroupExecutor::new(vec![
             region_alive_keeper.clone(),
@@ -109,7 +109,6 @@ impl HeartbeatTask {
             running: Arc::new(AtomicBool::new(false)),
             meta_client,
             region_server,
-            interval: opts.heartbeat.interval.as_millis() as u64,
             resp_handler_executor,
             region_alive_keeper,
             resource_stat,
@@ -123,9 +122,9 @@ impl HeartbeatTask {
         mailbox: MailboxRef,
         mut notify: Option<Arc<Notify>>,
         quit_signal: Arc<Notify>,
-    ) -> Result<HeartbeatSender> {
+    ) -> Result<(HeartbeatSender, HeartbeatConfig)> {
         let client_id = meta_client.id();
-        let (tx, mut rx) = meta_client.heartbeat().await.context(MetaClientInitSnafu)?;
+        let (tx, mut rx, config) = meta_client.heartbeat().await.context(MetaClientInitSnafu)?;
 
         let mut last_received_lease = Instant::now();
 
@@ -175,7 +174,7 @@ impl HeartbeatTask {
             quit_signal.notify_one();
             info!("Heartbeat handling loop exit.");
         });
-        Ok(tx)
+        Ok((tx, config))
     }
 
     async fn handle_response(
@@ -204,13 +203,9 @@ impl HeartbeatTask {
             warn!("Heartbeat task started multiple times");
             return Ok(());
         }
-        let interval = self.interval;
         let node_id = self.node_id;
         let node_epoch = self.node_epoch;
         let addr = &self.peer_addr;
-        info!(
-            "Starting heartbeat to Metasrv with interval {interval}. My node id is {node_id}, address is {addr}."
-        );
 
         let meta_client = self.meta_client.clone();
         let region_server_clone = self.region_server.clone();
@@ -222,7 +217,7 @@ impl HeartbeatTask {
 
         let quit_signal = Arc::new(Notify::new());
 
-        let mut tx = Self::create_streams(
+        let (mut tx, config) = Self::create_streams(
             &meta_client,
             running.clone(),
             handler_executor.clone(),
@@ -231,6 +226,17 @@ impl HeartbeatTask {
             quit_signal.clone(),
         )
         .await?;
+
+        let interval = config.interval.as_millis() as u64;
+        let mut retry_interval = config.retry_interval;
+
+        // Update RegionAliveKeeper with the interval from Metasrv
+        self.region_alive_keeper.update_heartbeat_interval(interval);
+
+        info!(
+            "Starting heartbeat to Metasrv with config: {}. My node id is {}, address is {}.",
+            config, node_id, addr
+        );
 
         let self_peer = Some(Peer {
             id: node_id,
@@ -244,6 +250,7 @@ impl HeartbeatTask {
         let total_cpu_millicores = self.resource_stat.get_total_cpu_millicores();
         let total_memory_bytes = self.resource_stat.get_total_memory_bytes();
         let resource_stat = self.resource_stat.clone();
+        let region_alive_keeper = self.region_alive_keeper.clone();
         let gc_limiter = self
             .region_server
             .mito_engine()
@@ -363,20 +370,23 @@ impl HeartbeatTask {
                         )
                         .await
                         {
-                            Ok(new_tx) => {
-                                info!("Reconnected to metasrv");
+                            Ok((new_tx, new_config)) => {
+                                info!("Reconnected to metasrv, heartbeat config: {}", new_config);
                                 tx = new_tx;
+                                // Update retry_interval from new config
+                                retry_interval = new_config.retry_interval;
+                                // Update region_alive_keeper's heartbeat interval
+                                region_alive_keeper.update_heartbeat_interval(
+                                    new_config.interval.as_millis() as u64,
+                                );
                                 // Triggers to send heartbeat immediately.
                                 sleep.as_mut().reset(Instant::now());
                             }
                             Err(e) => {
                                 // Before the META_LEASE_SECS expires,
                                 // any retries are meaningless, it always reads the old meta leader address.
-                                // Triggers to retry after META_KEEP_ALIVE_INTERVAL_SECS.
-                                sleep.as_mut().reset(
-                                    Instant::now()
-                                        + Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS),
-                                );
+                                // Triggers to retry after retry_interval from Metasrv config.
+                                sleep.as_mut().reset(Instant::now() + retry_interval);
                                 error!(e; "Failed to reconnect to metasrv!");
                             }
                         }

@@ -30,7 +30,7 @@ pub mod configurator;
 pub(crate) mod elasticsearch;
 pub mod error;
 pub mod grpc;
-pub mod heartbeat_options;
+
 mod hint_headers;
 pub mod http;
 pub mod influxdb;

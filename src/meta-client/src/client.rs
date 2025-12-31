@@ -13,7 +13,7 @@
 // limitations under the License.
 
 mod ask_leader;
-mod heartbeat;
+pub mod heartbeat;
 mod load_balance;
 mod procedure;
 
@@ -57,7 +57,7 @@ use common_meta::rpc::store::{
 };
 use common_telemetry::info;
 use futures::TryStreamExt;
-use heartbeat::Client as HeartbeatClient;
+use heartbeat::{Client as HeartbeatClient, HeartbeatConfig};
 use procedure::Client as ProcedureClient;
 use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
@@ -594,7 +594,9 @@ impl MetaClient {
     /// The `datanode` needs to use the sender to continuously send heartbeat
     /// packets (some self-state data), and the receiver can receive a response
     /// from "metasrv" (which may contain some scheduling instructions).
-    pub async fn heartbeat(&self) -> Result<(HeartbeatSender, HeartbeatStream)> {
+    ///
+    /// Returns the heartbeat sender, stream, and configuration received from Metasrv.
+    pub async fn heartbeat(&self) -> Result<(HeartbeatSender, HeartbeatStream, HeartbeatConfig)> {
         self.heartbeat_client()?.heartbeat().await
     }
 
@@ -873,7 +875,7 @@ mod tests {
     #[tokio::test]
     async fn test_heartbeat() {
         let tc = new_client("test_heartbeat").await;
-        let (sender, mut receiver) = tc.client.heartbeat().await.unwrap();
+        let (sender, mut receiver, _config) = tc.client.heartbeat().await.unwrap();
         // send heartbeats
 
         let request_sent = Arc::new(AtomicUsize::new(0));
