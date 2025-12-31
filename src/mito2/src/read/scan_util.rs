@@ -507,6 +507,7 @@ impl ScanMetricsSet {
                     inverted_index_apply_metrics,
                     bloom_filter_apply_metrics,
                     fulltext_index_apply_metrics,
+                    ..
                 },
             num_record_batches,
             num_batches,

@@ -51,6 +51,7 @@ pub struct VectorSearchResult {
     /// These are the original row offsets (not HNSW keys).
     pub row_offsets: Vec<u64>,
     /// The distances to the query vector.
+    #[allow(dead_code)]
     pub distances: Vec<f32>,
 }
 
@@ -94,6 +95,7 @@ impl VectorIndexApplyMetrics {
     }
 
     /// Merges another metrics into this one.
+    #[allow(dead_code)]
     pub fn merge_from(&mut self, other: &Self) {
         self.apply_elapsed += other.apply_elapsed;
         self.blob_cache_miss += other.blob_cache_miss;
@@ -134,6 +136,7 @@ pub struct VectorIndexApplier {
     query_vector: Vec<f32>,
 
     /// The number of results to return (k in KNN).
+    #[allow(dead_code)]
     k: usize,
 
     /// The distance metric.
@@ -179,21 +182,25 @@ impl VectorIndexApplier {
     }
 
     /// Returns the number of results to return (k in KNN).
+    #[allow(dead_code)]
     pub fn k(&self) -> usize {
         self.k
     }
 
     /// Returns the query vector.
+    #[allow(dead_code)]
     pub fn query_vector(&self) -> &[f32] {
         &self.query_vector
     }
 
     /// Returns the column ID of the vector column to search.
+    #[allow(dead_code)]
     pub fn column_id(&self) -> ColumnId {
         self.column_id
     }
 
     /// Returns the distance metric.
+    #[allow(dead_code)]
     pub fn metric(&self) -> VectorDistanceMetric {
         self.metric
     }

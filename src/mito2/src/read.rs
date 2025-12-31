@@ -32,8 +32,6 @@ pub mod series_scan;
 pub mod stream;
 pub(crate) mod unordered_scan;
 #[cfg(feature = "vector_index")]
-pub(crate) mod vector_scan;
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;

@@ -408,12 +408,6 @@ impl FileRangeBuilder {
         }
     }
 
-    /// Returns the context of the file.
-    #[cfg(feature = "vector_index")]
-    pub(crate) fn context(&self) -> Option<FileRangeContextRef> {
-        self.context.clone()
-    }
-
     /// Builds file ranges to read.
     /// Negative `row_group_index` indicates all row groups.
     pub fn build_ranges(&self, row_group_index: i64, ranges: &mut SmallVec<[FileRange; 2]>) {
