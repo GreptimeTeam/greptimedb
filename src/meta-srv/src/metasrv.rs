@@ -299,7 +299,7 @@ impl Default for MetasrvOptions {
             #[allow(deprecated)]
             server_addr: String::new(),
             store_addrs: vec!["127.0.0.1:2379".to_string()],
-            backend_tls: None,
+            backend_tls: Some(TlsOption::prefer()),
             selector: SelectorType::default(),
             enable_region_failover: false,
             heartbeat_interval: distributed_time_constants::BASE_HEARTBEAT_INTERVAL,

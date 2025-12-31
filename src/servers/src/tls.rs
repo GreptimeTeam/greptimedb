@@ -91,6 +91,17 @@ impl TlsOption {
         tls_option
     }
 
+    /// Creates a new TLS option with the prefer mode.
+    pub fn prefer() -> Self {
+        Self {
+            mode: TlsMode::Prefer,
+            cert_path: String::new(),
+            key_path: String::new(),
+            ca_cert_path: String::new(),
+            watch: false,
+        }
+    }
+
     /// Validates the TLS configuration.
     ///
     /// Returns an error if:
