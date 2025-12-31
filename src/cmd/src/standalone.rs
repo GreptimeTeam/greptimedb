@@ -261,7 +261,7 @@ impl StartCommand {
         };
 
         let tls_opts = TlsOption::new(
-            self.tls_mode.clone(),
+            self.tls_mode,
             self.tls_cert_path.clone(),
             self.tls_key_path.clone(),
             self.tls_watch,
