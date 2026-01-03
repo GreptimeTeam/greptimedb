@@ -777,9 +777,119 @@ fn expand_step_aggr_proj() {
     assert_eq!(expected, result.to_string());
 }
 
-/// should only expand `Sort`, notice `Sort` before `Aggregate` usually can and
-/// will be optimized out, and dist planner shouldn't handle that case, but
-/// for now, still handle that be expanding the `Sort` node
+#[test]
+fn expand_complex_col_req_proj_part_aggr_sort() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .filter(col("pk1").eq(lit("3")))
+        .unwrap()
+        .aggregate(vec![col("pk1"), col("pk2")], vec![min(col("number"))])
+        .unwrap()
+        .sort(vec![
+            col("pk1").sort(true, false),
+            col("pk2").sort(true, false),
+        ])
+        .unwrap()
+        .project(vec![col("pk1"), col("pk2")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [""].join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn repro_bug_aggregate_drops_sort_col() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    // Limit -> Projection (drops pk3) -> Sort (needs pk3) -> Scan
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .sort(vec![col("pk3").sort(true, false)])
+        .unwrap()
+        .project(vec![col("pk1"), col("pk2"), col("number")]) // drops pk3
+        .unwrap()
+        .limit(0, Some(10)) // force expansion
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [""].join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn repro_no_alias_found_aggregate() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    // pk3 is a partition column.
+    // Projection (pk3 AS p3, pk3 AS p3_alt, number)
+    // Sort (p3_alt) -> commutative, goes to stage. Requirement for p3_alt.
+    // Aggregate (group by p3) -> matches partition (since p3 is an alias of pk3), stays in on_node.
+    //   But it DROPS p3_alt.
+    // Projection (keeps p3, min_number) -> stays in on_node.
+    // Limit triggers expansion.
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![
+            col("pk1"),
+            col("pk2"),
+            col("pk3").alias("p3"),
+            col("pk3").alias("p3_alt"),
+            col("number"),
+        ])
+        .unwrap()
+        .sort(vec![col("p3_alt").sort(true, false)])
+        .unwrap()
+        .aggregate(
+            vec![col("p3")],
+            vec![min(col("number")).alias("min_number")],
+        )
+        .unwrap()
+        .project(vec![col("p3"), col("min_number")])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config);
+
+    match result {
+        Ok(plan) => panic!("Expected error, but got plan:\n{}", plan.display_indent()),
+        Err(e) => {
+            let err_msg = e.to_string();
+            assert!(
+                err_msg.contains(
+                    "EnforceDistRequirementRewriter: no alias found for required column p3_alt"
+                ),
+                "Error message was: {}",
+                err_msg
+            );
+        }
+    }
+}
+
 #[test]
 fn expand_proj_sort_step_aggr_limit() {
     // use logging for better debugging
