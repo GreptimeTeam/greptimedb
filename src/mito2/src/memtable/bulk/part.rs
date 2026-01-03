@@ -66,7 +66,7 @@ use crate::error::{
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
-use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics};
+use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::file_range::{PreFilterMode, row_group_contains_delete};
 use crate::sst::parquet::flat_format::primary_key_column_index;
@@ -167,6 +167,22 @@ impl BulkPart {
             dict_array.values().len()
         } else {
             0
+        }
+    }
+
+    /// Creates MemtableStats from this BulkPart.
+    pub fn to_memtable_stats(&self, region_metadata: &RegionMetadataRef) -> MemtableStats {
+        let ts_type = region_metadata.time_index_type();
+        let min_ts = ts_type.create_timestamp(self.min_timestamp);
+        let max_ts = ts_type.create_timestamp(self.max_timestamp);
+
+        MemtableStats {
+            estimated_bytes: self.estimated_size(),
+            time_range: Some((min_ts, max_ts)),
+            num_rows: self.num_rows(),
+            num_ranges: 1,
+            max_sequence: self.sequence,
+            series_count: self.estimated_series_count(),
         }
     }
 
@@ -965,6 +981,23 @@ impl EncodedBulkPart {
         &self.data
     }
 
+    /// Creates MemtableStats from this EncodedBulkPart.
+    pub fn to_memtable_stats(&self) -> MemtableStats {
+        let meta = &self.metadata;
+        let ts_type = meta.region_metadata.time_index_type();
+        let min_ts = ts_type.create_timestamp(meta.min_timestamp);
+        let max_ts = ts_type.create_timestamp(meta.max_timestamp);
+
+        MemtableStats {
+            estimated_bytes: self.size_bytes(),
+            time_range: Some((min_ts, max_ts)),
+            num_rows: meta.num_rows,
+            num_ranges: 1,
+            max_sequence: meta.max_sequence,
+            series_count: meta.num_series as usize,
+        }
+    }
+
     /// Converts this `EncodedBulkPart` to `SstInfo`.
     ///
     /// # Arguments
@@ -1061,6 +1094,8 @@ pub struct BulkPartMeta {
     pub region_metadata: RegionMetadataRef,
     /// Number of series.
     pub num_series: u64,
+    /// Maximum sequence number in part.
+    pub max_sequence: u64,
 }
 
 /// Metrics for encoding a part.
@@ -1122,6 +1157,7 @@ impl BulkPartEncoder {
         arrow_schema: SchemaRef,
         min_timestamp: i64,
         max_timestamp: i64,
+        max_sequence: u64,
         metrics: &mut BulkPartEncodeMetrics,
     ) -> Result<Option<EncodedBulkPart>> {
         let mut buf = Vec::with_capacity(4096);
@@ -1173,6 +1209,7 @@ impl BulkPartEncoder {
                 parquet_metadata,
                 region_metadata: self.metadata.clone(),
                 num_series,
+                max_sequence,
             },
         }))
     }
@@ -1206,6 +1243,7 @@ impl BulkPartEncoder {
                 parquet_metadata,
                 region_metadata: self.metadata.clone(),
                 num_series: part.estimated_series_count() as u64,
+                max_sequence: part.sequence,
             },
         }))
     }

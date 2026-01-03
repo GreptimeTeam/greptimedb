@@ -20,6 +20,8 @@ pub(crate) mod inverted_index;
 pub mod puffin_manager;
 mod statistics;
 pub(crate) mod store;
+#[cfg(feature = "vector_index")]
+pub(crate) mod vector_index;
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -41,10 +43,14 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId, RegionId};
 use strum::IntoStaticStr;
 use tokio::sync::mpsc::Sender;
+#[cfg(feature = "vector_index")]
+use vector_index::creator::VectorIndexer;
 
 use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, RegionFilePathFactory};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::{UploadTracker, WriteCacheRef};
+#[cfg(feature = "vector_index")]
+use crate::config::VectorIndexConfig;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{
     BuildIndexAsyncSnafu, DecodeSnafu, Error, InvalidRecordBatchSnafu, RegionClosedSnafu,
@@ -76,6 +82,8 @@ use crate::worker::WorkerListener;
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
 pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";
 pub(crate) const TYPE_BLOOM_FILTER_INDEX: &str = "bloom_filter_index";
+#[cfg(feature = "vector_index")]
+pub(crate) const TYPE_VECTOR_INDEX: &str = "vector_index";
 
 /// Triggers background download of an index file to the local cache.
 pub(crate) fn trigger_index_background_download(
@@ -114,6 +122,9 @@ pub struct IndexOutput {
     pub fulltext_index: FulltextIndexOutput,
     /// Bloom filter output.
     pub bloom_filter: BloomFilterOutput,
+    /// Vector index output.
+    #[cfg(feature = "vector_index")]
+    pub vector_index: VectorIndexOutput,
 }
 
 impl IndexOutput {
@@ -127,6 +138,10 @@ impl IndexOutput {
         }
         if self.bloom_filter.is_available() {
             indexes.push(IndexType::BloomFilterIndex);
+        }
+        #[cfg(feature = "vector_index")]
+        if self.vector_index.is_available() {
+            indexes.push(IndexType::VectorIndex);
         }
         indexes
     }
@@ -149,6 +164,12 @@ impl IndexOutput {
                 map.entry(col)
                     .or_default()
                     .push(IndexType::BloomFilterIndex);
+            }
+        }
+        #[cfg(feature = "vector_index")]
+        if self.vector_index.is_available() {
+            for &col in &self.vector_index.columns {
+                map.entry(col).or_default().push(IndexType::VectorIndex);
             }
         }
 
@@ -184,6 +205,9 @@ pub type InvertedIndexOutput = IndexBaseOutput;
 pub type FulltextIndexOutput = IndexBaseOutput;
 /// Output of the bloom filter creation.
 pub type BloomFilterOutput = IndexBaseOutput;
+/// Output of the vector index creation.
+#[cfg(feature = "vector_index")]
+pub type VectorIndexOutput = IndexBaseOutput;
 
 /// The index creator that hides the error handling details.
 #[derive(Default)]
@@ -199,6 +223,10 @@ pub struct Indexer {
     last_mem_fulltext_index: usize,
     bloom_filter_indexer: Option<BloomFilterIndexer>,
     last_mem_bloom_filter: usize,
+    #[cfg(feature = "vector_index")]
+    vector_indexer: Option<VectorIndexer>,
+    #[cfg(feature = "vector_index")]
+    last_mem_vector_index: usize,
     intermediate_manager: Option<IntermediateManager>,
 }
 
@@ -259,6 +287,18 @@ impl Indexer {
             .with_label_values(&[TYPE_BLOOM_FILTER_INDEX])
             .add(bloom_filter_mem as i64 - self.last_mem_bloom_filter as i64);
         self.last_mem_bloom_filter = bloom_filter_mem;
+
+        #[cfg(feature = "vector_index")]
+        {
+            let vector_mem = self
+                .vector_indexer
+                .as_ref()
+                .map_or(0, |creator| creator.memory_usage());
+            INDEX_CREATE_MEMORY_USAGE
+                .with_label_values(&[TYPE_VECTOR_INDEX])
+                .add(vector_mem as i64 - self.last_mem_vector_index as i64);
+            self.last_mem_vector_index = vector_mem;
+        }
     }
 }
 
@@ -279,6 +319,8 @@ pub(crate) struct IndexerBuilderImpl {
     pub(crate) inverted_index_config: InvertedIndexConfig,
     pub(crate) fulltext_index_config: FulltextIndexConfig,
     pub(crate) bloom_filter_index_config: BloomFilterConfig,
+    #[cfg(feature = "vector_index")]
+    pub(crate) vector_index_config: VectorIndexConfig,
 }
 
 #[async_trait::async_trait]
@@ -296,11 +338,23 @@ impl IndexerBuilder for IndexerBuilderImpl {
         indexer.inverted_indexer = self.build_inverted_indexer(file_id);
         indexer.fulltext_indexer = self.build_fulltext_indexer(file_id).await;
         indexer.bloom_filter_indexer = self.build_bloom_filter_indexer(file_id);
-        indexer.intermediate_manager = Some(self.intermediate_manager.clone());
-        if indexer.inverted_indexer.is_none()
-            && indexer.fulltext_indexer.is_none()
-            && indexer.bloom_filter_indexer.is_none()
+        #[cfg(feature = "vector_index")]
         {
+            indexer.vector_indexer = self.build_vector_indexer(file_id);
+        }
+        indexer.intermediate_manager = Some(self.intermediate_manager.clone());
+
+        #[cfg(feature = "vector_index")]
+        let has_any_indexer = indexer.inverted_indexer.is_some()
+            || indexer.fulltext_indexer.is_some()
+            || indexer.bloom_filter_indexer.is_some()
+            || indexer.vector_indexer.is_some();
+        #[cfg(not(feature = "vector_index"))]
+        let has_any_indexer = indexer.inverted_indexer.is_some()
+            || indexer.fulltext_indexer.is_some()
+            || indexer.bloom_filter_indexer.is_some();
+
+        if !has_any_indexer {
             indexer.abort().await;
             return Indexer::default();
         }
@@ -470,6 +524,69 @@ impl IndexerBuilderImpl {
         } else {
             warn!(
                 err; "Failed to create bloom filter, region_id: {}, file_id: {}",
+                self.metadata.region_id, file_id,
+            );
+        }
+
+        None
+    }
+
+    #[cfg(feature = "vector_index")]
+    fn build_vector_indexer(&self, file_id: FileId) -> Option<VectorIndexer> {
+        let create = match self.build_type {
+            IndexBuildType::Flush => self.vector_index_config.create_on_flush.auto(),
+            IndexBuildType::Compact => self.vector_index_config.create_on_compaction.auto(),
+            _ => true,
+        };
+
+        if !create {
+            debug!(
+                "Skip creating vector index due to config, region_id: {}, file_id: {}",
+                self.metadata.region_id, file_id,
+            );
+            return None;
+        }
+
+        // Get vector index column IDs and options from metadata
+        let vector_index_options = self.metadata.vector_indexed_column_ids();
+        if vector_index_options.is_empty() {
+            debug!(
+                "No vector columns to index, skip creating vector index, region_id: {}, file_id: {}",
+                self.metadata.region_id, file_id,
+            );
+            return None;
+        }
+
+        let mem_limit = self.vector_index_config.mem_threshold_on_create();
+        let indexer = VectorIndexer::new(
+            file_id,
+            &self.metadata,
+            self.intermediate_manager.clone(),
+            mem_limit,
+            &vector_index_options,
+        );
+
+        let err = match indexer {
+            Ok(indexer) => {
+                if indexer.is_none() {
+                    debug!(
+                        "Skip creating vector index due to no columns require indexing, region_id: {}, file_id: {}",
+                        self.metadata.region_id, file_id,
+                    );
+                }
+                return indexer;
+            }
+            Err(err) => err,
+        };
+
+        if cfg!(any(test, feature = "test")) {
+            panic!(
+                "Failed to create vector index, region_id: {}, file_id: {}, err: {:?}",
+                self.metadata.region_id, file_id, err
+            );
+        } else {
+            warn!(
+                err; "Failed to create vector index, region_id: {}, file_id: {}",
                 self.metadata.region_id, file_id,
             );
         }
@@ -1115,6 +1232,8 @@ mod tests {
         with_inverted: bool,
         with_fulltext: bool,
         with_skipping_bloom: bool,
+        #[cfg(feature = "vector_index")]
+        with_vector: bool,
     }
 
     fn mock_region_metadata(
@@ -1122,6 +1241,8 @@ mod tests {
             with_inverted,
             with_fulltext,
             with_skipping_bloom,
+            #[cfg(feature = "vector_index")]
+            with_vector,
         }: MetaConfig,
     ) -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
@@ -1187,6 +1308,24 @@ mod tests {
             builder.push_column_metadata(column);
         }
 
+        #[cfg(feature = "vector_index")]
+        if with_vector {
+            use index::vector::VectorIndexOptions;
+
+            let options = VectorIndexOptions::default();
+            let column_schema =
+                ColumnSchema::new("vec", ConcreteDataType::vector_datatype(4), true)
+                    .with_vector_index_options(&options)
+                    .unwrap();
+            let column = ColumnMetadata {
+                column_schema,
+                semantic_type: SemanticType::Field,
+                column_id: 6,
+            };
+
+            builder.push_column_metadata(column);
+        }
+
         Arc::new(builder.build().unwrap())
     }
 
@@ -1237,6 +1376,8 @@ mod tests {
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
             bloom_filter_index_config: Default::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         };
         let mut metrics = Metrics::new(WriteType::Flush);
         env.access_layer
@@ -1287,6 +1428,8 @@ mod tests {
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         })
     }
 
@@ -1300,6 +1443,8 @@ mod tests {
             with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: true,
+            #[cfg(feature = "vector_index")]
+            with_vector: false,
         });
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
@@ -1312,6 +1457,8 @@ mod tests {
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         }
         .build(FileId::random(), 0)
         .await;
@@ -1331,6 +1478,8 @@ mod tests {
             with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: true,
+            #[cfg(feature = "vector_index")]
+            with_vector: false,
         });
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
@@ -1346,6 +1495,8 @@ mod tests {
             },
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         }
         .build(FileId::random(), 0)
         .await;
@@ -1368,6 +1519,8 @@ mod tests {
                 ..Default::default()
             },
             bloom_filter_index_config: BloomFilterConfig::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         }
         .build(FileId::random(), 0)
         .await;
@@ -1390,6 +1543,8 @@ mod tests {
                 create_on_compaction: Mode::Disable,
                 ..Default::default()
             },
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         }
         .build(FileId::random(), 0)
         .await;
@@ -1409,6 +1564,8 @@ mod tests {
             with_inverted: false,
             with_fulltext: true,
             with_skipping_bloom: true,
+            #[cfg(feature = "vector_index")]
+            with_vector: false,
         });
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
@@ -1421,6 +1578,8 @@ mod tests {
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         }
         .build(FileId::random(), 0)
         .await;
@@ -1433,6 +1592,8 @@ mod tests {
             with_inverted: true,
             with_fulltext: false,
             with_skipping_bloom: true,
+            #[cfg(feature = "vector_index")]
+            with_vector: false,
         });
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
@@ -1445,6 +1606,8 @@ mod tests {
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         }
         .build(FileId::random(), 0)
         .await;
@@ -1457,6 +1620,8 @@ mod tests {
             with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: false,
+            #[cfg(feature = "vector_index")]
+            with_vector: false,
         });
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
@@ -1469,6 +1634,8 @@ mod tests {
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         }
         .build(FileId::random(), 0)
         .await;
@@ -1488,6 +1655,8 @@ mod tests {
             with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: true,
+            #[cfg(feature = "vector_index")]
+            with_vector: false,
         });
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
@@ -1500,11 +1669,89 @@ mod tests {
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         }
         .build(FileId::random(), 0)
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
+    }
+
+    #[cfg(feature = "vector_index")]
+    #[tokio::test]
+    async fn test_update_flat_builds_vector_index() {
+        use datatypes::arrow::array::BinaryBuilder;
+        use datatypes::arrow::datatypes::{DataType, Field, Schema};
+
+        struct TestPathProvider;
+
+        impl FilePathProvider for TestPathProvider {
+            fn build_index_file_path(&self, file_id: RegionFileId) -> String {
+                format!("index/{}.puffin", file_id)
+            }
+
+            fn build_index_file_path_with_version(&self, index_id: RegionIndexId) -> String {
+                format!("index/{}.puffin", index_id)
+            }
+
+            fn build_sst_file_path(&self, file_id: RegionFileId) -> String {
+                format!("sst/{}.parquet", file_id)
+            }
+        }
+
+        fn f32s_to_bytes(values: &[f32]) -> Vec<u8> {
+            let mut bytes = Vec::with_capacity(values.len() * 4);
+            for v in values {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            bytes
+        }
+
+        let (dir, factory) =
+            PuffinManagerFactory::new_for_test_async("test_update_flat_builds_vector_index_").await;
+        let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
+
+        let metadata = mock_region_metadata(MetaConfig {
+            with_inverted: false,
+            with_fulltext: false,
+            with_skipping_bloom: false,
+            with_vector: true,
+        });
+
+        let mut indexer = IndexerBuilderImpl {
+            build_type: IndexBuildType::Flush,
+            metadata,
+            row_group_size: 1024,
+            puffin_manager: factory.build(mock_object_store(), TestPathProvider),
+            write_cache_enabled: false,
+            intermediate_manager: intm_manager,
+            index_options: IndexOptions::default(),
+            inverted_index_config: InvertedIndexConfig::default(),
+            fulltext_index_config: FulltextIndexConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
+            vector_index_config: Default::default(),
+        }
+        .build(FileId::random(), 0)
+        .await;
+
+        assert!(indexer.vector_indexer.is_some());
+
+        let vec1 = f32s_to_bytes(&[1.0, 0.0, 0.0, 0.0]);
+        let vec2 = f32s_to_bytes(&[0.0, 1.0, 0.0, 0.0]);
+
+        let mut builder = BinaryBuilder::with_capacity(2, vec1.len() + vec2.len());
+        builder.append_value(&vec1);
+        builder.append_value(&vec2);
+
+        let schema = Arc::new(Schema::new(vec![Field::new("vec", DataType::Binary, true)]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(builder.finish())]).unwrap();
+
+        indexer.update_flat(&batch).await;
+        let output = indexer.finish().await;
+
+        assert!(output.vector_index.is_available());
+        assert!(output.vector_index.columns.contains(&6));
     }
 
     #[tokio::test]
@@ -1839,6 +2086,8 @@ mod tests {
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         });
 
         let sst_info = mock_sst_file(metadata.clone(), &env, IndexBuildMode::Async).await;

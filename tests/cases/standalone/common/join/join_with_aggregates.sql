@@ -62,7 +62,7 @@ FROM (
     s."location",
     COUNT(DISTINCT s.sensor_id) as sensor_count,
     COUNT(r.reading_id) / COUNT(DISTINCT s.sensor_id) as avg_readings_per_sensor,
-    AVG(r."value") as location_avg_value
+    ROUND(AVG(r."value"), 6) as location_avg_value
   FROM sensors s
   INNER JOIN readings r ON s.sensor_id = r.sensor_id
   GROUP BY s."location"

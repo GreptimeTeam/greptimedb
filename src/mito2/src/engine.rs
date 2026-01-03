@@ -126,7 +126,7 @@ use crate::config::MitoConfig;
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
     InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
-    SerdeJsonSnafu, SerializeColumnMetadataSnafu, SerializeManifestSnafu,
+    SerdeJsonSnafu, SerializeColumnMetadataSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
@@ -1057,19 +1057,8 @@ impl EngineInner {
         let region_id = request.region_id;
         let (request, receiver) = WorkerRequest::try_from_remap_manifests_request(request)?;
         self.workers.submit_to_worker(region_id, request).await?;
-        let manifests = receiver.await.context(RecvSnafu)??;
-
-        let new_manifests = manifests
-            .into_iter()
-            .map(|(region_id, manifest)| {
-                Ok((
-                    region_id,
-                    serde_json::to_string(&manifest)
-                        .context(SerializeManifestSnafu { region_id })?,
-                ))
-            })
-            .collect::<Result<HashMap<_, _>>>()?;
-        Ok(RemapManifestsResponse { new_manifests })
+        let manifest_paths = receiver.await.context(RecvSnafu)??;
+        Ok(RemapManifestsResponse { manifest_paths })
     }
 
     async fn copy_region_from(

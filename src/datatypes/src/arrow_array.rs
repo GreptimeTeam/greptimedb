@@ -15,10 +15,12 @@
 use arrow::array::{ArrayRef, AsArray};
 use arrow::datatypes::{
     DataType, DurationMicrosecondType, DurationMillisecondType, DurationNanosecondType,
-    DurationSecondType, Time32MillisecondType, Time32SecondType, Time64MicrosecondType,
-    Time64NanosecondType, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
-    TimestampNanosecondType, TimestampSecondType,
+    DurationSecondType, Int8Type, Int16Type, Int32Type, Int64Type, Time32MillisecondType,
+    Time32SecondType, Time64MicrosecondType, Time64NanosecondType, TimeUnit,
+    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+    TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
+use arrow_array::Array;
 use common_time::time::Time;
 use common_time::{Duration, Timestamp};
 
@@ -125,4 +127,88 @@ pub fn duration_array_value(array: &ArrayRef, i: usize) -> Duration {
         }
     };
     Duration::new(v, time_unit.into())
+}
+
+/// Get the string value at index `i` for `Utf8`, `LargeUtf8`, or `Utf8View` arrays.
+///
+/// Returns `None` when the array type is not a string type or the value is null.
+///
+/// # Panics
+///
+/// If index `i` is out of bounds.
+pub fn string_array_value_at_index(array: &ArrayRef, i: usize) -> Option<&str> {
+    match array.data_type() {
+        DataType::Utf8 => {
+            let array = array.as_string::<i32>();
+            array.is_valid(i).then(|| array.value(i))
+        }
+        DataType::LargeUtf8 => {
+            let array = array.as_string::<i64>();
+            array.is_valid(i).then(|| array.value(i))
+        }
+        DataType::Utf8View => {
+            let array = array.as_string_view();
+            array.is_valid(i).then(|| array.value(i))
+        }
+        _ => None,
+    }
+}
+
+/// Get the integer value (`i64`) at index `i` for any integer array.
+///
+/// Returns `None` when:
+///
+/// - the array type is not an integer type;
+/// - the value is larger than `i64::MAX`;
+/// - the value is null.
+///
+/// # Panics
+///
+/// If index `i` is out of bounds.
+pub fn int_array_value_at_index(array: &ArrayRef, i: usize) -> Option<i64> {
+    match array.data_type() {
+        DataType::Int8 => {
+            let array = array.as_primitive::<Int8Type>();
+            array.is_valid(i).then(|| array.value(i) as i64)
+        }
+        DataType::Int16 => {
+            let array = array.as_primitive::<Int16Type>();
+            array.is_valid(i).then(|| array.value(i) as i64)
+        }
+        DataType::Int32 => {
+            let array = array.as_primitive::<Int32Type>();
+            array.is_valid(i).then(|| array.value(i) as i64)
+        }
+        DataType::Int64 => {
+            let array = array.as_primitive::<Int64Type>();
+            array.is_valid(i).then(|| array.value(i))
+        }
+        DataType::UInt8 => {
+            let array = array.as_primitive::<UInt8Type>();
+            array.is_valid(i).then(|| array.value(i) as i64)
+        }
+        DataType::UInt16 => {
+            let array = array.as_primitive::<UInt16Type>();
+            array.is_valid(i).then(|| array.value(i) as i64)
+        }
+        DataType::UInt32 => {
+            let array = array.as_primitive::<UInt32Type>();
+            array.is_valid(i).then(|| array.value(i) as i64)
+        }
+        DataType::UInt64 => {
+            let array = array.as_primitive::<UInt64Type>();
+            array
+                .is_valid(i)
+                .then(|| {
+                    let i = array.value(i);
+                    if i <= i64::MAX as u64 {
+                        Some(i as i64)
+                    } else {
+                        None
+                    }
+                })
+                .flatten()
+        }
+        _ => None,
+    }
 }

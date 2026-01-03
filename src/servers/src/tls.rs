@@ -29,7 +29,7 @@ use strum::EnumString;
 use crate::error::{InternalIoSnafu, Result};
 
 /// TlsMode is used for Mysql and Postgres server start up.
-#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq, EnumString)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, EnumString)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsMode {
     #[default]
@@ -89,6 +89,17 @@ impl TlsOption {
         tls_option.watch = watch;
 
         tls_option
+    }
+
+    /// Creates a new TLS option with the prefer mode.
+    pub fn prefer() -> Self {
+        Self {
+            mode: TlsMode::Prefer,
+            cert_path: String::new(),
+            key_path: String::new(),
+            ca_cert_path: String::new(),
+            watch: false,
+        }
     }
 
     /// Validates the TLS configuration.

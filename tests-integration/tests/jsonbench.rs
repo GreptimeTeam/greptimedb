@@ -56,6 +56,121 @@ async fn query_data(frontend: &Arc<Instance>) -> io::Result<()> {
     ))?;
     execute_sql_and_expect(frontend, sql, &expected).await;
 
+    // query 1:
+    let sql = "\
+SELECT \
+    json_get_string(data, '$.commit.collection') AS event, count() AS count \
+FROM bluesky \
+GROUP BY event \
+ORDER BY count DESC, event ASC";
+    let expected = r#"
++-----------------------+-------+
+| event                 | count |
++-----------------------+-------+
+| app.bsky.feed.like    | 3     |
+| app.bsky.feed.post    | 3     |
+| app.bsky.graph.follow | 3     |
+| app.bsky.feed.repost  | 1     |
++-----------------------+-------+"#;
+    execute_sql_and_expect(frontend, sql, expected).await;
+
+    // query 2:
+    let sql = "\
+SELECT \
+    json_get_string(data, '$.commit.collection') AS event, \
+    count() AS count, \
+    count(DISTINCT json_get_string(data, '$.did')) AS users \
+FROM bluesky \
+WHERE \
+    (json_get_string(data, '$.kind') = 'commit') AND \
+    (json_get_string(data, '$.commit.operation') = 'create') \
+GROUP BY event \
+ORDER BY count DESC, event ASC";
+    let expected = r#"
++-----------------------+-------+-------+
+| event                 | count | users |
++-----------------------+-------+-------+
+| app.bsky.feed.like    | 3     | 3     |
+| app.bsky.feed.post    | 3     | 3     |
+| app.bsky.graph.follow | 3     | 3     |
+| app.bsky.feed.repost  | 1     | 1     |
++-----------------------+-------+-------+"#;
+    execute_sql_and_expect(frontend, sql, expected).await;
+
+    // query 3:
+    let sql = "\
+SELECT \
+    json_get_string(data, '$.commit.collection') AS event, \
+    date_part('hour', to_timestamp_micros(json_get_int(data, '$.time_us'))) as hour_of_day, \
+    count() AS count \
+FROM bluesky \
+WHERE \
+    (json_get_string(data, '$.kind') = 'commit') AND \
+    (json_get_string(data, '$.commit.operation') = 'create') AND \
+    json_get_string(data, '$.commit.collection') IN \
+        ('app.bsky.feed.post', 'app.bsky.feed.repost', 'app.bsky.feed.like') \
+GROUP BY event, hour_of_day \
+ORDER BY hour_of_day, event";
+    let expected = r#"
++----------------------+-------------+-------+
+| event                | hour_of_day | count |
++----------------------+-------------+-------+
+| app.bsky.feed.like   | 16          | 3     |
+| app.bsky.feed.post   | 16          | 3     |
+| app.bsky.feed.repost | 16          | 1     |
++----------------------+-------------+-------+"#;
+    execute_sql_and_expect(frontend, sql, expected).await;
+
+    // query 4:
+    let sql = "\
+SELECT
+    json_get_string(data, '$.did') as user_id,
+    min(to_timestamp_micros(json_get_int(data, '$.time_us'))) AS first_post_ts
+FROM bluesky
+WHERE
+    (json_get_string(data, '$.kind') = 'commit') AND
+    (json_get_string(data, '$.commit.operation') = 'create') AND
+    (json_get_string(data, '$.commit.collection') = 'app.bsky.feed.post')
+GROUP BY user_id
+ORDER BY first_post_ts ASC, user_id DESC
+LIMIT 3";
+    let expected = r#"
++----------------------------------+----------------------------+
+| user_id                          | first_post_ts              |
++----------------------------------+----------------------------+
+| did:plc:yj3sjq3blzpynh27cumnp5ks | 2024-11-21T16:25:49.000167 |
+| did:plc:l5o3qjrmfztir54cpwlv2eme | 2024-11-21T16:25:49.001905 |
+| did:plc:s4bwqchfzm6gjqfeb6mexgbu | 2024-11-21T16:25:49.003907 |
++----------------------------------+----------------------------+"#;
+    execute_sql_and_expect(frontend, sql, expected).await;
+
+    // query 5:
+    let sql = "
+SELECT
+    json_get_string(data, '$.did') as user_id,
+    date_part(
+        'epoch',
+        max(to_timestamp_micros(json_get_int(data, '$.time_us'))) -
+        min(to_timestamp_micros(json_get_int(data, '$.time_us')))
+    ) AS activity_span
+FROM bluesky
+WHERE
+    (json_get_string(data, '$.kind') = 'commit') AND
+    (json_get_string(data, '$.commit.operation') = 'create') AND
+    (json_get_string(data, '$.commit.collection') = 'app.bsky.feed.post')
+GROUP BY user_id
+ORDER BY activity_span DESC, user_id DESC
+LIMIT 3";
+    let expected = r#"
++----------------------------------+---------------+
+| user_id                          | activity_span |
++----------------------------------+---------------+
+| did:plc:yj3sjq3blzpynh27cumnp5ks | 0.0           |
+| did:plc:s4bwqchfzm6gjqfeb6mexgbu | 0.0           |
+| did:plc:l5o3qjrmfztir54cpwlv2eme | 0.0           |
++----------------------------------+---------------+"#;
+    execute_sql_and_expect(frontend, sql, expected).await;
+
     Ok(())
 }
 

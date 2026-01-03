@@ -759,8 +759,11 @@ pub struct RemapManifestsRequest {
 /// Response to remap manifests from old regions to new regions.
 #[derive(Debug, Clone)]
 pub struct RemapManifestsResponse {
-    /// The new manifests for the new regions.
-    pub new_manifests: HashMap<RegionId, String>,
+    /// Maps region id to its staging manifest path.
+    ///
+    /// These paths are relative paths within the central region's staging blob storage,
+    /// and should be passed to [`ApplyStagingManifestRequest`](RegionRequest::ApplyStagingManifest) to finalize the repartition.
+    pub manifest_paths: HashMap<RegionId, String>,
 }
 
 /// Request to copy files from a source region to a target region.

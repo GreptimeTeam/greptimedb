@@ -17,6 +17,7 @@ ahash.workspace = true
 api.workspace = true
 arc-swap = "1.0"
 arrow.workspace = true
+arrow-cast.workspace = true
 arrow-schema.workspace = true
 async-trait.workspace = true
 bincode = "=1.3.3"
@@ -46,6 +47,7 @@ geohash = { version = "0.13", optional = true }
 h3o = { version = "0.6", optional = true }
 hyperloglogplus = "0.4"
 jsonb.workspace = true
+jsonpath-rust = "0.7.5"
 memchr = "2.7"
 mito-codec.workspace = true
 nalgebra.workspace = true

@@ -287,6 +287,9 @@ pub enum IndexType {
     FulltextIndex,
     /// Bloom Filter index
     BloomFilterIndex,
+    /// Vector index (HNSW).
+    #[cfg(feature = "vector_index")]
+    VectorIndex,
 }
 
 /// Metadata of indexes created for a specific column in an SST file.

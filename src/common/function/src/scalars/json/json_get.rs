@@ -13,17 +13,24 @@
 // limitations under the License.
 
 use std::fmt::{self, Display};
+use std::str::FromStr;
 use std::sync::Arc;
 
+use arrow::array::{ArrayRef, BinaryViewArray, StringViewArray, StructArray};
 use arrow::compute;
-use datafusion_common::DataFusionError;
+use arrow::datatypes::{Float64Type, Int64Type, UInt64Type};
 use datafusion_common::arrow::array::{
     Array, AsArray, BinaryViewBuilder, BooleanBuilder, Float64Builder, Int64Builder,
     StringViewBuilder,
 };
 use datafusion_common::arrow::datatypes::DataType;
+use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::type_coercion::aggregates::STRINGS;
-use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature};
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
+use datatypes::arrow_array::{int_array_value_at_index, string_array_value_at_index};
+use datatypes::json::JsonStructureSettings;
+use jsonpath_rust::JsonPath;
+use serde_json::Value;
 
 use crate::function::{Function, extract_args};
 use crate::helper;
@@ -125,13 +132,6 @@ macro_rules! json_get {
 }
 
 json_get!(
-    JsonGetInt,
-    Int64,
-    i64,
-    "Get the value from the JSONB by the given path and return it as an integer."
-);
-
-json_get!(
     JsonGetFloat,
     Float64,
     f64,
@@ -145,26 +145,77 @@ json_get!(
     "Get the value from the JSONB by the given path and return it as a boolean."
 );
 
-/// Get the value from the JSONB by the given path and return it as a string.
-#[derive(Clone, Debug)]
-pub struct JsonGetString {
+enum JsonResultValue<'a> {
+    Jsonb(Vec<u8>),
+    JsonStructByColumn(&'a ArrayRef, usize),
+    JsonStructByValue(&'a Value),
+}
+
+trait JsonGetResultBuilder {
+    fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()>;
+
+    fn append_null(&mut self);
+
+    fn build(&mut self) -> ArrayRef;
+}
+
+/// Common implementation for JSON get scalar functions.
+///
+/// `JsonGet` encapsulates the logic for extracting values from JSON inputs
+/// based on a path expression. Different JSON get functions reuse this
+/// implementation by supplying their own `JsonGetResultBuilder` to control
+/// how the resulting values are materialized into an Arrow array.
+struct JsonGet {
     signature: Signature,
 }
 
-impl JsonGetString {
-    pub const NAME: &'static str = "json_get_string";
+impl JsonGet {
+    fn invoke<F, B>(&self, args: ScalarFunctionArgs, builder_factory: F) -> Result<ColumnarValue>
+    where
+        F: Fn(usize) -> B,
+        B: JsonGetResultBuilder,
+    {
+        let [arg0, arg1] = extract_args("JSON_GET", &args)?;
+
+        let arg1 = compute::cast(&arg1, &DataType::Utf8View)?;
+        let paths = arg1.as_string_view();
+
+        let mut builder = (builder_factory)(arg0.len());
+        match arg0.data_type() {
+            DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
+                let arg0 = compute::cast(&arg0, &DataType::BinaryView)?;
+                let jsons = arg0.as_binary_view();
+                jsonb_get(jsons, paths, &mut builder)?;
+            }
+            DataType::Struct(_) => {
+                let jsons = arg0.as_struct();
+                json_struct_get(jsons, paths, &mut builder)?
+            }
+            _ => {
+                return Err(DataFusionError::Execution(format!(
+                    "JSON_GET not supported argument type {}",
+                    arg0.data_type(),
+                )));
+            }
+        };
+
+        Ok(ColumnarValue::Array(builder.build()))
+    }
 }
 
-impl Default for JsonGetString {
+impl Default for JsonGet {
     fn default() -> Self {
         Self {
-            // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
-            signature: helper::one_of_sigs2(
-                vec![DataType::Binary, DataType::BinaryView],
-                vec![DataType::Utf8, DataType::Utf8View],
-            ),
+            signature: Signature::any(2, Volatility::Immutable),
         }
     }
+}
+
+#[derive(Default)]
+pub struct JsonGetString(JsonGet);
+
+impl JsonGetString {
+    pub const NAME: &'static str = "json_get_string";
 }
 
 impl Function for JsonGetString {
@@ -172,41 +223,276 @@ impl Function for JsonGetString {
         Self::NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
     fn signature(&self) -> &Signature {
-        &self.signature
+        &self.0.signature
     }
 
-    fn invoke_with_args(
-        &self,
-        args: ScalarFunctionArgs,
-    ) -> datafusion_common::Result<ColumnarValue> {
-        let [arg0, arg1] = extract_args(self.name(), &args)?;
-        let arg0 = compute::cast(&arg0, &DataType::BinaryView)?;
-        let jsons = arg0.as_binary_view();
-        let arg1 = compute::cast(&arg1, &DataType::Utf8View)?;
-        let paths = arg1.as_string_view();
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        struct StringResultBuilder(StringViewBuilder);
 
-        let size = jsons.len();
-        let mut builder = StringViewBuilder::with_capacity(size);
-
-        for i in 0..size {
-            let json = jsons.is_valid(i).then(|| jsons.value(i));
-            let path = paths.is_valid(i).then(|| paths.value(i));
-            let result = match (json, path) {
-                (Some(json), Some(path)) => {
-                    get_json_by_path(json, path).and_then(|json| jsonb::to_str(&json).ok())
+        impl JsonGetResultBuilder for StringResultBuilder {
+            fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
+                match value {
+                    JsonResultValue::Jsonb(value) => {
+                        self.0.append_option(jsonb::to_str(&value).ok())
+                    }
+                    JsonResultValue::JsonStructByColumn(column, i) => {
+                        if let Some(v) = string_array_value_at_index(column, i) {
+                            self.0.append_value(v);
+                        } else {
+                            self.0
+                                .append_value(arrow_cast::display::array_value_to_string(
+                                    column, i,
+                                )?);
+                        }
+                    }
+                    JsonResultValue::JsonStructByValue(value) => {
+                        if let Some(s) = value.as_str() {
+                            self.0.append_value(s)
+                        } else {
+                            self.0.append_value(value.to_string())
+                        }
+                    }
                 }
-                _ => None,
-            };
-            builder.append_option(result);
+                Ok(())
+            }
+
+            fn append_null(&mut self) {
+                self.0.append_null();
+            }
+
+            fn build(&mut self) -> ArrayRef {
+                Arc::new(self.0.finish())
+            }
         }
 
-        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
+        self.0.invoke(args, |len: usize| {
+            StringResultBuilder(StringViewBuilder::with_capacity(len))
+        })
     }
+}
+
+#[derive(Default)]
+pub struct JsonGetInt(JsonGet);
+
+impl JsonGetInt {
+    pub const NAME: &'static str = "json_get_int";
+}
+
+impl Function for JsonGetInt {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
+
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Int64)
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.0.signature
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        struct IntResultBuilder(Int64Builder);
+
+        impl JsonGetResultBuilder for IntResultBuilder {
+            fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
+                match value {
+                    JsonResultValue::Jsonb(value) => {
+                        self.0.append_option(jsonb::to_i64(&value).ok())
+                    }
+                    JsonResultValue::JsonStructByColumn(column, i) => {
+                        self.0.append_option(int_array_value_at_index(column, i))
+                    }
+                    JsonResultValue::JsonStructByValue(value) => {
+                        self.0.append_option(value.as_i64())
+                    }
+                }
+                Ok(())
+            }
+
+            fn append_null(&mut self) {
+                self.0.append_null();
+            }
+
+            fn build(&mut self) -> ArrayRef {
+                Arc::new(self.0.finish())
+            }
+        }
+
+        self.0.invoke(args, |len: usize| {
+            IntResultBuilder(Int64Builder::with_capacity(len))
+        })
+    }
+}
+
+impl Display for JsonGetInt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", Self::NAME.to_ascii_uppercase())
+    }
+}
+
+fn jsonb_get(
+    jsons: &BinaryViewArray,
+    paths: &StringViewArray,
+    builder: &mut impl JsonGetResultBuilder,
+) -> Result<()> {
+    let size = jsons.len();
+    for i in 0..size {
+        let json = jsons.is_valid(i).then(|| jsons.value(i));
+        let path = paths.is_valid(i).then(|| paths.value(i));
+        let result = match (json, path) {
+            (Some(json), Some(path)) => get_json_by_path(json, path),
+            _ => None,
+        };
+        if let Some(v) = result {
+            builder.append_value(JsonResultValue::Jsonb(v))?;
+        } else {
+            builder.append_null();
+        }
+    }
+    Ok(())
+}
+
+fn json_struct_get(
+    jsons: &StructArray,
+    paths: &StringViewArray,
+    builder: &mut impl JsonGetResultBuilder,
+) -> Result<()> {
+    let size = jsons.len();
+    for i in 0..size {
+        if jsons.is_null(i) || paths.is_null(i) {
+            builder.append_null();
+            continue;
+        }
+        let path = paths.value(i);
+
+        // naively assume the JSON path is our kind of indexing to the field, by removing its "root"
+        let field_path = path.trim().replace("$.", "");
+        let column = jsons.column_by_name(&field_path);
+
+        if let Some(column) = column {
+            builder.append_value(JsonResultValue::JsonStructByColumn(column, i))?;
+        } else {
+            let Some(raw) = jsons
+                .column_by_name(JsonStructureSettings::RAW_FIELD)
+                .and_then(|x| string_array_value_at_index(x, i))
+            else {
+                builder.append_null();
+                continue;
+            };
+
+            let path: JsonPath<Value> = JsonPath::try_from(path).map_err(|e| {
+                DataFusionError::Execution(format!("{path} is not a valid JSON path: {e}"))
+            })?;
+            // the wanted field is not retrievable from the JSON struct columns directly, we have
+            // to combine everything (columns and the "_raw") into a complete JSON value to find it
+            let value = json_struct_to_value(raw, jsons, i)?;
+
+            match path.find(&value) {
+                Value::Null => builder.append_null(),
+                Value::Array(values) => match values.as_slice() {
+                    [] => builder.append_null(),
+                    [x] => builder.append_value(JsonResultValue::JsonStructByValue(x))?,
+                    _ => builder.append_value(JsonResultValue::JsonStructByValue(&value))?,
+                },
+                value => builder.append_value(JsonResultValue::JsonStructByValue(&value))?,
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn json_struct_to_value(raw: &str, jsons: &StructArray, i: usize) -> Result<Value> {
+    let Ok(mut json) = Value::from_str(raw) else {
+        return Err(DataFusionError::Internal(format!(
+            "inner field '{}' is not a valid JSON string",
+            JsonStructureSettings::RAW_FIELD
+        )));
+    };
+
+    for (column_name, column) in jsons.column_names().into_iter().zip(jsons.columns()) {
+        if column_name == JsonStructureSettings::RAW_FIELD {
+            continue;
+        }
+
+        let (json_pointer, field) = if let Some((json_object, field)) = column_name.rsplit_once(".")
+        {
+            let json_pointer = format!("/{}", json_object.replace(".", "/"));
+            (json_pointer, field)
+        } else {
+            ("".to_string(), column_name)
+        };
+        let Some(json_object) = json
+            .pointer_mut(&json_pointer)
+            .and_then(|x| x.as_object_mut())
+        else {
+            return Err(DataFusionError::Internal(format!(
+                "value at JSON pointer '{}' is not an object",
+                json_pointer
+            )));
+        };
+
+        macro_rules! insert {
+            ($column: ident, $i: ident, $json_object: ident, $field: ident) => {{
+                if let Some(value) = $column
+                    .is_valid($i)
+                    .then(|| serde_json::Value::from($column.value($i)))
+                {
+                    $json_object.insert($field.to_string(), value);
+                }
+            }};
+        }
+
+        match column.data_type() {
+            // boolean => Value::Bool
+            DataType::Boolean => {
+                let column = column.as_boolean();
+                insert!(column, i, json_object, field);
+            }
+            // int => Value::Number
+            DataType::Int64 => {
+                let column = column.as_primitive::<Int64Type>();
+                insert!(column, i, json_object, field);
+            }
+            DataType::UInt64 => {
+                let column = column.as_primitive::<UInt64Type>();
+                insert!(column, i, json_object, field);
+            }
+            DataType::Float64 => {
+                let column = column.as_primitive::<Float64Type>();
+                insert!(column, i, json_object, field);
+            }
+            // string => Value::String
+            DataType::Utf8 => {
+                let column = column.as_string::<i32>();
+                insert!(column, i, json_object, field);
+            }
+            DataType::LargeUtf8 => {
+                let column = column.as_string::<i64>();
+                insert!(column, i, json_object, field);
+            }
+            DataType::Utf8View => {
+                let column = column.as_string_view();
+                insert!(column, i, json_object, field);
+            }
+            // other => Value::Array and Value::Object
+            _ => {
+                return Err(DataFusionError::NotImplemented(format!(
+                    "{} is not yet supported to be executed with field {} of datatype {}",
+                    JsonGetString::NAME,
+                    column_name,
+                    column.data_type()
+                )));
+            }
+        }
+    }
+    Ok(json)
 }
 
 impl Display for JsonGetString {
@@ -296,13 +582,59 @@ impl Display for JsonGetObject {
 mod tests {
     use std::sync::Arc;
 
+    use arrow::array::{Float64Array, Int64Array, StructArray};
     use arrow_schema::Field;
     use datafusion_common::ScalarValue;
     use datafusion_common::arrow::array::{BinaryArray, BinaryViewArray, StringArray};
     use datafusion_common::arrow::datatypes::{Float64Type, Int64Type};
     use datatypes::types::parse_string_to_jsonb;
+    use serde_json::json;
 
     use super::*;
+
+    /// Create a JSON object like this (as a one element struct array for testing):
+    ///
+    /// ```JSON
+    /// {
+    ///     "kind": "foo",
+    ///     "payload": {
+    ///         "code": 404,
+    ///         "success": false,
+    ///         "result": {
+    ///             "error": "not found",
+    ///             "time_cost": 1.234
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    fn test_json_struct() -> ArrayRef {
+        Arc::new(StructArray::new(
+            vec![
+                Field::new("kind", DataType::Utf8, true),
+                Field::new("payload.code", DataType::Int64, true),
+                Field::new("payload.result.time_cost", DataType::Float64, true),
+                Field::new(JsonStructureSettings::RAW_FIELD, DataType::Utf8View, true),
+            ]
+            .into(),
+            vec![
+                Arc::new(StringArray::from_iter([Some("foo")])) as ArrayRef,
+                Arc::new(Int64Array::from_iter([Some(404)])),
+                Arc::new(Float64Array::from_iter([Some(1.234)])),
+                Arc::new(StringViewArray::from_iter([Some(
+                    json! ({
+                        "payload": {
+                            "success": false,
+                            "result": {
+                                "error": "not found"
+                            }
+                        }
+                    })
+                    .to_string(),
+                )])),
+            ],
+            None,
+        ))
+    }
 
     #[test]
     fn test_json_get_int() {
@@ -321,37 +653,55 @@ mod tests {
             r#"{"a": 4, "b": {"c": 6}, "c": 6}"#,
             r#"{"a": 7, "b": 8, "c": {"a": 7}}"#,
         ];
-        let paths = vec!["$.a.b", "$.a", "$.c"];
-        let results = [Some(2), Some(4), None];
+        let json_struct = test_json_struct();
 
-        let jsonbs = json_strings
+        let path_expects = vec![
+            ("$.a.b", Some(2)),
+            ("$.a", Some(4)),
+            ("$.c", None),
+            ("$.kind", None),
+            ("$.payload.code", Some(404)),
+            ("$.payload.success", None),
+            ("$.payload.result.time_cost", None),
+            ("$.payload.not-exists", None),
+            ("$.not-exists", None),
+            ("$", None),
+        ];
+
+        let mut jsons = json_strings
             .iter()
             .map(|s| {
                 let value = jsonb::parse_value(s.as_bytes()).unwrap();
-                value.to_vec()
+                Arc::new(BinaryArray::from_iter_values([value.to_vec()])) as ArrayRef
             })
             .collect::<Vec<_>>();
+        let json_struct_arrays =
+            std::iter::repeat_n(json_struct, path_expects.len() - jsons.len()).collect::<Vec<_>>();
+        jsons.extend(json_struct_arrays);
 
-        let args = ScalarFunctionArgs {
-            args: vec![
-                ColumnarValue::Array(Arc::new(BinaryArray::from_iter_values(jsonbs))),
-                ColumnarValue::Array(Arc::new(StringArray::from_iter_values(paths))),
-            ],
-            arg_fields: vec![],
-            number_rows: 3,
-            return_field: Arc::new(Field::new("x", DataType::Int64, false)),
-            config_options: Arc::new(Default::default()),
-        };
-        let result = json_get_int
-            .invoke_with_args(args)
-            .and_then(|x| x.to_array(3))
-            .unwrap();
-        let vector = result.as_primitive::<Int64Type>();
+        for i in 0..jsons.len() {
+            let json = &jsons[i];
+            let (path, expect) = path_expects[i];
 
-        assert_eq!(3, vector.len());
-        for (i, gt) in results.iter().enumerate() {
-            let result = vector.is_valid(i).then(|| vector.value(i));
-            assert_eq!(*gt, result);
+            let args = ScalarFunctionArgs {
+                args: vec![
+                    ColumnarValue::Array(json.clone()),
+                    ColumnarValue::Scalar(path.into()),
+                ],
+                arg_fields: vec![],
+                number_rows: 1,
+                return_field: Arc::new(Field::new("x", DataType::Int64, false)),
+                config_options: Arc::new(Default::default()),
+            };
+            let result = json_get_int
+                .invoke_with_args(args)
+                .and_then(|x| x.to_array(1))
+                .unwrap();
+
+            let result = result.as_primitive::<Int64Type>();
+            assert_eq!(1, result.len());
+            let actual = result.is_valid(0).then(|| result.value(0));
+            assert_eq!(actual, expect);
         }
     }
 
@@ -474,42 +824,85 @@ mod tests {
             r#"{"a": "d", "b": {"c": "e"}, "c": "f"}"#,
             r#"{"a": "g", "b": "h", "c": {"a": "g"}}"#,
         ];
-        let paths = vec!["$.a.b", "$.a", ""];
-        let results = [Some("a"), Some("d"), None];
+        let json_struct = test_json_struct();
 
-        let jsonbs = json_strings
+        let paths = vec![
+            "$.a.b",
+            "$.a",
+            "",
+            "$.kind",
+            "$.payload.code",
+            "$.payload.result.time_cost",
+            "$.payload",
+            "$.payload.success",
+            "$.payload.result",
+            "$.payload.result.error",
+            "$.payload.result.not-exists",
+            "$.payload.not-exists",
+            "$.not-exists",
+            "$",
+        ];
+        let expects = [
+            Some("a"),
+            Some("d"),
+            None,
+            Some("foo"),
+            Some("404"),
+            Some("1.234"),
+            Some(
+                r#"{"code":404,"result":{"error":"not found","time_cost":1.234},"success":false}"#,
+            ),
+            Some("false"),
+            Some(r#"{"error":"not found","time_cost":1.234}"#),
+            Some("not found"),
+            None,
+            None,
+            None,
+            Some(
+                r#"{"kind":"foo","payload":{"code":404,"result":{"error":"not found","time_cost":1.234},"success":false}}"#,
+            ),
+        ];
+
+        let mut jsons = json_strings
             .iter()
             .map(|s| {
                 let value = jsonb::parse_value(s.as_bytes()).unwrap();
-                value.to_vec()
+                Arc::new(BinaryArray::from_iter_values([value.to_vec()])) as ArrayRef
             })
             .collect::<Vec<_>>();
+        let json_struct_arrays =
+            std::iter::repeat_n(json_struct, expects.len() - jsons.len()).collect::<Vec<_>>();
+        jsons.extend(json_struct_arrays);
 
-        let args = ScalarFunctionArgs {
-            args: vec![
-                ColumnarValue::Array(Arc::new(BinaryArray::from_iter_values(jsonbs))),
-                ColumnarValue::Array(Arc::new(StringArray::from_iter_values(paths))),
-            ],
-            arg_fields: vec![],
-            number_rows: 3,
-            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
-            config_options: Arc::new(Default::default()),
-        };
-        let result = json_get_string
-            .invoke_with_args(args)
-            .and_then(|x| x.to_array(3))
-            .unwrap();
-        let vector = result.as_string_view();
+        for i in 0..jsons.len() {
+            let json = &jsons[i];
+            let path = paths[i];
+            let expect = expects[i];
 
-        assert_eq!(3, vector.len());
-        for (i, gt) in results.iter().enumerate() {
-            let result = vector.is_valid(i).then(|| vector.value(i));
-            assert_eq!(*gt, result);
+            let args = ScalarFunctionArgs {
+                args: vec![
+                    ColumnarValue::Array(json.clone()),
+                    ColumnarValue::Scalar(path.into()),
+                ],
+                arg_fields: vec![],
+                number_rows: 1,
+                return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+                config_options: Arc::new(Default::default()),
+            };
+            let result = json_get_string
+                .invoke_with_args(args)
+                .and_then(|x| x.to_array(1))
+                .unwrap();
+
+            let result = result.as_string_view();
+            assert_eq!(1, result.len());
+            let actual = result.is_valid(0).then(|| result.value(0));
+            assert_eq!(actual, expect);
         }
     }
 
     #[test]
-    fn test_json_get_object() -> datafusion_common::Result<()> {
+    fn test_json_get_object() -> Result<()> {
         let udf = JsonGetObject::default();
         assert_eq!("json_get_object", udf.name());
         assert_eq!(

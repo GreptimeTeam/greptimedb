@@ -421,20 +421,17 @@ fn make_region_apply_staging_manifest(
     api::v1::region::ApplyStagingManifestRequest {
         region_id,
         partition_expr,
-        files_to_add,
+        central_region_id,
+        manifest_path,
     }: api::v1::region::ApplyStagingManifestRequest,
 ) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = region_id.into();
-    let files_to_add = files_to_add
-        .context(UnexpectedSnafu {
-            reason: "'files_to_add' field is missing",
-        })?
-        .data;
     Ok(vec![(
         region_id,
         RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
             partition_expr,
-            files_to_add,
+            central_region_id: central_region_id.into(),
+            manifest_path,
         }),
     )])
 }
@@ -1464,8 +1461,10 @@ pub struct EnterStagingRequest {
 /// In practice, this means:
 /// - The `partition_expr` identifies the staging region rule that the manifest
 ///   was generated for.
-/// - `files_to_add` carries the serialized metadata (such as file manifests or
-///   file lists) that should be attached to the region under the new rule.
+/// - `central_region_id` specifies which region holds the staging blob storage
+///   where the manifest was written during the `remap_manifests` operation.
+/// - `manifest_path` is the relative path within the central region's staging
+///   blob storage to fetch the generated manifest.
 ///
 /// It should typically be called **after** the staging region has been
 /// initialized by [`EnterStagingRequest`] and the new file layout has been
@@ -1474,8 +1473,11 @@ pub struct EnterStagingRequest {
 pub struct ApplyStagingManifestRequest {
     /// The partition expression of the staging region.
     pub partition_expr: String,
-    /// The files to add to the region.
-    pub files_to_add: Vec<u8>,
+    /// The region that stores the staging manifests in its staging blob storage.
+    pub central_region_id: RegionId,
+    /// The relative path to the staging manifest within the central region's
+    /// staging blob storage.
+    pub manifest_path: String,
 }
 
 impl fmt::Display for RegionRequest {
