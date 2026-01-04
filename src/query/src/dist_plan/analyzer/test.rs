@@ -777,6 +777,7 @@ fn expand_step_aggr_proj() {
     assert_eq!(expected, result.to_string());
 }
 
+/// Make sure that `SeriesDivide` special handling correctly clean up column requirements from it's previous sort
 #[test]
 fn expand_complex_col_req_sort_pql() {
     // use logging for better debugging
@@ -837,6 +838,9 @@ fn expand_complex_col_req_sort_pql() {
     assert_eq!(expected, result.to_string());
 }
 
+/// should only expand `Sort`, notice `Sort` before `Aggregate` usually can and
+/// will be optimized out, and dist planner shouldn't handle that case, but
+/// for now, still handle that be expanding the `Sort` node
 #[test]
 fn expand_proj_sort_step_aggr_limit() {
     // use logging for better debugging
