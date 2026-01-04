@@ -21,26 +21,26 @@ use crate::error::{Error, SerdeJsonSnafu};
 
 /// The metadata for "DoPut" requests and responses.
 ///
-/// Currently, there's only a "request_id", for coordinating requests and responses in the streams.
+/// Currently, there's a "request_id", for coordinating requests and responses in the streams.
 /// Client can set a unique request id in this metadata, and the server will return the same id in
 /// the corresponding response. In doing so, a client can know how to do with its pending requests.
 #[derive(Serialize, Deserialize)]
 pub struct DoPutMetadata {
     request_id: i64,
-    /// Start timestamp of the batch in nanoseconds (optional, for time-windowed batches)
+    /// Min timestamp of the batch (optional, for time-windowed batches)
     #[serde(skip_serializing_if = "Option::is_none")]
-    start_timestamp: Option<i64>,
-    /// End timestamp of the batch in nanoseconds (optional, for time-windowed batches)
+    min_timestamp: Option<i64>,
+    /// Max timestamp of the batch (optional, for time-windowed batches)
     #[serde(skip_serializing_if = "Option::is_none")]
-    end_timestamp: Option<i64>,
+    max_timestamp: Option<i64>,
 }
 
 impl DoPutMetadata {
     pub fn new(request_id: i64) -> Self {
         Self {
             request_id,
-            start_timestamp: None,
-            end_timestamp: None,
+            min_timestamp: None,
+            max_timestamp: None,
         }
     }
 
@@ -48,12 +48,12 @@ impl DoPutMetadata {
         self.request_id
     }
 
-    pub fn start_timestamp(&self) -> Option<i64> {
-        self.start_timestamp
+    pub fn min_timestamp(&self) -> Option<i64> {
+        self.min_timestamp
     }
 
-    pub fn end_timestamp(&self) -> Option<i64> {
-        self.end_timestamp
+    pub fn max_timestamp(&self) -> Option<i64> {
+        self.max_timestamp
     }
 }
 
