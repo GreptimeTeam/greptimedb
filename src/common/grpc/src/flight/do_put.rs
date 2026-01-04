@@ -21,16 +21,16 @@ use crate::error::{Error, SerdeJsonSnafu};
 
 /// The metadata for "DoPut" requests and responses.
 ///
-/// Currently, there's only a "request_id", for coordinating requests and responses in the streams.
+/// Currently, there's a "request_id", for coordinating requests and responses in the streams.
 /// Client can set a unique request id in this metadata, and the server will return the same id in
 /// the corresponding response. In doing so, a client can know how to do with its pending requests.
 #[derive(Serialize, Deserialize)]
 pub struct DoPutMetadata {
     request_id: i64,
-    /// Start timestamp of the batch in nanoseconds (optional, for time-windowed batches)
+    /// Start timestamp of the batch (optional, for time-windowed batches)
     #[serde(skip_serializing_if = "Option::is_none")]
     start_timestamp: Option<i64>,
-    /// End timestamp of the batch in nanoseconds (optional, for time-windowed batches)
+    /// End timestamp of the batch (optional, for time-windowed batches)
     #[serde(skip_serializing_if = "Option::is_none")]
     end_timestamp: Option<i64>,
 }
