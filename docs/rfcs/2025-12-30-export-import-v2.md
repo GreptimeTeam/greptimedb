@@ -410,8 +410,7 @@ greptime export delete --snapshot s3://bucket/snapshots/old-snapshot
 # Unresolved Questions
 
 1. **Cross-version restore**: Should V2 support restoring to older GreptimeDB versions?
-2. **Schema evolution**: How to handle schema changes between export and import?
-3. **Partial schema export**: Should we support table-level filtering (not just schema-level)?
+2. **Partial schema export**: Should we support table-level filtering (not just schema-level)?
 
 # Future Possibilities
 
