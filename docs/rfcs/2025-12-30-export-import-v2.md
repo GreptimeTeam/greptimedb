@@ -51,12 +51,15 @@ snapshot-20250101/
 │   ├── tables.json            # Table definitions (JSON)
 │   └── views.json             # View definitions (JSON)
 └── data/
-    ├── chunk_20240101_20240102/
+    ├── 1/
     │   ├── public.metrics.parquet
-    │   ├── public.logs.parquet
-    │   └── _chunk.meta
-    └── chunk_20240102_20240103/
-        └── ...
+    │   └── public.logs.parquet
+    ├── 2/
+    │   ├── public.metrics.parquet
+    │   └── public.logs.parquet
+    └── 3/
+        ├── public.metrics.parquet
+        └── public.logs.parquet
 ```
 
 **Key properties**:
@@ -71,9 +74,16 @@ A **chunk** is a time-range partition of data. Each chunk is independently expor
 
 **Chunk properties**:
 
-- Time-aligned (e.g., [2024-01-01, 2024-01-02))
+- Has explicit `start_time` and `end_time` (recorded in manifest)
+- Non-overlapping with other chunks
+- Covers a contiguous time range
 - Independent (can be exported/imported in any order)
 - Atomic (either fully succeeds or fully fails)
+
+**Chunk directory naming**:
+
+- Sequential numbers: `1/`, `2/`, `3/`, ...
+- Time ranges are recorded in manifest.json
 
 ### Storage Types
 
@@ -106,7 +116,7 @@ greptime export create \
   --schema-only \
   --to s3://my-bucket/snapshots/prod-schema-only
 
-# Export to CSV format (for debugging/inspection)
+# Export with specific format (default: parquet)
 greptime export create \
   --format csv \
   --to s3://my-bucket/snapshots/prod-csv
@@ -124,17 +134,17 @@ greptime export create \
 ### Import
 
 ```bash
-# Full restore
-greptime import restore \
+# Full import
+greptime import \
   --from s3://my-bucket/snapshots/prod-20250101
 
-# Partial restore (selected schemas)
-greptime import restore \
+# Partial import (selected schemas)
+greptime import \
   --from s3://my-bucket/snapshots/prod-20250101 \
   --schemas public,private
 
 # Dry-run (verify without importing)
-greptime import restore \
+greptime import \
   --from s3://my-bucket/snapshots/prod-20250101 \
   --dry-run
 ```
@@ -166,6 +176,16 @@ The manifest is a JSON file containing snapshot metadata and chunk index:
 - `chunks[]`: Array of chunk metadata
 - `checksum`: Snapshot-level SHA256 checksum
 
+**Chunk metadata structure**:
+
+Each chunk entry in the manifest contains:
+
+- `id`: Chunk identifier (sequential number)
+- `time_range`: Start and end timestamps
+- `status`: Export status (Pending, Completed, Failed)
+- `files`: List of data files in the chunk directory
+- `checksum`: Chunk-level checksum for integrity verification
+
 ### Schema Files
 
 Schema definitions are stored as JSON (not SQL) for better version compatibility and programmatic processing.
@@ -178,39 +198,14 @@ Schema definitions are stored as JSON (not SQL) for better version compatibility
 
 ### Data Files
 
-Data is exported via COPY DATABASE, supporting two formats:
+Data is exported via COPY DATABASE, supporting multiple formats:
 
-#### Parquet Format (Default, Recommended)
+- **Parquet** (default): Columnar format, efficient compression, recommended for production use
+- **CSV**: Human-readable, universally compatible, useful for debugging and third-party integration
+- **JSON**: Structured text format, flexible schema representation
+- Other formats supported by COPY DATABASE
 
-Apache Parquet is the default format. Configuration (compression, row group size, etc.) is determined by the COPY DATABASE implementation.
-
-**Parquet benefits**:
-
-- Columnar storage (query-friendly)
-- High compression ratio
-- Self-describing (includes schema metadata)
-- Efficient for large-scale data
-
-**Use cases**: Production backups, long-term archival, large-scale data migration
-
-#### CSV Format (Optional)
-
-CSV format is available for human-readable exports and third-party integration.
-
-**CSV benefits**:
-
-- Human-readable (can be opened in text editors/Excel)
-- Universal compatibility (supported by all tools)
-- Easy to debug and inspect
-- Simple hand-editing for small datasets
-
-**Use cases**: Data inspection, debugging, small-scale migration, third-party system integration
-
-**Limitations**:
-
-- Larger file size (no compression by default)
-- Type information loss (everything is text)
-- Less efficient for large datasets
+Format is specified via `--format` flag and recorded in manifest.json. Import automatically detects the format from manifest.
 
 ## Core Design Decisions
 
@@ -232,51 +227,50 @@ Export/import operations validate storage paths to prevent misconfigurations:
 
 ### 2. Time-based Chunking
 
-Data is partitioned into fixed time windows (default: 1 day).
+Data is partitioned into time-range chunks for efficient parallel processing and retry.
 
 **Algorithm**:
 
-- Generate non-overlapping half-open intervals: [start, start+duration), [start+duration, start+2\*duration), ...
-- Last chunk may be smaller to align with time_range.end
+- Generate non-overlapping half-open intervals with configurable time window (default: 1 day)
+- Chunks are numbered sequentially (1, 2, 3, ...)
+- Each chunk's time range is recorded in manifest.json
 - Empty chunks (no data in time window) are skipped and not recorded in manifest
 - Guarantees: no gaps, no overlaps, complete coverage of time range
 
-**Chunk size selection**:
+**Chunk time window selection**:
 
 The optimal chunk time window depends on data density (volume per unit time):
 
 - **Target**: 100MB - 1GB per chunk (balances parallelism and retry cost)
 - **Default**: 1 day (suitable for most workloads)
 - **Recommendations**:
-    - High density (>1GB/day): Use 1h, 6h, or 12h
-    - Low density (<100MB/day): Use 7d or 30d
+    - High density (>1GB/day): Use smaller windows like 1h, 6h, or 12h
+    - Low density (<100MB/day): Use larger windows like 7d or 30d
+    - Time windows can be adjusted flexibly (not required to align to day boundaries)
 
 **Example**: 500GB database spanning 30 days → ~16.7GB/day → use 1h chunks → ~695MB/chunk
 
 ### 3. Data Export via COPY DATABASE
 
-V2 uses the existing `COPY DATABASE TO` SQL for data export:
+V2 leverages the existing `COPY DATABASE TO` for data export, with additional tooling layer for chunking, resume, and metadata management.
 
-```sql
-COPY DATABASE <schema> TO '<path>' WITH (
-    START_TIME = '<start>',
-    END_TIME = '<end>',
-    FORMAT = 'parquet'  -- or 'csv'
-)
-```
+**How it works**:
 
-**Benefits**:
+1. **Export tool** generates chunks based on time range and chunk window
+2. For each chunk, **calls COPY DATABASE** with specific time range:
+    ```sql
+    COPY DATABASE <schema> TO '<chunk_path>' WITH (
+        START_TIME = '<chunk_start>',
+        END_TIME = '<chunk_end>',
+        FORMAT = 'parquet'
+    )
+    ```
+3. **Export tool** records chunk metadata, calculates checksums, and updates manifest
 
-- Reuses proven implementation
-- Streaming processing (constant memory usage)
-- Supports multiple formats (Parquet, CSV)
-- Built-in time range filtering
+**Separation of concerns**:
 
-**Format selection**:
-
-- Parquet (default): Efficient for production use, better compression
-- CSV: Human-readable, useful for debugging and third-party integration
-- Format is recorded in manifest, automatically detected during import
+- **COPY DATABASE** (data layer): Streaming export, format support, time filtering
+- **Export tool** (tooling layer): Chunking, resume, manifest management, checksum calculation, schema export
 
 ### 4. Data Integrity
 
@@ -318,12 +312,6 @@ Checksums are verified during import before data is written to the database.
 - Race condition exists during initial manifest creation, but unlikely in practice
 - Recommendation: Include timestamp in snapshot path to avoid conflicts
 
-**Why no distributed lock?**
-
-- Users unlikely to intentionally export to the same path
-- Path check prevents most accidents
-- Distributed lock adds complexity (Meta service dependency, timeouts, deadlocks)
-
 ## CLI Interface
 
 ### Export Command
@@ -341,7 +329,7 @@ Optional:
   --end-time <TIMESTAMP>          Time range end (default: now)
   --chunk-time-window <DURATION>  Chunk time window (default: 1d)
   --parallelism <N>               Concurrency level (default: 1)
-  --format <FORMAT>               Export format: parquet (default) or csv
+  --format <FORMAT>               Export format for data file: parquet (default), csv, json, or other formats supported by COPY DATABASE
   --schema-only                   Export schema only, no data
   --force                         Delete existing snapshot and recreate
 
@@ -355,7 +343,7 @@ Behavior:
 ### Import Command
 
 ```
-greptime import restore [OPTIONS] --from <SNAPSHOT>
+greptime import [OPTIONS] --from <SNAPSHOT>
 
 Required:
   --from <SNAPSHOT>         Source snapshot location
@@ -384,18 +372,6 @@ greptime export verify --snapshot s3://bucket/snapshots/prod-20250101
 # Delete snapshot
 greptime export delete --snapshot s3://bucket/snapshots/old-snapshot
 ```
-
-## Error Handling
-
-Key error types:
-
-- `UnsupportedLocalPath`: Bare path without URI scheme
-- `RemoteServerWithLocalPath`: file:/// used with remote server
-- `InvalidTimeRange`: start >= end
-- `ChecksumMismatch`: File/chunk/snapshot checksum verification failed
-- `SnapshotNotFound`: Resume requested but snapshot doesn't exist (import only)
-
-Errors include detailed hints for resolution.
 
 # Drawbacks
 
@@ -431,17 +407,6 @@ Errors include detailed hints for resolution.
 - Easier to validate and transform
 - Avoids SQL dialect issues
 
-## Why no distributed lock for concurrent exports?
-
-**Alternative**: Implement distributed lock via Meta service
-
-**Decision**: Path existence check only
-
-- Users unlikely to intentionally conflict
-- Path check prevents most accidents
-- Distributed lock adds significant complexity
-- YAGNI (You Aren't Gonna Need It)
-
 # Unresolved Questions
 
 1. **Cross-version restore**: Should V2 support restoring to older GreptimeDB versions?
@@ -452,6 +417,4 @@ Errors include detailed hints for resolution.
 
 1. **Incremental backup**: Export only data changes since last backup (requires WAL integration)
 2. **Parallel chunk processing**: Export/import multiple chunks simultaneously (requires careful resource management)
-3. **Cloud-native snapshots**: Direct integration with S3 Glacier, Azure Archive for cold storage
-4. **Point-in-time recovery**: Combine full + incremental snapshots for PITR capability
-5. **Snapshot metadata service**: Centralized snapshot registry and lifecycle management
+3. **Snapshot metadata service**: Centralized snapshot registry and lifecycle management
