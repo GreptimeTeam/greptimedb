@@ -393,6 +393,7 @@ impl PlanRewriter {
                 {
                     // revert last `ConditionalCommutative` result for Sort plan in this case.
                     // also need to remove any column requirements made by the Sort Plan
+                    // as it may refer to columns later no longer exist(rightfully) like by aggregate or projection
                     self.stage.pop();
                     self.expand_on_next_part_cond_trans_commutative = false;
                     self.column_requirements.clear();
@@ -737,7 +738,7 @@ impl EnforceDistRequirementRewriter {
                             .filter(|a| !a.is_empty())
                         else {
                             return Err(datafusion_common::DataFusionError::Internal(format!(
-                                "EnforceDistRequirementRewriter: no alias found for required column {original_col} in child plan {child} from original plan {original}",
+                                "EnforceDistRequirementRewriter: no alias found for required column {original_col} at level {level} in current node's child plan: \n{child} from original plan: \n{original}",
                             )));
                         };
 

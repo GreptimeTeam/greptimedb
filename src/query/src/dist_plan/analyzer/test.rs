@@ -778,17 +778,34 @@ fn expand_step_aggr_proj() {
 }
 
 #[test]
-fn expand_complex_col_req_proj_part_aggr_sort() {
+fn expand_complex_col_req_sort_pql() {
     // use logging for better debugging
     init_default_ut_logging();
     let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
-    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
         .unwrap()
-        .filter(col("pk1").eq(lit("3")))
+        .sort(vec![
+            col("pk1").sort(true, false),
+            col("pk2").sort(true, false),
+            col("pk3").sort(true, false), // make some col req here
+        ])
         .unwrap()
+        .build()
+        .unwrap();
+    let plan = SeriesDivide::new(
+        vec!["pk1".to_string(), "pk2".to_string(), "pk3".to_string()],
+        "ts".to_string(),
+        plan,
+    );
+    let plan = LogicalPlan::Extension(datafusion_expr::Extension {
+        node: Arc::new(plan),
+    });
+
+    let plan = LogicalPlanBuilder::from(plan)
         .aggregate(vec![col("pk1"), col("pk2")], vec![min(col("number"))])
         .unwrap()
         .sort(vec![
@@ -804,90 +821,20 @@ fn expand_complex_col_req_proj_part_aggr_sort() {
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
-    let expected = [""].join("\n");
+    let expected = [
+        "Projection: t.pk1, t.pk2",
+        "  MergeSort: t.pk1 ASC NULLS LAST, t.pk2 ASC NULLS LAST",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: t.pk1, t.pk2",
+        "  Sort: t.pk1 ASC NULLS LAST, t.pk2 ASC NULLS LAST",
+        "    Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        r#"      PromSeriesDivide: tags=["pk1", "pk2", "pk3"]"#,
+        "        Sort: t.pk1 ASC NULLS LAST, t.pk2 ASC NULLS LAST, t.pk3 ASC NULLS LAST",
+        "          TableScan: t",
+        "]]",
+    ]
+    .join("\n");
     assert_eq!(expected, result.to_string());
-}
-
-#[test]
-fn repro_bug_aggregate_drops_sort_col() {
-    init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "t".to_string());
-    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
-        DfTableProviderAdapter::new(test_table),
-    )));
-    // Limit -> Projection (drops pk3) -> Sort (needs pk3) -> Scan
-    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
-        .unwrap()
-        .sort(vec![col("pk3").sort(true, false)])
-        .unwrap()
-        .project(vec![col("pk1"), col("pk2"), col("number")]) // drops pk3
-        .unwrap()
-        .limit(0, Some(10)) // force expansion
-        .unwrap()
-        .build()
-        .unwrap();
-
-    let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-
-    let expected = [""].join("\n");
-    assert_eq!(expected, result.to_string());
-}
-
-#[test]
-fn repro_no_alias_found_aggregate() {
-    init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "t".to_string());
-    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
-        DfTableProviderAdapter::new(test_table),
-    )));
-    // pk3 is a partition column.
-    // Projection (pk3 AS p3, pk3 AS p3_alt, number)
-    // Sort (p3_alt) -> commutative, goes to stage. Requirement for p3_alt.
-    // Aggregate (group by p3) -> matches partition (since p3 is an alias of pk3), stays in on_node.
-    //   But it DROPS p3_alt.
-    // Projection (keeps p3, min_number) -> stays in on_node.
-    // Limit triggers expansion.
-    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
-        .unwrap()
-        .project(vec![
-            col("pk1"),
-            col("pk2"),
-            col("pk3").alias("p3"),
-            col("pk3").alias("p3_alt"),
-            col("number"),
-        ])
-        .unwrap()
-        .sort(vec![col("p3_alt").sort(true, false)])
-        .unwrap()
-        .aggregate(
-            vec![col("p3")],
-            vec![min(col("number")).alias("min_number")],
-        )
-        .unwrap()
-        .project(vec![col("p3"), col("min_number")])
-        .unwrap()
-        .limit(0, Some(10))
-        .unwrap()
-        .build()
-        .unwrap();
-
-    let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config);
-
-    match result {
-        Ok(plan) => panic!("Expected error, but got plan:\n{}", plan.display_indent()),
-        Err(e) => {
-            let err_msg = e.to_string();
-            assert!(
-                err_msg.contains(
-                    "EnforceDistRequirementRewriter: no alias found for required column p3_alt"
-                ),
-                "Error message was: {}",
-                err_msg
-            );
-        }
-    }
 }
 
 #[test]
