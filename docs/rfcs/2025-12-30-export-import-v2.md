@@ -106,10 +106,19 @@ greptime export create \
   --schema-only \
   --to s3://my-bucket/snapshots/prod-schema-only
 
-# Resume interrupted export
+# Export to CSV format (for debugging/inspection)
+greptime export create \
+  --format csv \
+  --to s3://my-bucket/snapshots/prod-csv
+
+# Resume interrupted export (automatic if snapshot exists)
+greptime export create \
+  --to s3://my-bucket/snapshots/prod-20250101
+
+# Force recreate (delete existing and start over)
 greptime export create \
   --to s3://my-bucket/snapshots/prod-20250101 \
-  --resume
+  --force
 ```
 
 ### Import
@@ -169,13 +178,39 @@ Schema definitions are stored as JSON (not SQL) for better version compatibility
 
 ### Data Files
 
-Data is exported to Apache Parquet format via COPY DATABASE. Parquet configuration (compression, row group size, etc.) is determined by the COPY DATABASE implementation.
+Data is exported via COPY DATABASE, supporting two formats:
+
+#### Parquet Format (Default, Recommended)
+
+Apache Parquet is the default format. Configuration (compression, row group size, etc.) is determined by the COPY DATABASE implementation.
 
 **Parquet benefits**:
 
 - Columnar storage (query-friendly)
 - High compression ratio
 - Self-describing (includes schema metadata)
+- Efficient for large-scale data
+
+**Use cases**: Production backups, long-term archival, large-scale data migration
+
+#### CSV Format (Optional)
+
+CSV format is available for human-readable exports and third-party integration.
+
+**CSV benefits**:
+
+- Human-readable (can be opened in text editors/Excel)
+- Universal compatibility (supported by all tools)
+- Easy to debug and inspect
+- Simple hand-editing for small datasets
+
+**Use cases**: Data inspection, debugging, small-scale migration, third-party system integration
+
+**Limitations**:
+
+- Larger file size (no compression by default)
+- Type information loss (everything is text)
+- Less efficient for large datasets
 
 ## Core Design Decisions
 
@@ -226,7 +261,7 @@ V2 uses the existing `COPY DATABASE TO` SQL for data export:
 COPY DATABASE <schema> TO '<path>' WITH (
     START_TIME = '<start>',
     END_TIME = '<end>',
-    FORMAT = 'parquet'
+    FORMAT = 'parquet'  -- or 'csv'
 )
 ```
 
@@ -234,8 +269,14 @@ COPY DATABASE <schema> TO '<path>' WITH (
 
 - Reuses proven implementation
 - Streaming processing (constant memory usage)
-- Automatic Parquet conversion
+- Supports multiple formats (Parquet, CSV)
 - Built-in time range filtering
+
+**Format selection**:
+
+- Parquet (default): Efficient for production use, better compression
+- CSV: Human-readable, useful for debugging and third-party integration
+- Format is recorded in manifest, automatically detected during import
 
 ### 4. Data Integrity
 
@@ -258,8 +299,10 @@ Checksums are verified during import before data is written to the database.
 **Resume capability**:
 
 - Manifest tracks chunk status (Pending, Completed, Failed)
-- `--resume` flag skips completed chunks and retries failed ones
+- Export/import automatically resumes when executed on existing snapshot
+- Skips completed chunks, retries failed chunks, processes pending chunks
 - Works across process restarts
+- Use `--force` (export only) to delete existing snapshot and start over
 
 ### 6. Concurrent Export Safety
 
@@ -271,9 +314,9 @@ Checksums are verified during import before data is written to the database.
 **Scenario 2**: Export to same path ⚠️
 
 - Concurrent exports to the same path can corrupt the snapshot
-- Solution: Path existence check (reject if `manifest.json` exists)
-- Limitation: Race condition exists, but unlikely in practice
-- Recommendation: Include timestamp in snapshot path
+- With default resume behavior: both processes will resume the same export (usually safe)
+- Race condition exists during initial manifest creation, but unlikely in practice
+- Recommendation: Include timestamp in snapshot path to avoid conflicts
 
 **Why no distributed lock?**
 
@@ -298,8 +341,15 @@ Optional:
   --end-time <TIMESTAMP>          Time range end (default: now)
   --chunk-time-window <DURATION>  Chunk time window (default: 1d)
   --parallelism <N>               Concurrency level (default: 1)
+  --format <FORMAT>               Export format: parquet (default) or csv
   --schema-only                   Export schema only, no data
-  --resume                        Resume interrupted export
+  --force                         Delete existing snapshot and recreate
+
+Behavior:
+  - If snapshot doesn't exist: create new snapshot
+  - If snapshot exists: automatically resume export (skip completed chunks,
+    retry failed chunks, process pending chunks)
+  - If --force is specified: delete existing snapshot first, then create new one
 ```
 
 ### Import Command
@@ -314,9 +364,12 @@ Optional:
   --catalog <CATALOG>       Catalog name (default: greptime)
   --schemas <SCHEMAS>       Comma-separated schema list (default: all)
   --parallelism <N>         Concurrency level (default: 1)
-  --resume                  Resume interrupted import
   --dry-run                 Verify without importing
   --time-range <RANGE>      Import partial time range only
+
+Behavior:
+  - Automatically resumes if import was previously interrupted
+  - Skips completed chunks, retries failed chunks, processes pending chunks
 ```
 
 ### Management Commands
@@ -338,9 +391,9 @@ Key error types:
 
 - `UnsupportedLocalPath`: Bare path without URI scheme
 - `RemoteServerWithLocalPath`: file:/// used with remote server
-- `SnapshotAlreadyExists`: Target path already contains a snapshot
 - `InvalidTimeRange`: start >= end
 - `ChecksumMismatch`: File/chunk/snapshot checksum verification failed
+- `SnapshotNotFound`: Resume requested but snapshot doesn't exist (import only)
 
 Errors include detailed hints for resolution.
 
