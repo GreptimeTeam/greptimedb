@@ -63,7 +63,6 @@ pub const TABLE_COLLATION: &str = "table_collation";
 pub const CHECKSUM: &str = "checksum";
 pub const CREATE_OPTIONS: &str = "create_options";
 pub const TABLE_COMMENT: &str = "table_comment";
-pub const COMMENT: &str = "comment";
 pub const MAX_INDEX_LENGTH: &str = "max_index_length";
 pub const TEMPORARY: &str = "temporary";
 const TABLE_ID: &str = "table_id";
@@ -123,7 +122,6 @@ impl InformationSchemaTables {
             ColumnSchema::new(CHECKSUM, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(CREATE_OPTIONS, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(TABLE_COMMENT, ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new(COMMENT, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(TEMPORARY, ConcreteDataType::string_datatype(), true),
         ]))
     }
@@ -201,7 +199,6 @@ struct InformationSchemaTablesBuilder {
     checksum: UInt64VectorBuilder,
     create_options: StringVectorBuilder,
     table_comment: StringVectorBuilder,
-    comment: StringVectorBuilder,
     engines: StringVectorBuilder,
     temporary: StringVectorBuilder,
 }
@@ -239,7 +236,6 @@ impl InformationSchemaTablesBuilder {
             checksum: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             create_options: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             table_comment: StringVectorBuilder::with_capacity(INIT_CAPACITY),
-            comment: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             temporary: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
@@ -383,7 +379,6 @@ impl InformationSchemaTablesBuilder {
         // use mariadb default table version number here
         self.version.push(Some(11));
         self.table_comment.push(table_info.desc.as_deref());
-        self.comment.push(table_info.desc.as_deref());
         self.create_options
             .push(Some(table_info.meta.options.to_string().as_ref()));
         self.create_time
@@ -423,7 +418,6 @@ impl InformationSchemaTablesBuilder {
             Arc::new(self.checksum.finish()),
             Arc::new(self.create_options.finish()),
             Arc::new(self.table_comment.finish()),
-            Arc::new(self.comment.finish()),
             Arc::new(self.temporary.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)

@@ -112,14 +112,14 @@ SHOW CREATE TABLE comment_column_test;
 |                     |                                                         |
 +---------------------+---------------------------------------------------------+
 
-SELECT comment
+SELECT column_comment
 FROM information_schema.columns
 WHERE table_schema = 'public'
   AND table_name = 'comment_column_test'
   AND column_name = 'val';
 
 +--------------------------+
-| comment                  |
+| column_comment           |
 +--------------------------+
 | value column description |
 +--------------------------+
@@ -146,17 +146,17 @@ SHOW CREATE TABLE comment_column_test;
 |                     |                                                    |
 +---------------------+----------------------------------------------------+
 
-SELECT comment
+SELECT column_comment
 FROM information_schema.columns
 WHERE table_schema = 'public'
   AND table_name = 'comment_column_test'
   AND column_name = 'val';
 
-+---------+
-| comment |
-+---------+
-|         |
-+---------+
++----------------+
+| column_comment |
++----------------+
+|                |
++----------------+
 
 DROP TABLE comment_column_test;
 

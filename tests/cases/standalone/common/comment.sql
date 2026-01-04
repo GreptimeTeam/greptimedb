@@ -35,7 +35,7 @@ CREATE TABLE comment_column_test (
 -- Add column comment
 COMMENT ON COLUMN comment_column_test.val IS 'value column description';
 SHOW CREATE TABLE comment_column_test;
-SELECT comment
+SELECT column_comment
 FROM information_schema.columns
 WHERE table_schema = 'public'
   AND table_name = 'comment_column_test'
@@ -44,7 +44,7 @@ WHERE table_schema = 'public'
 -- Remove column comment
 COMMENT ON COLUMN comment_column_test.val IS NULL;
 SHOW CREATE TABLE comment_column_test;
-SELECT comment
+SELECT column_comment
 FROM information_schema.columns
 WHERE table_schema = 'public'
   AND table_name = 'comment_column_test'
