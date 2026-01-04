@@ -392,12 +392,10 @@ impl PlanRewriter {
                     && ext_b.node.name() == MergeSortLogicalPlan::name()
                 {
                     // revert last `ConditionalCommutative` result for Sort plan in this case.
-                    // `update_column_requirements` left unchanged because Sort won't generate
-                    // new columns or remove existing columns.
+                    // also need to remove any column requirements made by the Sort Plan
                     self.stage.pop();
                     self.expand_on_next_part_cond_trans_commutative = false;
-                    // TODO(discord9): this revert also need to revert column requirements added by Sort plan, so later plans wouldn't accidentally use those column requirements now invalid in here
-                    // FIXME: also need to found out why this only trigger in flow, not normal pql query?
+                    self.column_requirements.clear();
                 }
             }
             Commutativity::PartialCommutative => {
