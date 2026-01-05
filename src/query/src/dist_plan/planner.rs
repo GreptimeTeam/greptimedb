@@ -28,7 +28,7 @@ use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
-use partition::manager::PartitionRuleManagerRef;
+use partition::manager::{PartitionRuleManagerRef, create_partitions_from_region_routes};
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -264,11 +264,10 @@ impl DistExtensionPlanner {
         }
 
         // Get partition information for the table if partition rule manager is available
-        let partitions = match self
-            .partition_rule_manager
-            .find_table_partitions(table.table_info().table_id())
-            .await
-        {
+        let partitions = match create_partitions_from_region_routes(
+            table_info.table_id(),
+            &physical_table_route.region_routes,
+        ) {
             Ok(partitions) => partitions,
             Err(err) => {
                 common_telemetry::debug!(
