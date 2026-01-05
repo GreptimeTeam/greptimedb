@@ -281,18 +281,18 @@ struct PlanRewriter {
     /// 2: Sort: t.pk1+t.pk2
     /// 3. Projection: t.number, t.pk1, t.pk2
     /// ```
-    /// `Sort` will make a column requirement for `t.pk1` at level 2.
+    /// `Sort` will make a column requirement for `t.pk1+t.pk2` at level 2.
     /// Which making `Projection` at level 1 need to add a ref to `t.pk1` as well.
     /// So that the expanded plan will be
     /// ```ignore
     /// Projection: t.number
-    ///   MergeSort: t.pk1
+    ///   MergeSort: t.pk1+t.pk2
     ///     MergeScan: remote_input=
     /// Projection: t.number, "t.pk1+t.pk2" <--- the original `Projection` at level 1 get added with `t.pk1+t.pk2`
     ///  Sort: t.pk1+t.pk2
     ///    Projection: t.number, t.pk1, t.pk2
     /// ```
-    /// Making `MergeSort` can have `t.pk1` as input.
+    /// Making `MergeSort` can have `t.pk1+t.pk2` as input.
     /// Meanwhile `Projection` at level 3 doesn't need to add any new column because 3 > 2
     /// and col requirements at level 2 is not applicable for level 3.
     ///
@@ -392,10 +392,11 @@ impl PlanRewriter {
                     && ext_b.node.name() == MergeSortLogicalPlan::name()
                 {
                     // revert last `ConditionalCommutative` result for Sort plan in this case.
-                    // `update_column_requirements` left unchanged because Sort won't generate
-                    // new columns or remove existing columns.
+                    // also need to remove any column requirements made by the Sort Plan
+                    // as it may refer to columns later no longer exist(rightfully) like by aggregate or projection
                     self.stage.pop();
                     self.expand_on_next_part_cond_trans_commutative = false;
+                    self.column_requirements.clear();
                 }
             }
             Commutativity::PartialCommutative => {
@@ -680,6 +681,10 @@ struct EnforceDistRequirementRewriter {
 
 impl EnforceDistRequirementRewriter {
     fn new(column_requirements: Vec<(HashSet<Column>, usize)>, cur_level: usize) -> Self {
+        debug!(
+            "Create EnforceDistRequirementRewriter with column_requirements: {:?} at cur_level: {}",
+            column_requirements, cur_level
+        );
         Self {
             column_requirements,
             cur_level,
@@ -733,7 +738,7 @@ impl EnforceDistRequirementRewriter {
                             .filter(|a| !a.is_empty())
                         else {
                             return Err(datafusion_common::DataFusionError::Internal(format!(
-                                "EnforceDistRequirementRewriter: no alias found for required column {original_col} in child plan {child} from original plan {original}",
+                                "EnforceDistRequirementRewriter: no alias found for required column {original_col} at level {level} in current node's child plan: \n{child} from original plan: \n{original}",
                             )));
                         };
 
