@@ -355,7 +355,7 @@ impl PipelineTable {
 
         // multiple pipeline with no empty or current schema
         // throw an error
-        let pipeline_content = pipeline.context(MultiPipelineWithDiffSchemaSnafu {
+        let pipeline_content = pipeline.with_context(|| MultiPipelineWithDiffSchemaSnafu {
             name: name.to_string(),
             current_schema: schema.to_string(),
             schemas: pipeline_vec.iter().map(|v| v.schema.clone()).join(","),
