@@ -313,13 +313,10 @@ impl PipelineTable {
                         return self
                             .cache
                             .get_failover_cache(schema, name, input_version)?
-                            .ok_or(
-                                PipelineNotFoundSnafu {
-                                    name,
-                                    version: input_version,
-                                }
-                                .build(),
-                            );
+                            .context(PipelineNotFoundSnafu {
+                                name,
+                                version: input_version,
+                            });
                     }
                     _ => {
                         // if other error, we should return it
