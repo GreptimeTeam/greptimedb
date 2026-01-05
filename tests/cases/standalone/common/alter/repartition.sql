@@ -18,6 +18,20 @@ ALTER TABLE alter_repartition_table REPARTITION (
   device_id < 100 AND area >= 'South'
 );
 
+-- valid grammar, currently not implemented
+ALTER TABLE alter_repartition_table SPLIT PARTITION (
+  device_id < 100
+) TO (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+);
+
+-- valid grammar, currently not implemented
+ALTER TABLE alter_repartition_table MERGE PARTITION (
+  device_id < 100,
+  device_id >= 100 AND device_id < 200
+);
+
 -- invalid: empty source clause
 ALTER TABLE alter_repartition_table REPARTITION () INTO (
   device_id < 100
