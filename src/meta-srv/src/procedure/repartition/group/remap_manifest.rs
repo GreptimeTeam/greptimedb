@@ -63,12 +63,16 @@ impl State for RemapManifest {
             operation_timeout,
         )
         .await?;
+        let table_id = ctx.persistent_ctx.table_id;
+        let group_id = ctx.persistent_ctx.group_id;
 
         if manifest_paths.len() != ctx.persistent_ctx.targets.len() {
             warn!(
-                "Expected {} manifest paths, but got {}",
+                "Mismatch in manifest paths count: expected {}, got {}. This occurred during remapping manifests for group {} and table {}.",
                 ctx.persistent_ctx.targets.len(),
-                manifest_paths.len()
+                manifest_paths.len(),
+                group_id,
+                table_id
             );
         }
 
