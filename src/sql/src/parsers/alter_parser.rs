@@ -229,7 +229,7 @@ impl ParserContext<'_> {
         }
 
         self.parser
-            .expect_keyword(Keyword::TO)
+            .expect_keyword(Keyword::INTO)
             .context(error::SyntaxSnafu)?;
         let into_exprs = self.parse_repartition_expr_list()?;
 
@@ -977,7 +977,7 @@ ALTER TABLE t REPARTITION (
         let sql = r#"
 ALTER TABLE metrics SPLIT PARTITION (
   device_id < 100
-) TO (
+) INTO (
   device_id < 100 AND area < 'South',
   device_id < 100 AND area >= 'South'
 );"#;

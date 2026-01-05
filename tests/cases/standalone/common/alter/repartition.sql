@@ -21,7 +21,7 @@ ALTER TABLE alter_repartition_table REPARTITION (
 -- valid grammar, currently not implemented
 ALTER TABLE alter_repartition_table SPLIT PARTITION (
   device_id < 100
-) TO (
+) INTO (
   device_id < 100 AND area < 'South',
   device_id < 100 AND area >= 'South'
 );
