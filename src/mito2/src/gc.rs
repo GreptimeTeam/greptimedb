@@ -332,19 +332,16 @@ impl LocalGcWorker {
 
         let manifest = region.manifest_ctx.manifest().await;
         // If the manifest version does not match, skip GC for this region to avoid deleting files that are still in use.
-        if self
+        let file_ref_manifest_version = self
             .file_ref_manifest
             .manifest_version
             .get(&region.region_id())
-            .cloned()
-            != Some(manifest.manifest_version)
-        {
+            .cloned();
+        if file_ref_manifest_version != Some(manifest.manifest_version) {
             // should be rare enough(few seconds after leader update manifest version), just skip gc for this region
             warn!(
                 "Tmp ref files manifest version {:?} does not match region {} manifest version {}, skip gc for this region",
-                self.file_ref_manifest
-                    .manifest_version
-                    .get(&region.region_id()),
+                file_ref_manifest_version,
                 region.region_id(),
                 manifest.manifest_version
             );
