@@ -337,7 +337,7 @@ mod tests {
         .build();
 
         let table_metadata_manager = TableMetadataManager::new(backend);
-        let mut view_info = common_meta::key::test_utils::new_test_table_info(1024, vec![]);
+        let mut view_info = common_meta::key::test_utils::new_test_table_info(1024);
         view_info.table_type = TableType::View;
         let logical_plan = vec![1, 2, 3];
         // Create view metadata

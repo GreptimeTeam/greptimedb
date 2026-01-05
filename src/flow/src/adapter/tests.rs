@@ -24,7 +24,7 @@ use super::*;
 pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
     table_id: TableId,
     table_name: &str,
-    region_numbers: I,
+    _region_numbers: I,
 ) -> TableInfo {
     let column_schemas = vec![
         ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
@@ -46,7 +46,6 @@ pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
         .primary_key_indices(vec![0])
         .engine("engine")
         .next_column_id(3)
-        .region_numbers(region_numbers.into_iter().collect::<Vec<_>>())
         .build()
         .unwrap();
     TableInfoBuilder::default()

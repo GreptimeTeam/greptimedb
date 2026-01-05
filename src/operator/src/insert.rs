@@ -1220,7 +1220,6 @@ mod tests {
             .next_column_id(0)
             .options(Default::default())
             .created_on(Default::default())
-            .region_numbers(vec![0])
             .build()
             .unwrap();
         let info = Arc::new(

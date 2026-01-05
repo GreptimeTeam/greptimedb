@@ -342,9 +342,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_metadata() {
-        let region_number = 1u32;
         let table_id = 1024;
-        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
+        let table_info: RawTableInfo = new_test_table_info(table_id).into();
 
         let region_id = RegionId::new(table_id, 1);
         let leader_peer_id = 1024;
@@ -394,9 +393,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_renew_region_leases_basic() {
-        let region_number = 1u32;
         let table_id = 1024;
-        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
+        let table_info: RawTableInfo = new_test_table_info(table_id).into();
 
         let region_id = RegionId::new(table_id, 1);
         let leader_peer_id = 1024;
@@ -502,9 +500,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_renew_unexpected_logic_table() {
-        let region_number = 1u32;
         let table_id = 1024;
-        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
+        let table_info: RawTableInfo = new_test_table_info(table_id).into();
 
         let region_id = RegionId::new(table_id, 1);
         let keeper = new_test_keeper();
@@ -512,7 +509,7 @@ mod tests {
         table_metadata_manager
             .create_table_metadata(
                 table_info,
-                TableRouteValue::Logical(LogicalTableRouteValue::new(table_id, vec![region_id])),
+                TableRouteValue::Logical(LogicalTableRouteValue::new(table_id)),
                 HashMap::default(),
             )
             .await
@@ -539,9 +536,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_renew_region_leases_with_downgrade_leader() {
-        let region_number = 1u32;
         let table_id = 1024;
-        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
+        let table_info: RawTableInfo = new_test_table_info(table_id).into();
 
         let region_id = RegionId::new(table_id, 1);
         let leader_peer_id = 1024;

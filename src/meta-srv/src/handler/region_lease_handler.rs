@@ -192,7 +192,7 @@ mod test {
         let another_region_id = RegionId::new(table_id, region_number + 1);
         let peer = Peer::empty(datanode_id);
         let follower_peer = Peer::empty(datanode_id + 1);
-        let table_info = new_test_table_info(table_id, vec![region_number]).into();
+        let table_info = new_test_table_info(table_id).into();
 
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
@@ -328,7 +328,7 @@ mod test {
         let no_exist_region_id = RegionId::new(table_id, region_number + 2);
         let peer = Peer::empty(datanode_id);
         let follower_peer = Peer::empty(datanode_id + 1);
-        let table_info = new_test_table_info(table_id, vec![region_number]).into();
+        let table_info = new_test_table_info(table_id).into();
 
         let region_routes = vec![
             RegionRoute {

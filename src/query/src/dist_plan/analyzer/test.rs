@@ -88,7 +88,6 @@ impl TestTable {
             primary_key_indices: vec![0, 1, 2],
             value_indices: vec![4],
             engine,
-            region_numbers: vec![0, 1],
             next_column_id: 5,
             options: Default::default(),
             created_on: Default::default(),

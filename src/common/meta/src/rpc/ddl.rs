@@ -1639,7 +1639,6 @@ mod tests {
             value_indices: vec![2],
             engine: METRIC_ENGINE_NAME.to_string(),
             next_column_id: 0,
-            region_numbers: vec![0],
             options: Default::default(),
             created_on: Default::default(),
             updated_on: Default::default(),

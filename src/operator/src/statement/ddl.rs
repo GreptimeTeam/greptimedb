@@ -1837,7 +1837,6 @@ pub fn create_table_info(
         value_indices: vec![],
         engine: create_table.engine.clone(),
         next_column_id: column_schemas.len() as u32,
-        region_numbers: vec![],
         options: table_options,
         created_on: Utc::now(),
         updated_on: Utc::now(),
