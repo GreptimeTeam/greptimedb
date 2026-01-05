@@ -87,7 +87,7 @@ impl HeartbeatTask {
         let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
             region_server.clone(),
             countdown_task_handler_ext,
-            BASE_HEARTBEAT_INTERVAL.as_millis() as u64,
+            BASE_HEARTBEAT_INTERVAL,
         ));
         let resp_handler_executor = Arc::new(HandlerGroupExecutor::new(vec![
             region_alive_keeper.clone(),

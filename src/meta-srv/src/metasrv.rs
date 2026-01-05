@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use api::v1::meta::Role;
+use api::v1::meta::{HeartbeatConfig, Role};
 use clap::ValueEnum;
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
@@ -28,7 +28,9 @@ use common_event_recorder::EventRecorderOptions;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl_manager::DdlManagerRef;
-use common_meta::distributed_time_constants::{self, default_distributed_time_constants};
+use common_meta::distributed_time_constants::{
+    self, BASE_HEARTBEAT_INTERVAL, default_distributed_time_constants, frontend_heartbeat_interval,
+};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
@@ -134,25 +136,8 @@ pub struct HeartbeatOptions {
     pub retry_interval: Duration,
 }
 
-impl HeartbeatOptions {
-    pub fn datanode_default() -> Self {
-        use common_meta::distributed_time_constants::*;
-        Self {
-            interval: BASE_HEARTBEAT_INTERVAL,
-            retry_interval: Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS),
-        }
-    }
-
-    pub fn frontend_default() -> Self {
-        use common_meta::distributed_time_constants::*;
-        Self {
-            interval: frontend_heartbeat_interval(BASE_HEARTBEAT_INTERVAL),
-            retry_interval: BASE_HEARTBEAT_INTERVAL,
-        }
-    }
-
-    pub fn flownode_default() -> Self {
-        use common_meta::distributed_time_constants::*;
+impl Default for HeartbeatOptions {
+    fn default() -> Self {
         Self {
             interval: BASE_HEARTBEAT_INTERVAL,
             retry_interval: BASE_HEARTBEAT_INTERVAL,
@@ -160,36 +145,34 @@ impl HeartbeatOptions {
     }
 }
 
-impl From<&HeartbeatOptions> for api::v1::meta::HeartbeatConfig {
-    fn from(opts: &HeartbeatOptions) -> Self {
+impl HeartbeatOptions {
+    pub fn datanode_from(base_interval: Duration) -> Self {
+        Self {
+            interval: base_interval,
+            retry_interval: base_interval,
+        }
+    }
+
+    pub fn frontend_from(base_interval: Duration) -> Self {
+        Self {
+            interval: frontend_heartbeat_interval(base_interval),
+            retry_interval: base_interval,
+        }
+    }
+
+    pub fn flownode_from(base_interval: Duration) -> Self {
+        Self {
+            interval: base_interval,
+            retry_interval: base_interval,
+        }
+    }
+}
+
+impl From<HeartbeatOptions> for HeartbeatConfig {
+    fn from(opts: HeartbeatOptions) -> Self {
         Self {
             heartbeat_interval_ms: opts.interval.as_millis() as u64,
             retry_interval_ms: opts.retry_interval.as_millis() as u64,
-        }
-    }
-}
-
-impl Default for HeartbeatOptions {
-    fn default() -> Self {
-        Self::datanode_default()
-    }
-}
-
-/// Heartbeat configuration that Metasrv manages for all node types.
-#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
-#[serde(default)]
-pub struct MetasrvHeartbeatOptions {
-    pub datanode: HeartbeatOptions,
-    pub frontend: HeartbeatOptions,
-    pub flownode: HeartbeatOptions,
-}
-
-impl Default for MetasrvHeartbeatOptions {
-    fn default() -> Self {
-        Self {
-            datanode: HeartbeatOptions::datanode_default(),
-            frontend: HeartbeatOptions::frontend_default(),
-            flownode: HeartbeatOptions::flownode_default(),
         }
     }
 }
@@ -315,10 +298,6 @@ pub struct MetasrvOptions {
     pub stats_persistence: StatsPersistenceOptions,
     /// The GC scheduler options.
     pub gc: GcSchedulerOptions,
-    /// Heartbeat configuration to send to nodes.
-    /// Metasrv will send these intervals to nodes during handshake.
-    #[serde(default)]
-    pub heartbeat_config: MetasrvHeartbeatOptions,
 }
 
 impl fmt::Debug for MetasrvOptions {
@@ -420,7 +399,6 @@ impl Default for MetasrvOptions {
             stats_persistence: StatsPersistenceOptions::default(),
             gc: GcSchedulerOptions::default(),
             backend_client: BackendClientOptions::default(),
-            heartbeat_config: MetasrvHeartbeatOptions::default(),
         }
     }
 }
@@ -457,7 +435,7 @@ pub struct Context {
     pub cache_invalidator: CacheInvalidatorRef,
     pub leader_region_registry: LeaderRegionRegistryRef,
     pub topic_stats_registry: TopicStatsRegistryRef,
-    pub heartbeat_config: MetasrvHeartbeatOptions,
+    pub heartbeat_interval: Duration,
     pub is_handshake: bool,
 }
 
@@ -472,11 +450,11 @@ impl Context {
         self
     }
 
-    pub fn heartbeat_options_for(&self, role: Role) -> &HeartbeatOptions {
+    pub fn heartbeat_options_for(&self, role: Role) -> HeartbeatOptions {
         match role {
-            Role::Datanode => &self.heartbeat_config.datanode,
-            Role::Frontend => &self.heartbeat_config.frontend,
-            Role::Flownode => &self.heartbeat_config.flownode,
+            Role::Datanode => HeartbeatOptions::datanode_from(self.heartbeat_interval),
+            Role::Frontend => HeartbeatOptions::frontend_from(self.heartbeat_interval),
+            Role::Flownode => HeartbeatOptions::flownode_from(self.heartbeat_interval),
         }
     }
 }
@@ -996,7 +974,7 @@ impl Metasrv {
             cache_invalidator,
             leader_region_registry,
             topic_stats_registry,
-            heartbeat_config: self.options().heartbeat_config.clone(),
+            heartbeat_interval: self.options().heartbeat_interval,
             is_handshake: false,
         }
     }

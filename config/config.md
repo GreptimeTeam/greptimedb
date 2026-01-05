@@ -348,20 +348,12 @@
 | `auto_create_schema` | Bool | `true` | Automatically create PostgreSQL schema if it doesn't exist.<br/>When enabled, the system will execute `CREATE SCHEMA IF NOT EXISTS <schema_name>`<br/>before creating metadata tables. This is useful in production environments where<br/>manual schema creation may be restricted.<br/>Default is true.<br/>Note: The PostgreSQL user must have CREATE SCHEMA permission for this to work.<br/>**Only used when backend is `postgres_store`.** |
 | `meta_election_lock_id` | Integer | `1` | Advisory lock id in PostgreSQL for election. Effect when using PostgreSQL as kvbackend<br/>Only used when backend is `postgres_store`. |
 | `selector` | String | `round_robin` | Datanode selector type.<br/>- `round_robin` (default value)<br/>- `lease_based`<br/>- `load_based`<br/>For details, please see "https://docs.greptime.com/developer-guide/metasrv/selector". |
+| `heartbeat_interval` | String | `3s` | The base heartbeat interval for distributed time constants.<br/>This value is used to calculate the distributed time constants for components.<br/>For example, the region lease time is `heartbeat_interval * 3 + 1s`.<br/>Default is "3s". |
 | `enable_region_failover` | Bool | `false` | Whether to enable region failover.<br/>This feature is only available on GreptimeDB running on cluster mode and<br/>- Using Remote WAL<br/>- Using shared storage (e.g., s3). |
 | `region_failure_detector_initialization_delay` | String | `10m` | The delay before starting region failure detection.<br/>This delay helps prevent Metasrv from triggering unnecessary region failovers before all Datanodes are fully started.<br/>Especially useful when the cluster is not deployed with GreptimeDB Operator and maintenance mode is not enabled. |
 | `allow_region_failover_on_local_wal` | Bool | `false` | Whether to allow region failover on local WAL.<br/>**This option is not recommended to be set to true, because it may lead to data loss during failover.** |
 | `node_max_idle_time` | String | `24hours` | Max allowed idle time before removing node info from metasrv memory. |
 | `enable_telemetry` | Bool | `true` | Whether to enable greptimedb telemetry. Enabled by default. |
-| `heartbeat_config.datanode` | -- | -- | Heartbeat configuration that Metasrv sends to nodes during handshake.<br/>Metasrv centrally manages heartbeat intervals for all node types.<br/>Nodes will receive these configurations when they first connect to Metasrv. |
-| `heartbeat_config.datanode.interval` | String | `3s` | Heartbeat interval for datanode. |
-| `heartbeat_config.datanode.retry_interval` | String | `2s` | Retry interval when heartbeat connection fails for datanode. |
-| `heartbeat_config.frontend` | -- | -- | -- |
-| `heartbeat_config.frontend.interval` | String | `18s` | Heartbeat interval for frontend (6x base interval to reduce overhead). |
-| `heartbeat_config.frontend.retry_interval` | String | `3s` | Retry interval when heartbeat connection fails for frontend. |
-| `heartbeat_config.flownode` | -- | -- | -- |
-| `heartbeat_config.flownode.interval` | String | `3s` | Heartbeat interval for flownode. |
-| `heartbeat_config.flownode.retry_interval` | String | `3s` | Retry interval when heartbeat connection fails for flownode. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |

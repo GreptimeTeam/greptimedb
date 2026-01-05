@@ -57,6 +57,12 @@ meta_election_lock_id = 1
 ## For details, please see "https://docs.greptime.com/developer-guide/metasrv/selector".
 selector = "round_robin"
 
+## The base heartbeat interval for distributed time constants.
+## This value is used to calculate the distributed time constants for components.
+## For example, the region lease time is `heartbeat_interval * 3 + 1s`.
+## Default is "3s".
+heartbeat_interval = "3s"
+
 ## Whether to enable region failover.
 ## This feature is only available on GreptimeDB running on cluster mode and
 ## - Using Remote WAL
@@ -77,27 +83,6 @@ node_max_idle_time = "24hours"
 
 ## Whether to enable greptimedb telemetry. Enabled by default.
 #+ enable_telemetry = true
-
-## Heartbeat configuration that Metasrv sends to nodes during handshake.
-## Metasrv centrally manages heartbeat intervals for all node types.
-## Nodes will receive these configurations when they first connect to Metasrv.
-#+ [heartbeat_config.datanode]
-## Heartbeat interval for datanode.
-#+ interval = "3s"
-## Retry interval when heartbeat connection fails for datanode.
-#+ retry_interval = "2s"
-
-#+ [heartbeat_config.frontend]
-## Heartbeat interval for frontend (6x base interval to reduce overhead).
-#+ interval = "18s"
-## Retry interval when heartbeat connection fails for frontend.
-#+ retry_interval = "3s"
-
-#+ [heartbeat_config.flownode]
-## Heartbeat interval for flownode.
-#+ interval = "3s"
-## Retry interval when heartbeat connection fails for flownode.
-#+ retry_interval = "3s"
 
 ## The runtime options.
 #+ [runtime]
