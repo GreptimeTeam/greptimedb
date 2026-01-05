@@ -124,7 +124,7 @@ impl FileReferenceManager {
 
         for r in &query_regions_for_mem {
             let manifest = r.manifest_ctx.manifest().await;
-            // remove in manifest files for smaller size
+            // remove in manifest files for smaller size, since gc worker read from manifest later.
             ref_files.entry(r.region_id()).and_modify(|refs| {
                 *refs = std::mem::take(refs)
                     .into_iter()
