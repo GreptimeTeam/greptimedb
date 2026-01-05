@@ -530,6 +530,49 @@ impl Display for EnterStagingRegion {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemapManifest {
+    pub region_id: RegionId,
+    /// Regions to remap manifests from.
+    pub input_regions: Vec<RegionId>,
+    /// For each old region, which new regions should receive its files
+    pub region_mapping: HashMap<RegionId, Vec<RegionId>>,
+    /// New partition expressions for the new regions.
+    pub new_partition_exprs: HashMap<RegionId, String>,
+}
+
+impl Display for RemapManifest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RemapManifest(region_id={}, input_regions={:?}, region_mapping={:?}, new_partition_exprs={:?})",
+            self.region_id, self.input_regions, self.region_mapping, self.new_partition_exprs
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApplyStagingManifest {
+    /// The region ID to apply the staging manifest to.
+    pub region_id: RegionId,
+    /// The partition expression of the staging region.
+    pub partition_expr: String,
+    /// The region that stores the staging manifests in its staging blob storage.
+    pub central_region_id: RegionId,
+    /// The relative path to the staging manifest within the central region's staging blob storage.
+    pub manifest_path: String,
+}
+
+impl Display for ApplyStagingManifest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ApplyStagingManifest(region_id={}, partition_expr={}, central_region_id={}, manifest_path={})",
+            self.region_id, self.partition_expr, self.central_region_id, self.manifest_path
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
 pub enum Instruction {
     /// Opens regions.
@@ -559,6 +602,10 @@ pub enum Instruction {
     Suspend,
     /// Makes regions enter staging state.
     EnterStagingRegions(Vec<EnterStagingRegion>),
+    /// Remaps manifests for a region.
+    RemapManifest(RemapManifest),
+    /// Applies staging manifests for a region.
+    ApplyStagingManifests(Vec<ApplyStagingManifest>),
 }
 
 impl Instruction {
@@ -738,6 +785,48 @@ impl EnterStagingRegionsReply {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct RemapManifestReply {
+    /// Returns false if the region does not exist.
+    pub exists: bool,
+    /// A map from region IDs to their corresponding remapped manifest paths.
+    pub manifest_paths: HashMap<RegionId, String>,
+    /// Return error if any during the operation.
+    pub error: Option<String>,
+}
+
+impl Display for RemapManifestReply {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RemapManifestReply(manifest_paths={:?}, error={:?})",
+            self.manifest_paths, self.error
+        )
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct ApplyStagingManifestsReply {
+    pub replies: Vec<ApplyStagingManifestReply>,
+}
+
+impl ApplyStagingManifestsReply {
+    pub fn new(replies: Vec<ApplyStagingManifestReply>) -> Self {
+        Self { replies }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct ApplyStagingManifestReply {
+    pub region_id: RegionId,
+    /// Returns true if the region is ready to serve reads and writes.
+    pub ready: bool,
+    /// Indicates whether the region exists.
+    pub exists: bool,
+    /// Return error if any during the operation.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InstructionReply {
     #[serde(alias = "open_region")]
@@ -758,6 +847,8 @@ pub enum InstructionReply {
     GetFileRefs(GetFileRefsReply),
     GcRegions(GcRegionsReply),
     EnterStagingRegions(EnterStagingRegionsReply),
+    RemapManifest(RemapManifestReply),
+    ApplyStagingManifests(ApplyStagingManifestsReply),
 }
 
 impl Display for InstructionReply {
@@ -781,6 +872,12 @@ impl Display for InstructionReply {
                     reply.replies
                 )
             }
+            Self::RemapManifest(reply) => write!(f, "InstructionReply::RemapManifest({})", reply),
+            Self::ApplyStagingManifests(reply) => write!(
+                f,
+                "InstructionReply::ApplyStagingManifests({:?})",
+                reply.replies
+            ),
         }
     }
 }
@@ -826,6 +923,20 @@ impl InstructionReply {
         match self {
             Self::EnterStagingRegions(reply) => reply.replies,
             _ => panic!("Expected EnterStagingRegion reply"),
+        }
+    }
+
+    pub fn expect_remap_manifest_reply(self) -> RemapManifestReply {
+        match self {
+            Self::RemapManifest(reply) => reply,
+            _ => panic!("Expected RemapManifest reply"),
+        }
+    }
+
+    pub fn expect_apply_staging_manifests_reply(self) -> Vec<ApplyStagingManifestReply> {
+        match self {
+            Self::ApplyStagingManifests(reply) => reply.replies,
+            _ => panic!("Expected ApplyStagingManifest reply"),
         }
     }
 }

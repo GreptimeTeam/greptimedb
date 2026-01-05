@@ -17,12 +17,14 @@ pub(crate) mod rollback_staging_region;
 
 use std::any::Any;
 
+use common_meta::lock_key::TableLock;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::procedure::repartition::group::repartition_start::RepartitionStart;
+use crate::procedure::repartition::group::enter_staging_region::EnterStagingRegion;
+use crate::procedure::repartition::group::repartition_end::RepartitionEnd;
 use crate::procedure::repartition::group::{Context, State};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -33,22 +35,16 @@ pub enum UpdateMetadata {
     RollbackStaging,
 }
 
-impl UpdateMetadata {
-    #[allow(dead_code)]
-    fn next_state() -> (Box<dyn State>, Status) {
-        // TODO(weny): change it later.
-        (Box::new(RepartitionStart), Status::executing(true))
-    }
-}
-
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for UpdateMetadata {
     async fn next(
         &mut self,
         ctx: &mut Context,
-        _procedure_ctx: &ProcedureContext,
+        procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let table_lock = TableLock::Write(ctx.persistent_ctx.table_id).into();
+        let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
         match self {
             UpdateMetadata::ApplyStaging => {
                 // TODO(weny): If all metadata have already been updated, skip applying staging regions.
@@ -59,7 +55,7 @@ impl State for UpdateMetadata {
                         "Failed to broadcast the invalidate table cache message during the apply staging regions, error: {err:?}"
                     );
                 };
-                Ok(Self::next_state())
+                Ok((Box::new(EnterStagingRegion), Status::executing(false)))
             }
             UpdateMetadata::RollbackStaging => {
                 self.rollback_staging_regions(ctx).await?;
@@ -69,7 +65,7 @@ impl State for UpdateMetadata {
                         "Failed to broadcast the invalidate table cache message during the rollback staging regions, error: {err:?}"
                     );
                 };
-                Ok(Self::next_state())
+                Ok((Box::new(RepartitionEnd), Status::executing(false)))
             }
         }
     }

@@ -22,6 +22,7 @@ use common_telemetry::error;
 use snafu::OptionExt;
 use store_api::storage::GcReport;
 
+mod apply_staging_manifest;
 mod close_region;
 mod downgrade_region;
 mod enter_staging;
@@ -29,8 +30,10 @@ mod file_ref;
 mod flush_region;
 mod gc_worker;
 mod open_region;
+mod remap_manifest;
 mod upgrade_region;
 
+use crate::heartbeat::handler::apply_staging_manifest::ApplyStagingManifestsHandler;
 use crate::heartbeat::handler::close_region::CloseRegionsHandler;
 use crate::heartbeat::handler::downgrade_region::DowngradeRegionsHandler;
 use crate::heartbeat::handler::enter_staging::EnterStagingRegionsHandler;
@@ -38,6 +41,7 @@ use crate::heartbeat::handler::file_ref::GetFileRefsHandler;
 use crate::heartbeat::handler::flush_region::FlushRegionsHandler;
 use crate::heartbeat::handler::gc_worker::GcRegionsHandler;
 use crate::heartbeat::handler::open_region::OpenRegionsHandler;
+use crate::heartbeat::handler::remap_manifest::RemapManifestHandler;
 use crate::heartbeat::handler::upgrade_region::UpgradeRegionsHandler;
 use crate::heartbeat::task_tracker::TaskTracker;
 use crate::region_server::RegionServer;
@@ -128,6 +132,10 @@ impl RegionHeartbeatResponseHandler {
             Instruction::EnterStagingRegions(_) => {
                 Ok(Some(Box::new(EnterStagingRegionsHandler.into())))
             }
+            Instruction::RemapManifest(_) => Ok(Some(Box::new(RemapManifestHandler.into()))),
+            Instruction::ApplyStagingManifests(_) => {
+                Ok(Some(Box::new(ApplyStagingManifestsHandler.into())))
+            }
         }
     }
 }
@@ -142,6 +150,8 @@ pub enum InstructionHandlers {
     GetFileRefs(GetFileRefsHandler),
     GcRegions(GcRegionsHandler),
     EnterStagingRegions(EnterStagingRegionsHandler),
+    RemapManifest(RemapManifestHandler),
+    ApplyStagingManifests(ApplyStagingManifestsHandler),
 }
 
 macro_rules! impl_from_handler {
@@ -164,7 +174,9 @@ impl_from_handler!(
     UpgradeRegionsHandler => UpgradeRegions,
     GetFileRefsHandler => GetFileRefs,
     GcRegionsHandler => GcRegions,
-    EnterStagingRegionsHandler => EnterStagingRegions
+    EnterStagingRegionsHandler => EnterStagingRegions,
+    RemapManifestHandler => RemapManifest,
+    ApplyStagingManifestsHandler => ApplyStagingManifests
 );
 
 macro_rules! dispatch_instr {
@@ -209,7 +221,9 @@ dispatch_instr!(
     UpgradeRegions => UpgradeRegions,
     GetFileRefs => GetFileRefs,
     GcRegions => GcRegions,
-    EnterStagingRegions => EnterStagingRegions
+    EnterStagingRegions => EnterStagingRegions,
+    RemapManifest => RemapManifest,
+    ApplyStagingManifests => ApplyStagingManifests,
 );
 
 #[async_trait]

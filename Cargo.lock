@@ -4062,6 +4062,7 @@ dependencies = [
  "mito2",
  "num_cpus",
  "object-store",
+ "partition",
  "prometheus",
  "prost 0.13.5",
  "query",

@@ -29,6 +29,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{self, Error, Result};
 use crate::handler::HeartbeatMailbox;
+use crate::procedure::repartition::group::remap_manifest::RemapManifest;
 use crate::procedure::repartition::group::utils::{
     HandleMultipleResult, group_region_routes_by_peer, handle_multiple_results,
 };
@@ -49,7 +50,7 @@ impl State for EnterStagingRegion {
     ) -> Result<(Box<dyn State>, Status)> {
         self.enter_staging_regions(ctx).await?;
 
-        Ok(Self::next_state())
+        Ok((Box::new(RemapManifest), Status::executing(true)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -58,16 +59,10 @@ impl State for EnterStagingRegion {
 }
 
 impl EnterStagingRegion {
-    #[allow(dead_code)]
-    fn next_state() -> (Box<dyn State>, Status) {
-        // TODO(weny): change it later.
-        (Box::new(EnterStagingRegion), Status::executing(true))
-    }
-
     fn build_enter_staging_instructions(
         prepare_result: &GroupPrepareResult,
         targets: &[RegionDescriptor],
-    ) -> Result<HashMap<Peer, Instruction>> {
+    ) -> Result<HashMap<Peer, Vec<common_meta::instruction::EnterStagingRegion>>> {
         let target_partition_expr_by_region = targets
             .iter()
             .map(|target| {
@@ -93,10 +88,7 @@ impl EnterStagingRegion {
                     partition_expr: target_partition_expr_by_region[&region_id].clone(),
                 })
                 .collect();
-            instructions.insert(
-                peer.clone(),
-                Instruction::EnterStagingRegions(enter_staging_regions),
-            );
+            instructions.insert(peer.clone(), enter_staging_regions);
         }
 
         Ok(instructions)
@@ -117,14 +109,14 @@ impl EnterStagingRegion {
                 })?;
         let (peers, tasks): (Vec<_>, Vec<_>) = instructions
             .iter()
-            .map(|(peer, instruction)| {
+            .map(|(peer, enter_staging_regions)| {
                 (
                     peer,
                     Self::enter_staging_region(
                         &ctx.mailbox,
                         &ctx.server_addr,
                         peer,
-                        instruction,
+                        enter_staging_regions,
                         operation_timeout,
                     ),
                 )
@@ -208,12 +200,19 @@ impl EnterStagingRegion {
         mailbox: &MailboxRef,
         server_addr: &str,
         peer: &Peer,
-        instruction: &Instruction,
+        enter_staging_regions: &[common_meta::instruction::EnterStagingRegion],
         timeout: Duration,
     ) -> Result<()> {
         let ch = Channel::Datanode(peer.id);
+        let instruction = Instruction::EnterStagingRegions(enter_staging_regions.to_vec());
         let message = MailboxMessage::json_message(
-            &format!("Enter staging regions: {:?}", instruction),
+            &format!(
+                "Enter staging regions: {:?}",
+                enter_staging_regions
+                    .iter()
+                    .map(|r| r.region_id)
+                    .collect::<Vec<_>>()
+            ),
             &format!("Metasrv@{}", server_addr),
             &format!("Datanode-{}@{}", peer.id, peer.addr),
             common_time::util::current_time_millis(),
@@ -328,7 +327,6 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::time::Duration;
 
-    use common_meta::instruction::Instruction;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use store_api::storage::RegionId;
@@ -376,7 +374,7 @@ mod tests {
                 },
             ],
             central_region: RegionId::new(table_id, 1),
-            central_region_datanode_id: 1,
+            central_region_datanode: Peer::empty(1),
         };
         let targets = test_targets();
         let instructions =
@@ -384,12 +382,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(instructions.len(), 2);
-        let instruction_1 = instructions
-            .get(&Peer::empty(1))
-            .unwrap()
-            .clone()
-            .into_enter_staging_regions()
-            .unwrap();
+        let instruction_1 = instructions.get(&Peer::empty(1)).unwrap().clone();
         assert_eq!(
             instruction_1,
             vec![common_meta::instruction::EnterStagingRegion {
@@ -397,12 +390,7 @@ mod tests {
                 partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
             }]
         );
-        let instruction_2 = instructions
-            .get(&Peer::empty(2))
-            .unwrap()
-            .clone()
-            .into_enter_staging_regions()
-            .unwrap();
+        let instruction_2 = instructions.get(&Peer::empty(2)).unwrap().clone();
         assert_eq!(
             instruction_2,
             vec![common_meta::instruction::EnterStagingRegion {
@@ -417,18 +405,17 @@ mod tests {
         let env = TestingEnv::new();
         let server_addr = "localhost";
         let peer = Peer::empty(1);
-        let instruction =
-            Instruction::EnterStagingRegions(vec![common_meta::instruction::EnterStagingRegion {
-                region_id: RegionId::new(1024, 1),
-                partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
-            }]);
+        let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
+            region_id: RegionId::new(1024, 1),
+            partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
+        }];
         let timeout = Duration::from_secs(10);
 
         let err = EnterStagingRegion::enter_staging_region(
             env.mailbox_ctx.mailbox(),
             server_addr,
             &peer,
-            &instruction,
+            &enter_staging_regions,
             timeout,
         )
         .await
@@ -447,11 +434,10 @@ mod tests {
             .await;
         let server_addr = "localhost";
         let peer = Peer::empty(1);
-        let instruction =
-            Instruction::EnterStagingRegions(vec![common_meta::instruction::EnterStagingRegion {
-                region_id: RegionId::new(1024, 1),
-                partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
-            }]);
+        let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
+            region_id: RegionId::new(1024, 1),
+            partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
+        }];
         let timeout = Duration::from_secs(10);
 
         // Sends a timeout error.
@@ -463,7 +449,7 @@ mod tests {
             env.mailbox_ctx.mailbox(),
             server_addr,
             &peer,
-            &instruction,
+            &enter_staging_regions,
             timeout,
         )
         .await
@@ -479,11 +465,10 @@ mod tests {
 
         let server_addr = "localhost";
         let peer = Peer::empty(1);
-        let instruction =
-            Instruction::EnterStagingRegions(vec![common_meta::instruction::EnterStagingRegion {
-                region_id: RegionId::new(1024, 1),
-                partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
-            }]);
+        let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
+            region_id: RegionId::new(1024, 1),
+            partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
+        }];
         let timeout = Duration::from_secs(10);
 
         env.mailbox_ctx
@@ -498,7 +483,7 @@ mod tests {
             env.mailbox_ctx.mailbox(),
             server_addr,
             &peer,
-            &instruction,
+            &enter_staging_regions,
             timeout,
         )
         .await
@@ -516,11 +501,10 @@ mod tests {
             .await;
         let server_addr = "localhost";
         let peer = Peer::empty(1);
-        let instruction =
-            Instruction::EnterStagingRegions(vec![common_meta::instruction::EnterStagingRegion {
-                region_id: RegionId::new(1024, 1),
-                partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
-            }]);
+        let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
+            region_id: RegionId::new(1024, 1),
+            partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
+        }];
         let timeout = Duration::from_secs(10);
 
         // Sends a failed reply.
@@ -538,7 +522,7 @@ mod tests {
             env.mailbox_ctx.mailbox(),
             server_addr,
             &peer,
-            &instruction,
+            &enter_staging_regions,
             timeout,
         )
         .await
@@ -565,7 +549,7 @@ mod tests {
             env.mailbox_ctx.mailbox(),
             server_addr,
             &peer,
-            &instruction,
+            &enter_staging_regions,
             timeout,
         )
         .await
@@ -596,7 +580,7 @@ mod tests {
                 },
             ],
             central_region: RegionId::new(table_id, 1),
-            central_region_datanode_id: 1,
+            central_region_datanode: Peer::empty(1),
         }
     }
 

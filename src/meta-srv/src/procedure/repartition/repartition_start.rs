@@ -129,6 +129,7 @@ impl RepartitionStart {
                     target_partition_exprs,
                     regions_to_allocate,
                     regions_to_deallocate,
+                    transition_map: subtask.transition_map,
                 }
             })
             .collect::<Vec<_>>()

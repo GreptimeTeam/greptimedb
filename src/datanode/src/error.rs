@@ -201,6 +201,7 @@ pub enum Error {
     ShutdownServer {
         #[snafu(implicit)]
         location: Location,
+        #[snafu(source)]
         source: servers::error::Error,
     },
 
@@ -208,6 +209,7 @@ pub enum Error {
     ShutdownInstance {
         #[snafu(implicit)]
         location: Location,
+        #[snafu(source)]
         source: BoxedError,
     },
 
