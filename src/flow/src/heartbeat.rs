@@ -116,7 +116,10 @@ impl HeartbeatTask {
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
-        info!("Heartbeat started with Metasrv config: {}", config);
+        info!(
+            "Heartbeat started for flownode {}, Metasrv config: {}",
+            self.node_id, config
+        );
 
         let (outgoing_tx, outgoing_rx) = mpsc::channel(16);
         let mailbox = Arc::new(HeartbeatMailbox::new(outgoing_tx));
