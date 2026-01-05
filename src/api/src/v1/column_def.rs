@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY};
 use datatypes::schema::{
     COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema, FULLTEXT_KEY, FulltextAnalyzer,
-    FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY, SkippingIndexOptions,
-    SkippingIndexType,
+    FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata, SKIPPING_INDEX_KEY,
+    SkippingIndexOptions, SkippingIndexType,
 };
 use greptime_proto::v1::{
     Analyzer, FulltextBackend as PbFulltextBackend, SkippingIndexType as PbSkippingIndexType,
@@ -35,6 +35,14 @@ const FULLTEXT_GRPC_KEY: &str = "fulltext";
 const INVERTED_INDEX_GRPC_KEY: &str = "inverted_index";
 /// Key used to store skip index options in gRPC column options.
 const SKIPPING_INDEX_GRPC_KEY: &str = "skipping_index";
+
+const COLUMN_OPTION_MAPPINGS: [(&str, &str); 5] = [
+    (FULLTEXT_GRPC_KEY, FULLTEXT_KEY),
+    (INVERTED_INDEX_GRPC_KEY, INVERTED_INDEX_KEY),
+    (SKIPPING_INDEX_GRPC_KEY, SKIPPING_INDEX_KEY),
+    (EXTENSION_TYPE_NAME_KEY, EXTENSION_TYPE_NAME_KEY),
+    (EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_METADATA_KEY),
+];
 
 /// Tries to construct a `ColumnSchema` from the given  `ColumnDef`.
 pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
@@ -129,6 +137,21 @@ pub fn try_as_column_def(column_schema: &ColumnSchema, is_primary_key: bool) -> 
         datatype_extension: column_datatype.1,
         options,
     })
+}
+
+/// Collect the [ColumnOptions] into the [Metadata] that can be used in, for example, [ColumnSchema].
+pub fn collect_column_options(column_options: Option<&ColumnOptions>) -> Metadata {
+    let Some(ColumnOptions { options }) = column_options else {
+        return Metadata::default();
+    };
+
+    let mut metadata = Metadata::with_capacity(options.len());
+    for (x, y) in COLUMN_OPTION_MAPPINGS {
+        if let Some(v) = options.get(x) {
+            metadata.insert(y.to_string(), v.clone());
+        }
+    }
+    metadata
 }
 
 /// Constructs a `ColumnOptions` from the given `ColumnSchema`.

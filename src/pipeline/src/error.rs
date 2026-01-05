@@ -804,6 +804,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(transparent)]
+    GreptimeProto {
+        source: api::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(transparent)]
+    Datatypes {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -924,6 +938,9 @@ impl ErrorExt for Error {
             FloatIsNan { .. }
             | InvalidEpochForResolution { .. }
             | UnsupportedTypeInPipeline { .. } => StatusCode::InvalidArguments,
+
+            GreptimeProto { source, .. } => source.status_code(),
+            Datatypes { source, .. } => source.status_code(),
         }
     }
 

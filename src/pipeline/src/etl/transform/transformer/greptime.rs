@@ -19,13 +19,17 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt};
-use api::helper::proto_value_type;
-use api::v1::column_data_type_extension::TypeExt;
+use api::helper::{ColumnDataTypeWrapper, encode_json_value};
+use api::v1::column_def::{collect_column_options, options_from_column_schema};
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, SemanticType};
+use api::v1::{ColumnDataType, SemanticType};
+use arrow_schema::extension::ExtensionType;
 use coerce::{coerce_columns, coerce_value};
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::warn;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::extension::json::JsonExtensionType;
+use datatypes::value::Value;
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
 use jsonb::Number;
@@ -33,12 +37,15 @@ use once_cell::sync::OnceCell;
 use serde_json as serde_json_crate;
 use session::context::Channel;
 use snafu::OptionExt;
+use table::Table;
 use vrl::prelude::{Bytes, VrlValueConvert};
+use vrl::value::value::StdError;
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    ArrayElementMustBeObjectSnafu, IdentifyPipelineColumnTypeMismatchSnafu, InvalidTimestampSnafu,
-    Result, TimeIndexMustBeNonNullSnafu, TransformColumnNameMustBeUniqueSnafu,
+    ArrayElementMustBeObjectSnafu, CoerceIncompatibleTypesSnafu,
+    IdentifyPipelineColumnTypeMismatchSnafu, InvalidTimestampSnafu, Result,
+    TimeIndexMustBeNonNullSnafu, TransformColumnNameMustBeUniqueSnafu,
     TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu, ValueMustBeMapSnafu,
 };
 use crate::etl::PipelineDocVersion;
@@ -272,15 +279,75 @@ impl GreptimeTransformer {
     }
 }
 
+#[derive(Clone)]
+pub struct ColumnMetadata {
+    column_schema: datatypes::schema::ColumnSchema,
+    semantic_type: SemanticType,
+}
+
+impl From<ColumnSchema> for ColumnMetadata {
+    fn from(value: ColumnSchema) -> Self {
+        let datatype = value.datatype();
+        let semantic_type = value.semantic_type();
+        let ColumnSchema {
+            column_name,
+            datatype: _,
+            semantic_type: _,
+            datatype_extension,
+            options,
+        } = value;
+
+        let column_schema = datatypes::schema::ColumnSchema::new(
+            column_name,
+            ColumnDataTypeWrapper::new(datatype, datatype_extension).into(),
+            semantic_type != SemanticType::Timestamp,
+        );
+
+        let metadata = collect_column_options(options.as_ref());
+        let column_schema = column_schema.with_metadata(metadata);
+
+        Self {
+            column_schema,
+            semantic_type,
+        }
+    }
+}
+
+impl TryFrom<ColumnMetadata> for ColumnSchema {
+    type Error = api::error::Error;
+
+    fn try_from(value: ColumnMetadata) -> std::result::Result<Self, Self::Error> {
+        let ColumnMetadata {
+            column_schema,
+            semantic_type,
+        } = value;
+
+        let options = options_from_column_schema(&column_schema);
+
+        let (datatype, datatype_extension) =
+            ColumnDataTypeWrapper::try_from(column_schema.data_type).map(|x| x.into_parts())?;
+
+        Ok(ColumnSchema {
+            column_name: column_schema.name,
+            datatype: datatype as _,
+            semantic_type: semantic_type as _,
+            datatype_extension,
+            options,
+        })
+    }
+}
+
 /// This is used to record the current state schema information and a sequential cache of field names.
 /// As you traverse the user input JSON, this will change.
 /// It will record a superset of all user input schemas.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct SchemaInfo {
     /// schema info
-    pub schema: Vec<ColumnSchema>,
+    pub schema: Vec<ColumnMetadata>,
     /// index of the column name
     pub index: HashMap<String, usize>,
+    /// The pipeline's corresponding table (if already created). Useful to retrieve column schemas.
+    table: Option<Arc<Table>>,
 }
 
 impl SchemaInfo {
@@ -288,6 +355,7 @@ impl SchemaInfo {
         Self {
             schema: Vec::with_capacity(capacity),
             index: HashMap::with_capacity(capacity),
+            table: None,
         }
     }
 
@@ -297,46 +365,88 @@ impl SchemaInfo {
             index.insert(schema.column_name.clone(), i);
         }
         Self {
-            schema: schema_list,
+            schema: schema_list.into_iter().map(Into::into).collect(),
             index,
+            table: None,
         }
+    }
+
+    pub fn set_table(&mut self, table: Option<Arc<Table>>) {
+        self.table = table;
+    }
+
+    fn find_column_schema_in_table(&self, column_name: &str) -> Option<ColumnMetadata> {
+        if let Some(table) = &self.table
+            && let Some(i) = table.schema_ref().column_index_by_name(column_name)
+        {
+            let column_schema = table.schema_ref().column_schemas()[i].clone();
+
+            let semantic_type = if column_schema.is_time_index() {
+                SemanticType::Timestamp
+            } else if table.table_info().meta.primary_key_indices.contains(&i) {
+                SemanticType::Tag
+            } else {
+                SemanticType::Field
+            };
+
+            Some(ColumnMetadata {
+                column_schema,
+                semantic_type,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn column_schemas(&self) -> api::error::Result<Vec<ColumnSchema>> {
+        self.schema
+            .iter()
+            .map(|x| x.clone().try_into())
+            .collect::<api::error::Result<Vec<_>>>()
     }
 }
 
 fn resolve_schema(
     index: Option<usize>,
-    value_data: ValueData,
-    column_schema: ColumnSchema,
-    row: &mut Vec<GreptimeValue>,
+    pipeline_context: &PipelineContext,
+    column: &str,
+    value_type: &ConcreteDataType,
     schema_info: &mut SchemaInfo,
 ) -> Result<()> {
     if let Some(index) = index {
-        let api_value = GreptimeValue {
-            value_data: Some(value_data),
-        };
-        // Safety unwrap is fine here because api_value is always valid
-        let value_column_data_type = proto_value_type(&api_value).unwrap();
-        // Safety unwrap is fine here because index is always valid
-        let schema_column_data_type = schema_info.schema.get(index).unwrap().datatype();
-        if value_column_data_type != schema_column_data_type {
-            IdentifyPipelineColumnTypeMismatchSnafu {
-                column: column_schema.column_name,
-                expected: schema_column_data_type.as_str_name(),
-                actual: value_column_data_type.as_str_name(),
+        let column_type = &mut schema_info.schema[index].column_schema.data_type;
+        match (column_type, value_type) {
+            (column_type, value_type) if column_type == value_type => Ok(()),
+            (ConcreteDataType::Json(column_type), ConcreteDataType::Json(value_type))
+                if column_type.is_include(value_type) =>
+            {
+                Ok(())
             }
-            .fail()
-        } else {
-            row[index] = api_value;
-            Ok(())
+            (column_type, value_type) => IdentifyPipelineColumnTypeMismatchSnafu {
+                column,
+                expected: column_type.to_string(),
+                actual: value_type.to_string(),
+            }
+            .fail(),
         }
     } else {
-        let key = column_schema.column_name.clone();
+        let column_schema = schema_info
+            .find_column_schema_in_table(column)
+            .unwrap_or_else(|| {
+                let semantic_type = decide_semantic(pipeline_context, column);
+                let column_schema = datatypes::schema::ColumnSchema::new(
+                    column,
+                    value_type.clone(),
+                    semantic_type != SemanticType::Timestamp,
+                );
+                ColumnMetadata {
+                    column_schema,
+                    semantic_type,
+                }
+            });
+        let key = column.to_string();
         schema_info.schema.push(column_schema);
         schema_info.index.insert(key, schema_info.schema.len() - 1);
-        let api_value = GreptimeValue {
-            value_data: Some(value_data),
-        };
-        row.push(api_value);
         Ok(())
     }
 }
@@ -481,11 +591,11 @@ pub(crate) fn values_to_row(
     Ok(Row { values: row })
 }
 
-fn decide_semantic(p_ctx: &PipelineContext, column_name: &str) -> i32 {
+fn decide_semantic(p_ctx: &PipelineContext, column_name: &str) -> SemanticType {
     if p_ctx.channel == Channel::Prometheus && column_name != greptime_value() {
-        SemanticType::Tag as i32
+        SemanticType::Tag
     } else {
-        SemanticType::Field as i32
+        SemanticType::Field
     }
 }
 
@@ -497,55 +607,56 @@ fn resolve_value(
     p_ctx: &PipelineContext,
 ) -> Result<()> {
     let index = schema_info.index.get(&column_name).copied();
-    let mut resolve_simple_type =
-        |value_data: ValueData, column_name: String, data_type: ColumnDataType| {
-            let semantic_type = decide_semantic(p_ctx, &column_name);
-            resolve_schema(
-                index,
-                value_data,
-                ColumnSchema {
-                    column_name,
-                    datatype: data_type as i32,
-                    semantic_type,
-                    datatype_extension: None,
-                    options: None,
-                },
-                row,
-                schema_info,
-            )
-        };
 
-    match value {
-        VrlValue::Null => {}
+    let value_data = match value {
+        VrlValue::Null => None,
 
         VrlValue::Integer(v) => {
             // safe unwrap after type matched
-            resolve_simple_type(ValueData::I64Value(v), column_name, ColumnDataType::Int64)?;
+            resolve_schema(
+                index,
+                p_ctx,
+                &column_name,
+                &ConcreteDataType::int64_datatype(),
+                schema_info,
+            )?;
+            Some(ValueData::I64Value(v))
         }
 
         VrlValue::Float(v) => {
             // safe unwrap after type matched
-            resolve_simple_type(
-                ValueData::F64Value(v.into()),
-                column_name,
-                ColumnDataType::Float64,
+            resolve_schema(
+                index,
+                p_ctx,
+                &column_name,
+                &ConcreteDataType::float64_datatype(),
+                schema_info,
             )?;
+            Some(ValueData::F64Value(v.into()))
         }
 
         VrlValue::Boolean(v) => {
-            resolve_simple_type(
-                ValueData::BoolValue(v),
-                column_name,
-                ColumnDataType::Boolean,
+            resolve_schema(
+                index,
+                p_ctx,
+                &column_name,
+                &ConcreteDataType::boolean_datatype(),
+                schema_info,
             )?;
+            Some(ValueData::BoolValue(v))
         }
 
         VrlValue::Bytes(v) => {
-            resolve_simple_type(
-                ValueData::StringValue(String::from_utf8_lossy_owned(v.to_vec())),
-                column_name,
-                ColumnDataType::String,
+            resolve_schema(
+                index,
+                p_ctx,
+                &column_name,
+                &ConcreteDataType::string_datatype(),
+                schema_info,
             )?;
+            Some(ValueData::StringValue(String::from_utf8_lossy_owned(
+                v.to_vec(),
+            )))
         }
 
         VrlValue::Regex(v) => {
@@ -553,42 +664,83 @@ fn resolve_value(
                 "Persisting regex value in the table, this should not happen, column_name: {}",
                 column_name
             );
-            resolve_simple_type(
-                ValueData::StringValue(v.to_string()),
-                column_name,
-                ColumnDataType::String,
+            resolve_schema(
+                index,
+                p_ctx,
+                &column_name,
+                &ConcreteDataType::string_datatype(),
+                schema_info,
             )?;
+            Some(ValueData::StringValue(v.to_string()))
         }
 
         VrlValue::Timestamp(ts) => {
             let ns = ts.timestamp_nanos_opt().context(InvalidTimestampSnafu {
                 input: ts.to_rfc3339(),
             })?;
-            resolve_simple_type(
-                ValueData::TimestampNanosecondValue(ns),
-                column_name,
-                ColumnDataType::TimestampNanosecond,
+            resolve_schema(
+                index,
+                p_ctx,
+                &column_name,
+                &ConcreteDataType::timestamp_nanosecond_datatype(),
+                schema_info,
             )?;
+            Some(ValueData::TimestampNanosecondValue(ns))
         }
 
         VrlValue::Array(_) | VrlValue::Object(_) => {
-            let data = vrl_value_to_jsonb_value(&value);
-            resolve_schema(
-                index,
-                ValueData::BinaryValue(data.to_vec()),
-                ColumnSchema {
-                    column_name,
-                    datatype: ColumnDataType::Binary as i32,
-                    semantic_type: SemanticType::Field as i32,
-                    datatype_extension: Some(ColumnDataTypeExtension {
-                        type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
-                    }),
-                    options: None,
-                },
-                row,
-                schema_info,
-            )?;
+            let is_json_native_type = schema_info
+                .find_column_schema_in_table(&column_name)
+                .is_some_and(|x| {
+                    if let ConcreteDataType::Json(column_type) = &x.column_schema.data_type {
+                        column_type.is_native_type()
+                    } else {
+                        false
+                    }
+                });
+
+            let value = if is_json_native_type {
+                let json_extension_type: Option<JsonExtensionType> =
+                    if let Some(x) = schema_info.find_column_schema_in_table(&column_name) {
+                        x.column_schema.extension_type()?
+                    } else {
+                        None
+                    };
+                let settings = json_extension_type
+                    .and_then(|x| x.metadata().json_structure_settings.clone())
+                    .unwrap_or_default();
+                let value: serde_json::Value = value.try_into().map_err(|e: StdError| {
+                    CoerceIncompatibleTypesSnafu { msg: e.to_string() }.build()
+                })?;
+                let value = settings.encode(value)?;
+
+                resolve_schema(index, p_ctx, &column_name, &value.data_type(), schema_info)?;
+
+                let Value::Json(value) = value else {
+                    unreachable!()
+                };
+                ValueData::JsonValue(encode_json_value(*value))
+            } else {
+                resolve_schema(
+                    index,
+                    p_ctx,
+                    &column_name,
+                    &ConcreteDataType::binary_datatype(),
+                    schema_info,
+                )?;
+
+                let value = vrl_value_to_jsonb_value(&value);
+                ValueData::BinaryValue(value.to_vec())
+            };
+            Some(value)
         }
+    };
+
+    let value = GreptimeValue { value_data };
+    if let Some(index) = index {
+        row[index] = value;
+    } else {
+        row.push(value);
     }
     Ok(())
 }
@@ -626,20 +778,24 @@ fn identity_pipeline_inner(
     let custom_ts = pipeline_ctx.pipeline_definition.get_custom_ts();
 
     // set time index column schema first
-    schema_info.schema.push(ColumnSchema {
-        column_name: custom_ts
+    let column_schema = datatypes::schema::ColumnSchema::new(
+        custom_ts
             .map(|ts| ts.get_column_name().to_string())
             .unwrap_or_else(|| greptime_timestamp().to_string()),
-        datatype: custom_ts.map(|c| c.get_datatype()).unwrap_or_else(|| {
-            if pipeline_ctx.channel == Channel::Prometheus {
-                ColumnDataType::TimestampMillisecond
-            } else {
-                ColumnDataType::TimestampNanosecond
-            }
-        }) as i32,
-        semantic_type: SemanticType::Timestamp as i32,
-        datatype_extension: None,
-        options: None,
+        custom_ts
+            .map(|c| ConcreteDataType::from(ColumnDataTypeWrapper::new(c.get_datatype(), None)))
+            .unwrap_or_else(|| {
+                if pipeline_ctx.channel == Channel::Prometheus {
+                    ConcreteDataType::timestamp_millisecond_datatype()
+                } else {
+                    ConcreteDataType::timestamp_nanosecond_datatype()
+                }
+            }),
+        false,
+    );
+    schema_info.schema.push(ColumnMetadata {
+        column_schema,
+        semantic_type: SemanticType::Timestamp,
     });
 
     let mut opt_map = HashMap::new();
@@ -697,28 +853,29 @@ pub fn identity_pipeline(
         input.push(result);
     }
 
-    identity_pipeline_inner(input, pipeline_ctx).map(|(mut schema, opt_map)| {
+    identity_pipeline_inner(input, pipeline_ctx).and_then(|(mut schema, opt_map)| {
         if let Some(table) = table {
             let table_info = table.table_info();
             for tag_name in table_info.meta.row_key_column_names() {
                 if let Some(index) = schema.index.get(tag_name) {
-                    schema.schema[*index].semantic_type = SemanticType::Tag as i32;
+                    schema.schema[*index].semantic_type = SemanticType::Tag;
                 }
             }
         }
 
-        opt_map
+        let column_schemas = schema.column_schemas()?;
+        Ok(opt_map
             .into_iter()
             .map(|(opt, rows)| {
                 (
                     opt,
                     Rows {
-                        schema: schema.schema.clone(),
+                        schema: column_schemas.clone(),
                         rows,
                     },
                 )
             })
-            .collect::<HashMap<ContextOpt, Rows>>()
+            .collect::<HashMap<ContextOpt, Rows>>())
     })
 }
 
@@ -850,7 +1007,7 @@ mod tests {
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
-                "Column datatype mismatch. For column: score, expected datatype: FLOAT64, actual datatype: STRING".to_string(),
+                "Column datatype mismatch. For column: score, expected datatype: Float64, actual datatype: String".to_string(),
             );
         }
         {
@@ -879,7 +1036,7 @@ mod tests {
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
-                "Column datatype mismatch. For column: score, expected datatype: FLOAT64, actual datatype: INT64".to_string(),
+                "Column datatype mismatch. For column: score, expected datatype: Float64, actual datatype: Int64".to_string(),
             );
         }
         {
@@ -942,7 +1099,7 @@ mod tests {
                     .map(|(mut schema, mut rows)| {
                         for name in tag_column_names {
                             if let Some(index) = schema.index.get(&name) {
-                                schema.schema[*index].semantic_type = SemanticType::Tag as i32;
+                                schema.schema[*index].semantic_type = SemanticType::Tag;
                             }
                         }
 
@@ -950,7 +1107,7 @@ mod tests {
                         let rows = rows.remove(&ContextOpt::default()).unwrap();
 
                         Rows {
-                            schema: schema.schema,
+                            schema: schema.column_schemas().unwrap(),
                             rows,
                         }
                     });

@@ -13,6 +13,7 @@ workspace = true
 ahash.workspace = true
 api.workspace = true
 arrow.workspace = true
+arrow-schema.workspace = true
 async-trait.workspace = true
 catalog.workspace = true
 chrono.workspace = true

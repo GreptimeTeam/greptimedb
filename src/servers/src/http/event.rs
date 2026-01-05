@@ -31,7 +31,7 @@ use axum_extra::TypedHeader;
 use common_catalog::consts::default_engine;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_query::{Output, OutputData};
-use common_telemetry::{debug, error, warn};
+use common_telemetry::{error, warn};
 use headers::ContentType;
 use lazy_static::lazy_static;
 use mime_guess::mime;
@@ -737,11 +737,6 @@ pub async fn log_ingester(
     .context(PipelineSnafu)?;
 
     let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
-
-    debug!(
-        "receiving logs: {:?}",
-        serde_json::to_string(&value).unwrap()
-    );
 
     query_ctx.set_channel(Channel::Log);
     let query_ctx = Arc::new(query_ctx);

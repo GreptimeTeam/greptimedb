@@ -1285,6 +1285,10 @@ impl Server for HttpServer {
     fn bind_addr(&self) -> Option<SocketAddr> {
         self.bind_addr
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]
