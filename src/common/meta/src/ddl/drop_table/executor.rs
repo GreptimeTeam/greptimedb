@@ -36,6 +36,8 @@ use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
+use crate::node_manager::NodeManagerRef;
+use crate::region_registry::LeaderRegionRegistryRef;
 use crate::rpc::router::{
     RegionRoute, find_follower_regions, find_followers, find_leader_regions, find_leaders,
     operating_leader_regions,
@@ -212,7 +214,8 @@ impl DropTableExecutor {
     /// Drops region on datanode.
     pub async fn on_drop_regions(
         &self,
-        ctx: &DdlContext,
+        node_manager: &NodeManagerRef,
+        leader_region_registry: &LeaderRegionRegistryRef,
         region_routes: &[RegionRoute],
         fast_path: bool,
     ) -> Result<()> {
@@ -221,7 +224,7 @@ impl DropTableExecutor {
         let mut drop_region_tasks = Vec::with_capacity(leaders.len());
         let table_id = self.table_id;
         for datanode in leaders {
-            let requester = ctx.node_manager.datanode(&datanode).await;
+            let requester = node_manager.datanode(&datanode).await;
             let regions = find_leader_regions(region_routes, &datanode);
             let region_ids = regions
                 .iter()
@@ -262,7 +265,7 @@ impl DropTableExecutor {
         let followers = find_followers(region_routes);
         let mut close_region_tasks = Vec::with_capacity(followers.len());
         for datanode in followers {
-            let requester = ctx.node_manager.datanode(&datanode).await;
+            let requester = node_manager.datanode(&datanode).await;
             let regions = find_follower_regions(region_routes, &datanode);
             let region_ids = regions
                 .iter()
@@ -307,8 +310,7 @@ impl DropTableExecutor {
 
         // Deletes the leader region from registry.
         let region_ids = operating_leader_regions(region_routes);
-        ctx.leader_region_registry
-            .batch_delete(region_ids.into_iter().map(|(region_id, _)| region_id));
+        leader_region_registry.batch_delete(region_ids.into_iter().map(|(region_id, _)| region_id));
 
         Ok(())
     }
