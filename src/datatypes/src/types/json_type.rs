@@ -15,10 +15,11 @@
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use arrow::datatypes::DataType as ArrowDataType;
 use common_base::bytes::Bytes;
+use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
@@ -401,8 +402,52 @@ pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
 /// Converts a json type value to serde_json::Value
 pub fn jsonb_to_serde_json(val: &[u8]) -> Result<serde_json::Value> {
     let json_string = jsonb_to_string(val)?;
-    serde_json::Value::from_str(json_string.as_str())
-        .context(DeserializeSnafu { json: json_string })
+    jsonb_string_to_serde_value(&json_string)
+}
+
+fn jsonb_string_to_serde_value(json: &str) -> Result<serde_json::Value> {
+    match serde_json::Value::from_str(json) {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            // If above deserialization is failed, the JSON string might contain some Rust chars
+            // that are somehow mis-represented as Unicode code point literal. For example,
+            // "\u{fe0f}". We have to convert them to JSON compatible format, like "\uFE0F", then
+            // try to deserialize the JSON string again.
+
+            static UNICODE_CODE_POINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+                // Match literal "\u{...}" sequences, capturing 1–6 (code point range) hex digits
+                // inside braces.
+                Regex::new(r"\\u\{([0-9a-fA-F]{1,6})}").unwrap_or_else(|e| panic!("{}", e))
+            });
+
+            let v = UNICODE_CODE_POINT_PATTERN.replace_all(json, |caps: &Captures| {
+                // Extract the hex payload (without braces) and parse to a code point.
+                let hex = &caps[1];
+                let Ok(code) = u32::from_str_radix(hex, 16) else {
+                    return json.to_string();
+                };
+
+                if code <= 0xFFFF {
+                    // Basic Multilingual Plane: JSON can represent this directly as \uXXXX.
+                    format!("\\u{:04X}", code)
+                } else {
+                    // Supplementary planes: JSON needs UTF-16 surrogate pairs.
+                    // Convert the code point to a 20-bit value.
+                    let code = code - 0x10000;
+
+                    // High surrogate: top 10 bits, offset by 0xD800.
+                    let high = 0xD800 + ((code >> 10) & 0x3FF);
+
+                    // Low surrogate: bottom 10 bits, offset by 0xDC00.
+                    let low = 0xDC00 + (code & 0x3FF);
+
+                    // Emit two \uXXXX escapes in sequence.
+                    format!("\\u{:04X}\\u{:04X}", high, low)
+                }
+            });
+            serde_json::Value::from_str(&v).context(DeserializeSnafu { json })
+        }
+    }
 }
 
 /// Parses a string to a json type value
@@ -416,6 +461,26 @@ pub fn parse_string_to_jsonb(s: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::json::JsonStructureSettings;
+
+    #[test]
+    fn test_jsonb_string_to_serde_value() -> Result<()> {
+        let cases = vec![
+            (r#"{"data": "simple ascii"}"#, r#"{"data":"simple ascii"}"#),
+            (
+                r#"{"data": "Greek sigma: \u{03a3}"}"#,
+                r#"{"data":"Greek sigma: Σ"}"#,
+            ),
+            (
+                r#"{"data": "Joker card: \u{1f0df}"}"#,
+                r#"{"data":"Joker card: 🃟"}"#,
+            ),
+        ];
+        for (input, expect) in cases {
+            let v = jsonb_string_to_serde_value(input)?;
+            assert_eq!(v.to_string(), expect);
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_json_type_include() {

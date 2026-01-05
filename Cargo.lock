@@ -4100,6 +4100,7 @@ dependencies = [
  "num-traits",
  "ordered-float 4.6.0",
  "paste",
+ "regex",
  "serde",
  "serde_json",
  "snafu 0.8.6",
