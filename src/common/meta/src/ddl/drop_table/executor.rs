@@ -241,6 +241,7 @@ impl DropTableExecutor {
                     body: Some(region_request::Body::Drop(PbDropRegionRequest {
                         region_id: region_id.as_u64(),
                         fast_path,
+                        force: false,
                     })),
                 };
                 let datanode = datanode.clone();

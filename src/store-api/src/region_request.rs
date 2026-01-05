@@ -271,6 +271,7 @@ fn parse_region_drop(drop: DropRequest) -> Result<(RegionId, RegionDropRequest)>
         region_id,
         RegionDropRequest {
             fast_path: drop.fast_path,
+            force: drop.force,
         },
     ))
 }
@@ -534,7 +535,11 @@ impl RegionCreateRequest {
 
 #[derive(Debug, Clone)]
 pub struct RegionDropRequest {
+    // Only used by Metric Engine, for fast path drop.
+    // It only works for Metric Engine, and will be ignored by other engines.
     pub fast_path: bool,
+    // Used only by the Metric Engine, to forcibly drop a physical region and all its associated logical regions.
+    pub force: bool,
 }
 
 /// Open region request.

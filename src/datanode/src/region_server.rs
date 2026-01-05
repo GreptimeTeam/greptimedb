@@ -1641,7 +1641,10 @@ mod tests {
         let response = mock_region_server
             .handle_request(
                 region_id,
-                RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_path: false,
+                    force: false,
+                }),
             )
             .await
             .unwrap();
@@ -1739,7 +1742,10 @@ mod tests {
         mock_region_server
             .handle_request(
                 region_id,
-                RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_path: false,
+                    force: false,
+                }),
             )
             .await
             .unwrap_err();

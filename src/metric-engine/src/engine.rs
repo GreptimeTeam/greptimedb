@@ -564,6 +564,7 @@ struct MetricEngineInner {
 
 #[cfg(test)]
 mod test {
+    use std::assert_matches::assert_matches;
     use std::collections::HashMap;
 
     use common_telemetry::info;
@@ -573,12 +574,13 @@ mod test {
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
     use store_api::mito_engine_options::WAL_OPTIONS_KEY;
     use store_api::region_request::{
-        PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
+        PathType, RegionCloseRequest, RegionDropRequest, RegionFlushRequest, RegionOpenRequest,
+        RegionRequest,
     };
 
     use super::*;
     use crate::maybe_skip_kafka_log_store_integration_test;
-    use crate::test_util::TestEnv;
+    use crate::test_util::{TestEnv, create_logical_region_request};
 
     #[tokio::test]
     async fn close_open_regions() {
@@ -881,5 +883,69 @@ mod test {
                 assert!(state.logical_regions().contains_key(logical_region));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_drop_region() {
+        let env = TestEnv::new().await;
+        let engine = env.metric();
+        let physical_region_id1 = RegionId::new(1024, 0);
+        let logical_region_id1 = RegionId::new(1025, 0);
+        env.create_physical_region(physical_region_id1, "/test_dir1", vec![])
+            .await;
+        let region_create_request1 =
+            create_logical_region_request(&["job"], physical_region_id1, "logical1");
+        engine
+            .handle_batch_ddl_requests(BatchRegionDdlRequest::Create(vec![(
+                logical_region_id1,
+                region_create_request1,
+            )]))
+            .await
+            .unwrap();
+        let err = engine
+            .handle_request(
+                physical_region_id1,
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_path: false,
+                    force: false,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_matches!(
+            err.as_any().downcast_ref::<Error>().unwrap(),
+            &Error::PhysicalRegionBusy { .. }
+        );
+
+        engine
+            .handle_request(
+                physical_region_id1,
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_path: false,
+                    force: true,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            engine
+                .inner
+                .state
+                .read()
+                .unwrap()
+                .physical_region_states()
+                .get(&physical_region_id1)
+                .is_none()
+        );
+        assert!(
+            engine
+                .inner
+                .state
+                .read()
+                .unwrap()
+                .logical_regions()
+                .get(&logical_region_id1)
+                .is_none()
+        );
     }
 }
