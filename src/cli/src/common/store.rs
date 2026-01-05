@@ -30,6 +30,7 @@ use crate::error::{EmptyStoreAddrsSnafu, InvalidArgumentsSnafu};
 // The datastores that implements metadata kvbackend.
 #[derive(Clone, Debug, PartialEq, Serialize, Default, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)]
 pub enum BackendImpl {
     // Etcd as metadata storage.
     #[default]
