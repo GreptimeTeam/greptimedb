@@ -125,7 +125,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_regin_not_leader() {
+    async fn test_region_not_leader() {
         let mock_region_server = mock_region_server();
         let region_id = RegionId::new(1024, 1);
         let (mock_engine, _) =
