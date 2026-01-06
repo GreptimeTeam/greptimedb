@@ -41,17 +41,50 @@ use crate::row_writer::{self, MultiTableData};
 pub const METRIC_NAME_LABEL: &str = "__name__";
 pub const METRIC_NAME_LABEL_BYTES: &[u8] = b"__name__";
 
-pub const DATABASE_LABEL: &str = "__database__";
-pub const DATABASE_LABEL_BYTES: &[u8] = b"__database__";
+/// special label for selecting database name on remote write
+pub const DATABASE_LABEL: &str = "x_greptime_database";
+pub const DATABASE_LABEL_BYTES: &[u8] = b"x_greptime_database";
+pub const DATABASE_LABEL_ALT: &str = "__database__";
+pub const DATABASE_LABEL_ALT_BYTES: &[u8] = b"__database__";
 
+// deprecated
 pub const SCHEMA_LABEL: &str = "__schema__";
 pub const SCHEMA_LABEL_BYTES: &[u8] = b"__schema__";
 
-pub const PHYSICAL_TABLE_LABEL: &str = "__physical_table__";
-pub const PHYSICAL_TABLE_LABEL_BYTES: &[u8] = b"__physical_table__";
+/// special label for selecting physical table name on remote write
+pub const PHYSICAL_TABLE_LABEL: &str = "x_greptime_physical_table";
+pub const PHYSICAL_TABLE_LABEL_BYTES: &[u8] = b"x_greptime_physical_table";
+pub const PHYSICAL_TABLE_LABEL_ALT: &str = "__physical_table__";
+pub const PHYSICAL_TABLE_LABEL_ALT_BYTES: &[u8] = b"__physical_table__";
 
 /// The same as `FIELD_COLUMN_MATCHER` in `promql` crate
 pub const FIELD_NAME_LABEL: &str = "__field__";
+
+/// Check if given label is a special label for remote write
+pub fn is_remote_write_special_label(label: &str) -> bool {
+    label == DATABASE_LABEL
+        || label == DATABASE_LABEL_ALT
+        || label == PHYSICAL_TABLE_LABEL
+        || label == PHYSICAL_TABLE_LABEL_ALT
+        || label == SCHEMA_LABEL
+}
+
+pub fn is_remote_read_special_label(label: &str) -> bool {
+    label == METRIC_NAME_LABEL
+        || label == DATABASE_LABEL
+        || label == DATABASE_LABEL_ALT
+        || label == SCHEMA_LABEL
+}
+
+/// Check if given label is a database selection label
+pub fn is_database_selection_label(label: &str) -> bool {
+    label == DATABASE_LABEL || label == DATABASE_LABEL_ALT || label == SCHEMA_LABEL
+}
+
+/// Check if given label is a physical table selection label
+pub fn is_physical_table_selection_label(label: &str) -> bool {
+    label == PHYSICAL_TABLE_LABEL || label == PHYSICAL_TABLE_LABEL_ALT
+}
 
 /// Metrics for push gateway protocol
 pub struct Metrics {
@@ -77,20 +110,12 @@ pub fn table_name(q: &Query) -> Result<String> {
 }
 
 /// Extract schema from remote read request. Returns the first schema found from any query's matchers.
-/// Prioritizes __schema__ over __database__ labels.
 pub fn extract_schema_from_read_request(request: &ReadRequest) -> Option<String> {
     for query in &request.queries {
         for matcher in &query.matchers {
-            if matcher.name == SCHEMA_LABEL && matcher.r#type == MatcherType::Eq as i32 {
-                return Some(matcher.value.clone());
-            }
-        }
-    }
-
-    // If no __schema__ found, look for __database__
-    for query in &request.queries {
-        for matcher in &query.matchers {
-            if matcher.name == DATABASE_LABEL && matcher.r#type == MatcherType::Eq as i32 {
+            if is_database_selection_label(&matcher.name)
+                && matcher.r#type == MatcherType::Eq as i32
+            {
                 return Some(matcher.value.clone());
             }
         }
@@ -115,7 +140,7 @@ pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
     for m in label_matches {
         let name = &m.name;
 
-        if name == METRIC_NAME_LABEL || name == SCHEMA_LABEL || name == DATABASE_LABEL {
+        if is_remote_read_special_label(name) {
             continue;
         }
 
@@ -546,8 +571,8 @@ pub fn mock_timeseries_special_labels() -> Vec<TimeSeries> {
     let idc3_schema = TimeSeries {
         labels: vec![
             new_label(METRIC_NAME_LABEL.to_string(), "idc3_lo_table".to_string()),
-            new_label("__database__".to_string(), "idc3".to_string()),
-            new_label("__physical_table__".to_string(), "f1".to_string()),
+            new_label(DATABASE_LABEL.to_string(), "idc3".to_string()),
+            new_label(PHYSICAL_TABLE_LABEL.to_string(), "f1".to_string()),
         ],
         samples: vec![Sample {
             value: 42.0,
@@ -561,8 +586,8 @@ pub fn mock_timeseries_special_labels() -> Vec<TimeSeries> {
                 METRIC_NAME_LABEL.to_string(),
                 "idc4_local_table".to_string(),
             ),
-            new_label("__database__".to_string(), "idc4".to_string()),
-            new_label("__physical_table__".to_string(), "f2".to_string()),
+            new_label(DATABASE_LABEL.to_string(), "idc4".to_string()),
+            new_label(PHYSICAL_TABLE_LABEL.to_string(), "f2".to_string()),
         ],
         samples: vec![Sample {
             value: 99.0,
