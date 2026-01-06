@@ -322,7 +322,6 @@ mod tests {
         let table_name = "system_metrics";
         let schema_name = "public".to_string();
         let catalog_name = "greptime".to_string();
-        let regions = vec![0, 1, 2];
 
         let mut options = table::requests::TableOptions {
             ttl: Some(Duration::from_secs(30).into()),
@@ -341,7 +340,6 @@ mod tests {
             .next_column_id(0)
             .options(options)
             .created_on(Default::default())
-            .region_numbers(regions)
             .build()
             .unwrap();
 

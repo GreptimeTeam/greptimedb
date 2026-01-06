@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::RegionNumber;
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId};
 
@@ -286,14 +286,7 @@ impl CreateTablesData {
             .flat_map(|(task, table_id)| {
                 if table_id.is_none() {
                     let table_info = task.table_info.clone();
-                    let region_ids = self
-                        .physical_region_numbers
-                        .iter()
-                        .map(|region_number| {
-                            RegionId::new(table_info.ident.table_id, *region_number)
-                        })
-                        .collect();
-                    let table_route = TableRouteValue::logical(self.physical_table_id, region_ids);
+                    let table_route = TableRouteValue::logical(self.physical_table_id);
                     Some((table_info, table_route))
                 } else {
                     None

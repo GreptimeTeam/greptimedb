@@ -162,7 +162,6 @@ fn create_table_info(table_id: TableId, table_name: TableName) -> RawTableInfo {
         next_column_id: columns as u32 + 1,
         value_indices: vec![],
         options: Default::default(),
-        region_numbers: (1..=100).collect(),
         partition_key_indices: vec![],
         column_ids: vec![],
     };

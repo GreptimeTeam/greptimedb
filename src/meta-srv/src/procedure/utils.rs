@@ -192,7 +192,6 @@ pub mod test_data {
                 value_indices: vec![2],
                 engine: MITO2_ENGINE.to_string(),
                 next_column_id: 3,
-                region_numbers: vec![1, 2, 3],
                 options: TableOptions::default(),
                 created_on: DateTime::default(),
                 updated_on: DateTime::default(),

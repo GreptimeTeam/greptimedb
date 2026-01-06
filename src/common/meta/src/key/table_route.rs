@@ -71,7 +71,6 @@ pub struct PhysicalTableRouteValue {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct LogicalTableRouteValue {
     physical_table_id: TableId,
-    region_ids: Vec<RegionId>,
 }
 
 impl TableRouteValue {
@@ -85,14 +84,7 @@ impl TableRouteValue {
         if table_id == physical_table_id {
             TableRouteValue::physical(region_routes)
         } else {
-            let region_routes = region_routes
-                .into_iter()
-                .map(|region| {
-                    debug_assert_eq!(region.region.id.table_id(), physical_table_id);
-                    RegionId::new(table_id, region.region.id.region_number())
-                })
-                .collect();
-            TableRouteValue::logical(physical_table_id, region_routes)
+            TableRouteValue::logical(physical_table_id)
         }
     }
 
@@ -100,8 +92,8 @@ impl TableRouteValue {
         Self::Physical(PhysicalTableRouteValue::new(region_routes))
     }
 
-    pub fn logical(physical_table_id: TableId, region_ids: Vec<RegionId>) -> Self {
-        Self::Logical(LogicalTableRouteValue::new(physical_table_id, region_ids))
+    pub fn logical(physical_table_id: TableId) -> Self {
+        Self::Logical(LogicalTableRouteValue::new(physical_table_id))
     }
 
     /// Returns a new version [TableRouteValue] with `region_routes`.
@@ -207,11 +199,9 @@ impl TableRouteValue {
                 .iter()
                 .map(|region_route| region_route.region.id.region_number())
                 .collect(),
-            TableRouteValue::Logical(x) => x
-                .region_ids()
-                .iter()
-                .map(|region_id| region_id.region_number())
-                .collect(),
+            TableRouteValue::Logical(_) => {
+                vec![]
+            }
         }
     }
 }
@@ -245,19 +235,12 @@ impl PhysicalTableRouteValue {
 }
 
 impl LogicalTableRouteValue {
-    pub fn new(physical_table_id: TableId, region_ids: Vec<RegionId>) -> Self {
-        Self {
-            physical_table_id,
-            region_ids,
-        }
+    pub fn new(physical_table_id: TableId) -> Self {
+        Self { physical_table_id }
     }
 
     pub fn physical_table_id(&self) -> TableId {
         self.physical_table_id
-    }
-
-    pub fn region_ids(&self) -> &Vec<RegionId> {
-        &self.region_ids
     }
 }
 
@@ -900,7 +883,6 @@ mod tests {
         let table_route_manager = TableRouteManager::new(kv.clone());
         let table_route_value = TableRouteValue::Logical(LogicalTableRouteValue {
             physical_table_id: 1023,
-            region_ids: vec![RegionId::new(1023, 1)],
         });
         let (txn, _) = table_route_manager
             .table_route_storage()
@@ -930,14 +912,12 @@ mod tests {
                 1024,
                 TableRouteValue::Logical(LogicalTableRouteValue {
                     physical_table_id: 1023,
-                    region_ids: vec![RegionId::new(1023, 1)],
                 }),
             ),
             (
                 1025,
                 TableRouteValue::Logical(LogicalTableRouteValue {
                     physical_table_id: 1023,
-                    region_ids: vec![RegionId::new(1023, 2)],
                 }),
             ),
         ];

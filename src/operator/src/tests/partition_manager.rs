@@ -32,7 +32,7 @@ use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder};
 pub fn new_test_table_info(
     table_id: u32,
     table_name: &str,
-    region_numbers: impl Iterator<Item = u32>,
+    _region_numbers: impl Iterator<Item = u32>,
 ) -> TableInfo {
     let column_schemas = vec![
         ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
@@ -55,7 +55,6 @@ pub fn new_test_table_info(
         .primary_key_indices(vec![0])
         .engine("engine")
         .next_column_id(3)
-        .region_numbers(region_numbers.collect::<Vec<_>>())
         .partition_key_indices(vec![0])
         .build()
         .unwrap();
