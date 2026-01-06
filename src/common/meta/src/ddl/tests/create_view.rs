@@ -259,7 +259,7 @@ async fn test_replace_table() {
     {
         // Create a `foo` table.
         let task = test_create_table_task("foo");
-        let mut procedure = CreateTableProcedure::new(task, ddl_context.clone());
+        let mut procedure = CreateTableProcedure::new(task, ddl_context.clone()).unwrap();
         procedure.on_prepare().await.unwrap();
         let ctx = ProcedureContext {
             procedure_id: ProcedureId::random(),

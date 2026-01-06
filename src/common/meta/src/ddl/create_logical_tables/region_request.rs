@@ -22,7 +22,7 @@ use store_api::storage::{RegionId, TableId};
 use table::metadata::RawTableInfo;
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
-use crate::ddl::create_table_template::{
+use crate::ddl::create_table::template::{
     CreateRequestBuilder, build_template, build_template_from_raw_table_info,
 };
 use crate::ddl::utils::region_storage_path;
