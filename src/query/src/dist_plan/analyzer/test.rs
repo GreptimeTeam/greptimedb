@@ -266,7 +266,7 @@ fn expand_proj_sort_partial_proj() {
         "Projection: t.number, eq_sorted", // notice how `eq_sorted` is added not `t.pk1 = t.pk2`
         "  Projection: t.number, t.pk1 = t.pk2 AS eq_sorted",
         "    Sort: t.pk1 = t.pk2 ASC NULLS FIRST",
-        "      Projection: t.number, t.pk1, t.pk3, t.pk1 = t.pk2",
+        "      Projection: t.number, t.pk1, t.pk3, t.pk2 = t.pk1 AS t.pk1 = t.pk2",
         "        Projection: t.number, t.pk1, t.pk2, t.pk3", // notice this projection doesn't add `t.pk1 = t.pk2` column requirement
         "          TableScan: t",
         "]]",
