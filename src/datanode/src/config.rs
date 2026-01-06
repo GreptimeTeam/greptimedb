@@ -29,7 +29,6 @@ pub(crate) use object_store::config::ObjectStoreConfig;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
-use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 
 /// Storage engine config
@@ -71,7 +70,6 @@ pub struct DatanodeOptions {
     pub init_regions_in_background: bool,
     pub init_regions_parallelism: usize,
     pub grpc: GrpcOptions,
-    pub heartbeat: HeartbeatOptions,
     pub http: HttpOptions,
     pub meta_client: Option<MetaClientOptions>,
     pub wal: DatanodeWalConfig,
@@ -134,7 +132,6 @@ impl Default for DatanodeOptions {
                 RegionEngineConfig::File(FileEngineConfig::default()),
             ],
             logging: LoggingOptions::default(),
-            heartbeat: HeartbeatOptions::datanode_default(),
             enable_telemetry: true,
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),

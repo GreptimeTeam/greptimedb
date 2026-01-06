@@ -39,7 +39,6 @@ use query::QueryEngine;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
-use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -111,7 +110,6 @@ pub struct FlownodeOptions {
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
     pub tracing: TracingOptions,
-    pub heartbeat: HeartbeatOptions,
     pub query: QueryOptions,
     pub user_provider: Option<String>,
     pub memory: MemoryOptions,
@@ -127,7 +125,6 @@ impl Default for FlownodeOptions {
             meta_client: None,
             logging: LoggingOptions::default(),
             tracing: TracingOptions::default(),
-            heartbeat: HeartbeatOptions::default(),
             // flownode's query option is set to 1 to throttle flow's query so
             // that it won't use too much cpu or memory
             query: QueryOptions {

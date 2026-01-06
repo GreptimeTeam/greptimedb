@@ -228,7 +228,6 @@ fn test_load_flownode_example_config() {
                 ..Default::default()
             },
             tracing: Default::default(),
-            heartbeat: Default::default(),
             // flownode deliberately use a slower query parallelism
             // to avoid overwhelming the frontend with too many queries
             query: QueryOptions {

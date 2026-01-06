@@ -44,7 +44,7 @@ async fn run() {
     // required only when the heartbeat_client is enabled
     meta_client.ask_leader().await.unwrap();
 
-    let (sender, mut receiver) = meta_client.heartbeat().await.unwrap();
+    let (sender, mut receiver, _config) = meta_client.heartbeat().await.unwrap();
 
     // send heartbeats
     let _handle = tokio::spawn(async move {

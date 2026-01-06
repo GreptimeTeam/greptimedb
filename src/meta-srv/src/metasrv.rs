@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use api::v1::meta::{HeartbeatConfig, Role};
 use clap::ValueEnum;
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
@@ -27,7 +28,9 @@ use common_event_recorder::EventRecorderOptions;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl_manager::DdlManagerRef;
-use common_meta::distributed_time_constants::{self, default_distributed_time_constants};
+use common_meta::distributed_time_constants::{
+    self, BASE_HEARTBEAT_INTERVAL, default_distributed_time_constants, frontend_heartbeat_interval,
+};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
@@ -117,6 +120,59 @@ impl Default for StatsPersistenceOptions {
         Self {
             ttl: Duration::ZERO,
             interval: Duration::from_mins(10),
+        }
+    }
+}
+
+/// Heartbeat configuration for a single node type.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct HeartbeatOptions {
+    /// Heartbeat interval.
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
+    /// Retry interval when heartbeat connection fails.
+    #[serde(with = "humantime_serde")]
+    pub retry_interval: Duration,
+}
+
+impl Default for HeartbeatOptions {
+    fn default() -> Self {
+        Self {
+            interval: BASE_HEARTBEAT_INTERVAL,
+            retry_interval: BASE_HEARTBEAT_INTERVAL,
+        }
+    }
+}
+
+impl HeartbeatOptions {
+    pub fn datanode_from(base_interval: Duration) -> Self {
+        Self {
+            interval: base_interval,
+            retry_interval: base_interval,
+        }
+    }
+
+    pub fn frontend_from(base_interval: Duration) -> Self {
+        Self {
+            interval: frontend_heartbeat_interval(base_interval),
+            retry_interval: base_interval,
+        }
+    }
+
+    pub fn flownode_from(base_interval: Duration) -> Self {
+        Self {
+            interval: base_interval,
+            retry_interval: base_interval,
+        }
+    }
+}
+
+impl From<HeartbeatOptions> for HeartbeatConfig {
+    fn from(opts: HeartbeatOptions) -> Self {
+        Self {
+            heartbeat_interval_ms: opts.interval.as_millis() as u64,
+            retry_interval_ms: opts.retry_interval.as_millis() as u64,
         }
     }
 }
@@ -379,12 +435,27 @@ pub struct Context {
     pub cache_invalidator: CacheInvalidatorRef,
     pub leader_region_registry: LeaderRegionRegistryRef,
     pub topic_stats_registry: TopicStatsRegistryRef,
+    pub heartbeat_interval: Duration,
+    pub is_handshake: bool,
 }
 
 impl Context {
     pub fn reset_in_memory(&self) {
         self.in_memory.reset();
         self.leader_region_registry.reset();
+    }
+
+    pub fn with_handshake(mut self, is_handshake: bool) -> Self {
+        self.is_handshake = is_handshake;
+        self
+    }
+
+    pub fn heartbeat_options_for(&self, role: Role) -> HeartbeatOptions {
+        match role {
+            Role::Datanode => HeartbeatOptions::datanode_from(self.heartbeat_interval),
+            Role::Frontend => HeartbeatOptions::frontend_from(self.heartbeat_interval),
+            Role::Flownode => HeartbeatOptions::flownode_from(self.heartbeat_interval),
+        }
     }
 }
 
@@ -903,6 +974,8 @@ impl Metasrv {
             cache_invalidator,
             leader_region_registry,
             topic_stats_registry,
+            heartbeat_interval: self.options().heartbeat_interval,
+            is_handshake: false,
         }
     }
 }
