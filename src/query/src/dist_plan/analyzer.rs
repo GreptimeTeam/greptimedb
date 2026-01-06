@@ -139,13 +139,28 @@ impl AnalyzerRule for DistPlannerAnalyzer {
             }
         }
 
+        /// Simplify all expressions recursively in the plan tree
+        struct PlanTreeExpressionSimplifier {
+            optimizer_context: OptimizerContext,
+        }
+
+        impl TreeNodeRewriter for PlanTreeExpressionSimplifier {
+            type Node = LogicalPlan;
+            fn f_down(&mut self, plan: Self::Node) -> DfResult<Transformed<Self::Node>> {
+                let simp = SimplifyExpressions::new()
+                    .rewrite(plan, &self.optimizer_context)?
+                    .data;
+                Ok(Transformed::yes(simp))
+            }
+        }
+
         let optimizer_context = OptimizerContext {
             inner: datafusion_optimizer::OptimizerContext::new(),
             config: config.clone(),
         };
 
-        let plan = SimplifyExpressions::new()
-            .rewrite(plan, &optimizer_context)?
+        let plan = plan
+            .rewrite_with_subqueries(&mut PlanTreeExpressionSimplifier { optimizer_context })?
             .data;
 
         let opt = config.extensions.get::<DistPlannerOptions>();
