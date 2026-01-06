@@ -373,9 +373,6 @@ mod tests {
             hostname = "127.0.0.1"
             runtime_size = 8
 
-            [heartbeat]
-            interval = "300ms"
-
             [meta_client]
             metasrv_addrs = ["127.0.0.1:3002"]
             timeout = "3s"
