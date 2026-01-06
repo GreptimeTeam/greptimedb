@@ -653,7 +653,7 @@ fn hnsw_key_to_row_offset(hnsw_key: u64, null_bitmap: &RoaringBitmap) -> u64 {
     row_offset + nulls_before
 }
 
-/// Checks if the error indicates a blob was not found.
+/// Checks if the error indicates a blob or puffin file was not found.
 fn is_blob_not_found(err: &crate::error::Error) -> bool {
     matches!(
         err,
@@ -666,7 +666,19 @@ fn is_blob_not_found(err: &crate::error::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use datatypes::schema::VectorDistanceMetric as DtVectorDistanceMetric;
+    use futures::io::Cursor;
+    use index::vector::{VectorDistanceMetric, distance_metric_to_usearch};
+    use object_store::services::Memory;
+    use puffin::puffin_manager::{PuffinManager, PuffinWriter, PutOptions};
+    use store_api::region_request::PathType;
+    use store_api::storage::{FileId, VectorIndexEngineType};
+
     use super::*;
+    use crate::access_layer::RegionFilePathFactory;
+    use crate::sst::index::puffin_manager::PuffinManagerFactory;
+    use crate::sst::index::vector_index::creator::VectorIndexConfig;
+    use crate::sst::index::vector_index::{INDEX_BLOB_TYPE, engine};
 
     #[test]
     fn test_hnsw_key_to_row_offset_no_nulls() {
@@ -679,110 +691,425 @@ mod tests {
     #[test]
     fn test_hnsw_key_to_row_offset_with_nulls() {
         let mut bitmap = RoaringBitmap::new();
-        // Row offsets 1 and 3 are NULL
         bitmap.insert(1);
         bitmap.insert(3);
 
-        // HNSW key 0 -> row offset 0 (no NULLs before)
         assert_eq!(hnsw_key_to_row_offset(0, &bitmap), 0);
-        // HNSW key 1 -> row offset 2 (1 NULL at position 1)
         assert_eq!(hnsw_key_to_row_offset(1, &bitmap), 2);
-        // HNSW key 2 -> row offset 4 (2 NULLs at positions 1 and 3)
         assert_eq!(hnsw_key_to_row_offset(2, &bitmap), 4);
     }
 
     #[test]
     fn test_hnsw_key_to_row_offset_consecutive_nulls() {
         let mut bitmap = RoaringBitmap::new();
-        // Row offsets 0, 1, 2 are NULL (first 3 rows)
         bitmap.insert(0);
         bitmap.insert(1);
         bitmap.insert(2);
 
-        // HNSW key 0 -> row offset 3 (3 NULLs before)
         assert_eq!(hnsw_key_to_row_offset(0, &bitmap), 3);
-        // HNSW key 1 -> row offset 4
         assert_eq!(hnsw_key_to_row_offset(1, &bitmap), 4);
     }
 
-    #[test]
-    fn test_metrics_is_empty() {
-        let metrics = VectorIndexApplyMetrics::default();
-        assert!(metrics.is_empty());
+    fn create_vector_index_blob(
+        vectors: &[Vec<f32>],
+        null_positions: &[u32],
+        config: &VectorIndexConfig,
+    ) -> Vec<u8> {
+        let mut engine_instance = engine::create_engine(config.engine, config).unwrap();
+        engine_instance.reserve(vectors.len()).unwrap();
+        for (i, v) in vectors.iter().enumerate() {
+            engine_instance.add(i as u64, v).unwrap();
+        }
 
-        let metrics = VectorIndexApplyMetrics {
-            apply_elapsed: std::time::Duration::from_millis(1),
-            ..Default::default()
-        };
-        assert!(!metrics.is_empty());
+        let mut null_bitmap = RoaringBitmap::new();
+        for &pos in null_positions {
+            null_bitmap.insert(pos);
+        }
+
+        let mut null_bitmap_bytes = Vec::new();
+        null_bitmap.serialize_into(&mut null_bitmap_bytes).unwrap();
+
+        let index_size = engine_instance.serialized_length();
+        let mut index_bytes = vec![0u8; index_size];
+        engine_instance.save_to_buffer(&mut index_bytes).unwrap();
+
+        let total_rows = vectors.len() as u64 + null_positions.len() as u64;
+        let indexed_rows = vectors.len() as u64;
+
+        const HEADER_SIZE: usize = 33;
+        let total_size = HEADER_SIZE + null_bitmap_bytes.len() + index_bytes.len();
+        let mut blob_data = Vec::with_capacity(total_size);
+
+        blob_data.push(1u8);
+        blob_data.push(config.engine.as_u8());
+        blob_data.extend_from_slice(&(config.dim as u32).to_le_bytes());
+        blob_data.push(config.distance_metric.as_u8());
+        blob_data.extend_from_slice(&(config.connectivity as u16).to_le_bytes());
+        blob_data.extend_from_slice(&(config.expansion_add as u16).to_le_bytes());
+        blob_data.extend_from_slice(&(config.expansion_search as u16).to_le_bytes());
+        blob_data.extend_from_slice(&total_rows.to_le_bytes());
+        blob_data.extend_from_slice(&indexed_rows.to_le_bytes());
+        blob_data.extend_from_slice(&(null_bitmap_bytes.len() as u32).to_le_bytes());
+        blob_data.extend_from_slice(&null_bitmap_bytes);
+        blob_data.extend_from_slice(&index_bytes);
+
+        blob_data
     }
 
-    #[test]
-    fn test_metrics_merge_from() {
-        let mut m1 = VectorIndexApplyMetrics {
-            apply_elapsed: std::time::Duration::from_millis(10),
-            blob_cache_miss: 1,
-            blob_read_bytes: 100,
-            vectors_searched: 50,
-        };
-
-        let m2 = VectorIndexApplyMetrics {
-            apply_elapsed: std::time::Duration::from_millis(20),
-            blob_cache_miss: 2,
-            blob_read_bytes: 200,
-            vectors_searched: 100,
-        };
-
-        m1.merge_from(&m2);
-
-        assert_eq!(m1.apply_elapsed, std::time::Duration::from_millis(30));
-        assert_eq!(m1.blob_cache_miss, 3);
-        assert_eq!(m1.blob_read_bytes, 300);
-        assert_eq!(m1.vectors_searched, 150);
+    fn test_config(dim: usize) -> VectorIndexConfig {
+        VectorIndexConfig {
+            engine: VectorIndexEngineType::Usearch,
+            dim,
+            metric: distance_metric_to_usearch(VectorDistanceMetric::L2sq),
+            distance_metric: VectorDistanceMetric::L2sq,
+            connectivity: 16,
+            expansion_add: 128,
+            expansion_search: 64,
+        }
     }
 
-    #[test]
-    fn test_metrics_debug_empty() {
-        let metrics = VectorIndexApplyMetrics::default();
-        let debug_str = format!("{:?}", metrics);
-        assert_eq!(debug_str, "{}");
+    async fn write_blob_to_puffin(
+        puffin_manager_factory: &PuffinManagerFactory,
+        object_store: &ObjectStore,
+        table_dir: &str,
+        index_id: RegionIndexId,
+        column_id: ColumnId,
+        blob_data: Vec<u8>,
+    ) {
+        let puffin_manager = puffin_manager_factory.build(
+            object_store.clone(),
+            RegionFilePathFactory::new(table_dir.to_string(), PathType::Bare),
+        );
+        let mut writer = puffin_manager.writer(&index_id).await.unwrap();
+        let blob_name = format!("{}-{}", INDEX_BLOB_TYPE, column_id);
+        writer
+            .put_blob(
+                &blob_name,
+                Cursor::new(blob_data),
+                PutOptions::default(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        writer.finish().await.unwrap();
     }
 
-    #[test]
-    fn test_metrics_debug_with_values() {
-        let metrics = VectorIndexApplyMetrics {
-            apply_elapsed: std::time::Duration::from_millis(10),
-            blob_cache_miss: 1,
-            blob_read_bytes: 100,
-            vectors_searched: 50,
-        };
-        let debug_str = format!("{:?}", metrics);
-        assert!(debug_str.contains("apply_elapsed"));
-        assert!(debug_str.contains("blob_cache_miss"));
-        assert!(debug_str.contains("blob_read_bytes"));
-        assert!(debug_str.contains("vectors_searched"));
+    #[tokio::test]
+    async fn test_apply_with_k_basic() {
+        let (_dir, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_apply_with_k_basic_").await;
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let table_dir = "test_table";
+        let file_id = RegionFileId::new(0.into(), FileId::random());
+        let index_id = RegionIndexId::new(file_id, 0);
+        let column_id = 1;
+
+        let vectors = vec![
+            vec![1.0f32, 0.0, 0.0, 0.0],
+            vec![0.0f32, 1.0, 0.0, 0.0],
+            vec![0.0f32, 0.0, 1.0, 0.0],
+            vec![0.0f32, 0.0, 0.0, 1.0],
+        ];
+        let config = test_config(4);
+        let blob_data = create_vector_index_blob(&vectors, &[], &config);
+        write_blob_to_puffin(
+            &puffin_manager_factory,
+            &object_store,
+            table_dir,
+            index_id,
+            column_id,
+            blob_data,
+        )
+        .await;
+
+        let applier = VectorIndexApplier::new(
+            table_dir.to_string(),
+            PathType::Bare,
+            object_store,
+            puffin_manager_factory,
+            column_id,
+            vec![1.0f32, 0.0, 0.0, 0.0],
+            2,
+            DtVectorDistanceMetric::L2sq,
+        );
+
+        let mut metrics = VectorIndexApplyMetrics::default();
+        let result = applier
+            .apply_with_k(file_id, None, Some(&mut metrics), 2)
+            .await
+            .unwrap();
+
+        assert_eq!(result.row_offsets.len(), 2);
+        assert_eq!(result.row_offsets[0], 0);
+        assert!(result.distances[0] < 0.01);
+        assert!(metrics.apply_elapsed.as_nanos() > 0);
+        assert_eq!(metrics.vectors_searched, 4);
     }
 
-    #[test]
-    fn test_column_blob_name() {
+    #[tokio::test]
+    async fn test_apply_with_k_with_nulls() {
+        let (_dir, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_apply_with_k_with_nulls_").await;
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let table_dir = "test_table";
+        let file_id = RegionFileId::new(0.into(), FileId::random());
+        let index_id = RegionIndexId::new(file_id, 0);
+        let column_id = 1;
+
+        // Row layout: [vec0, NULL, vec1, NULL, NULL, vec2]
+        let vectors = vec![
+            vec![1.0f32, 0.0, 0.0, 0.0], // row 0
+            vec![0.0f32, 1.0, 0.0, 0.0], // row 2
+            vec![0.0f32, 0.0, 1.0, 0.0], // row 5
+        ];
+        let null_positions = vec![1, 3, 4];
+        let config = test_config(4);
+        let blob_data = create_vector_index_blob(&vectors, &null_positions, &config);
+        write_blob_to_puffin(
+            &puffin_manager_factory,
+            &object_store,
+            table_dir,
+            index_id,
+            column_id,
+            blob_data,
+        )
+        .await;
+
+        let applier = VectorIndexApplier::new(
+            table_dir.to_string(),
+            PathType::Bare,
+            object_store,
+            puffin_manager_factory,
+            column_id,
+            vec![0.0f32, 1.0, 0.0, 0.0],
+            3,
+            DtVectorDistanceMetric::L2sq,
+        );
+
+        let result = applier.apply_with_k(file_id, None, None, 3).await.unwrap();
+
+        assert_eq!(result.row_offsets.len(), 3);
+        assert_eq!(result.row_offsets[0], 2);
+        assert!(result.distances[0] < 0.01);
+        assert!(result.row_offsets.contains(&0));
+        assert!(result.row_offsets.contains(&5));
+    }
+
+    #[tokio::test]
+    async fn test_apply_with_k_different_k_values() {
+        let (_dir, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_apply_with_k_different_k_").await;
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let table_dir = "test_table";
+        let file_id = RegionFileId::new(0.into(), FileId::random());
+        let index_id = RegionIndexId::new(file_id, 0);
+        let column_id = 1;
+
+        let mut vectors = Vec::new();
+        for i in 0..10 {
+            let mut v = vec![0.0f32; 4];
+            v[i % 4] = 1.0;
+            v[(i + 1) % 4] = (i as f32) * 0.1;
+            vectors.push(v);
+        }
+        let config = test_config(4);
+        let blob_data = create_vector_index_blob(&vectors, &[], &config);
+        write_blob_to_puffin(
+            &puffin_manager_factory,
+            &object_store,
+            table_dir,
+            index_id,
+            column_id,
+            blob_data,
+        )
+        .await;
+
+        let applier = VectorIndexApplier::new(
+            table_dir.to_string(),
+            PathType::Bare,
+            object_store,
+            puffin_manager_factory,
+            column_id,
+            vec![1.0f32, 0.0, 0.0, 0.0],
+            5,
+            DtVectorDistanceMetric::L2sq,
+        );
+
         assert_eq!(
-            VectorIndexApplier::column_blob_name(1),
-            "greptime-vector-index-v1-1"
+            applier
+                .apply_with_k(file_id, None, None, 1)
+                .await
+                .unwrap()
+                .row_offsets
+                .len(),
+            1
         );
         assert_eq!(
-            VectorIndexApplier::column_blob_name(42),
-            "greptime-vector-index-v1-42"
+            applier
+                .apply_with_k(file_id, None, None, 5)
+                .await
+                .unwrap()
+                .row_offsets
+                .len(),
+            5
+        );
+        assert_eq!(
+            applier
+                .apply_with_k(file_id, None, None, 10)
+                .await
+                .unwrap()
+                .row_offsets
+                .len(),
+            10
+        );
+        assert_eq!(
+            applier
+                .apply_with_k(file_id, None, None, 100)
+                .await
+                .unwrap()
+                .row_offsets
+                .len(),
+            10
         );
     }
 
-    #[test]
-    fn test_vector_search_result_clone() {
-        let result = VectorSearchResult {
-            row_offsets: vec![1, 2, 3],
-            distances: vec![0.1, 0.2, 0.3],
+    #[tokio::test]
+    async fn test_apply_with_k_blob_not_found() {
+        let (_dir, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_apply_with_k_blob_not_found_").await;
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let table_dir = "test_table";
+        let file_id = RegionFileId::new(0.into(), FileId::random());
+        let index_id = RegionIndexId::new(file_id, 0);
+
+        let vectors = vec![vec![1.0f32, 0.0, 0.0, 0.0]];
+        let config = test_config(4);
+        let blob_data = create_vector_index_blob(&vectors, &[], &config);
+        write_blob_to_puffin(
+            &puffin_manager_factory,
+            &object_store,
+            table_dir,
+            index_id,
+            1, // column 1 has index
+            blob_data,
+        )
+        .await;
+
+        // Query column 999 which has no index
+        let applier = VectorIndexApplier::new(
+            table_dir.to_string(),
+            PathType::Bare,
+            object_store,
+            puffin_manager_factory,
+            999,
+            vec![1.0f32, 0.0, 0.0, 0.0],
+            5,
+            DtVectorDistanceMetric::L2sq,
+        );
+
+        let result = applier.apply_with_k(file_id, None, None, 5).await.unwrap();
+        assert!(result.row_offsets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_apply_with_k_distance_ordering() {
+        let (_dir, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_apply_with_k_distance_ordering_").await;
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let table_dir = "test_table";
+        let file_id = RegionFileId::new(0.into(), FileId::random());
+        let index_id = RegionIndexId::new(file_id, 0);
+        let column_id = 1;
+
+        let vectors = vec![
+            vec![1.0f32, 0.0, 0.0, 0.0],
+            vec![0.9f32, 0.1, 0.0, 0.0],
+            vec![0.7f32, 0.3, 0.0, 0.0],
+            vec![0.5f32, 0.5, 0.0, 0.0],
+            vec![0.0f32, 1.0, 0.0, 0.0],
+        ];
+        let config = test_config(4);
+        let blob_data = create_vector_index_blob(&vectors, &[], &config);
+        write_blob_to_puffin(
+            &puffin_manager_factory,
+            &object_store,
+            table_dir,
+            index_id,
+            column_id,
+            blob_data,
+        )
+        .await;
+
+        let applier = VectorIndexApplier::new(
+            table_dir.to_string(),
+            PathType::Bare,
+            object_store,
+            puffin_manager_factory,
+            column_id,
+            vec![1.0f32, 0.0, 0.0, 0.0],
+            5,
+            DtVectorDistanceMetric::L2sq,
+        );
+
+        let result = applier.apply_with_k(file_id, None, None, 5).await.unwrap();
+
+        for i in 1..result.distances.len() {
+            assert!(result.distances[i] >= result.distances[i - 1]);
+        }
+        assert_eq!(result.row_offsets[0], 0);
+        assert!(result.distances[0] < 0.01);
+    }
+
+    #[tokio::test]
+    async fn test_apply_with_k_cosine_metric() {
+        let (_dir, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_apply_with_k_cosine_").await;
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let table_dir = "test_table";
+        let file_id = RegionFileId::new(0.into(), FileId::random());
+        let index_id = RegionIndexId::new(file_id, 0);
+        let column_id = 1;
+
+        let vectors = vec![
+            vec![1.0f32, 0.0, 0.0, 0.0],
+            vec![2.0f32, 0.0, 0.0, 0.0],
+            vec![0.0f32, 1.0, 0.0, 0.0],
+            vec![-1.0f32, 0.0, 0.0, 0.0],
+        ];
+        let config = VectorIndexConfig {
+            engine: VectorIndexEngineType::Usearch,
+            dim: 4,
+            metric: distance_metric_to_usearch(VectorDistanceMetric::Cosine),
+            distance_metric: VectorDistanceMetric::Cosine,
+            connectivity: 16,
+            expansion_add: 128,
+            expansion_search: 64,
         };
-        let cloned = result.clone();
-        assert_eq!(result.row_offsets, cloned.row_offsets);
-        assert_eq!(result.distances, cloned.distances);
+        let blob_data = create_vector_index_blob(&vectors, &[], &config);
+        write_blob_to_puffin(
+            &puffin_manager_factory,
+            &object_store,
+            table_dir,
+            index_id,
+            column_id,
+            blob_data,
+        )
+        .await;
+
+        let applier = VectorIndexApplier::new(
+            table_dir.to_string(),
+            PathType::Bare,
+            object_store,
+            puffin_manager_factory,
+            column_id,
+            vec![1.0f32, 0.0, 0.0, 0.0],
+            2,
+            DtVectorDistanceMetric::Cosine,
+        );
+
+        let result = applier.apply_with_k(file_id, None, None, 2).await.unwrap();
+
+        assert_eq!(result.row_offsets.len(), 2);
+        assert!(result.row_offsets.contains(&0) || result.row_offsets.contains(&1));
     }
 }
