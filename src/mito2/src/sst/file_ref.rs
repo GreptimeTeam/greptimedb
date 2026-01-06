@@ -82,14 +82,16 @@ impl FileReferenceManager {
 
     /// Gets all ref files for the given regions, meaning all open FileHandles for those regions
     /// and from related regions' manifests.
+    /// `query_regions_for_mem` queries for in memory file handles.
+    /// `related_regions_in_manifest` queries for related regions' manifests to get more file refs of given region ids.
     pub(crate) async fn get_snapshot_of_file_refs(
         &self,
-        query_regions: Vec<MitoRegionRef>,
-        related_regions: Vec<(MitoRegionRef, Vec<RegionId>)>,
+        query_regions_for_mem: Vec<MitoRegionRef>,
+        related_regions_in_manifest: Vec<(MitoRegionRef, Vec<RegionId>)>,
     ) -> Result<FileRefsManifest> {
         let mut ref_files = HashMap::new();
         // get from in memory file handles
-        for region_id in query_regions.iter().map(|r| r.region_id()) {
+        for region_id in query_regions_for_mem.iter().map(|r| r.region_id()) {
             if let Some(files) = self.ref_file_set(region_id) {
                 ref_files.insert(region_id, files);
             }
@@ -97,13 +99,8 @@ impl FileReferenceManager {
 
         let mut manifest_version = HashMap::new();
 
-        for r in &query_regions {
-            let manifest = r.manifest_ctx.manifest().await;
-            manifest_version.insert(r.region_id(), manifest.manifest_version);
-        }
-
         // get file refs from related regions' manifests
-        for (related_region, queries) in &related_regions {
+        for (related_region, queries) in &related_regions_in_manifest {
             let queries = queries.iter().cloned().collect::<HashSet<_>>();
             let manifest = related_region.manifest_ctx.manifest().await;
             for meta in manifest.files.values() {
@@ -123,6 +120,18 @@ impl FileReferenceManager {
             }
             // not sure if related region's manifest version is needed, but record it for now.
             manifest_version.insert(related_region.region_id(), manifest.manifest_version);
+        }
+
+        for r in &query_regions_for_mem {
+            let manifest = r.manifest_ctx.manifest().await;
+            // remove in manifest files for smaller size, since gc worker read from manifest later.
+            ref_files.entry(r.region_id()).and_modify(|refs| {
+                *refs = std::mem::take(refs)
+                    .into_iter()
+                    .filter(|f| !manifest.files.contains_key(&f.file_id))
+                    .collect();
+            });
+            manifest_version.insert(r.region_id(), manifest.manifest_version);
         }
 
         // simply return all ref files, no manifest version filtering for now.
