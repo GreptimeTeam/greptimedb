@@ -336,6 +336,9 @@ impl VectorIndexApplier {
         // arrive for the same key. Current implementation may load the same index multiple times
         // but doesn't cause data inconsistency.
         if let Some(cache) = &self.vector_index_cache {
+            CACHE_BYTES
+                .with_label_values(&[TYPE_VECTOR_INDEX])
+                .add(cached_index.size_bytes as i64);
             cache.insert(cache_key, cached_index.clone());
         }
 
