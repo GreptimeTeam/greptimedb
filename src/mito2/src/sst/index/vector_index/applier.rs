@@ -37,7 +37,7 @@ use crate::cache::index::vector_index::{
 use crate::error::{
     ApplyVectorIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result,
 };
-use crate::metrics::{CACHE_HIT, CACHE_MISS, INDEX_APPLY_ELAPSED};
+use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS, INDEX_APPLY_ELAPSED};
 use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::index::TYPE_VECTOR_INDEX;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
