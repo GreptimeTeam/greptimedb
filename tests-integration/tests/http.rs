@@ -1356,6 +1356,17 @@ pub async fn test_config_api(store_type: StorageType) {
     let res_get = client.get("/config").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
 
+    #[cfg(feature = "vector_index")]
+    let vector_index_config = r#"
+[region_engine.mito.vector_index]
+create_on_flush = "auto"
+create_on_compaction = "auto"
+apply_on_query = "auto"
+mem_threshold_on_create = "auto"
+"#;
+    #[cfg(not(feature = "vector_index"))]
+    let vector_index_config = "";
+
     let storage = if store_type != StorageType::File {
         format!(
             r#"[storage]
@@ -1545,13 +1556,7 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
-
-[region_engine.mito.vector_index]
-create_on_flush = "auto"
-create_on_compaction = "auto"
-apply_on_query = "auto"
-mem_threshold_on_create = "auto"
-
+{vector_index_config}
 [region_engine.mito.memtable]
 type = "time_series"
 

@@ -690,4 +690,99 @@ mod tests {
         // HNSW key 2 -> row offset 4 (2 NULLs at positions 1 and 3)
         assert_eq!(hnsw_key_to_row_offset(2, &bitmap), 4);
     }
+
+    #[test]
+    fn test_hnsw_key_to_row_offset_consecutive_nulls() {
+        let mut bitmap = RoaringBitmap::new();
+        // Row offsets 0, 1, 2 are NULL (first 3 rows)
+        bitmap.insert(0);
+        bitmap.insert(1);
+        bitmap.insert(2);
+
+        // HNSW key 0 -> row offset 3 (3 NULLs before)
+        assert_eq!(hnsw_key_to_row_offset(0, &bitmap), 3);
+        // HNSW key 1 -> row offset 4
+        assert_eq!(hnsw_key_to_row_offset(1, &bitmap), 4);
+    }
+
+    #[test]
+    fn test_metrics_is_empty() {
+        let metrics = VectorIndexApplyMetrics::default();
+        assert!(metrics.is_empty());
+
+        let metrics = VectorIndexApplyMetrics {
+            apply_elapsed: std::time::Duration::from_millis(1),
+            ..Default::default()
+        };
+        assert!(!metrics.is_empty());
+    }
+
+    #[test]
+    fn test_metrics_merge_from() {
+        let mut m1 = VectorIndexApplyMetrics {
+            apply_elapsed: std::time::Duration::from_millis(10),
+            blob_cache_miss: 1,
+            blob_read_bytes: 100,
+            vectors_searched: 50,
+        };
+
+        let m2 = VectorIndexApplyMetrics {
+            apply_elapsed: std::time::Duration::from_millis(20),
+            blob_cache_miss: 2,
+            blob_read_bytes: 200,
+            vectors_searched: 100,
+        };
+
+        m1.merge_from(&m2);
+
+        assert_eq!(m1.apply_elapsed, std::time::Duration::from_millis(30));
+        assert_eq!(m1.blob_cache_miss, 3);
+        assert_eq!(m1.blob_read_bytes, 300);
+        assert_eq!(m1.vectors_searched, 150);
+    }
+
+    #[test]
+    fn test_metrics_debug_empty() {
+        let metrics = VectorIndexApplyMetrics::default();
+        let debug_str = format!("{:?}", metrics);
+        assert_eq!(debug_str, "{}");
+    }
+
+    #[test]
+    fn test_metrics_debug_with_values() {
+        let metrics = VectorIndexApplyMetrics {
+            apply_elapsed: std::time::Duration::from_millis(10),
+            blob_cache_miss: 1,
+            blob_read_bytes: 100,
+            vectors_searched: 50,
+        };
+        let debug_str = format!("{:?}", metrics);
+        assert!(debug_str.contains("apply_elapsed"));
+        assert!(debug_str.contains("blob_cache_miss"));
+        assert!(debug_str.contains("blob_read_bytes"));
+        assert!(debug_str.contains("vectors_searched"));
+    }
+
+    #[test]
+    fn test_column_blob_name() {
+        assert_eq!(
+            VectorIndexApplier::column_blob_name(1),
+            "greptime-vector-index-v1-1"
+        );
+        assert_eq!(
+            VectorIndexApplier::column_blob_name(42),
+            "greptime-vector-index-v1-42"
+        );
+    }
+
+    #[test]
+    fn test_vector_search_result_clone() {
+        let result = VectorSearchResult {
+            row_offsets: vec![1, 2, 3],
+            distances: vec![0.1, 0.2, 0.3],
+        };
+        let cloned = result.clone();
+        assert_eq!(result.row_offsets, cloned.row_offsets);
+        assert_eq!(result.distances, cloned.distances);
+    }
 }

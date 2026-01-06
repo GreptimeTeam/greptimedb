@@ -1063,6 +1063,7 @@ impl ScanInput {
         let predicate = self.predicate_for_file(file);
         let filter_mode = pre_filter_mode(self.append_mode, self.merge_mode);
         let decode_pk_values = !self.compaction && self.mapper.has_tags();
+        #[cfg_attr(not(feature = "vector_index"), allow(unused_mut))]
         let mut reader = self
             .access_layer
             .read_sst(file.clone())

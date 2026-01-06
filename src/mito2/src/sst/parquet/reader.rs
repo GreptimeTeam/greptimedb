@@ -14,7 +14,9 @@
 
 //! Parquet reader.
 
-use std::collections::{BTreeSet, VecDeque};
+#[cfg(feature = "vector_index")]
+use std::collections::BTreeSet;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1036,7 +1038,7 @@ fn apply_selection_and_update_metrics(
     *output = intersection;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "vector_index"))]
 mod tests {
     use super::*;
 
