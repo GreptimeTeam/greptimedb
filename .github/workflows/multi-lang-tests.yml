@@ -1,0 +1,57 @@
+name: Multi-language Integration Tests
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build-greptimedb:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Build GreptimeDB binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "multi-lang-build"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-gc-bin
+        shell: bash
+        run: cargo install cargo-gc-bin --force
+      - name: Build greptime binary
+        shell: bash
+        run: cargo gc -- --bin greptime --features "pg_kvbackend,mysql_kvbackend"
+      - name: Pack greptime binary
+        shell: bash
+        run: |
+          mkdir bin && \
+          mv ./target/debug/greptime bin
+      - name: Print greptime binary info
+        run: ls -lh bin
+      - name: Upload greptime binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: greptime-bin
+          path: bin/
+          retention-days: 1
+
+  run-multi-lang-tests:
+    name: Run Multi-language SDK Tests
+    needs: build-greptimedb
+    uses: ./.github/workflows/run-multi-lang-tests.yml
+    with:
+      artifact-name: greptime-bin

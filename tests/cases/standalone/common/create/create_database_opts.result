@@ -110,27 +110,25 @@ Affected Rows: 0
 
 SHOW CREATE TABLE test1;
 
-+-------+-----------------------------------------+
-| Table | Create Table                            |
-+-------+-----------------------------------------+
-| test1 | CREATE TABLE IF NOT EXISTS "test1" (    |
-|       |   "host" STRING NULL,                   |
-|       |   "cpu" DOUBLE NULL,                    |
-|       |   "ts" TIMESTAMP(3) NOT NULL,           |
-|       |   TIME INDEX ("ts")                     |
-|       | )                                       |
-|       |                                         |
-|       | ENGINE=mito                             |
-|       | WITH(                                   |
-|       |   append_mode = 'false',                |
-|       |   'compaction.twcs.time_window' = '1h', |
-|       |   'compaction.type' = 'twcs',           |
-|       |   'memtable.type' = 'partition_tree',   |
-|       |   merge_mode = 'last_non_null',         |
-|       |   skip_wal = 'true',                    |
-|       |   ttl = '1h'                            |
-|       | )                                       |
-+-------+-----------------------------------------+
++-------+---------------------------------------+
+| Table | Create Table                          |
++-------+---------------------------------------+
+| test1 | CREATE TABLE IF NOT EXISTS "test1" (  |
+|       |   "host" STRING NULL,                 |
+|       |   "cpu" DOUBLE NULL,                  |
+|       |   "ts" TIMESTAMP(3) NOT NULL,         |
+|       |   TIME INDEX ("ts")                   |
+|       | )                                     |
+|       |                                       |
+|       | ENGINE=mito                           |
+|       | WITH(                                 |
+|       |   append_mode = 'false',              |
+|       |   'memtable.type' = 'partition_tree', |
+|       |   merge_mode = 'last_non_null',       |
+|       |   skip_wal = 'true',                  |
+|       |   ttl = '1h'                          |
+|       | )                                     |
++-------+---------------------------------------+
 
 CREATE TABLE test2(host STRING, cpu DOUBLE, ts TIMESTAMP TIME INDEX) WITH (
        'append_mode'='true',
@@ -141,27 +139,25 @@ Affected Rows: 0
 
 SHOW CREATE TABLE test2;
 
-+-------+-----------------------------------------+
-| Table | Create Table                            |
-+-------+-----------------------------------------+
-| test2 | CREATE TABLE IF NOT EXISTS "test2" (    |
-|       |   "host" STRING NULL,                   |
-|       |   "cpu" DOUBLE NULL,                    |
-|       |   "ts" TIMESTAMP(3) NOT NULL,           |
-|       |   TIME INDEX ("ts")                     |
-|       | )                                       |
-|       |                                         |
-|       | ENGINE=mito                             |
-|       | WITH(                                   |
-|       |   append_mode = 'true',                 |
-|       |   'compaction.twcs.time_window' = '1h', |
-|       |   'compaction.type' = 'twcs',           |
-|       |   'memtable.type' = 'partition_tree',   |
-|       |   merge_mode = '',                      |
-|       |   skip_wal = 'false',                   |
-|       |   ttl = '1h'                            |
-|       | )                                       |
-+-------+-----------------------------------------+
++-------+---------------------------------------+
+| Table | Create Table                          |
++-------+---------------------------------------+
+| test2 | CREATE TABLE IF NOT EXISTS "test2" (  |
+|       |   "host" STRING NULL,                 |
+|       |   "cpu" DOUBLE NULL,                  |
+|       |   "ts" TIMESTAMP(3) NOT NULL,         |
+|       |   TIME INDEX ("ts")                   |
+|       | )                                     |
+|       |                                       |
+|       | ENGINE=mito                           |
+|       | WITH(                                 |
+|       |   append_mode = 'true',               |
+|       |   'memtable.type' = 'partition_tree', |
+|       |   merge_mode = '',                    |
+|       |   skip_wal = 'false',                 |
+|       |   ttl = '1h'                          |
+|       | )                                     |
++-------+---------------------------------------+
 
 INSERT INTO test2 VALUES('host1', 1.0, '2023-10-01 00:00:00');
 
@@ -180,6 +176,166 @@ USE public;
 Affected Rows: 0
 
 DROP DATABASE mydb;
+
+Affected Rows: 0
+
+--- test compaction options----
+CREATE DATABASE test_compaction_opt;
+
+Affected Rows: 1
+
+USE test_compaction_opt;
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE test_compaction_opt;
+
++---------------------+---------------------------------------------------+
+| Database            | Create Database                                   |
++---------------------+---------------------------------------------------+
+| test_compaction_opt | CREATE DATABASE IF NOT EXISTS test_compaction_opt |
++---------------------+---------------------------------------------------+
+
+CREATE TABLE test_table(ts TIMESTAMP TIME INDEX, val INT);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_table;
+
++------------+-------------------------------------------+
+| Table      | Create Table                              |
++------------+-------------------------------------------+
+| test_table | CREATE TABLE IF NOT EXISTS "test_table" ( |
+|            |   "ts" TIMESTAMP(3) NOT NULL,             |
+|            |   "val" INT NULL,                         |
+|            |   TIME INDEX ("ts")                       |
+|            | )                                         |
+|            |                                           |
+|            | ENGINE=mito                               |
+|            |                                           |
++------------+-------------------------------------------+
+
+ALTER DATABASE test_compaction_opt SET 'compaction.type' = 'twcs';
+
+Affected Rows: 0
+
+ALTER DATABASE test_compaction_opt SET 'compaction.twcs.time_window' = '2h';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE test_compaction_opt;
+
++---------------------+---------------------------------------------------+
+| Database            | Create Database                                   |
++---------------------+---------------------------------------------------+
+| test_compaction_opt | CREATE DATABASE IF NOT EXISTS test_compaction_opt |
+|                     | WITH(                                             |
+|                     |   'compaction.twcs.time_window' = '2h',           |
+|                     |   'compaction.type' = 'twcs'                      |
+|                     | )                                                 |
++---------------------+---------------------------------------------------+
+
+SHOW CREATE TABLE test_table;
+
++------------+-------------------------------------------+
+| Table      | Create Table                              |
++------------+-------------------------------------------+
+| test_table | CREATE TABLE IF NOT EXISTS "test_table" ( |
+|            |   "ts" TIMESTAMP(3) NOT NULL,             |
+|            |   "val" INT NULL,                         |
+|            |   TIME INDEX ("ts")                       |
+|            | )                                         |
+|            |                                           |
+|            | ENGINE=mito                               |
+|            |                                           |
++------------+-------------------------------------------+
+
+CREATE TABLE test_table2(ts TIMESTAMP TIME INDEX, val INT);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_table2;
+
++-------------+--------------------------------------------+
+| Table       | Create Table                               |
++-------------+--------------------------------------------+
+| test_table2 | CREATE TABLE IF NOT EXISTS "test_table2" ( |
+|             |   "ts" TIMESTAMP(3) NOT NULL,              |
+|             |   "val" INT NULL,                          |
+|             |   TIME INDEX ("ts")                        |
+|             | )                                          |
+|             |                                            |
+|             | ENGINE=mito                                |
+|             |                                            |
++-------------+--------------------------------------------+
+
+USE public;
+
+Affected Rows: 0
+
+DROP DATABASE test_compaction_opt;
+
+Affected Rows: 0
+
+CREATE DATABASE test_compaction_opt2;
+
+Affected Rows: 1
+
+USE test_compaction_opt2;
+
+Affected Rows: 0
+
+CREATE TABLE test_table(ts TIMESTAMP TIME INDEX, v INT) WITH ('compaction.type'='twcs','compaction.twcs.time_window'='1h');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_table;
+
++------------+-------------------------------------------+
+| Table      | Create Table                              |
++------------+-------------------------------------------+
+| test_table | CREATE TABLE IF NOT EXISTS "test_table" ( |
+|            |   "ts" TIMESTAMP(3) NOT NULL,             |
+|            |   "v" INT NULL,                           |
+|            |   TIME INDEX ("ts")                       |
+|            | )                                         |
+|            |                                           |
+|            | ENGINE=mito                               |
+|            | WITH(                                     |
+|            |   'compaction.override' = 'true',         |
+|            |   'compaction.twcs.time_window' = '1h',   |
+|            |   'compaction.type' = 'twcs'              |
+|            | )                                         |
++------------+-------------------------------------------+
+
+ALTER DATABASE test_compaction_opt2 SET 'compaction.twcs.time_window' = '3h';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_table;
+
++------------+-------------------------------------------+
+| Table      | Create Table                              |
++------------+-------------------------------------------+
+| test_table | CREATE TABLE IF NOT EXISTS "test_table" ( |
+|            |   "ts" TIMESTAMP(3) NOT NULL,             |
+|            |   "v" INT NULL,                           |
+|            |   TIME INDEX ("ts")                       |
+|            | )                                         |
+|            |                                           |
+|            | ENGINE=mito                               |
+|            | WITH(                                     |
+|            |   'compaction.override' = 'true',         |
+|            |   'compaction.twcs.time_window' = '1h',   |
+|            |   'compaction.type' = 'twcs'              |
+|            | )                                         |
++------------+-------------------------------------------+
+
+USE public;
+
+Affected Rows: 0
+
+DROP DATABASE test_compaction_opt2;
 
 Affected Rows: 0
 

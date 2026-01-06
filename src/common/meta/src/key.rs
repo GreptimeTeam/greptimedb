@@ -106,6 +106,7 @@ mod schema_metadata_manager;
 pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
+pub mod table_repart;
 pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
@@ -156,6 +157,7 @@ use crate::DatanodeId;
 use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::key::flow::flow_state::FlowStateValue;
 use crate::key::node_address::NodeAddressValue;
+use crate::key::table_repart::{TableRepartKey, TableRepartManager};
 use crate::key::table_route::TableRouteKey;
 use crate::key::topic_region::TopicRegionValue;
 use crate::key::txn_helper::TxnOpGetResponseSet;
@@ -178,6 +180,7 @@ pub const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
 pub const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
 pub const SCHEMA_NAME_KEY_PREFIX: &str = "__schema_name";
 pub const TABLE_ROUTE_PREFIX: &str = "__table_route";
+pub const TABLE_REPART_PREFIX: &str = "__table_repart";
 pub const NODE_ADDRESS_PREFIX: &str = "__node_address";
 pub const KAFKA_TOPIC_KEY_PREFIX: &str = "__topic_name/kafka";
 // The legacy topic key prefix is used to store the topic name in previous versions.
@@ -289,6 +292,11 @@ lazy_static! {
 }
 
 lazy_static! {
+    pub(crate) static ref TABLE_REPART_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{TABLE_REPART_PREFIX}/([0-9]+)$")).unwrap();
+}
+
+lazy_static! {
     static ref DATANODE_TABLE_KEY_PATTERN: Regex =
         Regex::new(&format!("^{DATANODE_TABLE_KEY_PREFIX}/([0-9]+)/([0-9]+)$")).unwrap();
 }
@@ -386,6 +394,7 @@ pub struct TableMetadataManager {
     catalog_manager: CatalogManager,
     schema_manager: SchemaManager,
     table_route_manager: TableRouteManager,
+    table_repart_manager: TableRepartManager,
     tombstone_manager: TombstoneManager,
     topic_name_manager: TopicNameManager,
     topic_region_manager: TopicRegionManager,
@@ -538,6 +547,7 @@ impl TableMetadataManager {
             catalog_manager: CatalogManager::new(kv_backend.clone()),
             schema_manager: SchemaManager::new(kv_backend.clone()),
             table_route_manager: TableRouteManager::new(kv_backend.clone()),
+            table_repart_manager: TableRepartManager::new(kv_backend.clone()),
             tombstone_manager: TombstoneManager::new(kv_backend.clone()),
             topic_name_manager: TopicNameManager::new(kv_backend.clone()),
             topic_region_manager: TopicRegionManager::new(kv_backend.clone()),
@@ -558,6 +568,7 @@ impl TableMetadataManager {
             catalog_manager: CatalogManager::new(kv_backend.clone()),
             schema_manager: SchemaManager::new(kv_backend.clone()),
             table_route_manager: TableRouteManager::new(kv_backend.clone()),
+            table_repart_manager: TableRepartManager::new(kv_backend.clone()),
             tombstone_manager: TombstoneManager::new_with_prefix(
                 kv_backend.clone(),
                 tombstone_prefix,
@@ -614,6 +625,10 @@ impl TableMetadataManager {
 
     pub fn table_route_manager(&self) -> &TableRouteManager {
         &self.table_route_manager
+    }
+
+    pub fn table_repart_manager(&self) -> &TableRepartManager {
+        &self.table_repart_manager
     }
 
     pub fn topic_name_manager(&self) -> &TopicNameManager {
@@ -923,6 +938,7 @@ impl TableMetadataManager {
         );
         let table_info_key = TableInfoKey::new(table_id);
         let table_route_key = TableRouteKey::new(table_id);
+        let table_repart_key = TableRepartKey::new(table_id);
         let datanode_table_keys = datanode_ids
             .into_iter()
             .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
@@ -937,6 +953,7 @@ impl TableMetadataManager {
         keys.push(table_name.to_bytes());
         keys.push(table_info_key.to_bytes());
         keys.push(table_route_key.to_bytes());
+        keys.push(table_repart_key.to_bytes());
         for key in &datanode_table_keys {
             keys.push(key.to_bytes());
         }

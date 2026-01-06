@@ -12,6 +12,7 @@ api.workspace = true
 arrow-flight.workspace = true
 bytes.workspace = true
 common-base.workspace = true
+common-config.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-recordbatch.workspace = true
@@ -37,6 +38,7 @@ vec1 = "1.12"
 criterion = "0.4"
 hyper-util = { workspace = true, features = ["tokio"] }
 rand.workspace = true
+tempfile.workspace = true
 
 [[bench]]
 name = "bench_main"

@@ -16,7 +16,9 @@ use common_telemetry::{debug, warn};
 use puffin::puffin_manager::{PuffinManager, PuffinWriter};
 use store_api::storage::ColumnId;
 
-use crate::sst::file::RegionFileId;
+use crate::sst::file::{RegionFileId, RegionIndexId};
+#[cfg(feature = "vector_index")]
+use crate::sst::index::VectorIndexOutput;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount};
 use crate::sst::index::{
@@ -54,16 +56,29 @@ impl Indexer {
             return IndexOutput::default();
         }
 
+        #[cfg(feature = "vector_index")]
+        {
+            let success = self.do_finish_vector_index(&mut writer, &mut output).await;
+            if !success {
+                self.do_abort().await;
+                return IndexOutput::default();
+            }
+        }
+
         self.do_prune_intm_sst_dir().await;
         output.file_size = self.do_finish_puffin_writer(writer).await;
+        output.version = self.index_version;
         output
     }
 
     async fn build_puffin_writer(&mut self) -> Option<SstPuffinWriter> {
-        let puffin_manager = self.puffin_manager.take()?;
+        let puffin_manager = self.puffin_manager.clone()?;
 
         let err = match puffin_manager
-            .writer(&RegionFileId::new(self.region_id, self.file_id))
+            .writer(&RegionIndexId::new(
+                RegionFileId::new(self.region_id, self.file_id),
+                self.index_version,
+            ))
             .await
         {
             Ok(writer) => return Some(writer),
@@ -264,6 +279,63 @@ impl Indexer {
     ) {
         debug!(
             "Bloom filter created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}, columns: {:?}",
+            self.region_id, self.file_id, byte_count, row_count, column_ids
+        );
+
+        output.index_size = byte_count;
+        output.row_count = row_count;
+        output.columns = column_ids;
+    }
+
+    #[cfg(feature = "vector_index")]
+    async fn do_finish_vector_index(
+        &mut self,
+        puffin_writer: &mut SstPuffinWriter,
+        index_output: &mut IndexOutput,
+    ) -> bool {
+        let Some(mut indexer) = self.vector_indexer.take() else {
+            return true;
+        };
+
+        let column_ids = indexer.column_ids().collect();
+        let err = match indexer.finish(puffin_writer).await {
+            Ok((row_count, byte_count)) => {
+                self.fill_vector_index_output(
+                    &mut index_output.vector_index,
+                    row_count,
+                    byte_count,
+                    column_ids,
+                );
+                return true;
+            }
+            Err(err) => err,
+        };
+
+        if cfg!(any(test, feature = "test")) {
+            panic!(
+                "Failed to finish vector index, region_id: {}, file_id: {}, err: {:?}",
+                self.region_id, self.file_id, err
+            );
+        } else {
+            warn!(
+                err; "Failed to finish vector index, region_id: {}, file_id: {}",
+                self.region_id, self.file_id,
+            );
+        }
+
+        false
+    }
+
+    #[cfg(feature = "vector_index")]
+    fn fill_vector_index_output(
+        &mut self,
+        output: &mut VectorIndexOutput,
+        row_count: RowCount,
+        byte_count: ByteCount,
+        column_ids: Vec<ColumnId>,
+    ) {
+        debug!(
+            "Vector index created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}, columns: {:?}",
             self.region_id, self.file_id, byte_count, row_count, column_ids
         );
 

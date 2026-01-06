@@ -164,6 +164,12 @@ pub struct KafkaConnectionConfig {
     pub sasl: Option<KafkaClientSasl>,
     /// Client TLS config
     pub tls: Option<KafkaClientTls>,
+    /// The connect timeout for kafka client.
+    #[serde(with = "humantime_serde")]
+    pub connect_timeout: Duration,
+    /// The timeout for kafka client.
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
 }
 
 impl Default for KafkaConnectionConfig {
@@ -172,6 +178,8 @@ impl Default for KafkaConnectionConfig {
             broker_endpoints: vec![BROKER_ENDPOINT.to_string()],
             sasl: None,
             tls: None,
+            connect_timeout: Duration::from_secs(3),
+            timeout: Duration::from_secs(3),
         }
     }
 }

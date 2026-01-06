@@ -14,11 +14,11 @@
 
 //! Bulk part encoder/decoder.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use api::helper::{ColumnDataTypeWrapper, value_to_grpc_value};
+use api::helper::{ColumnDataTypeWrapper, to_grpc_value};
 use api::v1::bulk_wal_entry::Body;
 use api::v1::{ArrowIpc, BulkWalEntry, Mutation, OpType, bulk_wal_entry};
 use bytes::Bytes;
@@ -34,7 +34,9 @@ use datatypes::arrow::array::{
     UInt64Array, UInt64Builder,
 };
 use datatypes::arrow::compute::{SortColumn, SortOptions, TakeOptions};
-use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
+use datatypes::arrow::datatypes::{
+    DataType as ArrowDataType, Field, Schema, SchemaRef, UInt32Type,
+};
 use datatypes::arrow_array::BinaryArray;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector};
@@ -51,19 +53,20 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
 use snafu::{OptionExt, ResultExt, Snafu};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
-use store_api::storage::{FileId, SequenceNumber, SequenceRange};
+use store_api::storage::{FileId, RegionId, SequenceNumber, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{
-    self, ColumnNotFoundSnafu, ComputeArrowSnafu, DataTypeMismatchSnafu, EncodeMemtableSnafu,
-    EncodeSnafu, InvalidMetadataSnafu, NewRecordBatchSnafu, Result,
+    self, ColumnNotFoundSnafu, ComputeArrowSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu,
+    DataTypeMismatchSnafu, EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu,
+    InvalidRequestSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu,
 };
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
-use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics};
+use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::file_range::{PreFilterMode, row_group_contains_delete};
 use crate::sst::parquet::flat_format::primary_key_column_index;
@@ -167,6 +170,102 @@ impl BulkPart {
         }
     }
 
+    /// Creates MemtableStats from this BulkPart.
+    pub fn to_memtable_stats(&self, region_metadata: &RegionMetadataRef) -> MemtableStats {
+        let ts_type = region_metadata.time_index_type();
+        let min_ts = ts_type.create_timestamp(self.min_timestamp);
+        let max_ts = ts_type.create_timestamp(self.max_timestamp);
+
+        MemtableStats {
+            estimated_bytes: self.estimated_size(),
+            time_range: Some((min_ts, max_ts)),
+            num_rows: self.num_rows(),
+            num_ranges: 1,
+            max_sequence: self.sequence,
+            series_count: self.estimated_series_count(),
+        }
+    }
+
+    /// Fills missing columns in the BulkPart batch with default values.
+    ///
+    /// This function checks if the batch schema matches the region metadata schema,
+    /// and if there are missing columns, it fills them with default values (or null
+    /// for nullable columns).
+    ///
+    /// # Arguments
+    ///
+    /// * `region_metadata` - The region metadata containing the expected schema
+    pub fn fill_missing_columns(&mut self, region_metadata: &RegionMetadata) -> Result<()> {
+        // Builds a map of existing columns in the batch
+        let batch_schema = self.batch.schema();
+        let batch_columns: HashSet<_> = batch_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+
+        // Finds columns that need to be filled
+        let mut columns_to_fill = Vec::new();
+        for column_meta in &region_metadata.column_metadatas {
+            // TODO(yingwen): Returns error if it is impure default after we support filling
+            // bulk insert request in the frontend
+            if !batch_columns.contains(column_meta.column_schema.name.as_str()) {
+                columns_to_fill.push(column_meta);
+            }
+        }
+
+        if columns_to_fill.is_empty() {
+            return Ok(());
+        }
+
+        let num_rows = self.batch.num_rows();
+
+        let mut new_columns = Vec::new();
+        let mut new_fields = Vec::new();
+
+        // First, adds all existing columns
+        new_fields.extend(batch_schema.fields().iter().cloned());
+        new_columns.extend_from_slice(self.batch.columns());
+
+        let region_id = region_metadata.region_id;
+        // Then adds the missing columns with default values
+        for column_meta in columns_to_fill {
+            let default_vector = column_meta
+                .column_schema
+                .create_default_vector(num_rows)
+                .context(CreateDefaultSnafu {
+                    region_id,
+                    column: &column_meta.column_schema.name,
+                })?
+                .with_context(|| InvalidRequestSnafu {
+                    region_id,
+                    reason: format!(
+                        "column {} does not have default value",
+                        column_meta.column_schema.name
+                    ),
+                })?;
+            let arrow_array = default_vector.to_arrow_array();
+            column_meta.column_schema.data_type.as_arrow_type();
+
+            new_fields.push(Arc::new(Field::new(
+                column_meta.column_schema.name.clone(),
+                column_meta.column_schema.data_type.as_arrow_type(),
+                column_meta.column_schema.is_nullable(),
+            )));
+            new_columns.push(arrow_array);
+        }
+
+        // Create a new schema and batch with the filled columns
+        let new_schema = Arc::new(Schema::new(new_fields));
+        let new_batch =
+            RecordBatch::try_new(new_schema, new_columns).context(NewRecordBatchSnafu)?;
+
+        // Update the batch
+        self.batch = new_batch;
+
+        Ok(())
+    }
+
     /// Converts [BulkPart] to [Mutation] for fallback `write_bulk` implementation.
     pub(crate) fn to_mutation(&self, region_metadata: &RegionMetadataRef) -> Result<Mutation> {
         let vectors = region_metadata
@@ -185,7 +284,7 @@ impl BulkPart {
                 let values = (0..self.batch.num_columns())
                     .map(|col_idx| {
                         if let Some(v) = &vectors[col_idx] {
-                            value_to_grpc_value(v.get(row_idx))
+                            to_grpc_value(v.get(row_idx))
                         } else {
                             api::v1::Value { value_data: None }
                         }
@@ -381,7 +480,7 @@ impl UnorderedPart {
 }
 
 /// More accurate estimation of the size of a record batch.
-pub(crate) fn record_batch_estimated_size(batch: &RecordBatch) -> usize {
+pub fn record_batch_estimated_size(batch: &RecordBatch) -> usize {
     batch
         .columns()
         .iter()
@@ -632,7 +731,7 @@ fn new_primary_key_column_builders(
 }
 
 /// Sorts the record batch with primary key format.
-fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
+pub fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
     let total_columns = batch.num_columns();
     let sort_columns = vec![
         // Primary key column (ascending)
@@ -667,6 +766,196 @@ fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
     datatypes::arrow::compute::take_record_batch(batch, &indices).context(ComputeArrowSnafu)
 }
 
+/// Converts a `BulkPart` that is unordered and without encoded primary keys into a `BulkPart`
+/// with the same format as produced by [BulkPartConverter].
+///
+/// This function takes a `BulkPart` where:
+/// - For dense encoding: Primary key columns may be stored as individual columns
+/// - For sparse encoding: The `__primary_key` column should already be present with encoded keys
+/// - The batch may not be sorted
+///
+/// And produces a `BulkPart` where:
+/// - Primary key columns are optionally stored (depending on `store_primary_key_columns` and encoding)
+/// - An encoded `__primary_key` dictionary column is present
+/// - The batch is sorted by (primary_key, timestamp, sequence desc)
+///
+/// # Arguments
+///
+/// * `part` - The input `BulkPart` to convert
+/// * `region_metadata` - Region metadata containing schema information
+/// * `primary_key_codec` - Codec for encoding primary keys
+/// * `schema` - Target schema for the output batch
+/// * `store_primary_key_columns` - If true and encoding is not sparse, stores individual primary key columns
+///
+/// # Returns
+///
+/// Returns `None` if the input part has no rows, otherwise returns a new `BulkPart` with
+/// encoded primary keys and sorted data.
+pub fn convert_bulk_part(
+    part: BulkPart,
+    region_metadata: &RegionMetadataRef,
+    primary_key_codec: Arc<dyn PrimaryKeyCodec>,
+    schema: SchemaRef,
+    store_primary_key_columns: bool,
+) -> Result<Option<BulkPart>> {
+    if part.num_rows() == 0 {
+        return Ok(None);
+    }
+
+    let num_rows = part.num_rows();
+    let is_sparse = region_metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse;
+
+    // Builds a column name-to-index map for efficient lookups
+    let input_schema = part.batch.schema();
+    let column_indices: HashMap<&str, usize> = input_schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| (field.name().as_str(), idx))
+        .collect();
+
+    // Determines the structure of the input batch by looking up columns by name
+    let mut output_columns = Vec::new();
+
+    // Extracts primary key columns if we need to encode them (dense encoding)
+    let pk_array = if is_sparse {
+        // For sparse encoding, the input should already have the __primary_key column
+        // We need to find it in the input batch
+        None
+    } else {
+        // For dense encoding, extract and encode primary key columns by name
+        let pk_vectors: Result<Vec<_>> = region_metadata
+            .primary_key_columns()
+            .map(|col_meta| {
+                let col_idx = column_indices
+                    .get(col_meta.column_schema.name.as_str())
+                    .context(ColumnNotFoundSnafu {
+                        column: &col_meta.column_schema.name,
+                    })?;
+                let col = part.batch.column(*col_idx);
+                Helper::try_into_vector(col).context(error::ComputeVectorSnafu)
+            })
+            .collect();
+        let pk_vectors = pk_vectors?;
+
+        let mut key_array_builder = PrimaryKeyArrayBuilder::new();
+        let mut encode_buf = Vec::new();
+
+        for row_idx in 0..num_rows {
+            encode_buf.clear();
+
+            // Collects primary key values with column IDs for this row
+            let pk_values_with_ids: Vec<_> = region_metadata
+                .primary_key
+                .iter()
+                .zip(pk_vectors.iter())
+                .map(|(col_id, vector)| (*col_id, vector.get_ref(row_idx)))
+                .collect();
+
+            // Encodes the primary key
+            primary_key_codec
+                .encode_value_refs(&pk_values_with_ids, &mut encode_buf)
+                .context(EncodeSnafu)?;
+
+            key_array_builder
+                .append(&encode_buf)
+                .context(ComputeArrowSnafu)?;
+        }
+
+        Some(key_array_builder.finish())
+    };
+
+    // Adds primary key columns if storing them (only for dense encoding)
+    if store_primary_key_columns && !is_sparse {
+        for col_meta in region_metadata.primary_key_columns() {
+            let col_idx = column_indices
+                .get(col_meta.column_schema.name.as_str())
+                .context(ColumnNotFoundSnafu {
+                    column: &col_meta.column_schema.name,
+                })?;
+            let col = part.batch.column(*col_idx);
+
+            // Converts to dictionary if needed for string types
+            let col = if col_meta.column_schema.data_type.is_string() {
+                let target_type = ArrowDataType::Dictionary(
+                    Box::new(ArrowDataType::UInt32),
+                    Box::new(ArrowDataType::Utf8),
+                );
+                arrow::compute::cast(col, &target_type).context(ComputeArrowSnafu)?
+            } else {
+                col.clone()
+            };
+            output_columns.push(col);
+        }
+    }
+
+    // Adds field columns
+    for col_meta in region_metadata.field_columns() {
+        let col_idx = column_indices
+            .get(col_meta.column_schema.name.as_str())
+            .context(ColumnNotFoundSnafu {
+                column: &col_meta.column_schema.name,
+            })?;
+        output_columns.push(part.batch.column(*col_idx).clone());
+    }
+
+    // Adds timestamp column
+    let new_timestamp_index = output_columns.len();
+    let ts_col_idx = column_indices
+        .get(
+            region_metadata
+                .time_index_column()
+                .column_schema
+                .name
+                .as_str(),
+        )
+        .context(ColumnNotFoundSnafu {
+            column: &region_metadata.time_index_column().column_schema.name,
+        })?;
+    output_columns.push(part.batch.column(*ts_col_idx).clone());
+
+    // Adds encoded primary key dictionary column
+    let pk_dictionary = if let Some(pk_dict_array) = pk_array {
+        Arc::new(pk_dict_array) as ArrayRef
+    } else {
+        let pk_col_idx =
+            column_indices
+                .get(PRIMARY_KEY_COLUMN_NAME)
+                .context(ColumnNotFoundSnafu {
+                    column: PRIMARY_KEY_COLUMN_NAME,
+                })?;
+        let col = part.batch.column(*pk_col_idx);
+
+        // Casts to dictionary type if needed
+        let target_type = ArrowDataType::Dictionary(
+            Box::new(ArrowDataType::UInt32),
+            Box::new(ArrowDataType::Binary),
+        );
+        arrow::compute::cast(col, &target_type).context(ComputeArrowSnafu)?
+    };
+    output_columns.push(pk_dictionary);
+
+    let sequence_array = UInt64Array::from(vec![part.sequence; num_rows]);
+    output_columns.push(Arc::new(sequence_array) as ArrayRef);
+
+    let op_type_array = UInt8Array::from(vec![OpType::Put as u8; num_rows]);
+    output_columns.push(Arc::new(op_type_array) as ArrayRef);
+
+    let batch = RecordBatch::try_new(schema, output_columns).context(NewRecordBatchSnafu)?;
+
+    // Sorts the batch by (primary_key, timestamp, sequence desc)
+    let sorted_batch = sort_primary_key_record_batch(&batch)?;
+
+    Ok(Some(BulkPart {
+        batch: sorted_batch,
+        max_timestamp: part.max_timestamp,
+        min_timestamp: part.min_timestamp,
+        sequence: part.sequence,
+        timestamp_index: new_timestamp_index,
+        raw_data: None,
+    }))
+}
+
 #[derive(Debug, Clone)]
 pub struct EncodedBulkPart {
     data: Bytes,
@@ -692,6 +981,23 @@ impl EncodedBulkPart {
         &self.data
     }
 
+    /// Creates MemtableStats from this EncodedBulkPart.
+    pub fn to_memtable_stats(&self) -> MemtableStats {
+        let meta = &self.metadata;
+        let ts_type = meta.region_metadata.time_index_type();
+        let min_ts = ts_type.create_timestamp(meta.min_timestamp);
+        let max_ts = ts_type.create_timestamp(meta.max_timestamp);
+
+        MemtableStats {
+            estimated_bytes: self.size_bytes(),
+            time_range: Some((min_ts, max_ts)),
+            num_rows: meta.num_rows,
+            num_ranges: 1,
+            max_sequence: meta.max_sequence,
+            series_count: meta.num_series as usize,
+        }
+    }
+
     /// Converts this `EncodedBulkPart` to `SstInfo`.
     ///
     /// # Arguments
@@ -701,6 +1007,19 @@ impl EncodedBulkPart {
     /// Returns a `SstInfo` instance with information derived from this bulk part's metadata
     pub(crate) fn to_sst_info(&self, file_id: FileId) -> SstInfo {
         let unit = self.metadata.region_metadata.time_index_type().unit();
+        let max_row_group_uncompressed_size: u64 = self
+            .metadata
+            .parquet_metadata
+            .row_groups()
+            .iter()
+            .map(|rg| {
+                rg.columns()
+                    .iter()
+                    .map(|c| c.uncompressed_size() as u64)
+                    .sum::<u64>()
+            })
+            .max()
+            .unwrap_or(0);
         SstInfo {
             file_id,
             time_range: (
@@ -708,6 +1027,7 @@ impl EncodedBulkPart {
                 Timestamp::new(self.metadata.max_timestamp, unit),
             ),
             file_size: self.data.len() as u64,
+            max_row_group_uncompressed_size,
             num_rows: self.metadata.num_rows,
             num_row_groups: self.metadata.parquet_metadata.num_row_groups() as u64,
             file_metadata: Some(self.metadata.parquet_metadata.clone()),
@@ -774,6 +1094,8 @@ pub struct BulkPartMeta {
     pub region_metadata: RegionMetadataRef,
     /// Number of series.
     pub num_series: u64,
+    /// Maximum sequence number in part.
+    pub max_sequence: u64,
 }
 
 /// Metrics for encoding a part.
@@ -835,6 +1157,7 @@ impl BulkPartEncoder {
         arrow_schema: SchemaRef,
         min_timestamp: i64,
         max_timestamp: i64,
+        max_sequence: u64,
         metrics: &mut BulkPartEncodeMetrics,
     ) -> Result<Option<EncodedBulkPart>> {
         let mut buf = Vec::with_capacity(4096);
@@ -886,6 +1209,7 @@ impl BulkPartEncoder {
                 parquet_metadata,
                 region_metadata: self.metadata.clone(),
                 num_series,
+                max_sequence,
             },
         }))
     }
@@ -919,344 +1243,29 @@ impl BulkPartEncoder {
                 parquet_metadata,
                 region_metadata: self.metadata.clone(),
                 num_series: part.estimated_series_count() as u64,
+                max_sequence: part.sequence,
             },
         }))
     }
 }
 
-/// Converts mutations to record batches.
-fn mutations_to_record_batch(
-    mutations: &[Mutation],
-    metadata: &RegionMetadataRef,
-    pk_encoder: &DensePrimaryKeyCodec,
-    dedup: bool,
-) -> Result<Option<(RecordBatch, i64, i64)>> {
-    let total_rows: usize = mutations
-        .iter()
-        .map(|m| m.rows.as_ref().map(|r| r.rows.len()).unwrap_or(0))
-        .sum();
-
-    if total_rows == 0 {
-        return Ok(None);
-    }
-
-    let mut pk_builder = BinaryBuilder::with_capacity(total_rows, 0);
-
-    let mut ts_vector: Box<dyn MutableVector> = metadata
-        .time_index_column()
-        .column_schema
-        .data_type
-        .create_mutable_vector(total_rows);
-    let mut sequence_builder = UInt64Builder::with_capacity(total_rows);
-    let mut op_type_builder = UInt8Builder::with_capacity(total_rows);
-
-    let mut field_builders: Vec<Box<dyn MutableVector>> = metadata
-        .field_columns()
-        .map(|f| f.column_schema.data_type.create_mutable_vector(total_rows))
-        .collect();
-
-    let mut pk_buffer = vec![];
-    for m in mutations {
-        let Some(key_values) = KeyValuesRef::new(metadata, m) else {
-            continue;
-        };
-
-        for row in key_values.iter() {
-            pk_buffer.clear();
-            pk_encoder
-                .encode_to_vec(row.primary_keys(), &mut pk_buffer)
-                .context(EncodeSnafu)?;
-            pk_builder.append_value(pk_buffer.as_bytes());
-            ts_vector.push_value_ref(&row.timestamp());
-            sequence_builder.append_value(row.sequence());
-            op_type_builder.append_value(row.op_type() as u8);
-            for (builder, field) in field_builders.iter_mut().zip(row.fields()) {
-                builder.push_value_ref(&field);
-            }
-        }
-    }
-
-    let arrow_schema = to_sst_arrow_schema(metadata);
-    // safety: timestamp column must be valid, and values must not be None.
-    let timestamp_unit = metadata
-        .time_index_column()
-        .column_schema
-        .data_type
-        .as_timestamp()
-        .unwrap()
-        .unit();
-    let sorter = ArraysSorter {
-        encoded_primary_keys: pk_builder.finish(),
-        timestamp_unit,
-        timestamp: ts_vector.to_vector().to_arrow_array(),
-        sequence: sequence_builder.finish(),
-        op_type: op_type_builder.finish(),
-        fields: field_builders
-            .iter_mut()
-            .map(|f| f.to_vector().to_arrow_array()),
-        dedup,
-        arrow_schema,
-    };
-
-    sorter.sort().map(Some)
-}
-
-struct ArraysSorter<I> {
-    encoded_primary_keys: BinaryArray,
-    timestamp_unit: TimeUnit,
-    timestamp: ArrayRef,
-    sequence: UInt64Array,
-    op_type: UInt8Array,
-    fields: I,
-    dedup: bool,
-    arrow_schema: SchemaRef,
-}
-
-impl<I> ArraysSorter<I>
-where
-    I: Iterator<Item = ArrayRef>,
-{
-    /// Converts arrays to record batch.
-    fn sort(self) -> Result<(RecordBatch, i64, i64)> {
-        debug_assert!(!self.timestamp.is_empty());
-        debug_assert!(self.timestamp.len() == self.sequence.len());
-        debug_assert!(self.timestamp.len() == self.op_type.len());
-        debug_assert!(self.timestamp.len() == self.encoded_primary_keys.len());
-
-        let timestamp_iter = timestamp_array_to_iter(self.timestamp_unit, &self.timestamp);
-        let (mut min_timestamp, mut max_timestamp) = (i64::MAX, i64::MIN);
-        let mut to_sort = self
-            .encoded_primary_keys
-            .iter()
-            .zip(timestamp_iter)
-            .zip(self.sequence.iter())
-            .map(|((pk, timestamp), sequence)| {
-                max_timestamp = max_timestamp.max(*timestamp);
-                min_timestamp = min_timestamp.min(*timestamp);
-                (pk, timestamp, sequence)
-            })
-            .enumerate()
-            .collect::<Vec<_>>();
-
-        to_sort.sort_unstable_by(|(_, (l_pk, l_ts, l_seq)), (_, (r_pk, r_ts, r_seq))| {
-            l_pk.cmp(r_pk)
-                .then(l_ts.cmp(r_ts))
-                .then(l_seq.cmp(r_seq).reverse())
-        });
-
-        if self.dedup {
-            // Dedup by timestamps while ignore sequence.
-            to_sort.dedup_by(|(_, (l_pk, l_ts, _)), (_, (r_pk, r_ts, _))| {
-                l_pk == r_pk && l_ts == r_ts
-            });
-        }
-
-        let indices = UInt32Array::from_iter_values(to_sort.iter().map(|v| v.0 as u32));
-
-        let pk_dictionary = Arc::new(binary_array_to_dictionary(
-            // safety: pk must be BinaryArray
-            arrow::compute::take(
-                &self.encoded_primary_keys,
-                &indices,
-                Some(TakeOptions {
-                    check_bounds: false,
-                }),
-            )
-            .context(ComputeArrowSnafu)?
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .unwrap(),
-        )?) as ArrayRef;
-
-        let mut arrays = Vec::with_capacity(self.arrow_schema.fields.len());
-        for arr in self.fields {
-            arrays.push(
-                arrow::compute::take(
-                    &arr,
-                    &indices,
-                    Some(TakeOptions {
-                        check_bounds: false,
-                    }),
-                )
-                .context(ComputeArrowSnafu)?,
-            );
-        }
-
-        let timestamp = arrow::compute::take(
-            &self.timestamp,
-            &indices,
-            Some(TakeOptions {
-                check_bounds: false,
-            }),
-        )
-        .context(ComputeArrowSnafu)?;
-
-        arrays.push(timestamp);
-        arrays.push(pk_dictionary);
-        arrays.push(
-            arrow::compute::take(
-                &self.sequence,
-                &indices,
-                Some(TakeOptions {
-                    check_bounds: false,
-                }),
-            )
-            .context(ComputeArrowSnafu)?,
-        );
-
-        arrays.push(
-            arrow::compute::take(
-                &self.op_type,
-                &indices,
-                Some(TakeOptions {
-                    check_bounds: false,
-                }),
-            )
-            .context(ComputeArrowSnafu)?,
-        );
-
-        let batch = RecordBatch::try_new(self.arrow_schema, arrays).context(NewRecordBatchSnafu)?;
-        Ok((batch, min_timestamp, max_timestamp))
-    }
-}
-
-/// Converts timestamp array to an iter of i64 values.
-fn timestamp_array_to_iter(
-    timestamp_unit: TimeUnit,
-    timestamp: &ArrayRef,
-) -> impl Iterator<Item = &i64> {
-    match timestamp_unit {
-        // safety: timestamp column must be valid.
-        TimeUnit::Second => timestamp
-            .as_any()
-            .downcast_ref::<TimestampSecondArray>()
-            .unwrap()
-            .values()
-            .iter(),
-        TimeUnit::Millisecond => timestamp
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .unwrap()
-            .values()
-            .iter(),
-        TimeUnit::Microsecond => timestamp
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>()
-            .unwrap()
-            .values()
-            .iter(),
-        TimeUnit::Nanosecond => timestamp
-            .as_any()
-            .downcast_ref::<TimestampNanosecondArray>()
-            .unwrap()
-            .values()
-            .iter(),
-    }
-}
-
-/// Converts a **sorted** [BinaryArray] to [DictionaryArray].
-fn binary_array_to_dictionary(input: &BinaryArray) -> Result<PrimaryKeyArray> {
-    if input.is_empty() {
-        return Ok(DictionaryArray::new(
-            UInt32Array::from(Vec::<u32>::new()),
-            Arc::new(BinaryArray::from_vec(vec![])) as ArrayRef,
-        ));
-    }
-    let mut keys = Vec::with_capacity(16);
-    let mut values = BinaryBuilder::new();
-    let mut prev: usize = 0;
-    keys.push(prev as u32);
-    values.append_value(input.value(prev));
-
-    for current_bytes in input.iter().skip(1) {
-        // safety: encoded pk must present.
-        let current_bytes = current_bytes.unwrap();
-        let prev_bytes = input.value(prev);
-        if current_bytes != prev_bytes {
-            values.append_value(current_bytes);
-            prev += 1;
-        }
-        keys.push(prev as u32);
-    }
-
-    Ok(DictionaryArray::new(
-        UInt32Array::from(keys),
-        Arc::new(values.finish()) as ArrayRef,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-
-    use api::v1::{Row, WriteHint};
+    use api::v1::{Row, SemanticType, WriteHint};
     use datafusion_common::ScalarValue;
     use datatypes::arrow::array::Float64Array;
-    use datatypes::prelude::{ConcreteDataType, ScalarVector, Value};
-    use datatypes::vectors::{Float64Vector, TimestampMillisecondVector};
+    use datatypes::prelude::{ConcreteDataType, Value};
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
     use store_api::storage::consts::ReservedColumnId;
 
     use super::*;
     use crate::memtable::bulk::context::BulkIterContext;
-    use crate::sst::parquet::format::{PrimaryKeyReadFormat, ReadFormat};
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, metadata_for_test, region_metadata_to_row_schema,
     };
-
-    fn check_binary_array_to_dictionary(
-        input: &[&[u8]],
-        expected_keys: &[u32],
-        expected_values: &[&[u8]],
-    ) {
-        let input = BinaryArray::from_iter_values(input.iter());
-        let array = binary_array_to_dictionary(&input).unwrap();
-        assert_eq!(
-            &expected_keys,
-            &array.keys().iter().map(|v| v.unwrap()).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            expected_values,
-            &array
-                .values()
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .unwrap()
-                .iter()
-                .map(|v| v.unwrap())
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_binary_array_to_dictionary() {
-        check_binary_array_to_dictionary(&[], &[], &[]);
-
-        check_binary_array_to_dictionary(&["a".as_bytes()], &[0], &["a".as_bytes()]);
-
-        check_binary_array_to_dictionary(
-            &["a".as_bytes(), "a".as_bytes()],
-            &[0, 0],
-            &["a".as_bytes()],
-        );
-
-        check_binary_array_to_dictionary(
-            &["a".as_bytes(), "a".as_bytes(), "b".as_bytes()],
-            &[0, 0, 1],
-            &["a".as_bytes(), "b".as_bytes()],
-        );
-
-        check_binary_array_to_dictionary(
-            &[
-                "a".as_bytes(),
-                "a".as_bytes(),
-                "b".as_bytes(),
-                "c".as_bytes(),
-            ],
-            &[0, 0, 1, 2],
-            &["a".as_bytes(), "b".as_bytes(), "c".as_bytes()],
-        );
-    }
 
     struct MutationInput<'a> {
         k0: &'a str,
@@ -1271,232 +1280,6 @@ mod tests {
         pk_values: &'a [Value],
         timestamps: &'a [i64],
         v1: &'a [Option<f64>],
-    }
-
-    fn check_mutations_to_record_batches(
-        input: &[MutationInput],
-        expected: &[BatchOutput],
-        expected_timestamp: (i64, i64),
-        dedup: bool,
-    ) {
-        let metadata = metadata_for_test();
-        let mutations = input
-            .iter()
-            .map(|m| {
-                build_key_values_with_ts_seq_values(
-                    &metadata,
-                    m.k0.to_string(),
-                    m.k1,
-                    m.timestamps.iter().copied(),
-                    m.v1.iter().copied(),
-                    m.sequence,
-                )
-                .mutation
-            })
-            .collect::<Vec<_>>();
-        let total_rows: usize = mutations
-            .iter()
-            .flat_map(|m| m.rows.iter())
-            .map(|r| r.rows.len())
-            .sum();
-
-        let pk_encoder = DensePrimaryKeyCodec::new(&metadata);
-
-        let (batch, _, _) = mutations_to_record_batch(&mutations, &metadata, &pk_encoder, dedup)
-            .unwrap()
-            .unwrap();
-        let read_format = PrimaryKeyReadFormat::new_with_all_columns(metadata.clone());
-        let mut batches = VecDeque::new();
-        read_format
-            .convert_record_batch(&batch, None, &mut batches)
-            .unwrap();
-        if !dedup {
-            assert_eq!(
-                total_rows,
-                batches.iter().map(|b| { b.num_rows() }).sum::<usize>()
-            );
-        }
-        let batch_values = batches
-            .into_iter()
-            .map(|b| {
-                let pk_values = pk_encoder.decode(b.primary_key()).unwrap().into_dense();
-                let timestamps = b
-                    .timestamps()
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondVector>()
-                    .unwrap()
-                    .iter_data()
-                    .map(|v| v.unwrap().0.value())
-                    .collect::<Vec<_>>();
-                let float_values = b.fields()[1]
-                    .data
-                    .as_any()
-                    .downcast_ref::<Float64Vector>()
-                    .unwrap()
-                    .iter_data()
-                    .collect::<Vec<_>>();
-
-                (pk_values, timestamps, float_values)
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(expected.len(), batch_values.len());
-
-        for idx in 0..expected.len() {
-            assert_eq!(expected[idx].pk_values, &batch_values[idx].0);
-            assert_eq!(expected[idx].timestamps, &batch_values[idx].1);
-            assert_eq!(expected[idx].v1, &batch_values[idx].2);
-        }
-    }
-
-    #[test]
-    fn test_mutations_to_record_batch() {
-        check_mutations_to_record_batches(
-            &[MutationInput {
-                k0: "a",
-                k1: 0,
-                timestamps: &[0],
-                v1: &[Some(0.1)],
-                sequence: 0,
-            }],
-            &[BatchOutput {
-                pk_values: &[Value::String("a".into()), Value::UInt32(0)],
-                timestamps: &[0],
-                v1: &[Some(0.1)],
-            }],
-            (0, 0),
-            true,
-        );
-
-        check_mutations_to_record_batches(
-            &[
-                MutationInput {
-                    k0: "a",
-                    k1: 0,
-                    timestamps: &[0],
-                    v1: &[Some(0.1)],
-                    sequence: 0,
-                },
-                MutationInput {
-                    k0: "b",
-                    k1: 0,
-                    timestamps: &[0],
-                    v1: &[Some(0.0)],
-                    sequence: 0,
-                },
-                MutationInput {
-                    k0: "a",
-                    k1: 0,
-                    timestamps: &[1],
-                    v1: &[Some(0.2)],
-                    sequence: 1,
-                },
-                MutationInput {
-                    k0: "a",
-                    k1: 1,
-                    timestamps: &[1],
-                    v1: &[Some(0.3)],
-                    sequence: 2,
-                },
-            ],
-            &[
-                BatchOutput {
-                    pk_values: &[Value::String("a".into()), Value::UInt32(0)],
-                    timestamps: &[0, 1],
-                    v1: &[Some(0.1), Some(0.2)],
-                },
-                BatchOutput {
-                    pk_values: &[Value::String("a".into()), Value::UInt32(1)],
-                    timestamps: &[1],
-                    v1: &[Some(0.3)],
-                },
-                BatchOutput {
-                    pk_values: &[Value::String("b".into()), Value::UInt32(0)],
-                    timestamps: &[0],
-                    v1: &[Some(0.0)],
-                },
-            ],
-            (0, 1),
-            true,
-        );
-
-        check_mutations_to_record_batches(
-            &[
-                MutationInput {
-                    k0: "a",
-                    k1: 0,
-                    timestamps: &[0],
-                    v1: &[Some(0.1)],
-                    sequence: 0,
-                },
-                MutationInput {
-                    k0: "b",
-                    k1: 0,
-                    timestamps: &[0],
-                    v1: &[Some(0.0)],
-                    sequence: 0,
-                },
-                MutationInput {
-                    k0: "a",
-                    k1: 0,
-                    timestamps: &[0],
-                    v1: &[Some(0.2)],
-                    sequence: 1,
-                },
-            ],
-            &[
-                BatchOutput {
-                    pk_values: &[Value::String("a".into()), Value::UInt32(0)],
-                    timestamps: &[0],
-                    v1: &[Some(0.2)],
-                },
-                BatchOutput {
-                    pk_values: &[Value::String("b".into()), Value::UInt32(0)],
-                    timestamps: &[0],
-                    v1: &[Some(0.0)],
-                },
-            ],
-            (0, 0),
-            true,
-        );
-        check_mutations_to_record_batches(
-            &[
-                MutationInput {
-                    k0: "a",
-                    k1: 0,
-                    timestamps: &[0],
-                    v1: &[Some(0.1)],
-                    sequence: 0,
-                },
-                MutationInput {
-                    k0: "b",
-                    k1: 0,
-                    timestamps: &[0],
-                    v1: &[Some(0.0)],
-                    sequence: 0,
-                },
-                MutationInput {
-                    k0: "a",
-                    k1: 0,
-                    timestamps: &[0],
-                    v1: &[Some(0.2)],
-                    sequence: 1,
-                },
-            ],
-            &[
-                BatchOutput {
-                    pk_values: &[Value::String("a".into()), Value::UInt32(0)],
-                    timestamps: &[0, 0],
-                    v1: &[Some(0.2), Some(0.1)],
-                },
-                BatchOutput {
-                    pk_values: &[Value::String("b".into()), Value::UInt32(0)],
-                    timestamps: &[0],
-                    v1: &[Some(0.0)],
-                },
-            ],
-            (0, 0),
-            false,
-        );
     }
 
     fn encode(input: &[MutationInput]) -> EncodedBulkPart {
@@ -2165,5 +1948,380 @@ mod tests {
                 "Encoded primary key should not be empty"
             );
         }
+    }
+
+    #[test]
+    fn test_convert_bulk_part_empty() {
+        let metadata = metadata_for_test();
+        let schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+        let primary_key_codec = build_primary_key_codec(&metadata);
+
+        // Create empty batch
+        let empty_batch = RecordBatch::new_empty(schema.clone());
+        let empty_part = BulkPart {
+            batch: empty_batch,
+            max_timestamp: 0,
+            min_timestamp: 0,
+            sequence: 0,
+            timestamp_index: 0,
+            raw_data: None,
+        };
+
+        let result =
+            convert_bulk_part(empty_part, &metadata, primary_key_codec, schema, true).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_convert_bulk_part_dense_with_pk_columns() {
+        let metadata = metadata_for_test();
+        let primary_key_codec = build_primary_key_codec(&metadata);
+
+        let k0_array = Arc::new(arrow::array::StringArray::from(vec![
+            "key1", "key2", "key1",
+        ]));
+        let k1_array = Arc::new(arrow::array::UInt32Array::from(vec![1, 2, 1]));
+        let v0_array = Arc::new(arrow::array::Int64Array::from(vec![100, 200, 300]));
+        let v1_array = Arc::new(arrow::array::Float64Array::from(vec![1.0, 2.0, 3.0]));
+        let ts_array = Arc::new(TimestampMillisecondArray::from(vec![1000, 2000, 1500]));
+
+        let input_schema = Arc::new(Schema::new(vec![
+            Field::new("k0", ArrowDataType::Utf8, false),
+            Field::new("k1", ArrowDataType::UInt32, false),
+            Field::new("v0", ArrowDataType::Int64, true),
+            Field::new("v1", ArrowDataType::Float64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+
+        let input_batch = RecordBatch::try_new(
+            input_schema,
+            vec![k0_array, k1_array, v0_array, v1_array, ts_array],
+        )
+        .unwrap();
+
+        let part = BulkPart {
+            batch: input_batch,
+            max_timestamp: 2000,
+            min_timestamp: 1000,
+            sequence: 5,
+            timestamp_index: 4,
+            raw_data: None,
+        };
+
+        let output_schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+
+        let result = convert_bulk_part(
+            part,
+            &metadata,
+            primary_key_codec,
+            output_schema,
+            true, // store primary key columns
+        )
+        .unwrap();
+
+        let converted = result.unwrap();
+
+        assert_eq!(converted.num_rows(), 3);
+        assert_eq!(converted.max_timestamp, 2000);
+        assert_eq!(converted.min_timestamp, 1000);
+        assert_eq!(converted.sequence, 5);
+
+        let schema = converted.batch.schema();
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            field_names,
+            vec![
+                "k0",
+                "k1",
+                "v0",
+                "v1",
+                "ts",
+                "__primary_key",
+                "__sequence",
+                "__op_type"
+            ]
+        );
+
+        let k0_col = converted.batch.column_by_name("k0").unwrap();
+        assert!(matches!(
+            k0_col.data_type(),
+            ArrowDataType::Dictionary(_, _)
+        ));
+
+        let pk_col = converted.batch.column_by_name("__primary_key").unwrap();
+        let dict_array = pk_col
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt32Type>>()
+            .unwrap();
+        let keys = dict_array.keys();
+
+        assert_eq!(keys.len(), 3);
+    }
+
+    #[test]
+    fn test_convert_bulk_part_dense_without_pk_columns() {
+        let metadata = metadata_for_test();
+        let primary_key_codec = build_primary_key_codec(&metadata);
+
+        // Create input batch with primary key columns (k0, k1)
+        let k0_array = Arc::new(arrow::array::StringArray::from(vec!["key1", "key2"]));
+        let k1_array = Arc::new(arrow::array::UInt32Array::from(vec![1, 2]));
+        let v0_array = Arc::new(arrow::array::Int64Array::from(vec![100, 200]));
+        let v1_array = Arc::new(arrow::array::Float64Array::from(vec![1.0, 2.0]));
+        let ts_array = Arc::new(TimestampMillisecondArray::from(vec![1000, 2000]));
+
+        let input_schema = Arc::new(Schema::new(vec![
+            Field::new("k0", ArrowDataType::Utf8, false),
+            Field::new("k1", ArrowDataType::UInt32, false),
+            Field::new("v0", ArrowDataType::Int64, true),
+            Field::new("v1", ArrowDataType::Float64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+
+        let input_batch = RecordBatch::try_new(
+            input_schema,
+            vec![k0_array, k1_array, v0_array, v1_array, ts_array],
+        )
+        .unwrap();
+
+        let part = BulkPart {
+            batch: input_batch,
+            max_timestamp: 2000,
+            min_timestamp: 1000,
+            sequence: 3,
+            timestamp_index: 4,
+            raw_data: None,
+        };
+
+        let output_schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions {
+                raw_pk_columns: false,
+                string_pk_use_dict: true,
+            },
+        );
+
+        let result = convert_bulk_part(
+            part,
+            &metadata,
+            primary_key_codec,
+            output_schema,
+            false, // don't store primary key columns
+        )
+        .unwrap();
+
+        let converted = result.unwrap();
+
+        assert_eq!(converted.num_rows(), 2);
+        assert_eq!(converted.max_timestamp, 2000);
+        assert_eq!(converted.min_timestamp, 1000);
+        assert_eq!(converted.sequence, 3);
+
+        // Verify schema does NOT include individual primary key columns
+        let schema = converted.batch.schema();
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            field_names,
+            vec!["v0", "v1", "ts", "__primary_key", "__sequence", "__op_type"]
+        );
+
+        // Verify __primary_key column is present and is a dictionary
+        let pk_col = converted.batch.column_by_name("__primary_key").unwrap();
+        assert!(matches!(
+            pk_col.data_type(),
+            ArrowDataType::Dictionary(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_convert_bulk_part_sparse_encoding() {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("k1", ConcreteDataType::string_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("v0", ConcreteDataType::int64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("v1", ConcreteDataType::float64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .primary_key(vec![0, 1])
+            .primary_key_encoding(PrimaryKeyEncoding::Sparse);
+        let metadata = Arc::new(builder.build().unwrap());
+
+        let primary_key_codec = build_primary_key_codec(&metadata);
+
+        // Create input batch with __primary_key column (sparse encoding)
+        let pk_array = Arc::new(arrow::array::BinaryArray::from(vec![
+            b"encoded_key_1".as_slice(),
+            b"encoded_key_2".as_slice(),
+        ]));
+        let v0_array = Arc::new(arrow::array::Int64Array::from(vec![100, 200]));
+        let v1_array = Arc::new(arrow::array::Float64Array::from(vec![1.0, 2.0]));
+        let ts_array = Arc::new(TimestampMillisecondArray::from(vec![1000, 2000]));
+
+        let input_schema = Arc::new(Schema::new(vec![
+            Field::new("__primary_key", ArrowDataType::Binary, false),
+            Field::new("v0", ArrowDataType::Int64, true),
+            Field::new("v1", ArrowDataType::Float64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+
+        let input_batch =
+            RecordBatch::try_new(input_schema, vec![pk_array, v0_array, v1_array, ts_array])
+                .unwrap();
+
+        let part = BulkPart {
+            batch: input_batch,
+            max_timestamp: 2000,
+            min_timestamp: 1000,
+            sequence: 7,
+            timestamp_index: 3,
+            raw_data: None,
+        };
+
+        let output_schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+
+        let result = convert_bulk_part(
+            part,
+            &metadata,
+            primary_key_codec,
+            output_schema,
+            true, // store_primary_key_columns (ignored for sparse)
+        )
+        .unwrap();
+
+        let converted = result.unwrap();
+
+        assert_eq!(converted.num_rows(), 2);
+        assert_eq!(converted.max_timestamp, 2000);
+        assert_eq!(converted.min_timestamp, 1000);
+        assert_eq!(converted.sequence, 7);
+
+        // Verify schema does NOT include individual primary key columns (sparse encoding)
+        let schema = converted.batch.schema();
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            field_names,
+            vec!["v0", "v1", "ts", "__primary_key", "__sequence", "__op_type"]
+        );
+
+        // Verify __primary_key is dictionary encoded
+        let pk_col = converted.batch.column_by_name("__primary_key").unwrap();
+        assert!(matches!(
+            pk_col.data_type(),
+            ArrowDataType::Dictionary(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_convert_bulk_part_sorting_with_multiple_series() {
+        let metadata = metadata_for_test();
+        let primary_key_codec = build_primary_key_codec(&metadata);
+
+        // Create unsorted batch with multiple series and timestamps
+        let k0_array = Arc::new(arrow::array::StringArray::from(vec![
+            "series_b", "series_a", "series_b", "series_a",
+        ]));
+        let k1_array = Arc::new(arrow::array::UInt32Array::from(vec![2, 1, 2, 1]));
+        let v0_array = Arc::new(arrow::array::Int64Array::from(vec![200, 100, 400, 300]));
+        let v1_array = Arc::new(arrow::array::Float64Array::from(vec![2.0, 1.0, 4.0, 3.0]));
+        let ts_array = Arc::new(TimestampMillisecondArray::from(vec![
+            2000, 1000, 4000, 3000,
+        ]));
+
+        let input_schema = Arc::new(Schema::new(vec![
+            Field::new("k0", ArrowDataType::Utf8, false),
+            Field::new("k1", ArrowDataType::UInt32, false),
+            Field::new("v0", ArrowDataType::Int64, true),
+            Field::new("v1", ArrowDataType::Float64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+
+        let input_batch = RecordBatch::try_new(
+            input_schema,
+            vec![k0_array, k1_array, v0_array, v1_array, ts_array],
+        )
+        .unwrap();
+
+        let part = BulkPart {
+            batch: input_batch,
+            max_timestamp: 4000,
+            min_timestamp: 1000,
+            sequence: 10,
+            timestamp_index: 4,
+            raw_data: None,
+        };
+
+        let output_schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+
+        let result =
+            convert_bulk_part(part, &metadata, primary_key_codec, output_schema, true).unwrap();
+
+        let converted = result.unwrap();
+
+        assert_eq!(converted.num_rows(), 4);
+
+        // Verify data is sorted by (primary_key, timestamp, sequence desc)
+        let ts_col = converted.batch.column(converted.timestamp_index);
+        let ts_array = ts_col
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+
+        // After sorting by (pk, ts), we should have:
+        // series_a,1: ts=1000, 3000
+        // series_b,2: ts=2000, 4000
+        let timestamps: Vec<i64> = ts_array.values().to_vec();
+        assert_eq!(timestamps, vec![1000, 3000, 2000, 4000]);
     }
 }

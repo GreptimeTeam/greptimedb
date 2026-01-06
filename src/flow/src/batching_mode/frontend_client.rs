@@ -15,7 +15,7 @@
 //! Frontend client to run flow as batching task which is time-window-aware normal query triggered every tick set by user
 
 use std::collections::HashMap;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::SystemTime;
 
 use api::v1::greptime_request::Request;
@@ -23,7 +23,7 @@ use api::v1::query_request::Query;
 use api::v1::{CreateTableExpr, QueryRequest};
 use client::{Client, Database};
 use common_error::ext::{BoxedError, ErrorExt};
-use common_grpc::channel_manager::{ChannelConfig, ChannelManager, load_tls_config};
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager, load_client_tls_config};
 use common_meta::cluster::{NodeInfo, NodeInfoKey, Role};
 use common_meta::peer::Peer;
 use common_meta::rpc::store::RangeRequest;
@@ -38,6 +38,7 @@ use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
+use tokio::sync::SetOnce;
 
 use crate::batching_mode::BatchingModeOptions;
 use crate::error::{
@@ -75,7 +76,19 @@ impl<E: ErrorExt + Send + Sync + 'static, T: GrpcQueryHandler<Error = E> + Send 
     }
 }
 
-type HandlerMutable = Arc<std::sync::Mutex<Option<Weak<dyn GrpcQueryHandlerWithBoxedError>>>>;
+#[derive(Debug, Clone)]
+pub struct HandlerMutable {
+    handler: Arc<Mutex<Option<Weak<dyn GrpcQueryHandlerWithBoxedError>>>>,
+    is_initialized: Arc<SetOnce<()>>,
+}
+
+impl HandlerMutable {
+    pub async fn set_handler(&self, handler: Weak<dyn GrpcQueryHandlerWithBoxedError>) {
+        *self.handler.lock().unwrap() = Some(handler);
+        // Ignore the error, as we allow the handler to be set multiple times.
+        let _ = self.is_initialized.set(());
+    }
+}
 
 /// A simple frontend client able to execute sql using grpc protocol
 ///
@@ -100,7 +113,11 @@ pub enum FrontendClient {
 impl FrontendClient {
     /// Create a new empty frontend client, with a `HandlerMutable` to set the grpc handler later
     pub fn from_empty_grpc_handler(query: QueryOptions) -> (Self, HandlerMutable) {
-        let handler = Arc::new(std::sync::Mutex::new(None));
+        let is_initialized = Arc::new(SetOnce::new());
+        let handler = HandlerMutable {
+            handler: Arc::new(Mutex::new(None)),
+            is_initialized,
+        };
         (
             Self::Standalone {
                 database_client: handler.clone(),
@@ -108,6 +125,16 @@ impl FrontendClient {
             },
             handler,
         )
+    }
+
+    /// Waits until the frontend client is initialized.
+    pub async fn wait_initialized(&self) {
+        if let FrontendClient::Standalone {
+            database_client, ..
+        } = self
+        {
+            database_client.is_initialized.wait().await;
+        }
     }
 
     pub fn from_meta_client(
@@ -124,7 +151,7 @@ impl FrontendClient {
                     .connect_timeout(batch_opts.grpc_conn_timeout)
                     .timeout(batch_opts.query_timeout);
 
-                let tls_config = load_tls_config(batch_opts.frontend_tls.as_ref())
+                let tls_config = load_client_tls_config(batch_opts.frontend_tls.clone())
                     .context(InvalidClientConfigSnafu)?;
                 ChannelManager::with_config(cfg, tls_config)
             },
@@ -138,8 +165,14 @@ impl FrontendClient {
         grpc_handler: Weak<dyn GrpcQueryHandlerWithBoxedError>,
         query: QueryOptions,
     ) -> Self {
+        let is_initialized = Arc::new(SetOnce::new_with(Some(())));
+        let handler = HandlerMutable {
+            handler: Arc::new(Mutex::new(Some(grpc_handler))),
+            is_initialized: is_initialized.clone(),
+        };
+
         Self::Standalone {
-            database_client: Arc::new(std::sync::Mutex::new(Some(grpc_handler))),
+            database_client: handler,
             query,
         }
     }
@@ -321,6 +354,7 @@ impl FrontendClient {
                 {
                     let database_client = {
                         database_client
+                            .handler
                             .lock()
                             .map_err(|e| {
                                 UnexpectedSnafu {
@@ -398,6 +432,7 @@ impl FrontendClient {
                 {
                     let database_client = {
                         database_client
+                            .handler
                             .lock()
                             .map_err(|e| {
                                 UnexpectedSnafu {
@@ -458,5 +493,75 @@ impl std::fmt::Display for PeerDesc {
             PeerDesc::Dist { peer } => write!(f, "{}", peer.addr),
             PeerDesc::Standalone => write!(f, "standalone"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use common_query::Output;
+    use tokio::time::timeout;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct NoopHandler;
+
+    #[async_trait::async_trait]
+    impl GrpcQueryHandlerWithBoxedError for NoopHandler {
+        async fn do_query(
+            &self,
+            _query: Request,
+            _ctx: QueryContextRef,
+        ) -> std::result::Result<Output, BoxedError> {
+            Ok(Output::new_with_affected_rows(0))
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_initialized() {
+        let (client, handler_mut) =
+            FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+
+        assert!(
+            timeout(Duration::from_millis(50), client.wait_initialized())
+                .await
+                .is_err()
+        );
+
+        let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(NoopHandler);
+        handler_mut.set_handler(Arc::downgrade(&handler)).await;
+
+        timeout(Duration::from_secs(1), client.wait_initialized())
+            .await
+            .expect("wait_initialized should complete after handler is set");
+
+        timeout(Duration::from_millis(10), client.wait_initialized())
+            .await
+            .expect("wait_initialized should be a no-op once initialized");
+
+        let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(NoopHandler);
+        let client =
+            FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+        assert!(
+            timeout(Duration::from_millis(10), client.wait_initialized())
+                .await
+                .is_ok()
+        );
+
+        let meta_client = Arc::new(MetaClient::default());
+        let client = FrontendClient::from_meta_client(
+            meta_client,
+            None,
+            QueryOptions::default(),
+            BatchingModeOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            timeout(Duration::from_millis(10), client.wait_initialized())
+                .await
+                .is_ok()
+        );
     }
 }

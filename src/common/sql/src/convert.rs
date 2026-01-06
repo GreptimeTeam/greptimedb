@@ -14,11 +14,12 @@
 
 use std::str::FromStr;
 
+use arrow_schema::extension::ExtensionType;
 use common_time::Timestamp;
 use common_time::timezone::Timezone;
-use datatypes::json::JsonStructureSettings;
+use datatypes::extension::json::JsonExtensionType;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::ColumnDefaultConstraint;
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::{JsonFormat, parse_string_to_jsonb, parse_string_to_vector_type_value};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -124,13 +125,14 @@ pub(crate) fn sql_number_to_value(data_type: &ConcreteDataType, n: &str) -> Resu
 /// If `auto_string_to_numeric` is true, tries to cast the string value to numeric values,
 /// and returns error if the cast fails.
 pub fn sql_value_to_value(
-    column_name: &str,
-    data_type: &ConcreteDataType,
+    column_schema: &ColumnSchema,
     sql_val: &SqlValue,
     timezone: Option<&Timezone>,
     unary_op: Option<UnaryOperator>,
     auto_string_to_numeric: bool,
 ) -> Result<Value> {
+    let column_name = &column_schema.name;
+    let data_type = &column_schema.data_type;
     let mut value = match sql_val {
         SqlValue::Number(n, _) => sql_number_to_value(data_type, n)?,
         SqlValue::Null => Value::Null,
@@ -146,13 +148,9 @@ pub fn sql_value_to_value(
 
             (*b).into()
         }
-        SqlValue::DoubleQuotedString(s) | SqlValue::SingleQuotedString(s) => parse_string_to_value(
-            column_name,
-            s.clone(),
-            data_type,
-            timezone,
-            auto_string_to_numeric,
-        )?,
+        SqlValue::DoubleQuotedString(s) | SqlValue::SingleQuotedString(s) => {
+            parse_string_to_value(column_schema, s.clone(), timezone, auto_string_to_numeric)?
+        }
         SqlValue::HexStringLiteral(s) => {
             // Should not directly write binary into json column
             ensure!(
@@ -231,23 +229,25 @@ pub fn sql_value_to_value(
         }
     }
 
-    if value.data_type() != *data_type {
+    let value_datatype = value.data_type();
+    // The datatype of json value is determined by its actual data, so we can't simply "cast" it here.
+    if value_datatype.is_json() || value_datatype == *data_type {
+        Ok(value)
+    } else {
         datatypes::types::cast(value, data_type).with_context(|_| InvalidCastSnafu {
             sql_value: sql_val.clone(),
             datatype: data_type,
         })
-    } else {
-        Ok(value)
     }
 }
 
 pub(crate) fn parse_string_to_value(
-    column_name: &str,
+    column_schema: &ColumnSchema,
     s: String,
-    data_type: &ConcreteDataType,
     timezone: Option<&Timezone>,
     auto_string_to_numeric: bool,
 ) -> Result<Value> {
+    let data_type = &column_schema.data_type;
     if auto_string_to_numeric && let Some(value) = auto_cast_to_numeric(&s, data_type)? {
         return Ok(value);
     }
@@ -255,7 +255,7 @@ pub(crate) fn parse_string_to_value(
     ensure!(
         data_type.is_stringifiable(),
         ColumnTypeMismatchSnafu {
-            column_name,
+            column_name: column_schema.name.clone(),
             expect: data_type.clone(),
             actual: ConcreteDataType::string_datatype(),
         }
@@ -301,23 +301,21 @@ pub(crate) fn parse_string_to_value(
             }
         }
         ConcreteDataType::Binary(_) => Ok(Value::Binary(s.as_bytes().into())),
-        ConcreteDataType::Json(j) => {
-            match &j.format {
-                JsonFormat::Jsonb => {
-                    let v = parse_string_to_jsonb(&s).context(DatatypeSnafu)?;
-                    Ok(Value::Binary(v.into()))
-                }
-                JsonFormat::Native(_inner) => {
-                    // Always use the structured version at this level.
-                    let serde_json_value =
-                        serde_json::from_str(&s).context(DeserializeSnafu { json: s })?;
-                    let json_structure_settings = JsonStructureSettings::Structured(None);
-                    json_structure_settings
-                        .encode(serde_json_value)
-                        .context(DatatypeSnafu)
-                }
+        ConcreteDataType::Json(j) => match &j.format {
+            JsonFormat::Jsonb => {
+                let v = parse_string_to_jsonb(&s).context(DatatypeSnafu)?;
+                Ok(Value::Binary(v.into()))
             }
-        }
+            JsonFormat::Native(_) => {
+                let extension_type: Option<JsonExtensionType> =
+                    column_schema.extension_type().context(DatatypeSnafu)?;
+                let json_structure_settings = extension_type
+                    .and_then(|x| x.metadata().json_structure_settings.clone())
+                    .unwrap_or_default();
+                let v = serde_json::from_str(&s).context(DeserializeSnafu { json: s })?;
+                json_structure_settings.encode(v).context(DatatypeSnafu)
+            }
+        },
         ConcreteDataType::Vector(d) => {
             let v = parse_string_to_vector_type_value(&s, Some(d.dim)).context(DatatypeSnafu)?;
             Ok(Value::Binary(v.into()))
@@ -415,305 +413,265 @@ mod test {
 
     use super::*;
 
+    macro_rules! call_parse_string_to_value {
+        ($column_name: expr, $input: expr, $data_type: expr) => {
+            call_parse_string_to_value!($column_name, $input, $data_type, None)
+        };
+        ($column_name: expr, $input: expr, $data_type: expr, timezone = $timezone: expr) => {
+            call_parse_string_to_value!($column_name, $input, $data_type, Some($timezone))
+        };
+        ($column_name: expr, $input: expr, $data_type: expr, $timezone: expr) => {{
+            let column_schema = ColumnSchema::new($column_name, $data_type, true);
+            parse_string_to_value(&column_schema, $input, $timezone, true)
+        }};
+    }
+
     #[test]
-    fn test_string_to_value_auto_numeric() {
+    fn test_string_to_value_auto_numeric() -> Result<()> {
         // Test string to boolean with auto cast
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "true".to_string(),
-            &ConcreteDataType::boolean_datatype(),
-            None,
-            true,
-        )
-        .unwrap();
+            ConcreteDataType::boolean_datatype()
+        )?;
         assert_eq!(Value::Boolean(true), result);
 
         // Test invalid string to boolean with auto cast
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "not_a_boolean".to_string(),
-            &ConcreteDataType::boolean_datatype(),
-            None,
-            true,
+            ConcreteDataType::boolean_datatype()
         );
         assert!(result.is_err());
 
         // Test string to int8
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "42".to_string(),
-            &ConcreteDataType::int8_datatype(),
-            None,
-            true,
-        )
-        .unwrap();
+            ConcreteDataType::int8_datatype()
+        )?;
         assert_eq!(Value::Int8(42), result);
 
         // Test invalid string to int8 with auto cast
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "not_an_int8".to_string(),
-            &ConcreteDataType::int8_datatype(),
-            None,
-            true,
+            ConcreteDataType::int8_datatype()
         );
         assert!(result.is_err());
 
         // Test string to int16
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "1000".to_string(),
-            &ConcreteDataType::int16_datatype(),
-            None,
-            true,
-        )
-        .unwrap();
+            ConcreteDataType::int16_datatype()
+        )?;
         assert_eq!(Value::Int16(1000), result);
 
         // Test invalid string to int16 with auto cast
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "not_an_int16".to_string(),
-            &ConcreteDataType::int16_datatype(),
-            None,
-            true,
+            ConcreteDataType::int16_datatype()
         );
         assert!(result.is_err());
 
         // Test string to int32
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "100000".to_string(),
-            &ConcreteDataType::int32_datatype(),
-            None,
-            true,
-        )
-        .unwrap();
+            ConcreteDataType::int32_datatype()
+        )?;
         assert_eq!(Value::Int32(100000), result);
 
         // Test invalid string to int32 with auto cast
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "not_an_int32".to_string(),
-            &ConcreteDataType::int32_datatype(),
-            None,
-            true,
+            ConcreteDataType::int32_datatype()
         );
         assert!(result.is_err());
 
         // Test string to int64
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "1000000".to_string(),
-            &ConcreteDataType::int64_datatype(),
-            None,
-            true,
-        )
-        .unwrap();
+            ConcreteDataType::int64_datatype()
+        )?;
         assert_eq!(Value::Int64(1000000), result);
 
         // Test invalid string to int64 with auto cast
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "not_an_int64".to_string(),
-            &ConcreteDataType::int64_datatype(),
-            None,
-            true,
+            ConcreteDataType::int64_datatype()
         );
         assert!(result.is_err());
 
         // Test string to uint8
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "200".to_string(),
-            &ConcreteDataType::uint8_datatype(),
-            None,
-            true,
-        )
-        .unwrap();
+            ConcreteDataType::uint8_datatype()
+        )?;
         assert_eq!(Value::UInt8(200), result);
 
         // Test invalid string to uint8 with auto cast
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "not_a_uint8".to_string(),
-            &ConcreteDataType::uint8_datatype(),
-            None,
-            true,
+            ConcreteDataType::uint8_datatype()
         );
         assert!(result.is_err());
 
         // Test string to uint16
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "60000".to_string(),
-            &ConcreteDataType::uint16_datatype(),
-            None,
-            true,
-        )
-        .unwrap();
+            ConcreteDataType::uint16_datatype()
+        )?;
         assert_eq!(Value::UInt16(60000), result);
 
         // Test invalid string to uint16 with auto cast
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "not_a_uint16".to_string(),
-            &ConcreteDataType::uint16_datatype(),
-            None,
-            true,
+            ConcreteDataType::uint16_datatype()
         );
         assert!(result.is_err());
 
         // Test string to uint32
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "4000000000".to_string(),
-            &ConcreteDataType::uint32_datatype(),
-            None,
-            true,
-        )
-        .unwrap();
+            ConcreteDataType::uint32_datatype()
+        )?;
         assert_eq!(Value::UInt32(4000000000), result);
 
         // Test invalid string to uint32 with auto cast
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "not_a_uint32".to_string(),
-            &ConcreteDataType::uint32_datatype(),
-            None,
-            true,
+            ConcreteDataType::uint32_datatype()
         );
         assert!(result.is_err());
 
         // Test string to uint64
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "18446744073709551615".to_string(),
-            &ConcreteDataType::uint64_datatype(),
-            None,
-            true,
-        )
-        .unwrap();
+            ConcreteDataType::uint64_datatype()
+        )?;
         assert_eq!(Value::UInt64(18446744073709551615), result);
 
         // Test invalid string to uint64 with auto cast
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "not_a_uint64".to_string(),
-            &ConcreteDataType::uint64_datatype(),
-            None,
-            true,
+            ConcreteDataType::uint64_datatype()
         );
         assert!(result.is_err());
 
         // Test string to float32
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "3.5".to_string(),
-            &ConcreteDataType::float32_datatype(),
-            None,
-            true,
-        )
-        .unwrap();
+            ConcreteDataType::float32_datatype()
+        )?;
         assert_eq!(Value::Float32(OrderedF32::from(3.5)), result);
 
         // Test invalid string to float32 with auto cast
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "not_a_float32".to_string(),
-            &ConcreteDataType::float32_datatype(),
-            None,
-            true,
+            ConcreteDataType::float32_datatype()
         );
         assert!(result.is_err());
 
         // Test string to float64
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "3.5".to_string(),
-            &ConcreteDataType::float64_datatype(),
-            None,
-            true,
-        )
-        .unwrap();
+            ConcreteDataType::float64_datatype()
+        )?;
         assert_eq!(Value::Float64(OrderedF64::from(3.5)), result);
 
         // Test invalid string to float64 with auto cast
-        let result = parse_string_to_value(
+        let result = call_parse_string_to_value!(
             "col",
             "not_a_float64".to_string(),
-            &ConcreteDataType::float64_datatype(),
-            None,
-            true,
+            ConcreteDataType::float64_datatype()
         );
         assert!(result.is_err());
+        Ok(())
     }
 
-    #[test]
-    fn test_sql_value_to_value() {
-        let sql_val = SqlValue::Null;
-        assert_eq!(
-            Value::Null,
-            sql_value_to_value(
-                "a",
-                &ConcreteDataType::float64_datatype(),
-                &sql_val,
-                None,
+    macro_rules! call_sql_value_to_value {
+        ($column_name: expr, $data_type: expr, $sql_value: expr) => {
+            call_sql_value_to_value!($column_name, $data_type, $sql_value, None, None, false)
+        };
+        ($column_name: expr, $data_type: expr, $sql_value: expr, timezone = $timezone: expr) => {
+            call_sql_value_to_value!(
+                $column_name,
+                $data_type,
+                $sql_value,
+                Some($timezone),
                 None,
                 false
             )
-            .unwrap()
+        };
+        ($column_name: expr, $data_type: expr, $sql_value: expr, unary_op = $unary_op: expr) => {
+            call_sql_value_to_value!(
+                $column_name,
+                $data_type,
+                $sql_value,
+                None,
+                Some($unary_op),
+                false
+            )
+        };
+        ($column_name: expr, $data_type: expr, $sql_value: expr, auto_string_to_numeric) => {
+            call_sql_value_to_value!($column_name, $data_type, $sql_value, None, None, true)
+        };
+        ($column_name: expr, $data_type: expr, $sql_value: expr, $timezone: expr, $unary_op: expr, $auto_string_to_numeric: expr) => {{
+            let column_schema = ColumnSchema::new($column_name, $data_type, true);
+            sql_value_to_value(
+                &column_schema,
+                $sql_value,
+                $timezone,
+                $unary_op,
+                $auto_string_to_numeric,
+            )
+        }};
+    }
+
+    #[test]
+    fn test_sql_value_to_value() -> Result<()> {
+        let sql_val = SqlValue::Null;
+        assert_eq!(
+            Value::Null,
+            call_sql_value_to_value!("a", ConcreteDataType::float64_datatype(), &sql_val)?
         );
 
         let sql_val = SqlValue::Boolean(true);
         assert_eq!(
             Value::Boolean(true),
-            sql_value_to_value(
-                "a",
-                &ConcreteDataType::boolean_datatype(),
-                &sql_val,
-                None,
-                None,
-                false
-            )
-            .unwrap()
+            call_sql_value_to_value!("a", ConcreteDataType::boolean_datatype(), &sql_val)?
         );
 
         let sql_val = SqlValue::Number("3.0".to_string(), false);
         assert_eq!(
             Value::Float64(OrderedFloat(3.0)),
-            sql_value_to_value(
-                "a",
-                &ConcreteDataType::float64_datatype(),
-                &sql_val,
-                None,
-                None,
-                false
-            )
-            .unwrap()
+            call_sql_value_to_value!("a", ConcreteDataType::float64_datatype(), &sql_val)?
         );
 
         let sql_val = SqlValue::Number("3.0".to_string(), false);
-        let v = sql_value_to_value(
-            "a",
-            &ConcreteDataType::boolean_datatype(),
-            &sql_val,
-            None,
-            None,
-            false,
-        );
+        let v = call_sql_value_to_value!("a", ConcreteDataType::boolean_datatype(), &sql_val);
         assert!(v.is_err());
         assert!(format!("{v:?}").contains("Failed to parse number '3.0' to boolean column type"));
 
         let sql_val = SqlValue::Boolean(true);
-        let v = sql_value_to_value(
-            "a",
-            &ConcreteDataType::float64_datatype(),
-            &sql_val,
-            None,
-            None,
-            false,
-        );
+        let v = call_sql_value_to_value!("a", ConcreteDataType::float64_datatype(), &sql_val);
         assert!(v.is_err());
         assert!(
             format!("{v:?}").contains(
@@ -723,41 +681,18 @@ mod test {
         );
 
         let sql_val = SqlValue::HexStringLiteral("48656c6c6f20776f726c6421".to_string());
-        let v = sql_value_to_value(
-            "a",
-            &ConcreteDataType::binary_datatype(),
-            &sql_val,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let v = call_sql_value_to_value!("a", ConcreteDataType::binary_datatype(), &sql_val)?;
         assert_eq!(Value::Binary(Bytes::from(b"Hello world!".as_slice())), v);
 
         let sql_val = SqlValue::DoubleQuotedString("MorningMyFriends".to_string());
-        let v = sql_value_to_value(
-            "a",
-            &ConcreteDataType::binary_datatype(),
-            &sql_val,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let v = call_sql_value_to_value!("a", ConcreteDataType::binary_datatype(), &sql_val)?;
         assert_eq!(
             Value::Binary(Bytes::from(b"MorningMyFriends".as_slice())),
             v
         );
 
         let sql_val = SqlValue::HexStringLiteral("9AF".to_string());
-        let v = sql_value_to_value(
-            "a",
-            &ConcreteDataType::binary_datatype(),
-            &sql_val,
-            None,
-            None,
-            false,
-        );
+        let v = call_sql_value_to_value!("a", ConcreteDataType::binary_datatype(), &sql_val);
         assert!(v.is_err());
         assert!(
             format!("{v:?}").contains("odd number of digits"),
@@ -765,38 +700,16 @@ mod test {
         );
 
         let sql_val = SqlValue::HexStringLiteral("AG".to_string());
-        let v = sql_value_to_value(
-            "a",
-            &ConcreteDataType::binary_datatype(),
-            &sql_val,
-            None,
-            None,
-            false,
-        );
+        let v = call_sql_value_to_value!("a", ConcreteDataType::binary_datatype(), &sql_val);
         assert!(v.is_err());
         assert!(format!("{v:?}").contains("invalid character"), "v is {v:?}",);
 
         let sql_val = SqlValue::DoubleQuotedString("MorningMyFriends".to_string());
-        let v = sql_value_to_value(
-            "a",
-            &ConcreteDataType::json_datatype(),
-            &sql_val,
-            None,
-            None,
-            false,
-        );
+        let v = call_sql_value_to_value!("a", ConcreteDataType::json_datatype(), &sql_val);
         assert!(v.is_err());
 
         let sql_val = SqlValue::DoubleQuotedString(r#"{"a":"b"}"#.to_string());
-        let v = sql_value_to_value(
-            "a",
-            &ConcreteDataType::json_datatype(),
-            &sql_val,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let v = call_sql_value_to_value!("a", ConcreteDataType::json_datatype(), &sql_val)?;
         assert_eq!(
             Value::Binary(Bytes::from(
                 jsonb::parse_value(r#"{"a":"b"}"#.as_bytes())
@@ -806,16 +719,15 @@ mod test {
             )),
             v
         );
+        Ok(())
     }
 
     #[test]
     fn test_parse_json_to_jsonb() {
-        match parse_string_to_value(
+        match call_parse_string_to_value!(
             "json_col",
             r#"{"a": "b"}"#.to_string(),
-            &ConcreteDataType::json_datatype(),
-            None,
-            false,
+            ConcreteDataType::json_datatype()
         ) {
             Ok(Value::Binary(b)) => {
                 assert_eq!(
@@ -831,12 +743,10 @@ mod test {
         }
 
         assert!(
-            parse_string_to_value(
+            call_parse_string_to_value!(
                 "json_col",
                 r#"Nicola Kovac is the best rifler in the world"#.to_string(),
-                &ConcreteDataType::json_datatype(),
-                None,
-                false,
+                ConcreteDataType::json_datatype()
             )
             .is_err()
         )
@@ -876,13 +786,10 @@ mod test {
 
     #[test]
     fn test_parse_date_literal() {
-        let value = sql_value_to_value(
+        let value = call_sql_value_to_value!(
             "date",
-            &ConcreteDataType::date_datatype(),
-            &SqlValue::DoubleQuotedString("2022-02-22".to_string()),
-            None,
-            None,
-            false,
+            ConcreteDataType::date_datatype(),
+            &SqlValue::DoubleQuotedString("2022-02-22".to_string())
         )
         .unwrap();
         assert_eq!(ConcreteDataType::date_datatype(), value.data_type());
@@ -893,13 +800,11 @@ mod test {
         }
 
         // with timezone
-        let value = sql_value_to_value(
+        let value = call_sql_value_to_value!(
             "date",
-            &ConcreteDataType::date_datatype(),
+            ConcreteDataType::date_datatype(),
             &SqlValue::DoubleQuotedString("2022-02-22".to_string()),
-            Some(&Timezone::from_tz_string("+07:00").unwrap()),
-            None,
-            false,
+            timezone = &Timezone::from_tz_string("+07:00").unwrap()
         )
         .unwrap();
         assert_eq!(ConcreteDataType::date_datatype(), value.data_type());
@@ -911,16 +816,12 @@ mod test {
     }
 
     #[test]
-    fn test_parse_timestamp_literal() {
-        match parse_string_to_value(
+    fn test_parse_timestamp_literal() -> Result<()> {
+        match call_parse_string_to_value!(
             "timestamp_col",
             "2022-02-22T00:01:01+08:00".to_string(),
-            &ConcreteDataType::timestamp_millisecond_datatype(),
-            None,
-            false,
-        )
-        .unwrap()
-        {
+            ConcreteDataType::timestamp_millisecond_datatype()
+        )? {
             Value::Timestamp(ts) => {
                 assert_eq!(1645459261000, ts.value());
                 assert_eq!(TimeUnit::Millisecond, ts.unit());
@@ -930,15 +831,11 @@ mod test {
             }
         }
 
-        match parse_string_to_value(
+        match call_parse_string_to_value!(
             "timestamp_col",
             "2022-02-22T00:01:01+08:00".to_string(),
-            &ConcreteDataType::timestamp_datatype(TimeUnit::Second),
-            None,
-            false,
-        )
-        .unwrap()
-        {
+            ConcreteDataType::timestamp_datatype(TimeUnit::Second)
+        )? {
             Value::Timestamp(ts) => {
                 assert_eq!(1645459261, ts.value());
                 assert_eq!(TimeUnit::Second, ts.unit());
@@ -948,15 +845,11 @@ mod test {
             }
         }
 
-        match parse_string_to_value(
+        match call_parse_string_to_value!(
             "timestamp_col",
             "2022-02-22T00:01:01+08:00".to_string(),
-            &ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
-            None,
-            false,
-        )
-        .unwrap()
-        {
+            ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond)
+        )? {
             Value::Timestamp(ts) => {
                 assert_eq!(1645459261000000, ts.value());
                 assert_eq!(TimeUnit::Microsecond, ts.unit());
@@ -966,15 +859,11 @@ mod test {
             }
         }
 
-        match parse_string_to_value(
+        match call_parse_string_to_value!(
             "timestamp_col",
             "2022-02-22T00:01:01+08:00".to_string(),
-            &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
-            None,
-            false,
-        )
-        .unwrap()
-        {
+            ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond)
+        )? {
             Value::Timestamp(ts) => {
                 assert_eq!(1645459261000000000, ts.value());
                 assert_eq!(TimeUnit::Nanosecond, ts.unit());
@@ -985,26 +874,21 @@ mod test {
         }
 
         assert!(
-            parse_string_to_value(
+            call_parse_string_to_value!(
                 "timestamp_col",
                 "2022-02-22T00:01:01+08".to_string(),
-                &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
-                None,
-                false,
+                ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond)
             )
             .is_err()
         );
 
         // with timezone
-        match parse_string_to_value(
+        match call_parse_string_to_value!(
             "timestamp_col",
             "2022-02-22T00:01:01".to_string(),
-            &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
-            Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap()),
-            false,
-        )
-        .unwrap()
-        {
+            ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
+            timezone = &Timezone::from_tz_string("Asia/Shanghai").unwrap()
+        )? {
             Value::Timestamp(ts) => {
                 assert_eq!(1645459261000000000, ts.value());
                 assert_eq!("2022-02-21 16:01:01+0000", ts.to_iso8601_string());
@@ -1014,51 +898,42 @@ mod test {
                 unreachable!()
             }
         }
+        Ok(())
     }
 
     #[test]
     fn test_parse_placeholder_value() {
         assert!(
-            sql_value_to_value(
+            call_sql_value_to_value!(
                 "test",
-                &ConcreteDataType::string_datatype(),
+                ConcreteDataType::string_datatype(),
+                &SqlValue::Placeholder("default".into())
+            )
+            .is_err()
+        );
+        assert!(
+            call_sql_value_to_value!(
+                "test",
+                ConcreteDataType::string_datatype(),
                 &SqlValue::Placeholder("default".into()),
-                None,
-                None,
-                false
+                unary_op = UnaryOperator::Minus
             )
             .is_err()
         );
         assert!(
-            sql_value_to_value(
+            call_sql_value_to_value!(
                 "test",
-                &ConcreteDataType::string_datatype(),
-                &SqlValue::Placeholder("default".into()),
-                None,
-                Some(UnaryOperator::Minus),
-                false
-            )
-            .is_err()
-        );
-        assert!(
-            sql_value_to_value(
-                "test",
-                &ConcreteDataType::uint16_datatype(),
+                ConcreteDataType::uint16_datatype(),
                 &SqlValue::Number("3".into(), false),
-                None,
-                Some(UnaryOperator::Minus),
-                false
+                unary_op = UnaryOperator::Minus
             )
             .is_err()
         );
         assert!(
-            sql_value_to_value(
+            call_sql_value_to_value!(
                 "test",
-                &ConcreteDataType::uint16_datatype(),
-                &SqlValue::Number("3".into(), false),
-                None,
-                None,
-                false
+                ConcreteDataType::uint16_datatype(),
+                &SqlValue::Number("3".into(), false)
             )
             .is_ok()
         );
@@ -1068,77 +943,60 @@ mod test {
     fn test_auto_string_to_numeric() {
         // Test with auto_string_to_numeric=true
         let sql_val = SqlValue::SingleQuotedString("123".to_string());
-        let v = sql_value_to_value(
+        let v = call_sql_value_to_value!(
             "a",
-            &ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int32_datatype(),
             &sql_val,
-            None,
-            None,
-            true,
+            auto_string_to_numeric
         )
         .unwrap();
         assert_eq!(Value::Int32(123), v);
 
         // Test with a float string
         let sql_val = SqlValue::SingleQuotedString("3.5".to_string());
-        let v = sql_value_to_value(
+        let v = call_sql_value_to_value!(
             "a",
-            &ConcreteDataType::float64_datatype(),
+            ConcreteDataType::float64_datatype(),
             &sql_val,
-            None,
-            None,
-            true,
+            auto_string_to_numeric
         )
         .unwrap();
         assert_eq!(Value::Float64(OrderedFloat(3.5)), v);
 
         // Test with auto_string_to_numeric=false
         let sql_val = SqlValue::SingleQuotedString("123".to_string());
-        let v = sql_value_to_value(
-            "a",
-            &ConcreteDataType::int32_datatype(),
-            &sql_val,
-            None,
-            None,
-            false,
-        );
+        let v = call_sql_value_to_value!("a", ConcreteDataType::int32_datatype(), &sql_val);
         assert!(v.is_err());
 
         // Test with an invalid numeric string but auto_string_to_numeric=true
         // Should return an error now with the new auto_cast_to_numeric behavior
         let sql_val = SqlValue::SingleQuotedString("not_a_number".to_string());
-        let v = sql_value_to_value(
+        let v = call_sql_value_to_value!(
             "a",
-            &ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int32_datatype(),
             &sql_val,
-            None,
-            None,
-            true,
+            auto_string_to_numeric
         );
         assert!(v.is_err());
 
         // Test with boolean type
         let sql_val = SqlValue::SingleQuotedString("true".to_string());
-        let v = sql_value_to_value(
+        let v = call_sql_value_to_value!(
             "a",
-            &ConcreteDataType::boolean_datatype(),
+            ConcreteDataType::boolean_datatype(),
             &sql_val,
-            None,
-            None,
-            true,
+            auto_string_to_numeric
         )
         .unwrap();
         assert_eq!(Value::Boolean(true), v);
 
         // Non-numeric types should still be handled normally
         let sql_val = SqlValue::SingleQuotedString("hello".to_string());
-        let v = sql_value_to_value(
+        let v = call_sql_value_to_value!(
             "a",
-            &ConcreteDataType::string_datatype(),
+            ConcreteDataType::string_datatype(),
             &sql_val,
-            None,
-            None,
-            true,
+            auto_string_to_numeric
         );
         assert!(v.is_ok());
     }

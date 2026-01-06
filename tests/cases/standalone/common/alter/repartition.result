@@ -22,6 +22,24 @@ ALTER TABLE alter_repartition_table REPARTITION (
 
 Error: 1001(Unsupported), Not supported: ALTER TABLE REPARTITION
 
+-- valid grammar, currently not implemented
+ALTER TABLE alter_repartition_table SPLIT PARTITION (
+  device_id < 100
+) INTO (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+);
+
+Error: 1001(Unsupported), Not supported: ALTER TABLE REPARTITION
+
+-- valid grammar, currently not implemented
+ALTER TABLE alter_repartition_table MERGE PARTITION (
+  device_id < 100,
+  device_id >= 100 AND device_id < 200
+);
+
+Error: 1001(Unsupported), Not supported: ALTER TABLE REPARTITION
+
 -- invalid: empty source clause
 ALTER TABLE alter_repartition_table REPARTITION () INTO (
   device_id < 100

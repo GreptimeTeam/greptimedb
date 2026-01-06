@@ -16,8 +16,8 @@
 
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use common_telemetry::{debug, error, info, warn};
@@ -28,7 +28,7 @@ use log_store::kafka::log_store::KafkaLogStore;
 use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::manager::ObjectStoreManagerRef;
-use object_store::util::{join_dir, normalize_dir};
+use object_store::util::normalize_dir;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
@@ -41,7 +41,7 @@ use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
-use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
+use crate::cache::file_cache::{FileCache, FileType, IndexKey};
 use crate::config::MitoConfig;
 use crate::error;
 use crate::error::{
@@ -49,8 +49,7 @@ use crate::error::{
     Result, StaleLogEntrySnafu,
 };
 use crate::manifest::action::RegionManifest;
-use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
-use crate::manifest::storage::manifest_compress_type;
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::MemtableBuilderProvider;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
@@ -64,7 +63,7 @@ use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::FormatType;
-use crate::sst::file::RegionFileId;
+use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::file_purger::{FilePurgerRef, create_file_purger};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -271,8 +270,14 @@ impl RegionOpener {
             FormatType::PrimaryKey
         };
         // Create a manifest manager for this region and writes regions to the manifest file.
-        let region_manifest_options =
-            Self::manifest_options(config, &options, &region_dir, &self.object_store_manager)?;
+        let mut region_manifest_options =
+            RegionManifestOptions::new(config, &region_dir, &object_store);
+        // Set manifest cache if available
+        region_manifest_options.manifest_cache = self
+            .cache_manager
+            .as_ref()
+            .and_then(|cm| cm.write_cache())
+            .and_then(|wc| wc.manifest_cache());
         // For remote WAL, we need to set flushed_entry_id to current topic's latest entry id.
         let flushed_entry_id = provider.initial_flushed_entry_id::<S>(wal.store());
         let manifest_manager = RegionManifestManager::new(
@@ -335,6 +340,7 @@ impl RegionOpener {
             topic_latest_entry_id: AtomicU64::new(0),
             written_bytes: Arc::new(AtomicU64::new(0)),
             stats: self.stats,
+            staging_partition_expr: Mutex::new(None),
         }))
     }
 
@@ -406,13 +412,15 @@ impl RegionOpener {
     ) -> Result<Option<MitoRegionRef>> {
         let now = Instant::now();
         let mut region_options = self.options.as_ref().unwrap().clone();
-
-        let region_manifest_options = Self::manifest_options(
-            config,
-            &region_options,
-            &self.region_dir(),
-            &self.object_store_manager,
-        )?;
+        let object_storage = get_object_store(&region_options.storage, &self.object_store_manager)?;
+        let mut region_manifest_options =
+            RegionManifestOptions::new(config, &self.region_dir(), &object_storage);
+        // Set manifest cache if available
+        region_manifest_options.manifest_cache = self
+            .cache_manager
+            .as_ref()
+            .and_then(|cm| cm.write_cache())
+            .and_then(|wc| wc.manifest_cache());
         let Some(manifest_manager) =
             RegionManifestManager::open(region_manifest_options, &self.stats).await?
         else {
@@ -568,6 +576,8 @@ impl RegionOpener {
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
             written_bytes: Arc::new(AtomicU64::new(0)),
             stats: self.stats.clone(),
+            // TODO(weny): reload the staging partition expr from the manifest.
+            staging_partition_expr: Mutex::new(None),
         };
 
         let region = Arc::new(region);
@@ -575,27 +585,6 @@ impl RegionOpener {
         maybe_load_cache(&region, config, &self.cache_manager);
 
         Ok(Some(region))
-    }
-
-    /// Returns a new manifest options.
-    fn manifest_options(
-        config: &MitoConfig,
-        options: &RegionOptions,
-        region_dir: &str,
-        object_store_manager: &ObjectStoreManagerRef,
-    ) -> Result<RegionManifestOptions> {
-        let object_store = get_object_store(&options.storage, object_store_manager)?;
-        Ok(RegionManifestOptions {
-            manifest_dir: new_manifest_dir(region_dir),
-            object_store,
-            // We don't allow users to set the compression algorithm as we use it as a file suffix.
-            // Currently, the manifest storage doesn't have good support for changing compression algorithms.
-            compress_type: manifest_compress_type(config.compress_manifest),
-            checkpoint_distance: config.manifest_checkpoint_distance,
-            remove_file_options: RemoveFileOptions {
-                enable_gc: config.gc.enable,
-            },
-        })
     }
 }
 
@@ -644,54 +633,6 @@ pub fn get_object_store(
             .clone())
     } else {
         Ok(object_store_manager.default_object_store().clone())
-    }
-}
-
-/// A loader for loading metadata from a region dir.
-pub struct RegionMetadataLoader {
-    config: Arc<MitoConfig>,
-    object_store_manager: ObjectStoreManagerRef,
-}
-
-impl RegionMetadataLoader {
-    /// Creates a new `RegionOpenerBuilder`.
-    pub fn new(config: Arc<MitoConfig>, object_store_manager: ObjectStoreManagerRef) -> Self {
-        Self {
-            config,
-            object_store_manager,
-        }
-    }
-
-    /// Loads the metadata of the region from the region dir.
-    pub async fn load(
-        &self,
-        region_dir: &str,
-        region_options: &RegionOptions,
-    ) -> Result<Option<RegionMetadataRef>> {
-        let manifest = self.load_manifest(region_dir, region_options).await?;
-        Ok(manifest.map(|m| m.metadata.clone()))
-    }
-
-    /// Loads the manifest of the region from the region dir.
-    pub async fn load_manifest(
-        &self,
-        region_dir: &str,
-        region_options: &RegionOptions,
-    ) -> Result<Option<Arc<RegionManifest>>> {
-        let region_manifest_options = RegionOpener::manifest_options(
-            &self.config,
-            region_options,
-            region_dir,
-            &self.object_store_manager,
-        )?;
-        let Some(manifest_manager) =
-            RegionManifestManager::open(region_manifest_options, &Default::default()).await?
-        else {
-            return Ok(None);
-        };
-
-        let manifest = manifest_manager.manifest();
-        Ok(Some(manifest))
     }
 }
 
@@ -848,11 +789,6 @@ where
     Ok(last_entry_id)
 }
 
-/// Returns the directory to the manifest files.
-pub(crate) fn new_manifest_dir(region_dir: &str) -> String {
-    join_dir(region_dir, "manifest")
-}
-
 /// A task to load and fill the region file cache.
 pub(crate) struct RegionLoadCacheTask {
     region: MitoRegionRef,
@@ -864,7 +800,7 @@ impl RegionLoadCacheTask {
     }
 
     /// Fills the file cache with index files from the region.
-    pub(crate) async fn fill_cache(&self, file_cache: FileCacheRef) {
+    pub(crate) async fn fill_cache(&self, file_cache: &FileCache) {
         let region_id = self.region.region_id;
         let table_dir = self.region.access_layer.table_dir();
         let path_type = self.region.access_layer.path_type();
@@ -883,8 +819,8 @@ impl RegionLoadCacheTask {
                     if file_meta.exists_index() {
                         let puffin_key = IndexKey::new(
                             file_meta.region_id,
-                            file_meta.index_file_id().file_id(),
-                            FileType::Puffin,
+                            file_meta.file_id,
+                            FileType::Puffin(file_meta.index_version),
                         );
 
                         if !file_cache.contains_key(&puffin_key) {
@@ -941,11 +877,17 @@ impl RegionLoadCacheTask {
                 break;
             }
 
-            let index_remote_path = location::index_file_path(
-                table_dir,
+            let index_version = if let FileType::Puffin(version) = puffin_key.file_type {
+                version
+            } else {
+                unreachable!("`files_to_download` should only contains Puffin files");
+            };
+            let index_id = RegionIndexId::new(
                 RegionFileId::new(puffin_key.region_id, puffin_key.file_id),
-                path_type,
+                index_version,
             );
+
+            let index_remote_path = location::index_file_path(table_dir, index_id, path_type);
 
             match file_cache
                 .download(puffin_key, &index_remote_path, object_store, file_size)
@@ -1004,6 +946,7 @@ fn can_load_cache(state: RegionRoleState) -> bool {
         RegionRoleState::Leader(RegionLeaderState::Writable)
         | RegionRoleState::Leader(RegionLeaderState::Staging)
         | RegionRoleState::Leader(RegionLeaderState::Altering)
+        | RegionRoleState::Leader(RegionLeaderState::EnteringStaging)
         | RegionRoleState::Leader(RegionLeaderState::Editing)
         | RegionRoleState::Follower => true,
         // The region will be closed soon if it is downgrading.

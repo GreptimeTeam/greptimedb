@@ -16,6 +16,7 @@
 #![feature(try_blocks)]
 #![feature(exclusive_wrapper)]
 #![feature(if_let_guard)]
+#![feature(box_patterns)]
 
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;
@@ -49,13 +50,14 @@ pub mod prometheus_handler;
 pub mod proto;
 pub mod query_handler;
 pub mod repeated_field;
-pub mod request_limiter;
+pub mod request_memory_limiter;
+pub mod request_memory_metrics;
 mod row_writer;
 pub mod server;
 pub mod tls;
 
 /// Cached SQL and logical plan for database interfaces
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SqlPlan {
     query: String,
     // Store the parsed statement to determine if it is a query and whether to track it.

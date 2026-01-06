@@ -20,19 +20,21 @@ Affected Rows: 0
 
 SHOW CREATE TABLE out_num_cnt_basic;
 
-+-------------------+--------------------------------------------------+
-| Table             | Create Table                                     |
-+-------------------+--------------------------------------------------+
-| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
-|                   |   "sum(numbers_input_basic.number)" BIGINT NULL, |
-|                   |   "time_window" TIMESTAMP(9) NOT NULL,           |
-|                   |   "update_at" TIMESTAMP(3) NULL,                 |
-|                   |   TIME INDEX ("time_window")                     |
-|                   | )                                                |
-|                   |                                                  |
-|                   | ENGINE=mito                                      |
-|                   |                                                  |
-+-------------------+--------------------------------------------------+
++-------------------+---------------------------------------------------+
+| Table             | Create Table                                      |
++-------------------+---------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" (  |
+|                   |   "sum(numbers_input_basic.number)" BIGINT NULL,  |
+|                   |   "time_window" TIMESTAMP(9) NOT NULL,            |
+|                   |   "update_at" TIMESTAMP(3) NULL,                  |
+|                   |   TIME INDEX ("time_window")                      |
+|                   | )                                                 |
+|                   |                                                   |
+|                   | ENGINE=mito                                       |
+|                   | WITH(                                             |
+|                   |   'comment' = 'Auto created table by flow engine' |
+|                   | )                                                 |
++-------------------+---------------------------------------------------+
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_basic');
@@ -55,19 +57,21 @@ SELECT 1;
 -- SQLNESS SLEEP 3s
 SHOW CREATE TABLE out_num_cnt_basic;
 
-+-------------------+--------------------------------------------------+
-| Table             | Create Table                                     |
-+-------------------+--------------------------------------------------+
-| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
-|                   |   "sum(numbers_input_basic.number)" BIGINT NULL, |
-|                   |   "time_window" TIMESTAMP(9) NOT NULL,           |
-|                   |   "update_at" TIMESTAMP(3) NULL,                 |
-|                   |   TIME INDEX ("time_window")                     |
-|                   | )                                                |
-|                   |                                                  |
-|                   | ENGINE=mito                                      |
-|                   |                                                  |
-+-------------------+--------------------------------------------------+
++-------------------+---------------------------------------------------+
+| Table             | Create Table                                      |
++-------------------+---------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" (  |
+|                   |   "sum(numbers_input_basic.number)" BIGINT NULL,  |
+|                   |   "time_window" TIMESTAMP(9) NOT NULL,            |
+|                   |   "update_at" TIMESTAMP(3) NULL,                  |
+|                   |   TIME INDEX ("time_window")                      |
+|                   | )                                                 |
+|                   |                                                   |
+|                   | ENGINE=mito                                       |
+|                   | WITH(                                             |
+|                   |   'comment' = 'Auto created table by flow engine' |
+|                   | )                                                 |
++-------------------+---------------------------------------------------+
 
 SHOW CREATE FLOW test_numbers_basic;
 
@@ -122,19 +126,21 @@ SELECT 1;
 -- SQLNESS SLEEP 3s
 SHOW CREATE TABLE out_num_cnt_basic;
 
-+-------------------+--------------------------------------------------+
-| Table             | Create Table                                     |
-+-------------------+--------------------------------------------------+
-| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
-|                   |   "sumup" BIGINT NULL,                           |
-|                   |   "event_time" TIMESTAMP(3) NOT NULL,            |
-|                   |   "update_at" TIMESTAMP(3) NULL,                 |
-|                   |   TIME INDEX ("event_time")                      |
-|                   | )                                                |
-|                   |                                                  |
-|                   | ENGINE=mito                                      |
-|                   |                                                  |
-+-------------------+--------------------------------------------------+
++-------------------+---------------------------------------------------+
+| Table             | Create Table                                      |
++-------------------+---------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" (  |
+|                   |   "sumup" BIGINT NULL,                            |
+|                   |   "event_time" TIMESTAMP(3) NOT NULL,             |
+|                   |   "update_at" TIMESTAMP(3) NULL,                  |
+|                   |   TIME INDEX ("event_time")                       |
+|                   | )                                                 |
+|                   |                                                   |
+|                   | ENGINE=mito                                       |
+|                   | WITH(                                             |
+|                   |   'comment' = 'Auto created table by flow engine' |
+|                   | )                                                 |
++-------------------+---------------------------------------------------+
 
 -- SQLNESS ARG restart=true
 SELECT 1;
@@ -158,19 +164,21 @@ SHOW CREATE FLOW test_numbers_basic;
 
 SHOW CREATE TABLE out_num_cnt_basic;
 
-+-------------------+--------------------------------------------------+
-| Table             | Create Table                                     |
-+-------------------+--------------------------------------------------+
-| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
-|                   |   "sumup" BIGINT NULL,                           |
-|                   |   "event_time" TIMESTAMP(3) NOT NULL,            |
-|                   |   "update_at" TIMESTAMP(3) NULL,                 |
-|                   |   TIME INDEX ("event_time")                      |
-|                   | )                                                |
-|                   |                                                  |
-|                   | ENGINE=mito                                      |
-|                   |                                                  |
-+-------------------+--------------------------------------------------+
++-------------------+---------------------------------------------------+
+| Table             | Create Table                                      |
++-------------------+---------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" (  |
+|                   |   "sumup" BIGINT NULL,                            |
+|                   |   "event_time" TIMESTAMP(3) NOT NULL,             |
+|                   |   "update_at" TIMESTAMP(3) NULL,                  |
+|                   |   TIME INDEX ("event_time")                       |
+|                   | )                                                 |
+|                   |                                                   |
+|                   | ENGINE=mito                                       |
+|                   | WITH(                                             |
+|                   |   'comment' = 'Auto created table by flow engine' |
+|                   | )                                                 |
++-------------------+---------------------------------------------------+
 
 DROP FLOW test_numbers_basic;
 

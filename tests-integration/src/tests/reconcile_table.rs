@@ -23,9 +23,10 @@ use common_test_util::recordbatch::check_output_stream;
 use table::table_reference::TableReference;
 
 use crate::cluster::GreptimeDbClusterBuilder;
+use crate::test_util::execute_sql;
 use crate::tests::test_util::{
-    MockInstance, MockInstanceBuilder, RebuildableMockInstance, TestContext, dump_kvbackend,
-    execute_sql, restore_kvbackend, try_execute_sql, wait_procedure,
+    MockInstanceBuilder, RebuildableMockInstance, TestContext, dump_kvbackend, restore_kvbackend,
+    try_execute_sql, wait_procedure,
 };
 
 const CREATE_MONITOR_TABLE_SQL: &str = r#"
@@ -409,11 +410,11 @@ async fn test_recover_metadata_failed() {
 
     // Only grpc_latencies table is visible.
     let output = execute_sql(&test_context.frontend(), "show tables;").await;
-    let expected = r#"+---------+
-| Tables  |
-+---------+
-| numbers |
-+---------+"#;
+    let expected = r#"+------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
++------------------+"#;
     check_output_stream(output.data, expected).await;
 
     // Expect table creation to fail because the region directory already exists.
@@ -474,12 +475,12 @@ async fn test_dropped_table() {
     test_context.rebuild().await;
 
     let output = execute_sql(&test_context.frontend(), "show tables;").await;
-    let expected = r#"+----------------+
-| Tables         |
-+----------------+
-| grpc_latencies |
-| numbers        |
-+----------------+"#;
+    let expected = r#"+------------------+
+| Tables_in_public |
++------------------+
+| grpc_latencies   |
+| numbers          |
++------------------+"#;
     check_output_stream(output.data, expected).await;
 
     // We can't query the table because the table is dropped.
@@ -531,12 +532,12 @@ async fn test_renamed_table() {
     check_output_stream(output.data, expected).await;
 
     let output = execute_sql(&test_context.frontend(), "show tables;").await;
-    let expected = r#"+----------------+
-| Tables         |
-+----------------+
-| grpc_latencies |
-| numbers        |
-+----------------+"#;
+    let expected = r#"+------------------+
+| Tables_in_public |
++------------------+
+| grpc_latencies   |
+| numbers          |
++------------------+"#;
     check_output_stream(output.data, expected).await;
 }
 

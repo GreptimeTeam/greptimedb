@@ -84,6 +84,14 @@ impl ProjectionMapper {
         }
     }
 
+    /// Returns true if the projection includes any tag columns.
+    pub(crate) fn has_tags(&self) -> bool {
+        match self {
+            ProjectionMapper::PrimaryKey(m) => m.has_tags(),
+            ProjectionMapper::Flat(_) => false,
+        }
+    }
+
     /// Returns ids of projected columns that we need to read
     /// from memtables and SSTs.
     pub(crate) fn column_ids(&self) -> &[ColumnId] {
@@ -255,6 +263,11 @@ impl PrimaryKeyProjectionMapper {
     /// Returns the metadata that created the mapper.
     pub(crate) fn metadata(&self) -> &RegionMetadataRef {
         &self.metadata
+    }
+
+    /// Returns true if the projection includes any tag columns.
+    pub(crate) fn has_tags(&self) -> bool {
+        self.has_tags
     }
 
     /// Returns ids of projected columns that we need to read

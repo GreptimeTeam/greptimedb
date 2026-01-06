@@ -24,6 +24,9 @@ use uuid::Uuid;
 use crate::ManifestVersion;
 use crate::storage::RegionId;
 
+/// Index version
+pub type IndexVersion = u64;
+
 #[derive(Debug, Snafu, PartialEq)]
 pub struct ParseIdError {
     source: uuid::Error,
@@ -74,11 +77,16 @@ impl FromStr for FileId {
 pub struct FileRef {
     pub region_id: RegionId,
     pub file_id: FileId,
+    pub index_version: Option<IndexVersion>,
 }
 
 impl FileRef {
-    pub fn new(region_id: RegionId, file_id: FileId) -> Self {
-        Self { region_id, file_id }
+    pub fn new(region_id: RegionId, file_id: FileId, index_version: Option<IndexVersion>) -> Self {
+        Self {
+            region_id,
+            file_id,
+            index_version,
+        }
     }
 }
 
@@ -86,7 +94,7 @@ impl FileRef {
 /// Also record the manifest version when these tmp files are read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRefsManifest {
-    pub file_refs: HashMap<RegionId, HashSet<FileId>>,
+    pub file_refs: HashMap<RegionId, HashSet<FileRef>>,
     /// Manifest version when this manifest is read for it's files
     pub manifest_version: HashMap<RegionId, ManifestVersion>,
 }
@@ -94,7 +102,9 @@ pub struct FileRefsManifest {
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcReport {
     /// deleted files per region
+    /// TODO(discord9): change to `RemovedFile`?
     pub deleted_files: HashMap<RegionId, Vec<FileId>>,
+    pub deleted_indexes: HashMap<RegionId, Vec<(FileId, IndexVersion)>>,
     /// Regions that need retry in next gc round, usually because their tmp ref files are outdated
     pub need_retry_regions: HashSet<RegionId>,
 }
@@ -102,10 +112,12 @@ pub struct GcReport {
 impl GcReport {
     pub fn new(
         deleted_files: HashMap<RegionId, Vec<FileId>>,
+        deleted_indexes: HashMap<RegionId, Vec<(FileId, IndexVersion)>>,
         need_retry_regions: HashSet<RegionId>,
     ) -> Self {
         Self {
             deleted_files,
+            deleted_indexes,
             need_retry_regions,
         }
     }
@@ -121,6 +133,9 @@ impl GcReport {
             *self_files = dedup.into_iter().collect();
         }
         self.need_retry_regions.extend(other.need_retry_regions);
+        // Remove regions that have succeeded from need_retry_regions
+        self.need_retry_regions
+            .retain(|region| !self.deleted_files.contains_key(region));
     }
 }
 
@@ -156,13 +171,80 @@ mod tests {
         let mut manifest = FileRefsManifest::default();
         let r0 = RegionId::new(1024, 1);
         let r1 = RegionId::new(1024, 2);
-        manifest.file_refs.insert(r0, [FileId::random()].into());
-        manifest.file_refs.insert(r1, [FileId::random()].into());
+        manifest
+            .file_refs
+            .insert(r0, [FileRef::new(r0, FileId::random(), None)].into());
+        manifest
+            .file_refs
+            .insert(r1, [FileRef::new(r1, FileId::random(), None)].into());
         manifest.manifest_version.insert(r0, 10);
         manifest.manifest_version.insert(r1, 20);
 
         let json = serde_json::to_string(&manifest).unwrap();
         let parsed: FileRefsManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(manifest, parsed);
+    }
+
+    #[test]
+    fn test_file_ref_new() {
+        let region_id = RegionId::new(1024, 1);
+        let file_id = FileId::random();
+
+        // Test with Some(index_version)
+        let index_version: IndexVersion = 42;
+        let file_ref = FileRef::new(region_id, file_id, Some(index_version));
+        assert_eq!(file_ref.region_id, region_id);
+        assert_eq!(file_ref.file_id, file_id);
+        assert_eq!(file_ref.index_version, Some(index_version));
+
+        // Test with None
+        let file_ref_none = FileRef::new(region_id, file_id, None);
+        assert_eq!(file_ref_none.region_id, region_id);
+        assert_eq!(file_ref_none.file_id, file_id);
+        assert_eq!(file_ref_none.index_version, None);
+    }
+
+    #[test]
+    fn test_file_ref_equality() {
+        let region_id = RegionId::new(1024, 1);
+        let file_id = FileId::random();
+
+        let file_ref1 = FileRef::new(region_id, file_id, Some(10));
+        let file_ref2 = FileRef::new(region_id, file_id, Some(10));
+        let file_ref3 = FileRef::new(region_id, file_id, Some(20));
+        let file_ref4 = FileRef::new(region_id, file_id, None);
+
+        assert_eq!(file_ref1, file_ref2);
+        assert_ne!(file_ref1, file_ref3);
+        assert_ne!(file_ref1, file_ref4);
+        assert_ne!(file_ref3, file_ref4);
+
+        // Test equality with Some(0) vs None
+        let file_ref_zero = FileRef::new(region_id, file_id, Some(0));
+        assert_ne!(file_ref_zero, file_ref4);
+    }
+
+    #[test]
+    fn test_file_ref_serialization() {
+        let region_id = RegionId::new(1024, 1);
+        let file_id = FileId::random();
+
+        // Test with Some(index_version)
+        let index_version: IndexVersion = 12345;
+        let file_ref = FileRef::new(region_id, file_id, Some(index_version));
+
+        let json = serde_json::to_string(&file_ref).unwrap();
+        let parsed: FileRef = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(file_ref, parsed);
+        assert_eq!(parsed.index_version, Some(index_version));
+
+        // Test with None
+        let file_ref_none = FileRef::new(region_id, file_id, None);
+        let json_none = serde_json::to_string(&file_ref_none).unwrap();
+        let parsed_none: FileRef = serde_json::from_str(&json_none).unwrap();
+
+        assert_eq!(file_ref_none, parsed_none);
+        assert_eq!(parsed_none.index_version, None);
     }
 }

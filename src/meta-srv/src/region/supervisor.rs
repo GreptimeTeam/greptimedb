@@ -32,7 +32,6 @@ use common_meta::rpc::store::RangeRequest;
 use common_runtime::JoinHandle;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
-use error::Error::{LeaderPeerChanged, MigrationRunning, RegionMigrated, TableRouteNotFound};
 use futures::{StreamExt, TryStreamExt};
 use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
@@ -45,8 +44,9 @@ use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::metasrv::{RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef};
 use crate::procedure::region_migration::manager::{
-    RegionMigrationManagerRef, RegionMigrationTriggerReason,
+    RegionMigrationManagerRef, RegionMigrationTriggerReason, SubmitRegionMigrationTaskResult,
 };
+use crate::procedure::region_migration::utils::RegionMigrationTaskBatch;
 use crate::procedure::region_migration::{
     DEFAULT_REGION_MIGRATION_TIMEOUT, RegionMigrationProcedureTask,
 };
@@ -131,7 +131,7 @@ pub struct RegionSupervisorTicker {
     tick_handle: Mutex<Option<JoinHandle<()>>>,
 
     /// The [`Option`] wrapper allows us to abort the job while dropping the [`RegionSupervisor`].
-    initialization_handler: Mutex<Option<JoinHandle<()>>>,
+    initialization_handle: Mutex<Option<JoinHandle<()>>>,
 
     /// The interval of tick.
     tick_interval: Duration,
@@ -176,7 +176,7 @@ impl RegionSupervisorTicker {
         );
         Self {
             tick_handle: Mutex::new(None),
-            initialization_handler: Mutex::new(None),
+            initialization_handle: Mutex::new(None),
             tick_interval,
             initialization_delay,
             initialization_retry_period,
@@ -213,7 +213,7 @@ impl RegionSupervisorTicker {
                     }
                 }
             });
-            *self.initialization_handler.lock().unwrap() = Some(initialization_handler);
+            *self.initialization_handle.lock().unwrap() = Some(initialization_handler);
 
             let sender = self.sender.clone();
             let ticker_loop = tokio::spawn(async move {
@@ -243,7 +243,7 @@ impl RegionSupervisorTicker {
             handle.abort();
             info!("The tick loop is stopped.");
         }
-        let initialization_handler = self.initialization_handler.lock().unwrap().take();
+        let initialization_handler = self.initialization_handle.lock().unwrap().take();
         if let Some(initialization_handler) = initialization_handler {
             initialization_handler.abort();
             info!("The initialization loop is stopped.");
@@ -575,11 +575,22 @@ impl RegionSupervisor {
                 .await
             {
                 Ok(tasks) => {
+                    let mut grouped_tasks: HashMap<(u64, u64), Vec<_>> = HashMap::new();
                     for (task, count) in tasks {
-                        let region_id = task.region_id;
-                        let datanode_id = task.from_peer.id;
-                        if let Err(err) = self.do_failover(task, count).await {
-                            error!(err; "Failed to execute region failover for region: {}, datanode: {}", region_id, datanode_id);
+                        grouped_tasks
+                            .entry((task.from_peer.id, task.to_peer.id))
+                            .or_default()
+                            .push((task, count));
+                    }
+
+                    for ((from_peer_id, to_peer_id), tasks) in grouped_tasks {
+                        if tasks.is_empty() {
+                            continue;
+                        }
+                        let task = RegionMigrationTaskBatch::from_tasks(tasks);
+                        let region_ids = task.region_ids.clone();
+                        if let Err(err) = self.do_failover_tasks(task).await {
+                            error!(err; "Failed to execute region failover for regions: {:?}, from_peer: {}, to_peer: {}", region_ids, from_peer_id, to_peer_id);
                         }
                     }
                 }
@@ -688,56 +699,92 @@ impl RegionSupervisor {
         Ok(tasks)
     }
 
-    async fn do_failover(&mut self, task: RegionMigrationProcedureTask, count: u32) -> Result<()> {
+    async fn do_failover_tasks(&mut self, task: RegionMigrationTaskBatch) -> Result<()> {
         let from_peer_id = task.from_peer.id;
         let to_peer_id = task.to_peer.id;
-        let region_id = task.region_id;
+        let timeout = task.timeout;
+        let trigger_reason = task.trigger_reason;
+        let result = self
+            .region_migration_manager
+            .submit_region_migration_task(task)
+            .await?;
+        self.handle_submit_region_migration_task_result(
+            from_peer_id,
+            to_peer_id,
+            timeout,
+            trigger_reason,
+            result,
+        )
+        .await
+    }
 
-        info!(
-            "Failover for region: {}, from_peer: {}, to_peer: {}, timeout: {:?}, tries: {}",
-            task.region_id, task.from_peer, task.to_peer, task.timeout, count
-        );
-
-        if let Err(err) = self.region_migration_manager.submit_procedure(task).await {
-            return match err {
-                RegionMigrated { .. } => {
-                    info!(
-                        "Region has been migrated to target peer: {}, removed failover detector for region: {}, datanode: {}",
-                        to_peer_id, region_id, from_peer_id
-                    );
-                    self.deregister_failure_detectors(vec![(from_peer_id, region_id)])
-                        .await;
-                    Ok(())
-                }
-                // Returns Ok if it's running or table is dropped.
-                MigrationRunning { .. } => {
-                    info!(
-                        "Another region migration is running, skip failover for region: {}, datanode: {}",
-                        region_id, from_peer_id
-                    );
-                    Ok(())
-                }
-                TableRouteNotFound { .. } => {
-                    self.deregister_failure_detectors(vec![(from_peer_id, region_id)])
-                        .await;
-                    info!(
-                        "Table route is not found, the table is dropped, removed failover detector for region: {}, datanode: {}",
-                        region_id, from_peer_id
-                    );
-                    Ok(())
-                }
-                LeaderPeerChanged { .. } => {
-                    self.deregister_failure_detectors(vec![(from_peer_id, region_id)])
-                        .await;
-                    info!(
-                        "Region's leader peer changed, removed failover detector for region: {}, datanode: {}",
-                        region_id, from_peer_id
-                    );
-                    Ok(())
-                }
-                err => Err(err),
-            };
-        };
+    async fn handle_submit_region_migration_task_result(
+        &mut self,
+        from_peer_id: DatanodeId,
+        to_peer_id: DatanodeId,
+        timeout: Duration,
+        trigger_reason: RegionMigrationTriggerReason,
+        result: SubmitRegionMigrationTaskResult,
+    ) -> Result<()> {
+        if !result.migrated.is_empty() {
+            let detecting_regions = result
+                .migrated
+                .iter()
+                .map(|region_id| (from_peer_id, *region_id))
+                .collect::<Vec<_>>();
+            self.deregister_failure_detectors(detecting_regions).await;
+            info!(
+                "Region has been migrated to target peer: {}, removed failover detectors for regions: {:?}",
+                to_peer_id, result.migrated,
+            )
+        }
+        if !result.migrating.is_empty() {
+            info!(
+                "Region is still migrating, skipping failover for regions: {:?}",
+                result.migrating
+            );
+        }
+        if !result.table_not_found.is_empty() {
+            let detecting_regions = result
+                .table_not_found
+                .iter()
+                .map(|region_id| (from_peer_id, *region_id))
+                .collect::<Vec<_>>();
+            self.deregister_failure_detectors(detecting_regions).await;
+            info!(
+                "Table is not found, removed failover detectors for regions: {:?}",
+                result.table_not_found
+            );
+        }
+        if !result.leader_changed.is_empty() {
+            let detecting_regions = result
+                .leader_changed
+                .iter()
+                .map(|region_id| (from_peer_id, *region_id))
+                .collect::<Vec<_>>();
+            self.deregister_failure_detectors(detecting_regions).await;
+            info!(
+                "Region's leader peer changed, removed failover detectors for regions: {:?}",
+                result.leader_changed
+            );
+        }
+        if !result.peer_conflict.is_empty() {
+            info!(
+                "Region has peer conflict, ignore failover for regions: {:?}",
+                result.peer_conflict
+            );
+        }
+        if !result.submitted.is_empty() {
+            info!(
+                "Failover for regions: {:?}, from_peer: {}, to_peer: {}, procedure_id: {:?}, timeout: {:?}, trigger_reason: {:?}",
+                result.submitted,
+                from_peer_id,
+                to_peer_id,
+                result.procedure_id,
+                timeout,
+                trigger_reason,
+            );
+        }
 
         Ok(())
     }
@@ -813,7 +860,10 @@ pub(crate) mod tests {
     use tokio::time::sleep;
 
     use super::RegionSupervisorSelector;
-    use crate::procedure::region_migration::manager::RegionMigrationManager;
+    use crate::procedure::region_migration::RegionMigrationTriggerReason;
+    use crate::procedure::region_migration::manager::{
+        RegionMigrationManager, SubmitRegionMigrationTaskResult,
+    };
     use crate::procedure::region_migration::test_util::TestingEnv;
     use crate::region::supervisor::{
         DatanodeHeartbeat, Event, RegionFailureDetectorControl, RegionSupervisor,
@@ -929,7 +979,7 @@ pub(crate) mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(128);
         let ticker = RegionSupervisorTicker {
             tick_handle: Mutex::new(None),
-            initialization_handler: Mutex::new(None),
+            initialization_handle: Mutex::new(None),
             tick_interval: Duration::from_millis(10),
             initialization_delay: Duration::from_millis(100),
             initialization_retry_period: Duration::from_millis(100),
@@ -947,6 +997,8 @@ pub(crate) mod tests {
                     Event::Tick | Event::Clear | Event::InitializeAllRegions(_)
                 );
             }
+            assert!(ticker.initialization_handle.lock().unwrap().is_none());
+            assert!(ticker.tick_handle.lock().unwrap().is_none());
         }
     }
 
@@ -956,7 +1008,7 @@ pub(crate) mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(128);
         let ticker = RegionSupervisorTicker {
             tick_handle: Mutex::new(None),
-            initialization_handler: Mutex::new(None),
+            initialization_handle: Mutex::new(None),
             tick_interval: Duration::from_millis(1000),
             initialization_delay: Duration::from_millis(50),
             initialization_retry_period: Duration::from_millis(50),
@@ -1084,5 +1136,173 @@ pub(crate) mod tests {
         let (tx, rx) = oneshot::channel();
         sender.send(Event::Dump(tx)).await.unwrap();
         assert!(rx.await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_submit_region_migration_task_result_migrated() {
+        common_telemetry::init_default_ut_logging();
+        let (mut supervisor, _) = new_test_supervisor();
+        let region_id = RegionId::new(1, 1);
+        let detecting_region = (1, region_id);
+        supervisor
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+        supervisor.failover_counts.insert(detecting_region, 1);
+        let result = SubmitRegionMigrationTaskResult {
+            migrated: vec![region_id],
+            ..Default::default()
+        };
+        supervisor
+            .handle_submit_region_migration_task_result(
+                1,
+                2,
+                Duration::from_millis(1000),
+                RegionMigrationTriggerReason::Manual,
+                result,
+            )
+            .await
+            .unwrap();
+        assert!(!supervisor.failure_detector.contains(&detecting_region));
+        assert!(supervisor.failover_counts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_submit_region_migration_task_result_migrating() {
+        common_telemetry::init_default_ut_logging();
+        let (mut supervisor, _) = new_test_supervisor();
+        let region_id = RegionId::new(1, 1);
+        let detecting_region = (1, region_id);
+        supervisor
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+        supervisor.failover_counts.insert(detecting_region, 1);
+        let result = SubmitRegionMigrationTaskResult {
+            migrating: vec![region_id],
+            ..Default::default()
+        };
+        supervisor
+            .handle_submit_region_migration_task_result(
+                1,
+                2,
+                Duration::from_millis(1000),
+                RegionMigrationTriggerReason::Manual,
+                result,
+            )
+            .await
+            .unwrap();
+        assert!(supervisor.failure_detector.contains(&detecting_region));
+        assert!(supervisor.failover_counts.contains_key(&detecting_region));
+    }
+
+    #[tokio::test]
+    async fn test_handle_submit_region_migration_task_result_table_not_found() {
+        common_telemetry::init_default_ut_logging();
+        let (mut supervisor, _) = new_test_supervisor();
+        let region_id = RegionId::new(1, 1);
+        let detecting_region = (1, region_id);
+        supervisor
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+        supervisor.failover_counts.insert(detecting_region, 1);
+        let result = SubmitRegionMigrationTaskResult {
+            table_not_found: vec![region_id],
+            ..Default::default()
+        };
+        supervisor
+            .handle_submit_region_migration_task_result(
+                1,
+                2,
+                Duration::from_millis(1000),
+                RegionMigrationTriggerReason::Manual,
+                result,
+            )
+            .await
+            .unwrap();
+        assert!(!supervisor.failure_detector.contains(&detecting_region));
+        assert!(supervisor.failover_counts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_submit_region_migration_task_result_leader_changed() {
+        common_telemetry::init_default_ut_logging();
+        let (mut supervisor, _) = new_test_supervisor();
+        let region_id = RegionId::new(1, 1);
+        let detecting_region = (1, region_id);
+        supervisor
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+        supervisor.failover_counts.insert(detecting_region, 1);
+        let result = SubmitRegionMigrationTaskResult {
+            leader_changed: vec![region_id],
+            ..Default::default()
+        };
+        supervisor
+            .handle_submit_region_migration_task_result(
+                1,
+                2,
+                Duration::from_millis(1000),
+                RegionMigrationTriggerReason::Manual,
+                result,
+            )
+            .await
+            .unwrap();
+        assert!(!supervisor.failure_detector.contains(&detecting_region));
+        assert!(supervisor.failover_counts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_submit_region_migration_task_result_peer_conflict() {
+        common_telemetry::init_default_ut_logging();
+        let (mut supervisor, _) = new_test_supervisor();
+        let region_id = RegionId::new(1, 1);
+        let detecting_region = (1, region_id);
+        supervisor
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+        supervisor.failover_counts.insert(detecting_region, 1);
+        let result = SubmitRegionMigrationTaskResult {
+            peer_conflict: vec![region_id],
+            ..Default::default()
+        };
+        supervisor
+            .handle_submit_region_migration_task_result(
+                1,
+                2,
+                Duration::from_millis(1000),
+                RegionMigrationTriggerReason::Manual,
+                result,
+            )
+            .await
+            .unwrap();
+        assert!(supervisor.failure_detector.contains(&detecting_region));
+        assert!(supervisor.failover_counts.contains_key(&detecting_region));
+    }
+
+    #[tokio::test]
+    async fn test_handle_submit_region_migration_task_result_submitted() {
+        common_telemetry::init_default_ut_logging();
+        let (mut supervisor, _) = new_test_supervisor();
+        let region_id = RegionId::new(1, 1);
+        let detecting_region = (1, region_id);
+        supervisor
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+        supervisor.failover_counts.insert(detecting_region, 1);
+        let result = SubmitRegionMigrationTaskResult {
+            submitted: vec![region_id],
+            ..Default::default()
+        };
+        supervisor
+            .handle_submit_region_migration_task_result(
+                1,
+                2,
+                Duration::from_millis(1000),
+                RegionMigrationTriggerReason::Manual,
+                result,
+            )
+            .await
+            .unwrap();
+        assert!(supervisor.failure_detector.contains(&detecting_region));
+        assert!(supervisor.failover_counts.contains_key(&detecting_region));
     }
 }

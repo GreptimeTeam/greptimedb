@@ -14,11 +14,12 @@
 | --- | -----| ------- | ----------- |
 | `default_timezone` | String | Unset | The default timezone of the server. |
 | `default_column_prefix` | String | Unset | The default column prefix for auto-created time index and value columns. |
+| `max_in_flight_write_bytes` | String | Unset | Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
+| `write_bytes_exhausted_policy` | String | Unset | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
 | `max_concurrent_queries` | Integer | `0` | The maximum current queries allowed to be executed. Zero means unlimited.<br/>NOTE: This setting affects scan_memory_limit's privileged tier allocation.<br/>When set, 70% of queries get privileged memory access (full scan_memory_limit).<br/>The remaining 30% get standard tier access (70% of scan_memory_limit). |
 | `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. Enabled by default. |
-| `max_in_flight_write_bytes` | String | Unset | The maximum in-flight write bytes. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
@@ -26,14 +27,12 @@
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
 | `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
-| `http.max_total_body_memory` | String | Unset | Maximum total memory for all concurrent HTTP request bodies.<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
 | `http.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
-| `grpc.max_total_message_memory` | String | Unset | Maximum total memory for all concurrent gRPC request messages.<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
 | `grpc.max_connection_age` | String | Unset | The maximum connection age for gRPC connection.<br/>The value can be a human-readable time string. For example: `10m` for ten minutes or `1h` for one hour.<br/>Refer to https://grpc.io/docs/guides/keepalive/ for more details. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |
@@ -83,6 +82,8 @@
 | `wal.sync_period` | String | `10s` | Duration for fsyncing log files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.recovery_parallelism` | Integer | `2` | Parallelism during WAL recovery. |
 | `wal.broker_endpoints` | Array | -- | The Kafka broker endpoints.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.timeout` | String | `3s` | The timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.auto_create_topics` | Bool | `true` | Automatically create topics for WAL.<br/>Set to `true` to automatically create topics for WAL.<br/>Otherwise, use topics named `topic_name_prefix_[0..num_topics)` |
 | `wal.num_topics` | Integer | `64` | Number of topics.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.selector_type` | String | `round_robin` | Topic selector type.<br/>Available selector types:<br/>- `round_robin` (default)<br/>**It's only used when the provider is `kafka`**. |
@@ -108,9 +109,6 @@
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `./greptimedb_data` | The working home directory. |
 | `storage.type` | String | `File` | The storage type used to store the data.<br/>- `File`: the data is stored in the local file system.<br/>- `S3`: the data is stored in the S3 object storage.<br/>- `Gcs`: the data is stored in the Google Cloud Storage.<br/>- `Azblob`: the data is stored in the Azure Blob Storage.<br/>- `Oss`: the data is stored in the Aliyun OSS. |
-| `storage.enable_read_cache` | Bool | `true` | Whether to enable read cache. If not set, the read cache will be enabled by default when using object storage. |
-| `storage.cache_path` | String | Unset | Read cache configuration for object storage such as 'S3' etc, it's configured by default when using object storage. It is recommended to configure it when using object storage for better performance.<br/>A local file directory, defaults to `{data_home}`. An empty string means disabling. |
-| `storage.cache_capacity` | String | Unset | The local file cache capacity in bytes. If your disk space is sufficient, it is recommended to set it larger. |
 | `storage.bucket` | String | Unset | The S3 bucket name.<br/>**It's only used when the storage type is `S3`, `Oss` and `Gcs`**. |
 | `storage.root` | String | Unset | The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.<br/>**It's only used when the storage type is `S3`, `Oss` and `Azblob`**. |
 | `storage.access_key_id` | String | Unset | The access key id of the aws account.<br/>It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.<br/>**It's only used when the storage type is `S3` and `Oss`**. |
@@ -141,6 +139,8 @@
 | `region_engine.mito.max_background_flushes` | Integer | Auto | Max number of running background flush jobs (default: 1/2 of cpu cores). |
 | `region_engine.mito.max_background_compactions` | Integer | Auto | Max number of running background compaction jobs (default: 1/4 of cpu cores). |
 | `region_engine.mito.max_background_purges` | Integer | Auto | Max number of running background purge jobs (default: number of cpu cores). |
+| `region_engine.mito.experimental_compaction_memory_limit` | String | 0 | Memory budget for compaction tasks. Setting it to 0 or "unlimited" disables the limit. |
+| `region_engine.mito.experimental_compaction_on_exhausted` | String | wait | Behavior when compaction cannot acquire memory from the budget.<br/>Options: "wait" (default, 10s), "wait(<duration>)", "fail" |
 | `region_engine.mito.auto_flush_interval` | String | `1h` | Interval to auto flush a region if it has not flushed yet. |
 | `region_engine.mito.global_write_buffer_size` | String | Auto | Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB. |
 | `region_engine.mito.global_write_buffer_reject_size` | String | Auto | Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size`. |
@@ -154,6 +154,8 @@
 | `region_engine.mito.write_cache_ttl` | String | Unset | TTL for write cache. |
 | `region_engine.mito.preload_index_cache` | Bool | `true` | Preload index (puffin) files into cache on region open (default: true).<br/>When enabled, index files are loaded into the write cache during region initialization,<br/>which can improve query performance at the cost of longer startup times. |
 | `region_engine.mito.index_cache_percent` | Integer | `20` | Percentage of write cache capacity allocated for index (puffin) files (default: 20).<br/>The remaining capacity is used for data (parquet) files.<br/>Must be between 0 and 100 (exclusive). For example, with a 5GiB write cache and 20% allocation,<br/>1GiB is reserved for index files and 4GiB for data files. |
+| `region_engine.mito.enable_refill_cache_on_read` | Bool | `true` | Enable refilling cache on read operations (default: true).<br/>When disabled, cache refilling on read won't happen. |
+| `region_engine.mito.manifest_cache_size` | String | `256MB` | Capacity for manifest cache (default: 256MB). |
 | `region_engine.mito.sst_write_buffer_size` | String | `8MB` | Buffer size for SST writing. |
 | `region_engine.mito.parallel_scan_channel_size` | Integer | `32` | Capacity of the channel to send data from parallel scan tasks to the main task. |
 | `region_engine.mito.max_concurrent_scan_files` | Integer | `384` | Maximum number of SST files to scan concurrently. |
@@ -224,7 +226,8 @@
 | --- | -----| ------- | ----------- |
 | `default_timezone` | String | Unset | The default timezone of the server. |
 | `default_column_prefix` | String | Unset | The default column prefix for auto-created time index and value columns. |
-| `max_in_flight_write_bytes` | String | Unset | The maximum in-flight write bytes. |
+| `max_in_flight_write_bytes` | String | Unset | Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
+| `write_bytes_exhausted_policy` | String | Unset | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
@@ -235,7 +238,6 @@
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
 | `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
-| `http.max_total_body_memory` | String | Unset | Maximum total memory for all concurrent HTTP request bodies.<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
 | `http.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
@@ -243,7 +245,6 @@
 | `grpc.bind_addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.server_addr` | String | `127.0.0.1:4001` | The address advertised to the metasrv, and used for connections from outside the host.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `grpc.bind_addr`. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
-| `grpc.max_total_message_memory` | String | Unset | Maximum total memory for all concurrent gRPC request messages.<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
 | `grpc.flight_compression` | String | `arrow_ipc` | Compression mode for frontend side Arrow IPC service. Available options:<br/>- `none`: disable all compression<br/>- `transport`: only enable gRPC transport compression (zstd)<br/>- `arrow_ipc`: only enable Arrow IPC compression (lz4)<br/>- `all`: enable all compression.<br/>Default to `none` |
 | `grpc.max_connection_age` | String | Unset | The maximum connection age for gRPC connection.<br/>The value can be a human-readable time string. For example: `10m` for ten minutes or `1h` for one hour.<br/>Refer to https://grpc.io/docs/guides/keepalive/ for more details. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
@@ -294,7 +295,6 @@
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
-| `meta_client.heartbeat_timeout` | String | `500ms` | Heartbeat timeout. |
 | `meta_client.ddl_timeout` | String | `10s` | DDL timeout. |
 | `meta_client.connect_timeout` | String | `1s` | Connect server timeout. |
 | `meta_client.tcp_nodelay` | Bool | `true` | `TCP_NODELAY` option for accepted connections. |
@@ -340,34 +340,40 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `data_home` | String | `./greptimedb_data` | The working home directory. |
-| `store_addrs` | Array | -- | Store server address default to etcd store.<br/>For postgres store, the format is:<br/>"password=password dbname=postgres user=postgres host=localhost port=5432"<br/>For etcd store, the format is:<br/>"127.0.0.1:2379" |
+| `store_addrs` | Array | -- | Store server address(es). The format depends on the selected backend.<br/><br/>For etcd: a list of "host:port" endpoints.<br/>e.g. ["192.168.1.1:2379", "192.168.1.2:2379"]<br/><br/>For PostgreSQL: a connection string in libpq format or URI.<br/>e.g.<br/>- "host=localhost port=5432 user=postgres password=<PASSWORD> dbname=postgres"<br/>- "postgresql://user:password@localhost:5432/mydb?connect_timeout=10"<br/>The detail see: https://docs.rs/tokio-postgres/latest/tokio_postgres/config/struct.Config.html<br/><br/>For mysql store, the format is a MySQL connection URL.<br/>e.g. "mysql://user:password@localhost:3306/greptime_meta?ssl-mode=VERIFY_CA&ssl-ca=/path/to/ca.pem" |
 | `store_key_prefix` | String | `""` | If it's not empty, the metasrv will store all data with this key prefix. |
 | `backend` | String | `etcd_store` | The datastore for meta server.<br/>Available values:<br/>- `etcd_store` (default value)<br/>- `memory_store`<br/>- `postgres_store`<br/>- `mysql_store` |
 | `meta_table_name` | String | `greptime_metakv` | Table name in RDS to store metadata. Effect when using a RDS kvbackend.<br/>**Only used when backend is `postgres_store`.** |
-| `meta_schema_name` | String | `greptime_schema` | Optional PostgreSQL schema for metadata table and election table name qualification.<br/>When PostgreSQL public schema is not writable (e.g., PostgreSQL 15+ with restricted public),<br/>set this to a writable schema. GreptimeDB will use `meta_schema_name`.`meta_table_name`.<br/>GreptimeDB will NOT create the schema automatically; please ensure it exists or the user has permission.<br/>**Only used when backend is `postgres_store`.** |
+| `meta_schema_name` | String | `greptime_schema` | Optional PostgreSQL schema for metadata table and election table name qualification.<br/>When PostgreSQL public schema is not writable (e.g., PostgreSQL 15+ with restricted public),<br/>set this to a writable schema. GreptimeDB will use `meta_schema_name`.`meta_table_name`.<br/>**Only used when backend is `postgres_store`.** |
+| `auto_create_schema` | Bool | `true` | Automatically create PostgreSQL schema if it doesn't exist.<br/>When enabled, the system will execute `CREATE SCHEMA IF NOT EXISTS <schema_name>`<br/>before creating metadata tables. This is useful in production environments where<br/>manual schema creation may be restricted.<br/>Default is true.<br/>Note: The PostgreSQL user must have CREATE SCHEMA permission for this to work.<br/>**Only used when backend is `postgres_store`.** |
 | `meta_election_lock_id` | Integer | `1` | Advisory lock id in PostgreSQL for election. Effect when using PostgreSQL as kvbackend<br/>Only used when backend is `postgres_store`. |
 | `selector` | String | `round_robin` | Datanode selector type.<br/>- `round_robin` (default value)<br/>- `lease_based`<br/>- `load_based`<br/>For details, please see "https://docs.greptime.com/developer-guide/metasrv/selector". |
-| `use_memory_store` | Bool | `false` | Store data in memory. |
 | `enable_region_failover` | Bool | `false` | Whether to enable region failover.<br/>This feature is only available on GreptimeDB running on cluster mode and<br/>- Using Remote WAL<br/>- Using shared storage (e.g., s3). |
 | `region_failure_detector_initialization_delay` | String | `10m` | The delay before starting region failure detection.<br/>This delay helps prevent Metasrv from triggering unnecessary region failovers before all Datanodes are fully started.<br/>Especially useful when the cluster is not deployed with GreptimeDB Operator and maintenance mode is not enabled. |
 | `allow_region_failover_on_local_wal` | Bool | `false` | Whether to allow region failover on local WAL.<br/>**This option is not recommended to be set to true, because it may lead to data loss during failover.** |
 | `node_max_idle_time` | String | `24hours` | Max allowed idle time before removing node info from metasrv memory. |
+| `heartbeat_interval` | String | `3s` | Base heartbeat interval for calculating distributed time constants.<br/>The frontend heartbeat interval is 6 times of the base heartbeat interval.<br/>The flownode/datanode heartbeat interval is 1 times of the base heartbeat interval.<br/>e.g., If the base heartbeat interval is 3s, the frontend heartbeat interval is 18s, the flownode/datanode heartbeat interval is 3s.<br/>If you change this value, you need to change the heartbeat interval of the flownode/frontend/datanode accordingly. |
 | `enable_telemetry` | Bool | `true` | Whether to enable greptimedb telemetry. Enabled by default. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
-| `backend_tls` | -- | -- | TLS configuration for kv store backend (applicable for etcd, PostgreSQL, and MySQL backends)<br/>When using etcd, PostgreSQL, or MySQL as metadata store, you can configure TLS here |
+| `backend_tls` | -- | -- | TLS configuration for kv store backend (applicable for etcd, PostgreSQL, and MySQL backends)<br/>When using etcd, PostgreSQL, or MySQL as metadata store, you can configure TLS here<br/><br/>Note: if TLS is configured in both this section and the `store_addrs` connection string, the<br/>settings here will override the TLS settings in `store_addrs`. |
 | `backend_tls.mode` | String | `prefer` | TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html<br/>- "disable" - No TLS<br/>- "prefer" (default) - Try TLS, fallback to plain<br/>- "require" - Require TLS<br/>- "verify_ca" - Require TLS and verify CA<br/>- "verify_full" - Require TLS and verify hostname |
 | `backend_tls.cert_path` | String | `""` | Path to client certificate file (for client authentication)<br/>Like "/path/to/client.crt" |
 | `backend_tls.key_path` | String | `""` | Path to client private key file (for client authentication)<br/>Like "/path/to/client.key" |
 | `backend_tls.ca_cert_path` | String | `""` | Path to CA certificate file (for server certificate verification)<br/>Required when using custom CAs or self-signed certificates<br/>Leave empty to use system root certificates only<br/>Like "/path/to/ca.crt" |
-| `backend_tls.watch` | Bool | `false` | Watch for certificate file changes and auto reload |
+| `backend_client` | -- | -- | The backend client options.<br/>Currently, only applicable when using etcd as the metadata store. |
+| `backend_client.keep_alive_timeout` | String | `3s` | The keep alive timeout for backend client. |
+| `backend_client.keep_alive_interval` | String | `10s` | The keep alive interval for backend client. |
+| `backend_client.connect_timeout` | String | `3s` | The connect timeout for backend client. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:3002` | The address to bind the gRPC server. |
 | `grpc.server_addr` | String | `127.0.0.1:3002` | The communication server address for the frontend and datanode to connect to metasrv.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `bind_addr`. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
 | `grpc.max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
 | `grpc.max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
+| `grpc.http2_keep_alive_interval` | String | `10s` | The server side HTTP/2 keep-alive interval |
+| `grpc.http2_keep_alive_timeout` | String | `3s` | The server side HTTP/2 keep-alive timeout. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
 | `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout. |
@@ -458,7 +464,6 @@
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
-| `meta_client.heartbeat_timeout` | String | `500ms` | Heartbeat timeout. |
 | `meta_client.ddl_timeout` | String | `10s` | DDL timeout. |
 | `meta_client.connect_timeout` | String | `1s` | Connect server timeout. |
 | `meta_client.tcp_nodelay` | Bool | `true` | `TCP_NODELAY` option for accepted connections. |
@@ -478,6 +483,8 @@
 | `wal.sync_period` | String | `10s` | Duration for fsyncing log files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.recovery_parallelism` | Integer | `2` | Parallelism during WAL recovery. |
 | `wal.broker_endpoints` | Array | -- | The Kafka broker endpoints.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.timeout` | String | `3s` | The timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.max_batch_bytes` | String | `1MB` | The max size of a single producer batch.<br/>Warning: Kafka has a default limit of 1MB per message in a topic.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.consumer_wait_timeout` | String | `100ms` | The consumer wait timeout.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.create_index` | Bool | `true` | Whether to enable WAL index creation.<br/>**It's only used when the provider is `kafka`**. |
@@ -489,9 +496,6 @@
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `./greptimedb_data` | The working home directory. |
 | `storage.type` | String | `File` | The storage type used to store the data.<br/>- `File`: the data is stored in the local file system.<br/>- `S3`: the data is stored in the S3 object storage.<br/>- `Gcs`: the data is stored in the Google Cloud Storage.<br/>- `Azblob`: the data is stored in the Azure Blob Storage.<br/>- `Oss`: the data is stored in the Aliyun OSS. |
-| `storage.cache_path` | String | Unset | Read cache configuration for object storage such as 'S3' etc, it's configured by default when using object storage. It is recommended to configure it when using object storage for better performance.<br/>A local file directory, defaults to `{data_home}`. An empty string means disabling. |
-| `storage.enable_read_cache` | Bool | `true` | Whether to enable read cache. If not set, the read cache will be enabled by default when using object storage. |
-| `storage.cache_capacity` | String | Unset | The local file cache capacity in bytes. If your disk space is sufficient, it is recommended to set it larger. |
 | `storage.bucket` | String | Unset | The S3 bucket name.<br/>**It's only used when the storage type is `S3`, `Oss` and `Gcs`**. |
 | `storage.root` | String | Unset | The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.<br/>**It's only used when the storage type is `S3`, `Oss` and `Azblob`**. |
 | `storage.access_key_id` | String | Unset | The access key id of the aws account.<br/>It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.<br/>**It's only used when the storage type is `S3` and `Oss`**. |
@@ -524,6 +528,8 @@
 | `region_engine.mito.max_background_flushes` | Integer | Auto | Max number of running background flush jobs (default: 1/2 of cpu cores). |
 | `region_engine.mito.max_background_compactions` | Integer | Auto | Max number of running background compaction jobs (default: 1/4 of cpu cores). |
 | `region_engine.mito.max_background_purges` | Integer | Auto | Max number of running background purge jobs (default: number of cpu cores). |
+| `region_engine.mito.experimental_compaction_memory_limit` | String | 0 | Memory budget for compaction tasks. Setting it to 0 or "unlimited" disables the limit. |
+| `region_engine.mito.experimental_compaction_on_exhausted` | String | wait | Behavior when compaction cannot acquire memory from the budget.<br/>Options: "wait" (default, 10s), "wait(<duration>)", "fail" |
 | `region_engine.mito.auto_flush_interval` | String | `1h` | Interval to auto flush a region if it has not flushed yet. |
 | `region_engine.mito.global_write_buffer_size` | String | Auto | Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB. |
 | `region_engine.mito.global_write_buffer_reject_size` | String | Auto | Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size` |
@@ -537,6 +543,8 @@
 | `region_engine.mito.write_cache_ttl` | String | Unset | TTL for write cache. |
 | `region_engine.mito.preload_index_cache` | Bool | `true` | Preload index (puffin) files into cache on region open (default: true).<br/>When enabled, index files are loaded into the write cache during region initialization,<br/>which can improve query performance at the cost of longer startup times. |
 | `region_engine.mito.index_cache_percent` | Integer | `20` | Percentage of write cache capacity allocated for index (puffin) files (default: 20).<br/>The remaining capacity is used for data (parquet) files.<br/>Must be between 0 and 100 (exclusive). For example, with a 5GiB write cache and 20% allocation,<br/>1GiB is reserved for index files and 4GiB for data files. |
+| `region_engine.mito.enable_refill_cache_on_read` | Bool | `true` | Enable refilling cache on read operations (default: true).<br/>When disabled, cache refilling on read won't happen. |
+| `region_engine.mito.manifest_cache_size` | String | `256MB` | Capacity for manifest cache (default: 256MB). |
 | `region_engine.mito.sst_write_buffer_size` | String | `8MB` | Buffer size for SST writing. |
 | `region_engine.mito.parallel_scan_channel_size` | Integer | `32` | Capacity of the channel to send data from parallel scan tasks to the main task. |
 | `region_engine.mito.max_concurrent_scan_files` | Integer | `384` | Maximum number of SST files to scan concurrently. |
@@ -630,7 +638,6 @@
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
-| `meta_client.heartbeat_timeout` | String | `500ms` | Heartbeat timeout. |
 | `meta_client.ddl_timeout` | String | `10s` | DDL timeout. |
 | `meta_client.connect_timeout` | String | `1s` | Connect server timeout. |
 | `meta_client.tcp_nodelay` | Bool | `true` | `TCP_NODELAY` option for accepted connections. |

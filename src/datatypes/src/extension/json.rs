@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use arrow_schema::extension::ExtensionType;
-use arrow_schema::{ArrowError, DataType};
+use arrow_schema::{ArrowError, DataType, FieldRef};
 use serde::{Deserialize, Serialize};
 
 use crate::json::JsonStructureSettings;
@@ -101,4 +101,9 @@ impl ExtensionType for JsonExtensionType {
         json.supports_data_type(data_type)?;
         Ok(json)
     }
+}
+
+/// Check if this field is to be treated as json extension type.
+pub fn is_json_extension_type(field: &FieldRef) -> bool {
+    field.extension_type_name() == Some(JsonExtensionType::NAME)
 }

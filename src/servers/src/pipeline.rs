@@ -16,9 +16,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt};
-use api::greptime_proto;
 use api::v1::helper::time_index_column_schema;
-use api::v1::{ColumnDataType, RowInsertRequest, Rows};
+use api::v1::{ColumnDataType, RowInsertRequest, Rows, Value};
 use common_time::timestamp::TimeUnit;
 use pipeline::{
     ContextReq, DispatchedTo, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, Pipeline, PipelineContext,
@@ -136,11 +135,17 @@ async fn run_custom_pipeline(
             let mut schema_info = SchemaInfo::default();
             schema_info
                 .schema
-                .push(time_index_column_schema(ts_name, timeunit));
+                .push(time_index_column_schema(ts_name, timeunit).into());
 
             schema_info
         }
     };
+
+    let table = handler
+        .get_table(&table_name, query_ctx)
+        .await
+        .context(CatalogSnafu)?;
+    schema_info.set_table(table);
 
     for pipeline_map in pipeline_maps {
         let result = pipeline
@@ -154,13 +159,18 @@ async fn run_custom_pipeline(
 
         let r = unwrap_or_continue_if_err!(result, skip_error);
         match r {
-            PipelineExecOutput::Transformed(TransformedOutput {
-                opt,
-                row,
-                table_suffix,
-            }) => {
-                let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
-                push_to_map!(transformed_map, (opt, act_table_name), row, arr_len);
+            PipelineExecOutput::Transformed(TransformedOutput { rows_by_context }) => {
+                // Process each ContextOpt group separately
+                for (opt, rows_with_suffix) in rows_by_context {
+                    // Group rows by table name within each context
+                    for (row, table_suffix) in rows_with_suffix {
+                        let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
+                        transformed_map
+                            .entry((opt.clone(), act_table_name))
+                            .or_insert_with(|| Vec::with_capacity(arr_len))
+                            .push(row);
+                    }
+                }
             }
             PipelineExecOutput::DispatchedTo(dispatched_to, val) => {
                 push_to_map!(dispatched, dispatched_to, val, arr_len);
@@ -173,22 +183,26 @@ async fn run_custom_pipeline(
 
     let mut results = ContextReq::default();
 
-    let s_len = schema_info.schema.len();
-
-    // if transformed
+    // Process transformed outputs. Each entry in transformed_map contains
+    // Vec<Row> grouped by (opt, table_name).
+    let column_count = schema_info.schema.len();
     for ((opt, table_name), mut rows) in transformed_map {
-        for row in rows.iter_mut() {
-            row.values
-                .resize(s_len, greptime_proto::v1::Value::default());
+        // Pad rows to match final schema size (schema may have evolved during processing)
+        for row in &mut rows {
+            let diff = column_count.saturating_sub(row.values.len());
+            for _ in 0..diff {
+                row.values.push(Value { value_data: None });
+            }
         }
+
         results.add_row(
-            opt,
+            &opt,
             RowInsertRequest {
                 rows: Some(Rows {
                     rows,
-                    schema: schema_info.schema.clone(),
+                    schema: schema_info.column_schemas()?,
                 }),
-                table_name,
+                table_name: table_name.clone(),
             },
         );
     }

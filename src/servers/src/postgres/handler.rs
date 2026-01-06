@@ -28,7 +28,7 @@ use futures::{Sink, SinkExt, Stream, StreamExt, future, stream};
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
-    DescribePortalResponse, DescribeStatementResponse, QueryResponse, Response, Tag,
+    DescribePortalResponse, DescribeStatementResponse, FieldInfo, QueryResponse, Response, Tag,
 };
 use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::{ClientInfo, ErrorHandler, Type};
@@ -40,6 +40,7 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::dialect::PostgreSqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::statement::Statement;
 
 use crate::SqlPlan;
 use crate::error::{DataFusionSnafu, Result};
@@ -201,7 +202,7 @@ impl QueryParser for DefaultQueryParser {
         &self,
         _client: &C,
         sql: &str,
-        _types: &[Type],
+        _types: &[Option<Type>],
     ) -> PgWireResult<Self::Statement> {
         crate::metrics::METRIC_POSTGRES_PREPARED_COUNT.inc();
         let query_ctx = self.session.new_query_context();
@@ -260,6 +261,26 @@ impl QueryParser for DefaultQueryParser {
                 schema,
             })
         }
+    }
+
+    fn get_parameter_types(&self, _stmt: &Self::Statement) -> PgWireResult<Vec<Type>> {
+        // we have our own implementation of describes in ExtendedQueryHandler
+        // so we don't use these methods
+        Err(PgWireError::ApiError(
+            "get_parameter_types is not expected to be called".into(),
+        ))
+    }
+
+    fn get_result_schema(
+        &self,
+        _stmt: &Self::Statement,
+        _column_format: Option<&Format>,
+    ) -> PgWireResult<Vec<FieldInfo>> {
+        // we have our own implementation of describes in ExtendedQueryHandler
+        // so we don't use these methods
+        Err(PgWireError::ApiError(
+            "get_result_schema is not expected to be called".into(),
+        ))
     }
 }
 
@@ -341,7 +362,9 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         C: ClientInfo + Unpin + Send + Sync,
     {
         let sql_plan = &stmt.statement;
-        let (param_types, sql_plan, format) = if let Some(plan) = &sql_plan.plan {
+        // client provided parameter types, can be empty if client doesn't try to parse statement
+        let provided_param_types = &stmt.parameter_types;
+        let server_inferenced_types = if let Some(plan) = &sql_plan.plan {
             let param_types = plan
                 .get_parameter_types()
                 .context(DataFusionSnafu)
@@ -352,14 +375,36 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
 
             let types = param_types_to_pg_types(&param_types).map_err(convert_err)?;
 
-            (types, sql_plan, &Format::UnifiedBinary)
+            Some(types)
         } else {
-            let param_types = stmt.parameter_types.clone();
-            (param_types, sql_plan, &Format::UnifiedBinary)
+            None
         };
 
+        let param_count = if provided_param_types.is_empty() {
+            server_inferenced_types
+                .as_ref()
+                .map(|types| types.len())
+                .unwrap_or(0)
+        } else {
+            provided_param_types.len()
+        };
+
+        let param_types = (0..param_count)
+            .map(|i| {
+                let client_type = provided_param_types.get(i);
+                // use server type when client provided type is None (oid: 0 or other invalid values)
+                match client_type {
+                    Some(Some(client_type)) => client_type.clone(),
+                    _ => server_inferenced_types
+                        .as_ref()
+                        .and_then(|types| types.get(i).cloned())
+                        .unwrap_or(Type::UNKNOWN),
+                }
+            })
+            .collect::<Vec<_>>();
+
         if let Some(schema) = &sql_plan.schema {
-            schema_to_pg(schema, format)
+            schema_to_pg(schema, &Format::UnifiedBinary)
                 .map(|fields| DescribeStatementResponse::new(param_types, fields))
                 .map_err(convert_err)
         } else {
@@ -388,21 +433,67 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         let sql_plan = &portal.statement.statement;
         let format = &portal.result_column_format;
 
-        if let Some(schema) = &sql_plan.schema {
-            schema_to_pg(schema, format)
-                .map(DescribePortalResponse::new)
-                .map_err(convert_err)
-        } else {
-            if let Some(mut resp) =
-                fixtures::process(&sql_plan.query, self.session.new_query_context())
-                && let Response::Query(query_response) = resp.remove(0)
-            {
-                return Ok(DescribePortalResponse::new(
-                    (*query_response.row_schema()).clone(),
-                ));
+        match sql_plan.statement.as_ref() {
+            Some(Statement::Query(_)) => {
+                // if the query has a schema, it is managed by datafusion, use the schema
+                if let Some(schema) = &sql_plan.schema {
+                    schema_to_pg(schema, format)
+                        .map(DescribePortalResponse::new)
+                        .map_err(convert_err)
+                } else {
+                    // fallback to NoData
+                    Ok(DescribePortalResponse::new(vec![]))
+                }
             }
-
-            Ok(DescribePortalResponse::new(vec![]))
+            // We can cover only part of show statements
+            // these show create statements will return 2 columns
+            Some(Statement::ShowCreateDatabase(_))
+            | Some(Statement::ShowCreateTable(_))
+            | Some(Statement::ShowCreateFlow(_))
+            | Some(Statement::ShowCreateView(_)) => Ok(DescribePortalResponse::new(vec![
+                FieldInfo::new(
+                    "name".to_string(),
+                    None,
+                    None,
+                    Type::TEXT,
+                    format.format_for(0),
+                ),
+                FieldInfo::new(
+                    "create_statement".to_string(),
+                    None,
+                    None,
+                    Type::TEXT,
+                    format.format_for(1),
+                ),
+            ])),
+            // single column show statements
+            Some(Statement::ShowTables(_))
+            | Some(Statement::ShowFlows(_))
+            | Some(Statement::ShowViews(_)) => {
+                Ok(DescribePortalResponse::new(vec![FieldInfo::new(
+                    "name".to_string(),
+                    None,
+                    None,
+                    Type::TEXT,
+                    format.format_for(0),
+                )]))
+            }
+            // we will not support other show statements for extended query protocol at least for now.
+            // because the return columns is not predictable at this stage
+            _ => {
+                // test if query caught by fixture
+                if let Some(mut resp) =
+                    fixtures::process(&sql_plan.query, self.session.new_query_context())
+                    && let Response::Query(query_response) = resp.remove(0)
+                {
+                    Ok(DescribePortalResponse::new(
+                        (*query_response.row_schema()).clone(),
+                    ))
+                } else {
+                    // fallback to NoData
+                    Ok(DescribePortalResponse::new(vec![]))
+                }
+            }
         }
     }
 }

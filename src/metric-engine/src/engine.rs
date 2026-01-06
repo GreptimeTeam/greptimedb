@@ -23,6 +23,7 @@ mod options;
 mod put;
 mod read;
 mod region_metadata;
+mod staging;
 mod state;
 mod sync;
 
@@ -42,9 +43,10 @@ pub(crate) use state::MetricEngineState;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
-    BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
-    RegionStatistic, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
-    SettableRegionRoleState, SyncManifestResponse,
+    BatchResponses, RegionEngine, RegionRole, RegionScannerRef, RegionStatistic,
+    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    SetRegionRoleStateSuccess, SettableRegionRoleState, SyncRegionFromRequest,
+    SyncRegionFromResponse,
 };
 use store_api::region_request::{
     BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
@@ -53,7 +55,10 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
-use crate::error::{self, Error, Result, StartRepeatedTaskSnafu, UnsupportedRegionRequestSnafu};
+use crate::error::{
+    self, Error, Result, StartRepeatedTaskSnafu, UnsupportedRegionRequestSnafu,
+    UnsupportedRemapManifestsRequestSnafu,
+};
 use crate::metadata_region::MetadataRegion;
 use crate::repeated_task::FlushMetadataRegionTask;
 use crate::row_modifier::RowModifier;
@@ -208,6 +213,20 @@ impl RegionEngine for MetricEngine {
         let mut extension_return_value = HashMap::new();
 
         let result = match request {
+            RegionRequest::EnterStaging(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    self.handle_enter_staging_request(region_id, request).await
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
+            }
+            RegionRequest::ApplyStagingManifest(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    return self.inner.mito.handle_request(region_id, request).await;
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
+            }
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
             RegionRequest::Create(create) => {
                 self.inner
@@ -342,12 +361,44 @@ impl RegionEngine for MetricEngine {
     async fn sync_region(
         &self,
         region_id: RegionId,
-        manifest_info: RegionManifestInfo,
-    ) -> Result<SyncManifestResponse, BoxedError> {
-        self.inner
-            .sync_region(region_id, manifest_info)
-            .await
-            .map_err(BoxedError::new)
+        request: SyncRegionFromRequest,
+    ) -> Result<SyncRegionFromResponse, BoxedError> {
+        match request {
+            SyncRegionFromRequest::FromManifest(manifest_info) => self
+                .inner
+                .sync_region_from_manifest(region_id, manifest_info)
+                .await
+                .map_err(BoxedError::new),
+            SyncRegionFromRequest::FromRegion {
+                source_region_id,
+                parallelism,
+            } => {
+                if self.inner.is_physical_region(region_id) {
+                    self.inner
+                        .sync_region_from_region(region_id, source_region_id, parallelism)
+                        .await
+                        .map_err(BoxedError::new)
+                } else {
+                    Err(BoxedError::new(
+                        error::UnsupportedSyncRegionFromRequestSnafu { region_id }.build(),
+                    ))
+                }
+            }
+        }
+    }
+
+    async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse, BoxedError> {
+        let region_id = request.region_id;
+        if self.inner.is_physical_region(region_id) {
+            self.inner.mito.remap_manifests(request).await
+        } else {
+            Err(BoxedError::new(
+                UnsupportedRemapManifestsRequestSnafu { region_id }.build(),
+            ))
+        }
     }
 
     async fn set_region_role_state_gracefully(

@@ -27,6 +27,7 @@ const SECRET_ACCESS_KEY: &str = "secret_access_key";
 const SESSION_TOKEN: &str = "session_token";
 const REGION: &str = "region";
 const ENABLE_VIRTUAL_HOST_STYLE: &str = "enable_virtual_host_style";
+const DISABLE_EC2_METADATA: &str = "disable_ec2_metadata";
 
 pub fn is_supported_in_s3(key: &str) -> bool {
     [
@@ -36,6 +37,7 @@ pub fn is_supported_in_s3(key: &str) -> bool {
         SESSION_TOKEN,
         REGION,
         ENABLE_VIRTUAL_HOST_STYLE,
+        DISABLE_EC2_METADATA,
     ]
     .contains(&key)
 }
@@ -82,6 +84,21 @@ pub fn build_s3_backend(
         }
     }
 
+    if let Some(disable_str) = connection.get(DISABLE_EC2_METADATA) {
+        let disable = disable_str.as_str().parse::<bool>().map_err(|e| {
+            error::InvalidConnectionSnafu {
+                msg: format!(
+                    "failed to parse the option {}={}, {}",
+                    DISABLE_EC2_METADATA, disable_str, e
+                ),
+            }
+            .build()
+        })?;
+        if disable {
+            builder = builder.disable_ec2_metadata();
+        }
+    }
+
     // TODO(weny): Consider finding a better way to eliminate duplicate code.
     Ok(ObjectStore::new(builder)
         .context(error::BuildBackendSnafu)?
@@ -109,6 +126,7 @@ mod tests {
         assert!(is_supported_in_s3(SESSION_TOKEN));
         assert!(is_supported_in_s3(REGION));
         assert!(is_supported_in_s3(ENABLE_VIRTUAL_HOST_STYLE));
+        assert!(is_supported_in_s3(DISABLE_EC2_METADATA));
         assert!(!is_supported_in_s3("foo"))
     }
 }

@@ -21,7 +21,7 @@ use itertools::Itertools;
 
 use crate::Bytes;
 use crate::bloom_filter::error::Result;
-use crate::bloom_filter::reader::BloomFilterReader;
+use crate::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReader};
 
 /// `InListPredicate` contains a list of acceptable values. A value needs to match at least
 /// one of the elements (logical OR semantic) for the predicate to be satisfied.
@@ -38,7 +38,7 @@ pub struct BloomFilterApplier {
 
 impl BloomFilterApplier {
     pub async fn new(reader: Box<dyn BloomFilterReader + Send>) -> Result<Self> {
-        let meta = reader.metadata().await?;
+        let meta = reader.metadata(None).await?;
 
         Ok(Self { reader, meta })
     }
@@ -50,6 +50,7 @@ impl BloomFilterApplier {
         &mut self,
         predicates: &[InListPredicate],
         search_ranges: &[Range<usize>],
+        metrics: Option<&mut BloomFilterReadMetrics>,
     ) -> Result<Vec<Range<usize>>> {
         if predicates.is_empty() {
             // If no predicates, return empty result
@@ -57,7 +58,7 @@ impl BloomFilterApplier {
         }
 
         let segments = self.row_ranges_to_segments(search_ranges);
-        let (seg_locations, bloom_filters) = self.load_bloom_filters(&segments).await?;
+        let (seg_locations, bloom_filters) = self.load_bloom_filters(&segments, metrics).await?;
         let matching_row_ranges = self.find_matching_rows(seg_locations, bloom_filters, predicates);
         Ok(intersect_ranges(search_ranges, &matching_row_ranges))
     }
@@ -95,6 +96,7 @@ impl BloomFilterApplier {
     async fn load_bloom_filters(
         &mut self,
         segments: &[usize],
+        metrics: Option<&mut BloomFilterReadMetrics>,
     ) -> Result<(Vec<(u64, usize)>, Vec<BloomFilter>)> {
         let segment_locations = segments
             .iter()
@@ -108,7 +110,10 @@ impl BloomFilterApplier {
             .map(|i| self.meta.bloom_filter_locs[i as usize])
             .collect::<Vec<_>>();
 
-        let bloom_filters = self.reader.bloom_filter_vec(&bloom_filter_locs).await?;
+        let bloom_filters = self
+            .reader
+            .bloom_filter_vec(&bloom_filter_locs, metrics)
+            .await?;
 
         Ok((segment_locations, bloom_filters))
     }
@@ -422,7 +427,10 @@ mod tests {
         ];
 
         for (predicates, search_range, expected) in cases {
-            let result = applier.search(&predicates, &[search_range]).await.unwrap();
+            let result = applier
+                .search(&predicates, &[search_range], None)
+                .await
+                .unwrap();
             assert_eq!(
                 result, expected,
                 "Expected {:?}, got {:?}",

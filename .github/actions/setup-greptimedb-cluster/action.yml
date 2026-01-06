@@ -51,7 +51,7 @@ runs:
     run: |
       helm upgrade \
         --install my-greptimedb \
-        --set meta.backendStorage.etcd.endpoints=${{ inputs.etcd-endpoints }} \
+        --set 'meta.backendStorage.etcd.endpoints[0]=${{ inputs.etcd-endpoints }}' \
         --set meta.enableRegionFailover=${{ inputs.enable-region-failover }} \
         --set image.registry=${{ inputs.image-registry }} \
         --set image.repository=${{ inputs.image-repository }}  \
@@ -70,19 +70,23 @@ runs:
         --wait \
         --wait-for-jobs
   - name: Wait for GreptimeDB
-    shell: bash
-    run: |
-      while true; do
-        PHASE=$(kubectl -n my-greptimedb get gtc my-greptimedb -o jsonpath='{.status.clusterPhase}')
-        if [ "$PHASE" == "Running" ]; then
-          echo "Cluster is ready"
-          break
-        else
-          echo "Cluster is not ready yet: Current phase: $PHASE"
-          kubectl get pods -n my-greptimedb
-          sleep 5 # wait for 5 seconds before check again.
-        fi
-      done
+    uses: nick-fields/retry@v3
+    with:
+      timeout_minutes: 3
+      max_attempts: 1
+      shell: bash
+      command: |
+        while true; do
+          PHASE=$(kubectl -n my-greptimedb get gtc my-greptimedb -o jsonpath='{.status.clusterPhase}')
+          if [ "$PHASE" == "Running" ]; then
+            echo "Cluster is ready"
+            break
+          else
+            echo "Cluster is not ready yet: Current phase: $PHASE"
+            kubectl get pods -n my-greptimedb
+            sleep 5 # wait for 5 seconds before check again.
+          fi
+        done
   - name: Print GreptimeDB info
     if: always()
     shell: bash

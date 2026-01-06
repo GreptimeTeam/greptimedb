@@ -37,7 +37,7 @@ use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
     BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
 };
-use crate::storage::{RegionId, ScanRequest, SequenceNumber};
+use crate::storage::{FileId, RegionId, ScanRequest, SequenceNumber};
 
 /// The settable region role state.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -421,6 +421,8 @@ pub struct QueryScanContext {
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
 /// You can use this trait to implement an [`ExecutionPlan`](datafusion_physical_plan::ExecutionPlan).
 pub trait RegionScanner: Debug + DisplayAs + Send {
+    fn name(&self) -> &str;
+
     /// Returns the properties of the scanner.
     fn properties(&self) -> &ScannerProperties;
 
@@ -635,9 +637,64 @@ impl RegionStatistic {
     }
 }
 
-/// The response of syncing the manifest.
+/// Request to sync the region from a manifest or a region.
+#[derive(Debug, Clone)]
+pub enum SyncRegionFromRequest {
+    /// Syncs the region using manifest information.
+    /// Used in leader-follower manifest sync scenarios.
+    FromManifest(RegionManifestInfo),
+    /// Syncs the region from another region.
+    ///
+    /// Used by the metric engine to sync logical regions from a source physical region
+    /// to a target physical region. This copies metadata region SST files and transforms
+    /// logical region entries to use the target's region number.
+    FromRegion {
+        /// The [`RegionId`] of the source region.
+        source_region_id: RegionId,
+        /// The parallelism of the sync operation.
+        parallelism: usize,
+    },
+}
+
+impl From<RegionManifestInfo> for SyncRegionFromRequest {
+    fn from(manifest_info: RegionManifestInfo) -> Self {
+        SyncRegionFromRequest::FromManifest(manifest_info)
+    }
+}
+
+impl SyncRegionFromRequest {
+    /// Creates a new request from a manifest info.
+    pub fn from_manifest(manifest_info: RegionManifestInfo) -> Self {
+        SyncRegionFromRequest::FromManifest(manifest_info)
+    }
+
+    /// Creates a new request from a region.
+    pub fn from_region(source_region_id: RegionId, parallelism: usize) -> Self {
+        SyncRegionFromRequest::FromRegion {
+            source_region_id,
+            parallelism,
+        }
+    }
+
+    /// Returns true if the request is from a manifest.
+    pub fn is_from_manifest(&self) -> bool {
+        matches!(self, SyncRegionFromRequest::FromManifest { .. })
+    }
+
+    /// Converts the request to a region manifest info.
+    ///
+    /// Returns None if the request is not from a manifest.
+    pub fn into_region_manifest_info(self) -> Option<RegionManifestInfo> {
+        match self {
+            SyncRegionFromRequest::FromManifest(manifest_info) => Some(manifest_info),
+            SyncRegionFromRequest::FromRegion { .. } => None,
+        }
+    }
+}
+
+/// The response of syncing the region.
 #[derive(Debug)]
-pub enum SyncManifestResponse {
+pub enum SyncRegionFromResponse {
     NotSupported,
     Mito {
         /// Indicates if the data region was synced.
@@ -654,41 +711,74 @@ pub enum SyncManifestResponse {
     },
 }
 
-impl SyncManifestResponse {
+impl SyncRegionFromResponse {
     /// Returns true if data region is synced.
     pub fn is_data_synced(&self) -> bool {
         match self {
-            SyncManifestResponse::NotSupported => false,
-            SyncManifestResponse::Mito { synced } => *synced,
-            SyncManifestResponse::Metric { data_synced, .. } => *data_synced,
+            SyncRegionFromResponse::NotSupported => false,
+            SyncRegionFromResponse::Mito { synced } => *synced,
+            SyncRegionFromResponse::Metric { data_synced, .. } => *data_synced,
         }
-    }
-
-    /// Returns true if the engine is supported the sync operation.
-    pub fn is_supported(&self) -> bool {
-        matches!(self, SyncManifestResponse::NotSupported)
     }
 
     /// Returns true if the engine is a mito2 engine.
     pub fn is_mito(&self) -> bool {
-        matches!(self, SyncManifestResponse::Mito { .. })
+        matches!(self, SyncRegionFromResponse::Mito { .. })
     }
 
     /// Returns true if the engine is a metric engine.
     pub fn is_metric(&self) -> bool {
-        matches!(self, SyncManifestResponse::Metric { .. })
+        matches!(self, SyncRegionFromResponse::Metric { .. })
     }
 
     /// Returns the new opened logical region ids.
     pub fn new_opened_logical_region_ids(self) -> Option<Vec<RegionId>> {
         match self {
-            SyncManifestResponse::Metric {
+            SyncRegionFromResponse::Metric {
                 new_opened_logical_region_ids,
                 ..
             } => Some(new_opened_logical_region_ids),
             _ => None,
         }
     }
+}
+
+/// Request to remap manifests from old regions to new regions.
+#[derive(Debug, Clone)]
+pub struct RemapManifestsRequest {
+    /// The [`RegionId`] of a staging region used to obtain table directory and storage configuration for the remap operation.
+    pub region_id: RegionId,
+    /// Regions to remap manifests from.
+    pub input_regions: Vec<RegionId>,
+    /// For each old region, which new regions should receive its files
+    pub region_mapping: HashMap<RegionId, Vec<RegionId>>,
+    /// New partition expressions for the new regions.
+    pub new_partition_exprs: HashMap<RegionId, String>,
+}
+
+/// Response to remap manifests from old regions to new regions.
+#[derive(Debug, Clone)]
+pub struct RemapManifestsResponse {
+    /// Maps region id to its staging manifest path.
+    ///
+    /// These paths are relative paths within the central region's staging blob storage,
+    /// and should be passed to [`ApplyStagingManifestRequest`](RegionRequest::ApplyStagingManifest) to finalize the repartition.
+    pub manifest_paths: HashMap<RegionId, String>,
+}
+
+/// Request to copy files from a source region to a target region.
+#[derive(Debug, Clone)]
+pub struct MitoCopyRegionFromRequest {
+    /// The [`RegionId`] of the source region.
+    pub source_region_id: RegionId,
+    /// The parallelism of the copy operation.
+    pub parallelism: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct MitoCopyRegionFromResponse {
+    /// The file ids that were copied from the source region to the target region.
+    pub copied_file_ids: Vec<FileId>,
 }
 
 #[async_trait]
@@ -812,8 +902,14 @@ pub trait RegionEngine: Send + Sync {
     async fn sync_region(
         &self,
         region_id: RegionId,
-        manifest_info: RegionManifestInfo,
-    ) -> Result<SyncManifestResponse, BoxedError>;
+        request: SyncRegionFromRequest,
+    ) -> Result<SyncRegionFromResponse, BoxedError>;
+
+    /// Remaps manifests from old regions to new regions.
+    async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse, BoxedError>;
 
     /// Sets region role state gracefully.
     ///
@@ -866,6 +962,10 @@ impl Debug for SinglePartitionScanner {
 }
 
 impl RegionScanner for SinglePartitionScanner {
+    fn name(&self) -> &str {
+        "SinglePartition"
+    }
+
     fn properties(&self) -> &ScannerProperties {
         &self.properties
     }

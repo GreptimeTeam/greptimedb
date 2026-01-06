@@ -183,10 +183,8 @@ impl RegionRequester {
 
                 match flight_message {
                     FlightMessage::RecordBatch(record_batch) => {
-                        let result_to_yield = RecordBatch::try_from_df_record_batch(
-                            schema_cloned.clone(),
-                            record_batch,
-                        );
+                        let result_to_yield =
+                            RecordBatch::from_df_record_batch(schema_cloned.clone(), record_batch);
 
                         // get the next message from the stream. normally it should be a metrics message.
                         if let Some(next_flight_message_result) = flight_message_stream.next().await
@@ -220,7 +218,7 @@ impl RegionRequester {
                             stream_ended = true;
                         }
 
-                        yield result_to_yield;
+                        yield Ok(result_to_yield);
                     }
                     FlightMessage::Metrics(s) => {
                         // just a branch in case of some metrics message comes after other things.

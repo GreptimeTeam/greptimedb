@@ -48,9 +48,9 @@ use flow::{FlownodeBuilder, FrontendClient, GrpcQueryHandlerWithBoxedError};
 use frontend::frontend::Frontend;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{Instance, StandaloneDatanodeManager};
+use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::grpc::GrpcOptions;
-use servers::server::ServerHandlers;
 use snafu::ResultExt;
 use standalone::options::StandaloneOptions;
 
@@ -249,7 +249,7 @@ impl GreptimeDbStandaloneBuilder {
             procedure_executor.clone(),
             Arc::new(ProcessManager::new(server_addr, None)),
         )
-        .with_plugin(plugins)
+        .with_plugin(plugins.clone())
         .try_build()
         .await
         .unwrap();
@@ -259,9 +259,8 @@ impl GreptimeDbStandaloneBuilder {
         let grpc_handler = instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;
         let weak_grpc_handler = Arc::downgrade(&grpc_handler);
         frontend_instance_handler
-            .lock()
-            .unwrap()
-            .replace(weak_grpc_handler);
+            .set_handler(weak_grpc_handler)
+            .await;
 
         let flow_streaming_engine = flownode.flow_engine().streaming_engine();
         let invoker = flow::FrontendInvoker::build_from(
@@ -283,13 +282,14 @@ impl GreptimeDbStandaloneBuilder {
 
         test_util::prepare_another_catalog_and_schema(&instance).await;
 
-        let mut frontend = Frontend {
+        let servers = Services::new(opts.clone(), instance.clone(), plugins)
+            .build()
+            .unwrap();
+        let frontend = Frontend {
             instance,
-            servers: ServerHandlers::default(),
+            servers,
             heartbeat_task: None,
         };
-
-        frontend.start().await.unwrap();
 
         GreptimeDbStandalone {
             frontend: Arc::new(frontend),
@@ -309,6 +309,7 @@ impl GreptimeDbStandaloneBuilder {
             store_types,
             &self.instance_name,
             self.datanode_wal_config.clone(),
+            Default::default(),
         );
 
         let kv_backend_config = KvBackendConfig::default();

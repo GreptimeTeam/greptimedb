@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{FileId, RegionId, SequenceNumber};
+use store_api::storage::{FileId, IndexVersion, RegionId, SequenceNumber};
 use strum::Display;
 
 use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu};
@@ -43,6 +43,18 @@ pub enum RegionMetaAction {
     Remove(RegionRemove),
     /// Truncate the region.
     Truncate(RegionTruncate),
+}
+
+impl RegionMetaAction {
+    /// Returns true if the action is a change action.
+    pub fn is_change(&self) -> bool {
+        matches!(self, RegionMetaAction::Change(_))
+    }
+
+    /// Returns true if the action is an edit action.
+    pub fn is_edit(&self) -> bool {
+        matches!(self, RegionMetaAction::Edit(_))
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -193,17 +205,27 @@ impl RegionManifestBuilder {
 
     pub fn apply_edit(&mut self, manifest_version: ManifestVersion, edit: RegionEdit) {
         self.manifest_version = manifest_version;
+
+        let mut removed_files = vec![];
         for file in edit.files_to_add {
-            self.files.insert(file.file_id, file);
+            if let Some(old_file) = self.files.insert(file.file_id, file.clone())
+                && let Some(old_index) = old_file.index_version()
+                && !old_file.is_index_up_to_date(&file)
+            {
+                // The old file has an index that is now outdated.
+                removed_files.push(RemovedFile::Index(old_file.file_id, old_index));
+            }
         }
-        self.removed_files.add_removed_files(
+        removed_files.extend(
             edit.files_to_remove
                 .iter()
-                .map(|meta| meta.file_id)
-                .collect(),
-            edit.timestamp_ms
-                .unwrap_or_else(|| Utc::now().timestamp_millis()),
+                .map(|f| RemovedFile::File(f.file_id, f.index_version())),
         );
+        let at = edit
+            .timestamp_ms
+            .unwrap_or_else(|| Utc::now().timestamp_millis());
+        self.removed_files.add_removed_files(removed_files, at);
+
         for file in edit.files_to_remove {
             self.files.remove(&file.file_id);
         }
@@ -236,7 +258,10 @@ impl RegionManifestBuilder {
                 self.flushed_sequence = truncated_sequence;
                 self.truncated_entry_id = Some(truncated_entry_id);
                 self.removed_files.add_removed_files(
-                    self.files.values().map(|meta| meta.file_id).collect(),
+                    self.files
+                        .values()
+                        .map(|f| RemovedFile::File(f.file_id, f.index_version()))
+                        .collect(),
                     truncate
                         .timestamp_ms
                         .unwrap_or_else(|| Utc::now().timestamp_millis()),
@@ -245,7 +270,10 @@ impl RegionManifestBuilder {
             }
             TruncateKind::Partial { files_to_remove } => {
                 self.removed_files.add_removed_files(
-                    files_to_remove.iter().map(|meta| meta.file_id).collect(),
+                    files_to_remove
+                        .iter()
+                        .map(|f| RemovedFile::File(f.file_id, f.index_version()))
+                        .collect(),
                     truncate
                         .timestamp_ms
                         .unwrap_or_else(|| Utc::now().timestamp_millis()),
@@ -295,20 +323,22 @@ pub struct RemovedFilesRecord {
 
 impl RemovedFilesRecord {
     /// Clear the actually deleted files from the list of removed files
-    pub fn clear_deleted_files(&mut self, deleted_files: Vec<FileId>) {
+    pub fn clear_deleted_files(&mut self, deleted_files: Vec<RemovedFile>) {
         let deleted_file_set: HashSet<_> = HashSet::from_iter(deleted_files);
         for files in self.removed_files.iter_mut() {
-            files.file_ids.retain(|fid| !deleted_file_set.contains(fid));
+            files
+                .files
+                .retain(|removed| !deleted_file_set.contains(removed));
         }
 
-        self.removed_files.retain(|fs| !fs.file_ids.is_empty());
+        self.removed_files.retain(|fs| !fs.files.is_empty());
     }
 
     pub fn update_file_removed_cnt_to_stats(&self, stats: &ManifestStats) {
         let cnt = self
             .removed_files
             .iter()
-            .map(|r| r.file_ids.len() as u64)
+            .map(|r| r.files.len() as u64)
             .sum();
         stats
             .file_removed_cnt
@@ -322,18 +352,77 @@ pub struct RemovedFiles {
     /// the files are removed from manifest. The timestamp is in milliseconds since unix epoch.
     pub removed_at: i64,
     /// The set of file ids that are removed.
-    pub file_ids: HashSet<FileId>,
+    #[serde(default)]
+    pub files: HashSet<RemovedFile>,
+}
+
+/// A removed file, which can be a data file(optional paired with a index file) or an outdated index file.
+#[derive(Serialize, Hash, Clone, Debug, PartialEq, Eq)]
+pub enum RemovedFile {
+    File(FileId, Option<IndexVersion>),
+    Index(FileId, IndexVersion),
+}
+
+/// Support deserialize from old format(just FileId as string) for backward compatibility
+/// into current format(RemovedFile enum).
+/// This is needed just in case there are old manifests with removed files recorded.
+impl<'de> Deserialize<'de> for RemovedFile {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum CompatRemovedFile {
+            Enum(RemovedFileEnum),
+            FileId(FileId),
+        }
+
+        #[derive(Deserialize)]
+        enum RemovedFileEnum {
+            File(FileId, Option<IndexVersion>),
+            Index(FileId, IndexVersion),
+        }
+
+        let compat = CompatRemovedFile::deserialize(deserializer)?;
+        match compat {
+            CompatRemovedFile::FileId(file_id) => Ok(RemovedFile::File(file_id, None)),
+            CompatRemovedFile::Enum(e) => match e {
+                RemovedFileEnum::File(file_id, version) => Ok(RemovedFile::File(file_id, version)),
+                RemovedFileEnum::Index(file_id, version) => {
+                    Ok(RemovedFile::Index(file_id, version))
+                }
+            },
+        }
+    }
+}
+
+impl RemovedFile {
+    pub fn file_id(&self) -> FileId {
+        match self {
+            RemovedFile::File(file_id, _) => *file_id,
+            RemovedFile::Index(file_id, _) => *file_id,
+        }
+    }
+
+    pub fn index_version(&self) -> Option<IndexVersion> {
+        match self {
+            RemovedFile::File(_, index_version) => *index_version,
+            RemovedFile::Index(_, index_version) => Some(*index_version),
+        }
+    }
 }
 
 impl RemovedFilesRecord {
     /// Add a record of removed files with the current timestamp.
-    pub fn add_removed_files(&mut self, file_ids: HashSet<FileId>, at: i64) {
-        if file_ids.is_empty() {
+    pub fn add_removed_files(&mut self, removed: Vec<RemovedFile>, at: i64) {
+        if removed.is_empty() {
             return;
         }
+        let files = removed.into_iter().collect();
         self.removed_files.push(RemovedFiles {
             removed_at: at,
-            file_ids,
+            files,
         });
     }
 
@@ -396,7 +485,8 @@ impl RegionMetaActionList {
         Self { actions }
     }
 
-    pub fn into_region_edit(self) -> RegionEdit {
+    /// Split the actions into a region change and an edit.
+    pub fn split_region_change_and_edit(self) -> (Option<RegionChange>, RegionEdit) {
         let mut edit = RegionEdit {
             files_to_add: Vec::new(),
             files_to_remove: Vec::new(),
@@ -406,31 +496,39 @@ impl RegionMetaActionList {
             flushed_sequence: None,
             committed_sequence: None,
         };
-
+        let mut region_change = None;
         for action in self.actions {
-            if let RegionMetaAction::Edit(region_edit) = action {
-                // Merge file adds/removes
-                edit.files_to_add.extend(region_edit.files_to_add);
-                edit.files_to_remove.extend(region_edit.files_to_remove);
-                // Max of flushed entry id / sequence
-                if let Some(eid) = region_edit.flushed_entry_id {
-                    edit.flushed_entry_id = Some(edit.flushed_entry_id.map_or(eid, |v| v.max(eid)));
+            match action {
+                RegionMetaAction::Change(change) => {
+                    region_change = Some(change);
                 }
-                if let Some(seq) = region_edit.flushed_sequence {
-                    edit.flushed_sequence = Some(edit.flushed_sequence.map_or(seq, |v| v.max(seq)));
+                RegionMetaAction::Edit(region_edit) => {
+                    // Merge file adds/removes
+                    edit.files_to_add.extend(region_edit.files_to_add);
+                    edit.files_to_remove.extend(region_edit.files_to_remove);
+                    // Max of flushed entry id / sequence
+                    if let Some(eid) = region_edit.flushed_entry_id {
+                        edit.flushed_entry_id =
+                            Some(edit.flushed_entry_id.map_or(eid, |v| v.max(eid)));
+                    }
+                    if let Some(seq) = region_edit.flushed_sequence {
+                        edit.flushed_sequence =
+                            Some(edit.flushed_sequence.map_or(seq, |v| v.max(seq)));
+                    }
+                    if let Some(seq) = region_edit.committed_sequence {
+                        edit.committed_sequence =
+                            Some(edit.committed_sequence.map_or(seq, |v| v.max(seq)));
+                    }
+                    // Prefer the latest non-none time window
+                    if region_edit.compaction_time_window.is_some() {
+                        edit.compaction_time_window = region_edit.compaction_time_window;
+                    }
                 }
-                if let Some(seq) = region_edit.committed_sequence {
-                    edit.committed_sequence =
-                        Some(edit.committed_sequence.map_or(seq, |v| v.max(seq)));
-                }
-                // Prefer the latest non-none time window
-                if region_edit.compaction_time_window.is_some() {
-                    edit.compaction_time_window = region_edit.compaction_time_window;
-                }
+                _ => {}
             }
         }
 
-        edit
+        (region_change, edit)
     }
 }
 
@@ -738,10 +836,10 @@ mod tests {
             removed_files: RemovedFilesRecord {
                 removed_files: vec![RemovedFiles {
                     removed_at: 0,
-                    file_ids: HashSet::from([FileId::parse_str(
-                        "4b220a70-2b03-4641-9687-b65d94641208",
-                    )
-                    .unwrap()]),
+                    files: HashSet::from([RemovedFile::File(
+                        FileId::parse_str("4b220a70-2b03-4641-9687-b65d94641208").unwrap(),
+                        None,
+                    )]),
                 }],
             },
             sst_format: FormatType::PrimaryKey,
@@ -965,5 +1063,116 @@ mod tests {
         let serialized = serde_json::to_string(&region_change).unwrap();
         let deserialized: RegionChange = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized.sst_format, FormatType::Flat);
+    }
+
+    #[test]
+    fn test_removed_file_compatibility() {
+        let file_id = FileId::random();
+        // Case 1: Deserialize from FileId string (Legacy format)
+        let json_str = format!("\"{}\"", file_id);
+        let removed_file: RemovedFile = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(removed_file, RemovedFile::File(file_id, None));
+
+        // Case 2: Deserialize from new format (File)
+        let removed_file_v2 = RemovedFile::File(file_id, Some(10));
+        let json_v2 = serde_json::to_string(&removed_file_v2).unwrap();
+        let deserialized_v2: RemovedFile = serde_json::from_str(&json_v2).unwrap();
+        assert_eq!(removed_file_v2, deserialized_v2);
+
+        // Case 3: Deserialize from new format (Index)
+        let removed_index = RemovedFile::Index(file_id, 20);
+        let json_index = serde_json::to_string(&removed_index).unwrap();
+        let deserialized_index: RemovedFile = serde_json::from_str(&json_index).unwrap();
+        assert_eq!(removed_index, deserialized_index);
+
+        // Case 4: Round-trip serialization/deserialization of new enum format with None as index version
+        let removed_file = RemovedFile::File(file_id, None);
+        let json = serde_json::to_string(&removed_file).unwrap();
+        let deserialized: RemovedFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(removed_file, deserialized);
+
+        // Case 5: Deserialize mixed set in RemovedFilesRecord
+        // This simulates a Set<RemovedFile> which might contain old strings or new objects if manually constructed or from old versions.
+        // Actually, if it was HashSet<FileId>, the JSON is ["id1", "id2"].
+        // If it is HashSet<RemovedFile>, the JSON is [{"File":...}, "id2"] if mixed (which shouldn't happen usually but good to test).
+
+        let json_set = format!("[\"{}\"]", file_id);
+        let removed_files_set: HashSet<RemovedFile> = serde_json::from_str(&json_set).unwrap();
+        assert!(removed_files_set.contains(&RemovedFile::File(file_id, None)));
+    }
+
+    /// It is intentionally acceptable to ignore the legacy `file_ids` field when
+    /// deserializing [`RemovedFiles`].
+    ///
+    /// In older manifests, `file_ids` recorded the set of SSTable files that were
+    /// candidates for garbage collection at a given `removed_at` timestamp. The
+    /// newer format stores this information in the `files` field instead. When we
+    /// deserialize an old manifest entry into the new struct, we *drop* the
+    /// `file_ids` field instead of trying to recover or merge it.
+    ///
+    /// Dropping `file_ids` does **not** risk deleting live data: a file is only
+    /// physically removed when it is both (a) no longer referenced by any region
+    /// metadata and (b) selected by the GC worker as safe to delete. Losing the
+    /// historical list of candidate `file_ids` merely means some obsolete files
+    /// may stay on disk longer than strictly necessary.
+    ///
+    /// The GC worker periodically scans storage (e.g. by walking the data
+    /// directories and/or consulting the latest manifest) to discover files that
+    /// are no longer referenced anywhere. Any files that were only referenced via
+    /// the dropped `file_ids` field will be rediscovered during these scans and
+    /// eventually deleted. Thus the system converges to a correct, fully-collected
+    /// state without relying on `file_ids`, and the only potential impact of
+    /// ignoring it is temporary disk space overhead, not data loss.
+    #[test]
+    fn test_removed_files_backward_compatibility() {
+        // Define the old version struct with file_ids field
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+        struct OldRemovedFiles {
+            pub removed_at: i64,
+            pub file_ids: HashSet<FileId>,
+        }
+
+        // Create an old version instance
+        let mut file_ids = HashSet::new();
+        file_ids.insert(FileId::random());
+        file_ids.insert(FileId::random());
+
+        let old_removed_files = OldRemovedFiles {
+            removed_at: 1234567890,
+            file_ids,
+        };
+
+        // Serialize the old version
+        let old_json = serde_json::to_string(&old_removed_files).unwrap();
+
+        // Try to deserialize into new version - file_ids should be ignored
+        let result: Result<RemovedFiles, _> = serde_json::from_str(&old_json);
+
+        // This should succeed and create a default RemovedFiles (empty files set)
+        assert!(result.is_ok(), "{:?}", result);
+        let removed_files = result.unwrap();
+        assert_eq!(removed_files.removed_at, 1234567890);
+        assert!(removed_files.files.is_empty());
+
+        // Test that new format still works
+        let file_id = FileId::random();
+        let new_json = format!(
+            r#"{{
+            "removed_at": 1234567890,
+            "files": ["{}"]
+        }}"#,
+            file_id
+        );
+
+        let result: Result<RemovedFiles, _> = serde_json::from_str(&new_json);
+        assert!(result.is_ok());
+        let removed_files = result.unwrap();
+        assert_eq!(removed_files.removed_at, 1234567890);
+        assert_eq!(removed_files.files.len(), 1);
+        assert!(
+            removed_files
+                .files
+                .contains(&RemovedFile::File(file_id, None))
+        );
     }
 }

@@ -151,13 +151,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to build stream adapter"))]
-    BuildStreamAdapter {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_recordbatch::error::Error,
-    },
-
     #[snafu(display("Failed to parse file format"))]
     ParseFileFormat {
         #[snafu(implicit)]
@@ -200,13 +193,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Missing default value for column: {}", column))]
-    MissingColumnNoDefault {
-        column: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -222,13 +208,11 @@ impl ErrorExt for Error {
             | Unsupported { .. }
             | InvalidMetadata { .. }
             | ProjectionOutOfBounds { .. }
-            | CreateDefault { .. }
-            | MissingColumnNoDefault { .. } => StatusCode::InvalidArguments,
+            | CreateDefault { .. } => StatusCode::InvalidArguments,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
 
             BuildBackend { source, .. } => source.status_code(),
-            BuildStreamAdapter { source, .. } => source.status_code(),
             ParseFileFormat { source, .. } => source.status_code(),
 
             CheckObject { .. }

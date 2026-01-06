@@ -145,6 +145,17 @@ impl ObjbenchCommand {
         let region_meta = extract_region_metadata(&self.source, &parquet_meta)?;
         let num_rows = parquet_meta.file_metadata().num_rows() as u64;
         let num_row_groups = parquet_meta.num_row_groups() as u64;
+        let max_row_group_uncompressed_size: u64 = parquet_meta
+            .row_groups()
+            .iter()
+            .map(|rg| {
+                rg.columns()
+                    .iter()
+                    .map(|c| c.uncompressed_size() as u64)
+                    .sum::<u64>()
+            })
+            .max()
+            .unwrap_or(0);
 
         println!(
             "{} Metadata loaded - rows: {}, size: {} bytes",
@@ -160,9 +171,11 @@ impl ObjbenchCommand {
             time_range: Default::default(),
             level: 0,
             file_size,
+            max_row_group_uncompressed_size,
             available_indexes: Default::default(),
+            indexes: Default::default(),
             index_file_size: 0,
-            index_file_id: None,
+            index_version: 0,
             num_rows,
             num_row_groups,
             sequence: None,
@@ -220,6 +233,8 @@ impl ObjbenchCommand {
             inverted_index_config: MitoConfig::default().inverted_index,
             fulltext_index_config,
             bloom_filter_index_config: MitoConfig::default().bloom_filter_index,
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
         };
 
         // Write SST
@@ -563,7 +578,7 @@ fn new_noop_file_purger() -> FilePurgerRef {
     #[derive(Debug)]
     struct Noop;
     impl FilePurger for Noop {
-        fn remove_file(&self, _file_meta: FileMeta, _is_delete: bool) {}
+        fn remove_file(&self, _file_meta: FileMeta, _is_delete: bool, _index_outdated: bool) {}
     }
     Arc::new(Noop)
 }

@@ -2,7 +2,7 @@
   description = "Development environment flake";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     fenix = {
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -48,7 +48,7 @@
             gnuplot ## for cargo bench
           ];
 
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs;
+          buildInputs = buildInputs;
           NIX_HARDENING_ENABLE = "";
         };
       });

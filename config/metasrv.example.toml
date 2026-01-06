@@ -1,11 +1,19 @@
 ## The working home directory.
 data_home = "./greptimedb_data"
 
-## Store server address default to etcd store.
-## For postgres store, the format is:
-## "password=password dbname=postgres user=postgres host=localhost port=5432"
-## For etcd store, the format is:
-## "127.0.0.1:2379"
+## Store server address(es). The format depends on the selected backend.
+##
+## For etcd: a list of "host:port" endpoints.
+## e.g. ["192.168.1.1:2379", "192.168.1.2:2379"]
+##
+## For PostgreSQL: a connection string in libpq format or URI.
+## e.g.
+## - "host=localhost port=5432 user=postgres password=<PASSWORD> dbname=postgres"
+## - "postgresql://user:password@localhost:5432/mydb?connect_timeout=10"
+## The detail see: https://docs.rs/tokio-postgres/latest/tokio_postgres/config/struct.Config.html
+##
+## For mysql store, the format is a MySQL connection URL.
+## e.g. "mysql://user:password@localhost:3306/greptime_meta?ssl-mode=VERIFY_CA&ssl-ca=/path/to/ca.pem"
 store_addrs = ["127.0.0.1:2379"]
 
 ## If it's not empty, the metasrv will store all data with this key prefix.
@@ -26,10 +34,17 @@ meta_table_name = "greptime_metakv"
 ## Optional PostgreSQL schema for metadata table and election table name qualification.
 ## When PostgreSQL public schema is not writable (e.g., PostgreSQL 15+ with restricted public),
 ## set this to a writable schema. GreptimeDB will use `meta_schema_name`.`meta_table_name`.
-## GreptimeDB will NOT create the schema automatically; please ensure it exists or the user has permission.
 ## **Only used when backend is `postgres_store`.**
-
 meta_schema_name = "greptime_schema"
+
+## Automatically create PostgreSQL schema if it doesn't exist.
+## When enabled, the system will execute `CREATE SCHEMA IF NOT EXISTS <schema_name>`
+## before creating metadata tables. This is useful in production environments where
+## manual schema creation may be restricted.
+## Default is true.
+## Note: The PostgreSQL user must have CREATE SCHEMA permission for this to work.
+## **Only used when backend is `postgres_store`.**
+auto_create_schema = true
 
 ## Advisory lock id in PostgreSQL for election. Effect when using PostgreSQL as kvbackend
 ## Only used when backend is `postgres_store`.
@@ -41,9 +56,6 @@ meta_election_lock_id = 1
 ## - `load_based`
 ## For details, please see "https://docs.greptime.com/developer-guide/metasrv/selector".
 selector = "round_robin"
-
-## Store data in memory.
-use_memory_store = false
 
 ## Whether to enable region failover.
 ## This feature is only available on GreptimeDB running on cluster mode and
@@ -63,6 +75,13 @@ allow_region_failover_on_local_wal = false
 ## Max allowed idle time before removing node info from metasrv memory.
 node_max_idle_time = "24hours"
 
+## Base heartbeat interval for calculating distributed time constants.
+## The frontend heartbeat interval is 6 times of the base heartbeat interval.
+## The flownode/datanode heartbeat interval is 1 times of the base heartbeat interval.
+## e.g., If the base heartbeat interval is 3s, the frontend heartbeat interval is 18s, the flownode/datanode heartbeat interval is 3s.
+## If you change this value, you need to change the heartbeat interval of the flownode/frontend/datanode accordingly.
+#+ heartbeat_interval = "3s"
+
 ## Whether to enable greptimedb telemetry. Enabled by default.
 #+ enable_telemetry = true
 
@@ -75,6 +94,9 @@ node_max_idle_time = "24hours"
 
 ## TLS configuration for kv store backend (applicable for etcd, PostgreSQL, and MySQL backends)
 ## When using etcd, PostgreSQL, or MySQL as metadata store, you can configure TLS here
+##
+## Note: if TLS is configured in both this section and the `store_addrs` connection string, the
+## settings here will override the TLS settings in `store_addrs`.
 [backend_tls]
 ## TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html
 ## - "disable" - No TLS
@@ -98,8 +120,15 @@ key_path = ""
 ## Like "/path/to/ca.crt"
 ca_cert_path = ""
 
-## Watch for certificate file changes and auto reload
-watch = false
+## The backend client options.
+## Currently, only applicable when using etcd as the metadata store.
+#+ [backend_client]
+## The keep alive timeout for backend client.
+#+ keep_alive_timeout = "3s"
+## The keep alive interval for backend client.
+#+ keep_alive_interval = "10s"
+## The connect timeout for backend client.
+#+ connect_timeout = "3s"
 
 ## The gRPC server options.
 [grpc]
@@ -115,6 +144,10 @@ runtime_size = 8
 max_recv_message_size = "512MB"
 ## The maximum send message size for gRPC server.
 max_send_message_size = "512MB"
+## The server side HTTP/2 keep-alive interval
+#+ http2_keep_alive_interval = "10s"
+## The server side HTTP/2 keep-alive timeout.
+#+ http2_keep_alive_timeout = "3s"
 
 ## The HTTP server options.
 [http]

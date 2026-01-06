@@ -439,6 +439,10 @@ impl UnorderedScan {
 }
 
 impl RegionScanner for UnorderedScan {
+    fn name(&self) -> &str {
+        "UnorderedScan"
+    }
+
     fn properties(&self) -> &ScannerProperties {
         &self.properties
     }

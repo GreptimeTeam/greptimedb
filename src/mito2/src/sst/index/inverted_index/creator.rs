@@ -466,7 +466,7 @@ mod tests {
     use crate::cache::index::inverted_index::InvertedIndexCache;
     use crate::metrics::CACHE_BYTES;
     use crate::read::BatchColumn;
-    use crate::sst::file::RegionFileId;
+    use crate::sst::file::{RegionFileId, RegionIndexId};
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
@@ -591,7 +591,8 @@ mod tests {
         );
 
         let sst_file_id = RegionFileId::new(region_metadata.region_id, sst_file_id);
-        let mut writer = puffin_manager.writer(&sst_file_id).await.unwrap();
+        let index_id = RegionIndexId::new(sst_file_id, 0);
+        let mut writer = puffin_manager.writer(&index_id).await.unwrap();
         let (row_count, _) = creator.finish(&mut writer).await.unwrap();
         assert_eq!(row_count, rows.len() * segment_row_count);
         writer.finish().await.unwrap();
@@ -615,7 +616,7 @@ mod tests {
             .unwrap();
             Box::pin(async move {
                 applier
-                    .apply(sst_file_id, None)
+                    .apply(index_id, None, None)
                     .await
                     .unwrap()
                     .matched_segment_ids

@@ -21,6 +21,7 @@ members = [
     "src/common/grpc-expr",
     "src/common/macro",
     "src/common/mem-prof",
+    "src/common/memory-manager",
     "src/common/meta",
     "src/common/options",
     "src/common/plugins",
@@ -74,7 +75,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.4"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -102,6 +103,7 @@ aquamarine = "0.6"
 arrow = { version = "56.2", features = ["prettyprint"] }
 arrow-array = { version = "56.2", default-features = false, features = ["chrono-tz"] }
 arrow-buffer = "56.2"
+arrow-cast = "56.2"
 arrow-flight = "56.2"
 arrow-ipc = { version = "56.2", default-features = false, features = ["lz4", "zstd"] }
 arrow-schema = { version = "56.2", features = ["serde"] }
@@ -131,7 +133,7 @@ datafusion-functions = "50"
 datafusion-functions-aggregate-common = "50"
 datafusion-optimizer = "50"
 datafusion-orc = "0.5"
-datafusion-pg-catalog = "0.12.1"
+datafusion-pg-catalog = "0.12.3"
 datafusion-physical-expr = "50"
 datafusion-physical-plan = "50"
 datafusion-sql = "50"
@@ -139,16 +141,17 @@ datafusion-substrait = "50"
 deadpool = "0.12"
 deadpool-postgres = "0.14"
 derive_builder = "0.20"
+derive_more = { version = "2.1", features = ["full"] }
 dotenv = "0.15"
 either = "1.15"
-etcd-client = { git = "https://github.com/GreptimeTeam/etcd-client", rev = "f62df834f0cffda355eba96691fe1a9a332b75a7", features = [
+etcd-client = { version = "0.16.1", features = [
     "tls",
     "tls-roots",
 ] }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "fd699b21991e358201ee81ead4d319545c5df2ad" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a2e5099d72a1cfa8ba41fa4296101eb5f874074a" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -200,7 +203,8 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "multipart",
 ] }
-rskafka = { git = "https://github.com/WenyXu/rskafka.git", rev = "7b0f31ed39db049b4ee2e5f1e95b5a30be9baf76", features = [
+# Branch: feat/request-timeout
+rskafka = { git = "https://github.com/GreptimeTeam/rskafka.git", rev = "f5688f83e7da591cda3f2674c2408b4c0ed4ed50", features = [
     "transport-tls",
 ] }
 rstest = "0.25"
@@ -264,6 +268,7 @@ common-grpc = { path = "src/common/grpc" }
 common-grpc-expr = { path = "src/common/grpc-expr" }
 common-macro = { path = "src/common/macro" }
 common-mem-prof = { path = "src/common/mem-prof" }
+common-memory-manager = { path = "src/common/memory-manager" }
 common-meta = { path = "src/common/meta" }
 common-options = { path = "src/common/options" }
 common-plugins = { path = "src/common/plugins" }
@@ -328,7 +333,7 @@ datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.g
 datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
 datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
 datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "4b519a5caa95472cc3988f5556813a583dd35af1" }                           # branch = "v0.58.x"
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "a0ce2bc6eb3e804532932f39833c32432f5c9a39" }                           # branch = "v0.58.x"
 
 [profile.release]
 debug = 1

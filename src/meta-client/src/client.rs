@@ -189,6 +189,9 @@ impl MetaClientBuilder {
         let mgr = client.channel_manager.clone();
 
         if self.enable_heartbeat {
+            if self.heartbeat_channel_manager.is_some() {
+                info!("Enable heartbeat channel using the heartbeat channel manager.");
+            }
             let mgr = self.heartbeat_channel_manager.unwrap_or(mgr.clone());
             client.heartbeat = Some(HeartbeatClient::new(
                 self.id,

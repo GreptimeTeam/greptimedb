@@ -14,6 +14,7 @@
 
 mod buckets;
 pub mod compactor;
+pub mod memory_manager;
 pub mod picker;
 pub mod run;
 mod task;
@@ -29,6 +30,7 @@ use std::time::Instant;
 use api::v1::region::compact_request;
 use api::v1::region::compact_request::Options;
 use common_base::Plugins;
+use common_memory_manager::OnExhaustedPolicy;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
@@ -46,7 +48,8 @@ use tokio::sync::mpsc::{self, Sender};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultCompactor};
-use crate::compaction::picker::{CompactionTask, new_picker};
+use crate::compaction::memory_manager::CompactionMemoryManager;
+use crate::compaction::picker::{CompactionTask, PickerOutput, new_picker};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -59,7 +62,7 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
 use crate::read::{BoxedBatchReader, BoxedRecordBatchStream};
-use crate::region::options::MergeMode;
+use crate::region::options::{MergeMode, RegionOptions};
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequestWithTime};
@@ -104,12 +107,15 @@ pub(crate) struct CompactionScheduler {
     request_sender: Sender<WorkerRequestWithTime>,
     cache_manager: CacheManagerRef,
     engine_config: Arc<MitoConfig>,
+    memory_manager: Arc<CompactionMemoryManager>,
+    memory_policy: OnExhaustedPolicy,
     listener: WorkerListener,
     /// Plugins for the compaction scheduler.
     plugins: Plugins,
 }
 
 impl CompactionScheduler {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         scheduler: SchedulerRef,
         request_sender: Sender<WorkerRequestWithTime>,
@@ -117,6 +123,8 @@ impl CompactionScheduler {
         engine_config: Arc<MitoConfig>,
         listener: WorkerListener,
         plugins: Plugins,
+        memory_manager: Arc<CompactionMemoryManager>,
+        memory_policy: OnExhaustedPolicy,
     ) -> Self {
         Self {
             scheduler,
@@ -124,6 +132,8 @@ impl CompactionScheduler {
             request_sender,
             cache_manager,
             engine_config,
+            memory_manager,
+            memory_policy,
             listener,
             plugins,
         }
@@ -301,9 +311,24 @@ impl CompactionScheduler {
         request: CompactionRequest,
         options: compact_request::Options,
     ) -> Result<()> {
+        let region_id = request.region_id();
+        let (dynamic_compaction_opts, ttl) = find_dynamic_options(
+            region_id.table_id(),
+            &request.current_version.options,
+            &request.schema_metadata_manager,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            warn!(e; "Failed to find dynamic options for region: {}", region_id);
+            (
+                request.current_version.options.compaction.clone(),
+                request.current_version.options.ttl.unwrap_or_default(),
+            )
+        });
+
         let picker = new_picker(
             &options,
-            &request.current_version.options.compaction,
+            &dynamic_compaction_opts,
             request.current_version.options.append_mode,
             Some(self.engine_config.max_background_compactions),
         );
@@ -318,20 +343,9 @@ impl CompactionScheduler {
             cache_manager,
             manifest_ctx,
             listener,
-            schema_metadata_manager,
+            schema_metadata_manager: _,
             max_parallelism,
         } = request;
-
-        let ttl = find_ttl(
-            region_id.table_id(),
-            current_version.options.ttl,
-            &schema_metadata_manager,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            warn!(e; "Failed to get ttl for region: {}", region_id);
-            TimeToLive::default()
-        });
 
         debug!(
             "Pick compaction strategy {:?} for region: {}, ttl: {:?}",
@@ -341,7 +355,10 @@ impl CompactionScheduler {
         let compaction_region = CompactionRegion {
             region_id,
             current_version: current_version.clone(),
-            region_options: current_version.options.clone(),
+            region_options: RegionOptions {
+                compaction: dynamic_compaction_opts.clone(),
+                ..current_version.options.clone()
+            },
             engine_config: engine_config.clone(),
             region_metadata: current_version.metadata.clone(),
             cache_manager: cache_manager.clone(),
@@ -372,7 +389,7 @@ impl CompactionScheduler {
 
         // If specified to run compaction remotely, we schedule the compaction job remotely.
         // It will fall back to local compaction if there is no remote job scheduler.
-        let waiters = if current_version.options.compaction.remote_compaction() {
+        let waiters = if dynamic_compaction_opts.remote_compaction() {
             if let Some(remote_job_scheduler) = &self.plugins.get::<RemoteJobSchedulerRef>() {
                 let remote_compaction_job = CompactionJob {
                     compaction_region: compaction_region.clone(),
@@ -401,7 +418,7 @@ impl CompactionScheduler {
                         return Ok(());
                     }
                     Err(e) => {
-                        if !current_version.options.compaction.fallback_to_local() {
+                        if !dynamic_compaction_opts.fallback_to_local() {
                             error!(e; "Failed to schedule remote compaction job for region {}", region_id);
                             return RemoteCompactionSnafu {
                                 region_id,
@@ -429,7 +446,8 @@ impl CompactionScheduler {
         };
 
         // Create a local compaction task.
-        let mut local_compaction_task = Box::new(CompactionTaskImpl {
+        let estimated_bytes = estimate_compaction_bytes(&picker_output);
+        let local_compaction_task = Box::new(CompactionTaskImpl {
             request_sender,
             waiters,
             start_time,
@@ -437,18 +455,27 @@ impl CompactionScheduler {
             picker_output,
             compaction_region,
             compactor: Arc::new(DefaultCompactor {}),
+            memory_manager: self.memory_manager.clone(),
+            memory_policy: self.memory_policy,
+            estimated_memory_bytes: estimated_bytes,
         });
 
-        // Submit the compaction task.
+        self.submit_compaction_task(local_compaction_task, region_id)
+    }
+
+    fn submit_compaction_task(
+        &mut self,
+        mut task: Box<CompactionTaskImpl>,
+        region_id: RegionId,
+    ) -> Result<()> {
         self.scheduler
             .schedule(Box::pin(async move {
                 INFLIGHT_COMPACTION_COUNT.inc();
-                local_compaction_task.run().await;
+                task.run().await;
                 INFLIGHT_COMPACTION_COUNT.dec();
             }))
             .map_err(|e| {
                 error!(e; "Failed to submit compaction request for region {}", region_id);
-                // If failed to submit the job, we need to remove the region from the scheduler.
                 self.region_status.remove(&region_id);
                 e
             })
@@ -474,29 +501,88 @@ impl Drop for CompactionScheduler {
     }
 }
 
-/// Finds TTL of table by first examine table options then database options.
-async fn find_ttl(
+/// Finds compaction options and TTL together with a single metadata fetch to reduce RTT.
+async fn find_dynamic_options(
     table_id: TableId,
-    table_ttl: Option<TimeToLive>,
+    region_options: &crate::region::options::RegionOptions,
     schema_metadata_manager: &SchemaMetadataManagerRef,
-) -> Result<TimeToLive> {
-    // If table TTL is set, we use it.
-    if let Some(table_ttl) = table_ttl {
-        return Ok(table_ttl);
+) -> Result<(crate::region::options::CompactionOptions, TimeToLive)> {
+    if region_options.compaction_override && region_options.ttl.is_some() {
+        debug!(
+            "Use region options directly for table {}: compaction={:?}, ttl={:?}",
+            table_id, region_options.compaction, region_options.ttl
+        );
+        return Ok((
+            region_options.compaction.clone(),
+            region_options.ttl.unwrap(),
+        ));
     }
 
-    let ttl = tokio::time::timeout(
+    let db_options = tokio::time::timeout(
         crate::config::FETCH_OPTION_TIMEOUT,
         schema_metadata_manager.get_schema_options_by_table_id(table_id),
     )
     .await
     .context(TimeoutSnafu)?
-    .context(GetSchemaMetadataSnafu)?
-    .and_then(|options| options.ttl)
-    .unwrap_or_default()
-    .into();
+    .context(GetSchemaMetadataSnafu)?;
 
-    Ok(ttl)
+    let ttl = if region_options.ttl.is_some() {
+        debug!(
+            "Use region TTL directly for table {}: ttl={:?}",
+            table_id, region_options.ttl
+        );
+        region_options.ttl.unwrap()
+    } else {
+        db_options
+            .as_ref()
+            .and_then(|options| options.ttl)
+            .unwrap_or_default()
+            .into()
+    };
+
+    let compaction = if !region_options.compaction_override {
+        if let Some(schema_opts) = db_options {
+            let map: HashMap<String, String> = schema_opts
+                .extra_options
+                .iter()
+                .filter_map(|(k, v)| {
+                    if k.starts_with("compaction.") {
+                        Some((k.clone(), v.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if map.is_empty() {
+                region_options.compaction.clone()
+            } else {
+                crate::region::options::RegionOptions::try_from(&map)
+                    .map(|o| o.compaction)
+                    .unwrap_or_else(|e| {
+                        error!(e; "Failed to create RegionOptions from map");
+                        region_options.compaction.clone()
+                    })
+            }
+        } else {
+            debug!(
+                "DB options is None for table {}, use region compaction: compaction={:?}",
+                table_id, region_options.compaction
+            );
+            region_options.compaction.clone()
+        }
+    } else {
+        debug!(
+            "No schema options for table {}, use region compaction: compaction={:?}",
+            table_id, region_options.compaction
+        );
+        region_options.compaction.clone()
+    };
+
+    debug!(
+        "Resolved dynamic options for table {}: compaction={:?}, ttl={:?}",
+        table_id, compaction, ttl
+    );
+    Ok((compaction, ttl))
 }
 
 /// Status of running and pending region compaction tasks.
@@ -758,6 +844,20 @@ fn get_expired_ssts(
         .collect()
 }
 
+/// Estimates compaction memory as the sum of all input files' maximum row-group
+/// uncompressed sizes.
+fn estimate_compaction_bytes(picker_output: &PickerOutput) -> u64 {
+    picker_output
+        .outputs
+        .iter()
+        .flat_map(|output| output.inputs.iter())
+        .map(|file: &FileHandle| {
+            let meta = file.meta_ref();
+            meta.max_row_group_uncompressed_size
+        })
+        .sum()
+}
+
 /// Pending compaction request that is supposed to run after current task is finished,
 /// typically used for manual compactions.
 struct PendingCompaction {
@@ -771,17 +871,179 @@ struct PendingCompaction {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use api::v1::region::StrictWindow;
     use common_datasource::compression::CompressionType;
-    use tokio::sync::oneshot;
+    use common_meta::key::schema_name::SchemaNameValue;
+    use common_time::DatabaseTimeToLive;
+    use tokio::sync::{Barrier, oneshot};
 
     use super::*;
+    use crate::compaction::memory_manager::{CompactionMemoryGuard, new_compaction_memory_manager};
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::ManifestContext;
     use crate::sst::FormatType;
     use crate::test_util::mock_schema_metadata_manager;
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::version_util::{VersionControlBuilder, apply_edit};
+
+    #[tokio::test]
+    async fn test_find_compaction_options_db_level() {
+        let env = SchedulerEnv::new().await;
+        let builder = VersionControlBuilder::new();
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+        let region_id = builder.region_id();
+        let table_id = region_id.table_id();
+        // Register table without ttl but with db-level compaction options
+        let mut schema_value = SchemaNameValue {
+            ttl: Some(DatabaseTimeToLive::default()),
+            ..Default::default()
+        };
+        schema_value
+            .extra_options
+            .insert("compaction.type".to_string(), "twcs".to_string());
+        schema_value
+            .extra_options
+            .insert("compaction.twcs.time_window".to_string(), "2h".to_string());
+        schema_metadata_manager
+            .register_region_table_info(
+                table_id,
+                "t",
+                "c",
+                "s",
+                Some(schema_value),
+                kv_backend.clone(),
+            )
+            .await;
+
+        let version_control = Arc::new(builder.build());
+        let region_opts = version_control.current().version.options.clone();
+        let (opts, _) = find_dynamic_options(table_id, &region_opts, &schema_metadata_manager)
+            .await
+            .unwrap();
+        match opts {
+            crate::region::options::CompactionOptions::Twcs(t) => {
+                assert_eq!(t.time_window_seconds(), Some(2 * 3600));
+            }
+        }
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let (otx, _orx) = oneshot::channel();
+        let request = scheduler
+            .region_status
+            .entry(region_id)
+            .or_insert_with(|| {
+                crate::compaction::CompactionStatus::new(
+                    region_id,
+                    version_control.clone(),
+                    env.access_layer.clone(),
+                )
+            })
+            .new_compaction_request(
+                scheduler.request_sender.clone(),
+                OptionOutputTx::new(Some(OutputTx::new(otx))),
+                scheduler.engine_config.clone(),
+                scheduler.cache_manager.clone(),
+                &manifest_ctx,
+                scheduler.listener.clone(),
+                schema_metadata_manager.clone(),
+                1,
+            );
+        scheduler
+            .schedule_compaction_request(
+                request,
+                compact_request::Options::Regular(Default::default()),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_find_compaction_options_priority() {
+        fn schema_value_with_twcs(time_window: &str) -> SchemaNameValue {
+            let mut schema_value = SchemaNameValue {
+                ttl: Some(DatabaseTimeToLive::default()),
+                ..Default::default()
+            };
+            schema_value
+                .extra_options
+                .insert("compaction.type".to_string(), "twcs".to_string());
+            schema_value.extra_options.insert(
+                "compaction.twcs.time_window".to_string(),
+                time_window.to_string(),
+            );
+            schema_value
+        }
+
+        let cases = [
+            (
+                "db options set and table override set",
+                Some(schema_value_with_twcs("2h")),
+                true,
+                Some(Duration::from_secs(5 * 3600)),
+                Some(5 * 3600),
+            ),
+            (
+                "db options set and table override not set",
+                Some(schema_value_with_twcs("2h")),
+                false,
+                None,
+                Some(2 * 3600),
+            ),
+            (
+                "db options not set and table override set",
+                None,
+                true,
+                Some(Duration::from_secs(4 * 3600)),
+                Some(4 * 3600),
+            ),
+            (
+                "db options not set and table override not set",
+                None,
+                false,
+                None,
+                None,
+            ),
+        ];
+
+        for (case_name, schema_value, override_set, table_window, expected_window) in cases {
+            let builder = VersionControlBuilder::new();
+            let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+            let table_id = builder.region_id().table_id();
+            schema_metadata_manager
+                .register_region_table_info(
+                    table_id,
+                    "t",
+                    "c",
+                    "s",
+                    schema_value,
+                    kv_backend.clone(),
+                )
+                .await;
+
+            let version_control = Arc::new(builder.build());
+            let mut region_opts = version_control.current().version.options.clone();
+            region_opts.compaction_override = override_set;
+            if let Some(window) = table_window {
+                let crate::region::options::CompactionOptions::Twcs(twcs) =
+                    &mut region_opts.compaction;
+                twcs.time_window = Some(window);
+            }
+
+            let (opts, _) = find_dynamic_options(table_id, &region_opts, &schema_metadata_manager)
+                .await
+                .unwrap();
+            match opts {
+                crate::region::options::CompactionOptions::Twcs(t) => {
+                    assert_eq!(t.time_window_seconds(), expected_window, "{case_name}");
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_schedule_empty() {
@@ -1110,6 +1372,7 @@ mod tests {
                     compress_type: CompressionType::Uncompressed,
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
+                    manifest_cache: None,
                 },
                 FormatType::PrimaryKey,
                 &Default::default(),
@@ -1143,5 +1406,40 @@ mod tests {
         let result = rx.await.unwrap();
         assert_eq!(result.unwrap(), 0); // is there a better way to check this?
         assert_eq!(0, scheduler.region_status.len());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_memory_competition() {
+        let manager = Arc::new(new_compaction_memory_manager(3 * 1024 * 1024)); // 3MB
+        let barrier = Arc::new(Barrier::new(3));
+        let mut handles = vec![];
+
+        // Spawn 3 tasks competing for memory, each trying to acquire 2MB
+        for _i in 0..3 {
+            let mgr = manager.clone();
+            let bar = barrier.clone();
+            let handle = tokio::spawn(async move {
+                bar.wait().await; // Synchronize start
+                mgr.try_acquire(2 * 1024 * 1024)
+            });
+            handles.push(handle);
+        }
+
+        let results: Vec<Option<CompactionMemoryGuard>> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+
+        // Only 1 should succeed (3MB limit, 2MB request, can only fit one)
+        let succeeded = results.iter().filter(|r| r.is_some()).count();
+        let failed = results.iter().filter(|r| r.is_none()).count();
+
+        assert_eq!(succeeded, 1, "Expected exactly 1 task to acquire memory");
+        assert_eq!(failed, 2, "Expected 2 tasks to fail");
+
+        // Clean up
+        drop(results);
+        assert_eq!(manager.used_bytes(), 0);
     }
 }

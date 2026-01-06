@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -34,6 +35,7 @@ use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionContext, SessionState};
 use datafusion::execution::memory_pool::{
     GreedyMemoryPool, MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation,
+    TrackConsumersPool,
 };
 use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -207,6 +209,7 @@ impl QueryEngineState {
             .build();
 
         let df_context = SessionContext::new_with_state(session_state);
+        register_function_aliases(&df_context);
 
         Self {
             df_context,
@@ -231,7 +234,7 @@ impl QueryEngineState {
         rules.retain(|rule| rule.name() != name);
     }
 
-    /// Optimize the logical plan by the extension anayzer rules.
+    /// Optimize the logical plan by the extension analyzer rules.
     pub fn optimize_by_extension_rules(
         &self,
         plan: DfLogicalPlan,
@@ -413,6 +416,41 @@ impl QueryPlanner for DfQueryPlanner {
     }
 }
 
+/// MySQL-compatible scalar function aliases: (target_name, alias)
+const SCALAR_FUNCTION_ALIASES: &[(&str, &str)] = &[
+    ("upper", "ucase"),
+    ("lower", "lcase"),
+    ("ceil", "ceiling"),
+    ("substr", "mid"),
+    ("random", "rand"),
+];
+
+/// MySQL-compatible aggregate function aliases: (target_name, alias)
+const AGGREGATE_FUNCTION_ALIASES: &[(&str, &str)] =
+    &[("stddev_pop", "std"), ("var_pop", "variance")];
+
+/// Register function aliases.
+///
+/// This function adds aliases like `ucase` -> `upper`, `lcase` -> `lower`, etc.
+/// to make GreptimeDB more compatible with MySQL syntax.
+fn register_function_aliases(ctx: &SessionContext) {
+    let state = ctx.state();
+
+    for (target, alias) in SCALAR_FUNCTION_ALIASES {
+        if let Some(func) = state.scalar_functions().get(*target) {
+            let aliased = func.as_ref().clone().with_aliases([*alias]);
+            ctx.register_udf(aliased);
+        }
+    }
+
+    for (target, alias) in AGGREGATE_FUNCTION_ALIASES {
+        if let Some(func) = state.aggregate_functions().get(*target) {
+            let aliased = func.as_ref().clone().with_aliases([*alias]);
+            ctx.register_udaf(aliased);
+        }
+    }
+}
+
 impl DfQueryPlanner {
     fn new(
         catalog_manager: CatalogManagerRef,
@@ -437,19 +475,25 @@ impl DfQueryPlanner {
     }
 }
 
-/// A wrapper around GreedyMemoryPool that records metrics.
+/// A wrapper around TrackConsumersPool that records metrics.
 ///
 /// This wrapper intercepts all memory pool operations and updates
 /// Prometheus metrics for monitoring query memory usage and rejections.
 #[derive(Debug)]
 struct MetricsMemoryPool {
-    inner: Arc<GreedyMemoryPool>,
+    inner: Arc<TrackConsumersPool<GreedyMemoryPool>>,
 }
 
 impl MetricsMemoryPool {
+    // Number of top memory consumers to report in OOM error messages
+    const TOP_CONSUMERS_TO_REPORT: usize = 5;
+
     fn new(limit: usize) -> Self {
         Self {
-            inner: Arc::new(GreedyMemoryPool::new(limit)),
+            inner: Arc::new(TrackConsumersPool::new(
+                GreedyMemoryPool::new(limit),
+                NonZeroUsize::new(Self::TOP_CONSUMERS_TO_REPORT).unwrap(),
+            )),
         }
     }
 

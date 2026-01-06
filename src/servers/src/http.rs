@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt::Display;
 use std::net::SocketAddr;
 use std::sync::Mutex as StdMutex;
@@ -20,9 +21,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use auth::UserProviderRef;
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::routing::Route;
 use axum::serve::ListenerExt;
 use axum::{Router, middleware, routing};
 use common_base::Plugins;
@@ -32,9 +34,7 @@ use common_telemetry::{debug, error, info};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use datatypes::data_type::DataType;
-use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
-use datatypes::types::jsonb_to_serde_json;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
 use http::{HeaderValue, Method};
@@ -44,7 +44,8 @@ use serde_json::Value;
 use snafu::{ResultExt, ensure};
 use tokio::sync::Mutex;
 use tokio::sync::oneshot::{self, Sender};
-use tower::ServiceBuilder;
+use tonic::codegen::Service;
+use tower::{Layer, ServiceBuilder};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::decompression::RequestDecompressionLayer;
@@ -52,11 +53,11 @@ use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
-use crate::configurator::ConfiguratorRef;
+use crate::configurator::HttpConfiguratorRef;
 use crate::elasticsearch;
 use crate::error::{
-    AddressBindSnafu, AlreadyStartedSnafu, ConvertSqlValueSnafu, Error, InternalIoSnafu,
-    InvalidHeaderValueSnafu, Result, ToJsonSnafu,
+    AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu,
+    OtherSnafu, Result,
 };
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::otlp::OtlpState;
@@ -82,7 +83,7 @@ use crate::query_handler::{
     OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef, PipelineHandlerRef,
     PromStoreProtocolHandlerRef,
 };
-use crate::request_limiter::RequestMemoryLimiter;
+use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::server::Server;
 
 pub mod authorize;
@@ -109,6 +110,7 @@ pub mod result;
 mod timeout;
 pub mod utils;
 
+use result::HttpOutputWriter;
 pub(crate) use timeout::DynamicTimeoutLayer;
 
 mod hints;
@@ -132,7 +134,7 @@ pub struct HttpServer {
     router: StdMutex<Router>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
-    memory_limiter: RequestMemoryLimiter,
+    memory_limiter: ServerMemoryLimiter,
 
     // plugins
     plugins: Plugins,
@@ -154,9 +156,6 @@ pub struct HttpOptions {
     pub disable_dashboard: bool,
 
     pub body_limit: ReadableSize,
-
-    /// Maximum total memory for all concurrent HTTP request bodies. 0 disables the limit.
-    pub max_total_body_memory: ReadableSize,
 
     /// Validation mode while decoding Prometheus remote write requests.
     pub prom_validation_mode: PromValidationMode,
@@ -202,7 +201,6 @@ impl Default for HttpOptions {
             timeout: Duration::from_secs(0),
             disable_dashboard: false,
             body_limit: DEFAULT_BODY_LIMIT,
-            max_total_body_memory: ReadableSize(0),
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
             prom_validation_mode: PromValidationMode::Strict,
@@ -298,30 +296,10 @@ impl HttpRecordsOutput {
         } else {
             let num_rows = recordbatches.iter().map(|r| r.num_rows()).sum::<usize>();
             let mut rows = Vec::with_capacity(num_rows);
-            let schemas = schema.column_schemas();
-            let num_cols = schema.column_schemas().len();
-            rows.resize_with(num_rows, || Vec::with_capacity(num_cols));
 
-            let mut finished_row_cursor = 0;
             for recordbatch in recordbatches {
-                for (col_idx, col) in recordbatch.columns().iter().enumerate() {
-                    // safety here: schemas length is equal to the number of columns in the recordbatch
-                    let schema = &schemas[col_idx];
-                    for row_idx in 0..recordbatch.num_rows() {
-                        let value = col.get(row_idx);
-                        // TODO(sunng87): is this duplicated with `map_json_type_to_string` in recordbatch?
-                        let value = if let ConcreteDataType::Json(_json_type) = &schema.data_type
-                            && let datatypes::value::Value::Binary(bytes) = value
-                        {
-                            jsonb_to_serde_json(bytes.as_ref()).context(ConvertSqlValueSnafu)?
-                        } else {
-                            serde_json::Value::try_from(col.get(row_idx)).context(ToJsonSnafu)?
-                        };
-
-                        rows[row_idx + finished_row_cursor].push(value);
-                    }
-                }
-                finished_row_cursor += recordbatch.num_rows();
+                let mut writer = HttpOutputWriter::new(schema.num_columns(), None);
+                writer.write(recordbatch, &mut rows)?;
             }
 
             Ok(HttpRecordsOutput {
@@ -557,12 +535,12 @@ pub struct GreptimeOptionsConfigState {
     pub greptime_config_options: String,
 }
 
-#[derive(Default)]
 pub struct HttpServerBuilder {
     options: HttpOptions,
     plugins: Plugins,
     user_provider: Option<UserProviderRef>,
     router: Router,
+    memory_limiter: ServerMemoryLimiter,
 }
 
 impl HttpServerBuilder {
@@ -572,7 +550,14 @@ impl HttpServerBuilder {
             plugins: Plugins::default(),
             user_provider: None,
             router: Router::new(),
+            memory_limiter: ServerMemoryLimiter::default(),
         }
+    }
+
+    /// Set a global memory limiter for all server protocols.
+    pub fn with_memory_limiter(mut self, limiter: ServerMemoryLimiter) -> Self {
+        self.memory_limiter = limiter;
+        self
     }
 
     pub fn with_sql_handler(self, sql_handler: ServerSqlQueryHandlerRef) -> Self {
@@ -753,9 +738,21 @@ impl HttpServerBuilder {
         }
     }
 
+    pub fn add_layer<L>(self, layer: L) -> Self
+    where
+        L: Layer<Route> + Clone + Send + Sync + 'static,
+        L::Service: Service<Request> + Clone + Send + Sync + 'static,
+        <L::Service as Service<Request>>::Response: IntoResponse + 'static,
+        <L::Service as Service<Request>>::Error: Into<Infallible> + 'static,
+        <L::Service as Service<Request>>::Future: Send + 'static,
+    {
+        Self {
+            router: self.router.layer(layer),
+            ..self
+        }
+    }
+
     pub fn build(self) -> HttpServer {
-        let memory_limiter =
-            RequestMemoryLimiter::new(self.options.max_total_body_memory.as_bytes() as usize);
         HttpServer {
             options: self.options,
             user_provider: self.user_provider,
@@ -763,7 +760,7 @@ impl HttpServerBuilder {
             plugins: self.plugins,
             router: StdMutex::new(self.router),
             bind_addr: None,
-            memory_limiter,
+            memory_limiter: self.memory_limiter,
         }
     }
 }
@@ -1227,8 +1224,11 @@ impl Server for HttpServer {
             );
 
             let mut app = self.make_app();
-            if let Some(configurator) = self.plugins.get::<ConfiguratorRef>() {
-                app = configurator.config_http(app);
+            if let Some(configurator) = self.plugins.get::<HttpConfiguratorRef<()>>() {
+                app = configurator
+                    .configure_http(app, ())
+                    .await
+                    .context(OtherSnafu)?;
             }
             let app = self.build(app)?;
             let listener = tokio::net::TcpListener::bind(listening)
@@ -1284,6 +1284,10 @@ impl Server for HttpServer {
 
     fn bind_addr(&self) -> Option<SocketAddr> {
         self.bind_addr
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

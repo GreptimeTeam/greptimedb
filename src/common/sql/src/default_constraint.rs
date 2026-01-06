@@ -14,8 +14,9 @@
 
 use common_time::timezone::Timezone;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::ColumnDefaultConstraint;
 use datatypes::schema::constraint::{CURRENT_TIMESTAMP, CURRENT_TIMESTAMP_FN};
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
+use snafu::ensure;
 use sqlparser::ast::ValueWithSpan;
 pub use sqlparser::ast::{
     BinaryOperator, ColumnDef, ColumnOption, ColumnOptionDef, DataType, Expr, Function,
@@ -37,10 +38,21 @@ pub fn parse_column_default_constraint(
         .iter()
         .find(|o| matches!(o.option, ColumnOption::Default(_)))
     {
+        ensure!(
+            !data_type.is_json(),
+            UnsupportedDefaultValueSnafu {
+                column_name,
+                reason: "json column cannot have a default value",
+            }
+        );
+
         let default_constraint = match &opt.option {
-            ColumnOption::Default(Expr::Value(v)) => ColumnDefaultConstraint::Value(
-                sql_value_to_value(column_name, data_type, &v.value, timezone, None, false)?,
-            ),
+            ColumnOption::Default(Expr::Value(v)) => {
+                let schema = ColumnSchema::new(column_name, data_type.clone(), true);
+                ColumnDefaultConstraint::Value(sql_value_to_value(
+                    &schema, &v.value, timezone, None, false,
+                )?)
+            }
             ColumnOption::Default(Expr::Function(func)) => {
                 let mut func = format!("{func}").to_lowercase();
                 // normalize CURRENT_TIMESTAMP to CURRENT_TIMESTAMP()
@@ -71,8 +83,7 @@ pub fn parse_column_default_constraint(
 
                 if let Expr::Value(v) = &**expr {
                     let value = sql_value_to_value(
-                        column_name,
-                        data_type,
+                        &ColumnSchema::new(column_name, data_type.clone(), true),
                         &v.value,
                         timezone,
                         Some(*op),
@@ -82,7 +93,7 @@ pub fn parse_column_default_constraint(
                 } else {
                     return UnsupportedDefaultValueSnafu {
                         column_name,
-                        expr: *expr.clone(),
+                        reason: format!("expr '{expr}' not supported"),
                     }
                     .fail();
                 }
@@ -90,14 +101,14 @@ pub fn parse_column_default_constraint(
             ColumnOption::Default(others) => {
                 return UnsupportedDefaultValueSnafu {
                     column_name,
-                    expr: others.clone(),
+                    reason: format!("expr '{others}' not supported"),
                 }
                 .fail();
             }
             _ => {
                 return UnsupportedDefaultValueSnafu {
                     column_name,
-                    expr: Expr::Value(SqlValue::Null.into()),
+                    reason: format!("option '{}' not supported", opt.option),
                 }
                 .fail();
             }

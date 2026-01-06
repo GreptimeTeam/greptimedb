@@ -101,20 +101,6 @@ impl GcRegionsHandler {
         // always use the smallest region id on datanode as the target region id
         region_ids.sort_by_key(|r| r.region_number());
 
-        ensure!(
-            region_ids.windows(2).all(|w| {
-                let t1 = w[0].table_id();
-                let t2 = w[1].table_id();
-                t1 == t2
-            }),
-            InvalidGcArgsSnafu {
-                msg: format!(
-                    "Regions to GC should belong to the same table, found: {:?}",
-                    region_ids
-                ),
-            }
-        );
-
         let mito_engine = ctx
             .region_server
             .mito_engine()
@@ -153,17 +139,14 @@ impl GcRegionsHandler {
             })?
             .access_layer();
 
+        // if region happen to be dropped before this but after gc scheduler send gc instr,
+        // need to deal with it properly(it is ok for region to be dropped after GC worker started)
+        // region not found here can only be drop table/database case, since region migration is prevented by lock in gc procedure
+        // TODO(discord9): add integration test for this drop case
         let mito_regions = region_ids
             .iter()
-            .map(|rid| {
-                mito_engine
-                    .find_region(*rid)
-                    .map(|r| (*rid, r))
-                    .with_context(|| InvalidGcArgsSnafu {
-                        msg: format!("Region {} not found on datanode", rid),
-                    })
-            })
-            .collect::<Result<_>>()?;
+            .filter_map(|rid| mito_engine.find_region(*rid).map(|r| (*rid, r)))
+            .collect();
 
         let cache_manager = mito_engine.cache_manager();
 

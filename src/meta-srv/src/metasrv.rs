@@ -27,7 +27,7 @@ use common_event_recorder::EventRecorderOptions;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl_manager::DdlManagerRef;
-use common_meta::distributed_time_constants;
+use common_meta::distributed_time_constants::{self, default_distributed_time_constants};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
@@ -67,6 +67,7 @@ use crate::error::{
     StartTelemetryTaskSnafu, StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
+use crate::gc::{GcSchedulerOptions, GcTickerRef};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
@@ -120,6 +121,27 @@ impl Default for StatsPersistenceOptions {
     }
 }
 
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct BackendClientOptions {
+    #[serde(with = "humantime_serde")]
+    pub keep_alive_timeout: Duration,
+    #[serde(with = "humantime_serde")]
+    pub keep_alive_interval: Duration,
+    #[serde(with = "humantime_serde")]
+    pub connect_timeout: Duration,
+}
+
+impl Default for BackendClientOptions {
+    fn default() -> Self {
+        Self {
+            keep_alive_interval: Duration::from_secs(10),
+            keep_alive_timeout: Duration::from_secs(3),
+            connect_timeout: Duration::from_secs(3),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetasrvOptions {
@@ -135,12 +157,20 @@ pub struct MetasrvOptions {
     /// Only applicable when using PostgreSQL or MySQL as the metadata store
     #[serde(default)]
     pub backend_tls: Option<TlsOption>,
+    /// The backend client options.
+    /// Currently, only applicable when using etcd as the metadata store.
+    #[serde(default)]
+    pub backend_client: BackendClientOptions,
     /// The type of selector.
     pub selector: SelectorType,
-    /// Whether to use the memory store.
-    pub use_memory_store: bool,
     /// Whether to enable region failover.
     pub enable_region_failover: bool,
+    /// The base heartbeat interval.
+    ///
+    /// This value is used to calculate the distributed time constants for components.
+    /// e.g., the region lease time is `heartbeat_interval * 3 + Duration::from_secs(1)`.
+    #[serde(with = "humantime_serde")]
+    pub heartbeat_interval: Duration,
     /// The delay before starting region failure detection.
     /// This delay helps prevent Metasrv from triggering unnecessary region failovers before all Datanodes are fully started.
     /// Especially useful when the cluster is not deployed with GreptimeDB Operator and maintenance mode is not enabled.
@@ -201,12 +231,17 @@ pub struct MetasrvOptions {
     #[cfg(feature = "pg_kvbackend")]
     /// Optional PostgreSQL schema for metadata table (defaults to current search_path if empty).
     pub meta_schema_name: Option<String>,
+    #[cfg(feature = "pg_kvbackend")]
+    /// Automatically create PostgreSQL schema if it doesn't exist (default: true).
+    pub auto_create_schema: bool,
     #[serde(with = "humantime_serde")]
     pub node_max_idle_time: Duration,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
     /// The stats persistence options.
     pub stats_persistence: StatsPersistenceOptions,
+    /// The GC scheduler options.
+    pub gc: GcSchedulerOptions,
 }
 
 impl fmt::Debug for MetasrvOptions {
@@ -216,7 +251,6 @@ impl fmt::Debug for MetasrvOptions {
             .field("store_addrs", &self.sanitize_store_addrs())
             .field("backend_tls", &self.backend_tls)
             .field("selector", &self.selector)
-            .field("use_memory_store", &self.use_memory_store)
             .field("enable_region_failover", &self.enable_region_failover)
             .field(
                 "allow_region_failover_on_local_wal",
@@ -237,7 +271,9 @@ impl fmt::Debug for MetasrvOptions {
             .field("tracing", &self.tracing)
             .field("backend", &self.backend)
             .field("event_recorder", &self.event_recorder)
-            .field("stats_persistence", &self.stats_persistence);
+            .field("stats_persistence", &self.stats_persistence)
+            .field("heartbeat_interval", &self.heartbeat_interval)
+            .field("backend_client", &self.backend_client);
 
         #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
         debug_struct.field("meta_table_name", &self.meta_table_name);
@@ -263,10 +299,10 @@ impl Default for MetasrvOptions {
             #[allow(deprecated)]
             server_addr: String::new(),
             store_addrs: vec!["127.0.0.1:2379".to_string()],
-            backend_tls: None,
+            backend_tls: Some(TlsOption::prefer()),
             selector: SelectorType::default(),
-            use_memory_store: false,
             enable_region_failover: false,
+            heartbeat_interval: distributed_time_constants::BASE_HEARTBEAT_INTERVAL,
             region_failure_detector_initialization_delay: Duration::from_secs(10 * 60),
             allow_region_failover_on_local_wal: false,
             grpc: GrpcOptions {
@@ -300,9 +336,13 @@ impl Default for MetasrvOptions {
             meta_election_lock_id: common_meta::kv_backend::DEFAULT_META_ELECTION_LOCK_ID,
             #[cfg(feature = "pg_kvbackend")]
             meta_schema_name: None,
+            #[cfg(feature = "pg_kvbackend")]
+            auto_create_schema: true,
             node_max_idle_time: Duration::from_secs(24 * 60 * 60),
             event_recorder: EventRecorderOptions::default(),
             stats_persistence: StatsPersistenceOptions::default(),
+            gc: GcSchedulerOptions::default(),
+            backend_client: BackendClientOptions::default(),
         }
     }
 }
@@ -448,6 +488,7 @@ pub struct MetaStateHandler {
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
     leadership_change_notifier: LeadershipChangeNotifier,
+    mailbox: MailboxRef,
     state: StateRef,
 }
 
@@ -471,6 +512,9 @@ impl MetaStateHandler {
     pub async fn on_leader_stop(&self) {
         self.state.write().unwrap().next_state(become_follower());
 
+        // Enforces the mailbox to clear all pushers.
+        // The remaining heartbeat connections will be closed by the remote peer or keep-alive detection.
+        self.mailbox.reset().await;
         self.leadership_change_notifier
             .notify_on_leader_stop()
             .await;
@@ -524,6 +568,7 @@ pub struct Metasrv {
     table_id_sequence: SequenceRef,
     reconciliation_manager: ReconciliationManagerRef,
     resource_stat: ResourceStatRef,
+    gc_ticker: Option<GcTickerRef>,
 
     plugins: Plugins,
 }
@@ -584,6 +629,9 @@ impl Metasrv {
             if let Some(region_flush_trigger) = &self.region_flush_ticker {
                 leadership_change_notifier.add_listener(region_flush_trigger.clone() as _);
             }
+            if let Some(gc_ticker) = &self.gc_ticker {
+                leadership_change_notifier.add_listener(gc_ticker.clone() as _);
+            }
             if let Some(customizer) = self.plugins.get::<LeadershipChangeNotifierCustomizerRef>() {
                 customizer.customize(&mut leadership_change_notifier);
             }
@@ -594,6 +642,7 @@ impl Metasrv {
                 state: self.state.clone(),
                 leader_cached_kv_backend: leader_cached_kv_backend.clone(),
                 leadership_change_notifier,
+                mailbox: self.mailbox.clone(),
             };
             let _handle = common_runtime::spawn_global(async move {
                 loop {
@@ -734,7 +783,7 @@ impl Metasrv {
             &DefaultSystemTimer,
             self.meta_peer_client.as_ref(),
             peer_id,
-            Duration::from_secs(distributed_time_constants::DATANODE_LEASE_SECS),
+            default_distributed_time_constants().datanode_lease,
         )
         .await
     }

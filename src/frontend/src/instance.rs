@@ -26,7 +26,8 @@ mod region_query;
 pub mod standalone;
 
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, atomic};
 use std::time::{Duration, SystemTime};
 
 use async_stream::stream;
@@ -83,6 +84,7 @@ use snafu::prelude::*;
 use sql::ast::ObjectNamePartExt;
 use sql::dialect::Dialect;
 use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::comment::CommentObject;
 use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
@@ -96,7 +98,6 @@ use crate::error::{
     ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
     StatementTimeoutSnafu, TableOperationSnafu,
 };
-use crate::limiter::LimiterRef;
 use crate::stream_wrapper::CancellableStreamWrapper;
 
 lazy_static! {
@@ -117,9 +118,9 @@ pub struct Instance {
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
     event_recorder: Option<EventRecorderRef>,
-    limiter: Option<LimiterRef>,
     process_manager: ProcessManagerRef,
     slow_query_options: SlowQueryOptions,
+    suspend: Arc<AtomicBool>,
 
     // cache for otlp metrics
     // first layer key: db-string
@@ -171,6 +172,14 @@ impl Instance {
 
     pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
         self.statement_executor.procedure_executor()
+    }
+
+    pub fn suspend_state(&self) -> Arc<AtomicBool> {
+        self.suspend.clone()
+    }
+
+    pub(crate) fn is_suspended(&self) -> bool {
+        self.suspend.load(atomic::Ordering::Relaxed)
     }
 }
 
@@ -515,6 +524,10 @@ impl SqlQueryHandler for Instance {
 
     #[tracing::instrument(skip_all)]
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        if self.is_suspended() {
+            return vec![error::SuspendedSnafu {}.fail()];
+        }
+
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
@@ -582,6 +595,8 @@ impl SqlQueryHandler for Instance {
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        ensure!(!self.is_suspended(), error::SuspendedSnafu);
+
         if should_capture_statement(stmt.as_ref()) {
             // It's safe to unwrap here because we've already checked the type.
             let stmt = stmt.unwrap();
@@ -643,6 +658,10 @@ impl SqlQueryHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Vec<Result<Output>> {
+        if self.is_suspended() {
+            return vec![error::SuspendedSnafu {}.fail()];
+        }
+
         // check will be done in prometheus handler's do_query
         let result = PrometheusHandler::do_query(self, query, query_ctx)
             .await
@@ -657,6 +676,8 @@ impl SqlQueryHandler for Instance {
         stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> Result<Option<DescribeResult>> {
+        ensure!(!self.is_suspended(), error::SuspendedSnafu);
+
         if matches!(
             stmt,
             Statement::Insert(_) | Statement::Query(_) | Statement::Delete(_)
@@ -877,7 +898,7 @@ pub fn check_permission(
             validate_param(&stmt.table_name, query_ctx)?;
         }
         Statement::ShowCreateFlow(stmt) => {
-            validate_param(&stmt.flow_name, query_ctx)?;
+            validate_flow(&stmt.flow_name, query_ctx)?;
         }
         #[cfg(feature = "enterprise")]
         Statement::ShowCreateTrigger(stmt) => {
@@ -909,6 +930,12 @@ pub fn check_permission(
         Statement::SetVariables(_) | Statement::ShowVariables(_) => {}
         // show charset and show collation won't be checked
         Statement::ShowCharset(_) | Statement::ShowCollation(_) => {}
+
+        Statement::Comment(comment) => match &comment.object {
+            CommentObject::Table(table) => validate_param(table, query_ctx)?,
+            CommentObject::Column { table, .. } => validate_param(table, query_ctx)?,
+            CommentObject::Flow(flow) => validate_flow(flow, query_ctx)?,
+        },
 
         Statement::Insert(insert) => {
             let name = insert.table_name().context(ParseSqlSnafu)?;
@@ -989,6 +1016,27 @@ fn validate_param(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> 
     let (catalog, schema, _) = table_idents_to_full_name(name, query_ctx)
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
+
+    validate_catalog_and_schema(&catalog, &schema, query_ctx)
+        .map_err(BoxedError::new)
+        .context(SqlExecInterceptedSnafu)
+}
+
+fn validate_flow(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> {
+    let catalog = match &name.0[..] {
+        [_flow] => query_ctx.current_catalog().to_string(),
+        [catalog, _flow] => catalog.to_string_unquoted(),
+        _ => {
+            return InvalidSqlSnafu {
+                err_msg: format!(
+                    "expect flow name to be <catalog>.<flow_name> or <flow_name>, actual: {name}",
+                ),
+            }
+            .fail();
+        }
+    };
+
+    let schema = query_ctx.current_schema();
 
     validate_catalog_and_schema(&catalog, &schema, query_ctx)
         .map_err(BoxedError::new)
@@ -1253,6 +1301,28 @@ mod tests {
 
         // test describe table
         let sql = "DESC TABLE {catalog}{schema}demo;";
-        replace_test(sql, plugins, &query_ctx);
+        replace_test(sql, plugins.clone(), &query_ctx);
+
+        let comment_flow_cases = [
+            ("COMMENT ON FLOW my_flow IS 'comment';", true),
+            ("COMMENT ON FLOW greptime.my_flow IS 'comment';", true),
+            ("COMMENT ON FLOW wrongcatalog.my_flow IS 'comment';", false),
+        ];
+        for (sql, is_ok) in comment_flow_cases {
+            let stmt = &parse_stmt(sql, &GreptimeDbDialect {}).unwrap()[0];
+            let result = check_permission(plugins.clone(), stmt, &query_ctx);
+            assert_eq!(result.is_ok(), is_ok);
+        }
+
+        let show_flow_cases = [
+            ("SHOW CREATE FLOW my_flow;", true),
+            ("SHOW CREATE FLOW greptime.my_flow;", true),
+            ("SHOW CREATE FLOW wrongcatalog.my_flow;", false),
+        ];
+        for (sql, is_ok) in show_flow_cases {
+            let stmt = &parse_stmt(sql, &GreptimeDbDialect {}).unwrap()[0];
+            let result = check_permission(plugins.clone(), stmt, &query_ctx);
+            assert_eq!(result.is_ok(), is_ok);
+        }
     }
 }

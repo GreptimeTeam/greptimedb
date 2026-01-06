@@ -24,6 +24,7 @@ use common_base::Plugins;
 use common_config::Configurable;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
+use common_query::Output;
 use common_runtime::runtime::BuilderBuild;
 use common_runtime::{Builder as RuntimeBuilder, Runtime};
 use common_test_util::ports;
@@ -32,6 +33,7 @@ use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, StorageConfig};
 use frontend::instance::Instance;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
+use mito2::gc::GcConfig;
 use object_store::config::{
     AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
 };
@@ -48,6 +50,7 @@ use servers::otel_arrow::OtelArrowServiceHandler;
 use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
+use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::Server;
 use servers::tls::ReloadableTlsServerConfig;
 use session::context::QueryContext;
@@ -145,6 +148,7 @@ fn s3_test_config() -> S3Config {
             secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap().into(),
             bucket: env::var("GT_S3_BUCKET").unwrap(),
             region: Some(env::var("GT_S3_REGION").unwrap()),
+            endpoint: env::var("GT_S3_ENDPOINT_URL").ok(),
             ..Default::default()
         },
         ..Default::default()
@@ -163,7 +167,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
                     scope: env::var("GT_GCS_SCOPE").unwrap(),
                     credential_path: env::var("GT_GCS_CREDENTIAL_PATH").unwrap().into(),
                     credential: env::var("GT_GCS_CREDENTIAL").unwrap().into(),
-                    endpoint: env::var("GT_GCS_ENDPOINT").unwrap(),
+                    endpoint: env::var("GT_GCS_ENDPOINT").unwrap_or_default(),
                 },
                 ..Default::default()
             };
@@ -297,6 +301,7 @@ pub fn create_tmp_dir_and_datanode_opts(
     store_provider_types: Vec<StorageType>,
     name: &str,
     wal_config: DatanodeWalConfig,
+    gc_config: GcConfig,
 ) -> (DatanodeOptions, TestGuard) {
     let home_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
@@ -314,7 +319,13 @@ pub fn create_tmp_dir_and_datanode_opts(
         store_providers.push(store);
         storage_guards.push(StorageGuard(data_tmp_dir))
     }
-    let opts = create_datanode_opts(default_store, store_providers, home_dir, wal_config);
+    let opts = create_datanode_opts(
+        default_store,
+        store_providers,
+        home_dir,
+        wal_config,
+        gc_config,
+    );
 
     (
         opts,
@@ -330,7 +341,18 @@ pub(crate) fn create_datanode_opts(
     providers: Vec<ObjectStoreConfig>,
     home_dir: String,
     wal_config: DatanodeWalConfig,
+    gc_config: GcConfig,
 ) -> DatanodeOptions {
+    let region_engine = DatanodeOptions::default()
+        .region_engine
+        .into_iter()
+        .map(|mut v| {
+            if let datanode::config::RegionEngineConfig::Mito(mito_config) = &mut v {
+                mito_config.gc = gc_config.clone();
+            }
+            v
+        })
+        .collect();
     DatanodeOptions {
         node_id: Some(0),
         require_lease_before_startup: true,
@@ -343,6 +365,7 @@ pub(crate) fn create_datanode_opts(
             .with_bind_addr(PEER_PLACEHOLDER_ADDR)
             .with_server_addr(PEER_PLACEHOLDER_ADDR),
         wal: wal_config,
+        region_engine,
         ..Default::default()
     }
 }
@@ -418,6 +441,23 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
     name: &str,
     user_provider: Option<UserProviderRef>,
 ) -> (Router, TestGuard) {
+    setup_test_http_app_with_frontend_and_custom_options(
+        store_type,
+        name,
+        user_provider,
+        None,
+        None,
+    )
+    .await
+}
+
+pub async fn setup_test_http_app_with_frontend_and_custom_options(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
+    http_opts: Option<HttpOptions>,
+    memory_limiter: Option<ServerMemoryLimiter>,
+) -> (Router, TestGuard) {
     let plugins = Plugins::new();
     if let Some(user_provider) = user_provider.clone() {
         plugins.insert::<UserProviderRef>(user_provider.clone());
@@ -428,14 +468,12 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 
     create_test_table(instance.fe_instance(), "demo").await;
 
-    let http_opts = HttpOptions {
+    let http_opts = http_opts.unwrap_or_else(|| HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
         ..Default::default()
-    };
+    });
 
-    let mut http_server = HttpServerBuilder::new(http_opts);
-
-    http_server = http_server
+    let mut http_server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(
             instance.fe_instance().clone(),
         ))
@@ -448,6 +486,10 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 
     if let Some(user_provider) = user_provider {
         http_server = http_server.with_user_provider(user_provider);
+    }
+
+    if let Some(limiter) = memory_limiter {
+        http_server = http_server.with_memory_limiter(limiter);
     }
 
     let http_server = http_server.build();
@@ -540,7 +582,7 @@ pub async fn setup_grpc_server(
     store_type: StorageType,
     name: &str,
 ) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
-    setup_grpc_server_with(store_type, name, None, None).await
+    setup_grpc_server_with(store_type, name, None, None, None).await
 }
 
 pub async fn setup_grpc_server_with_user_provider(
@@ -548,7 +590,7 @@ pub async fn setup_grpc_server_with_user_provider(
     name: &str,
     user_provider: Option<UserProviderRef>,
 ) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
-    setup_grpc_server_with(store_type, name, user_provider, None).await
+    setup_grpc_server_with(store_type, name, user_provider, None, None).await
 }
 
 pub async fn setup_grpc_server_with(
@@ -556,6 +598,7 @@ pub async fn setup_grpc_server_with(
     name: &str,
     user_provider: Option<UserProviderRef>,
     grpc_config: Option<GrpcServerConfig>,
+    memory_limiter: Option<servers::request_memory_limiter::ServerMemoryLimiter>,
 ) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
     let instance = setup_standalone_instance(name, store_type).await;
 
@@ -577,7 +620,13 @@ pub async fn setup_grpc_server_with(
     let flight_handler = Arc::new(greptime_request_handler.clone());
 
     let grpc_config = grpc_config.unwrap_or_default();
-    let grpc_builder = GrpcServerBuilder::new(grpc_config.clone(), runtime)
+    let mut grpc_builder = GrpcServerBuilder::new(grpc_config.clone(), runtime);
+
+    if let Some(limiter) = memory_limiter {
+        grpc_builder = grpc_builder.with_memory_limiter(limiter);
+    }
+
+    let grpc_builder = grpc_builder
         .database_handler(greptime_request_handler)
         .flight_handler(flight_handler)
         .prometheus_handler(fe_instance_ref.clone(), user_provider.clone())
@@ -725,4 +774,17 @@ pub(crate) async fn prepare_another_catalog_and_schema(instance: &Instance) {
         )
         .await
         .unwrap();
+}
+
+pub async fn execute_sql(instance: &Arc<Instance>, sql: &str) -> Output {
+    SqlQueryHandler::do_query(instance.as_ref(), sql, QueryContext::arc())
+        .await
+        .remove(0)
+        .unwrap()
+}
+
+pub async fn execute_sql_and_expect(instance: &Arc<Instance>, sql: &str, expected: &str) {
+    let output = execute_sql(instance, sql).await;
+    let output = output.data.pretty_print().await;
+    assert_eq!(output, expected.trim());
 }

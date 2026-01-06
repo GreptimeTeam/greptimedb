@@ -84,11 +84,11 @@ Affected Rows: 0
 
 SHOW TABLES;
 
-+---------+
-| Tables  |
-+---------+
-| numbers |
-+---------+
++------------------+
+| Tables_in_public |
++------------------+
+| numbers          |
++------------------+
 
 SHOW VIEWS;
 

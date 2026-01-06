@@ -136,6 +136,14 @@ impl Scanner {
         }
     }
 
+    pub(crate) fn index_ids(&self) -> Vec<crate::sst::file::RegionIndexId> {
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.input().index_ids(),
+            Scanner::Unordered(unordered_scan) => unordered_scan.input().index_ids(),
+            Scanner::Series(series_scan) => series_scan.input().index_ids(),
+        }
+    }
+
     /// Sets the target partitions for the scanner. It can controls the parallelism of the scanner.
     pub(crate) fn set_target_partitions(&mut self, target_partitions: usize) {
         use store_api::region_engine::{PrepareRequest, RegionScanner};
@@ -460,10 +468,7 @@ impl ScanRegion {
                     .with_pre_filter_mode(filter_mode),
             )?;
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
-                // todo: we should add stats to MemtableRange
-                let mut stats = ranges_in_memtable.stats.clone();
-                stats.num_ranges = 1;
-                stats.num_rows = v.num_rows();
+                let stats = v.stats().clone();
                 MemRangeBuilder::new(v, stats)
             }));
         }
@@ -982,6 +987,7 @@ impl ScanInput {
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
         let filter_mode = pre_filter_mode(self.append_mode, self.merge_mode);
+        let decode_pk_values = !self.compaction && self.mapper.has_tags();
         let res = self
             .access_layer
             .read_sst(file.clone())
@@ -995,6 +1001,7 @@ impl ScanInput {
             .flat_format(self.flat_format)
             .compaction(self.compaction)
             .pre_filter_mode(filter_mode)
+            .decode_primary_key_values(decode_pk_values)
             .build_reader_input(reader_metrics)
             .await;
         let (mut file_range_ctx, selection) = match res {
@@ -1184,6 +1191,12 @@ impl ScanInput {
         self.files.len()
     }
 
+    /// Gets the file handle from a row group index.
+    pub(crate) fn file_from_index(&self, index: RowGroupIndex) -> &FileHandle {
+        let file_index = index.index - self.num_memtables();
+        &self.files[file_index]
+    }
+
     pub fn region_metadata(&self) -> &RegionMetadataRef {
         self.mapper.metadata()
     }
@@ -1216,6 +1229,10 @@ impl ScanInput {
     /// Returns SST file ids to scan.
     pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::RegionFileId> {
         self.files.iter().map(|file| file.file_id()).collect()
+    }
+
+    pub(crate) fn index_ids(&self) -> Vec<crate::sst::file::RegionIndexId> {
+        self.files.iter().map(|file| file.index_id()).collect()
     }
 }
 

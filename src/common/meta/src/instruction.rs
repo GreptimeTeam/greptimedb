@@ -339,6 +339,16 @@ pub struct FlushRegions {
     pub error_strategy: FlushErrorStrategy,
 }
 
+impl Display for FlushRegions {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "FlushRegions(region_ids={:?}, strategy={:?}, error_strategy={:?})",
+            self.region_ids, self.strategy, self.error_strategy
+        )
+    }
+}
+
 impl FlushRegions {
     /// Create synchronous single-region flush
     pub fn sync_single(region_id: RegionId) -> Self {
@@ -420,13 +430,18 @@ where
 /// Instruction to get file references for specified regions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GetFileRefs {
-    /// List of region IDs to get file references for.
-    pub region_ids: Vec<RegionId>,
+    /// List of region IDs to get file references from active FileHandles (in-memory).
+    pub query_regions: Vec<RegionId>,
+    /// Mapping from the source region ID (where to read the manifest) to
+    /// the target region IDs (whose file references to look for).
+    /// Key: The region ID of the manifest.
+    /// Value: The list of region IDs to find references for in that manifest.
+    pub related_regions: HashMap<RegionId, Vec<RegionId>>,
 }
 
 impl Display for GetFileRefs {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "GetFileRefs(region_ids={:?})", self.region_ids)
+        write!(f, "GetFileRefs(region_ids={:?})", self.query_regions)
     }
 }
 
@@ -499,6 +514,65 @@ impl Display for GcRegionsReply {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EnterStagingRegion {
+    pub region_id: RegionId,
+    pub partition_expr: String,
+}
+
+impl Display for EnterStagingRegion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "EnterStagingRegion(region_id={}, partition_expr={})",
+            self.region_id, self.partition_expr
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemapManifest {
+    pub region_id: RegionId,
+    /// Regions to remap manifests from.
+    pub input_regions: Vec<RegionId>,
+    /// For each old region, which new regions should receive its files
+    pub region_mapping: HashMap<RegionId, Vec<RegionId>>,
+    /// New partition expressions for the new regions.
+    pub new_partition_exprs: HashMap<RegionId, String>,
+}
+
+impl Display for RemapManifest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RemapManifest(region_id={}, input_regions={:?}, region_mapping={:?}, new_partition_exprs={:?})",
+            self.region_id, self.input_regions, self.region_mapping, self.new_partition_exprs
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApplyStagingManifest {
+    /// The region ID to apply the staging manifest to.
+    pub region_id: RegionId,
+    /// The partition expression of the staging region.
+    pub partition_expr: String,
+    /// The region that stores the staging manifests in its staging blob storage.
+    pub central_region_id: RegionId,
+    /// The relative path to the staging manifest within the central region's staging blob storage.
+    pub manifest_path: String,
+}
+
+impl Display for ApplyStagingManifest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ApplyStagingManifest(region_id={}, partition_expr={}, central_region_id={}, manifest_path={})",
+            self.region_id, self.partition_expr, self.central_region_id, self.manifest_path
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
 pub enum Instruction {
     /// Opens regions.
@@ -524,6 +598,14 @@ pub enum Instruction {
     GetFileRefs(GetFileRefs),
     /// Triggers garbage collection for a region.
     GcRegions(GcRegions),
+    /// Temporary suspend serving reads or writes
+    Suspend,
+    /// Makes regions enter staging state.
+    EnterStagingRegions(Vec<EnterStagingRegion>),
+    /// Remaps manifests for a region.
+    RemapManifest(RemapManifest),
+    /// Applies staging manifests for a region.
+    ApplyStagingManifests(Vec<ApplyStagingManifest>),
 }
 
 impl Instruction {
@@ -577,6 +659,13 @@ impl Instruction {
     pub fn into_gc_regions(self) -> Option<GcRegions> {
         match self {
             Self::GcRegions(gc_regions) => Some(gc_regions),
+            _ => None,
+        }
+    }
+
+    pub fn into_enter_staging_regions(self) -> Option<Vec<EnterStagingRegion>> {
+        match self {
+            Self::EnterStagingRegions(enter_staging) => Some(enter_staging),
             _ => None,
         }
     }
@@ -674,6 +763,70 @@ where
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct EnterStagingRegionReply {
+    pub region_id: RegionId,
+    /// Returns true if the region is under the new region rule.
+    pub ready: bool,
+    /// Indicates whether the region exists.
+    pub exists: bool,
+    /// Return error if any during the operation.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct EnterStagingRegionsReply {
+    pub replies: Vec<EnterStagingRegionReply>,
+}
+
+impl EnterStagingRegionsReply {
+    pub fn new(replies: Vec<EnterStagingRegionReply>) -> Self {
+        Self { replies }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct RemapManifestReply {
+    /// Returns false if the region does not exist.
+    pub exists: bool,
+    /// A map from region IDs to their corresponding remapped manifest paths.
+    pub manifest_paths: HashMap<RegionId, String>,
+    /// Return error if any during the operation.
+    pub error: Option<String>,
+}
+
+impl Display for RemapManifestReply {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RemapManifestReply(manifest_paths={:?}, error={:?})",
+            self.manifest_paths, self.error
+        )
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct ApplyStagingManifestsReply {
+    pub replies: Vec<ApplyStagingManifestReply>,
+}
+
+impl ApplyStagingManifestsReply {
+    pub fn new(replies: Vec<ApplyStagingManifestReply>) -> Self {
+        Self { replies }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct ApplyStagingManifestReply {
+    pub region_id: RegionId,
+    /// Returns true if the region is ready to serve reads and writes.
+    pub ready: bool,
+    /// Indicates whether the region exists.
+    pub exists: bool,
+    /// Return error if any during the operation.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InstructionReply {
     #[serde(alias = "open_region")]
@@ -693,6 +846,9 @@ pub enum InstructionReply {
     FlushRegions(FlushRegionReply),
     GetFileRefs(GetFileRefsReply),
     GcRegions(GcRegionsReply),
+    EnterStagingRegions(EnterStagingRegionsReply),
+    RemapManifest(RemapManifestReply),
+    ApplyStagingManifests(ApplyStagingManifestsReply),
 }
 
 impl Display for InstructionReply {
@@ -709,6 +865,19 @@ impl Display for InstructionReply {
             Self::FlushRegions(reply) => write!(f, "InstructionReply::FlushRegions({})", reply),
             Self::GetFileRefs(reply) => write!(f, "InstructionReply::GetFileRefs({})", reply),
             Self::GcRegions(reply) => write!(f, "InstructionReply::GcRegion({})", reply),
+            Self::EnterStagingRegions(reply) => {
+                write!(
+                    f,
+                    "InstructionReply::EnterStagingRegions({:?})",
+                    reply.replies
+                )
+            }
+            Self::RemapManifest(reply) => write!(f, "InstructionReply::RemapManifest({})", reply),
+            Self::ApplyStagingManifests(reply) => write!(
+                f,
+                "InstructionReply::ApplyStagingManifests({:?})",
+                reply.replies
+            ),
         }
     }
 }
@@ -749,13 +918,34 @@ impl InstructionReply {
             _ => panic!("Expected FlushRegions reply"),
         }
     }
+
+    pub fn expect_enter_staging_regions_reply(self) -> Vec<EnterStagingRegionReply> {
+        match self {
+            Self::EnterStagingRegions(reply) => reply.replies,
+            _ => panic!("Expected EnterStagingRegion reply"),
+        }
+    }
+
+    pub fn expect_remap_manifest_reply(self) -> RemapManifestReply {
+        match self {
+            Self::RemapManifest(reply) => reply,
+            _ => panic!("Expected RemapManifest reply"),
+        }
+    }
+
+    pub fn expect_apply_staging_manifests_reply(self) -> Vec<ApplyStagingManifestReply> {
+        match self {
+            Self::ApplyStagingManifests(reply) => reply.replies,
+            _ => panic!("Expected ApplyStagingManifest reply"),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
-    use store_api::storage::FileId;
+    use store_api::storage::{FileId, FileRef};
 
     use super::*;
 
@@ -1130,12 +1320,14 @@ mod tests {
         let mut manifest = FileRefsManifest::default();
         let r0 = RegionId::new(1024, 1);
         let r1 = RegionId::new(1024, 2);
-        manifest
-            .file_refs
-            .insert(r0, HashSet::from([FileId::random()]));
-        manifest
-            .file_refs
-            .insert(r1, HashSet::from([FileId::random()]));
+        manifest.file_refs.insert(
+            r0,
+            HashSet::from([FileRef::new(r0, FileId::random(), None)]),
+        );
+        manifest.file_refs.insert(
+            r1,
+            HashSet::from([FileRef::new(r1, FileId::random(), None)]),
+        );
         manifest.manifest_version.insert(r0, 10);
         manifest.manifest_version.insert(r1, 20);
 

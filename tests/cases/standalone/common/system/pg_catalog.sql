@@ -5,7 +5,7 @@ create database pg_catalog;
 -- SQLNESS PROTOCOL POSTGRES
 SELECT session_user is not null;
 
--- SQLNESS REPLACE (\d+(?:\.\d+)*)-greptimedb-(\d+(?:\.\d+)*(?:-[a-zA-Z0-9-.]+)?) PG_VERSION-greptimedb-VERSION
+-- SQLNESS REPLACE PostgreSQL.* VERSION
 -- current_schema
 -- SQLNESS PROTOCOL POSTGRES
 select current_schema(), current_schemas(true), current_schemas(false), version(), current_database();
@@ -133,6 +133,64 @@ where relnamespace in (
 );
 
 -- SQLNESS PROTOCOL POSTGRES
+SELECT
+    CASE WHEN
+            quote_ident(table_schema) IN (
+            SELECT
+            CASE WHEN trim(s[i]) = '"$user"' THEN user ELSE trim(s[i]) END
+            FROM
+            generate_series(
+                array_lower(string_to_array(current_setting('search_path'),','),1),
+                array_upper(string_to_array(current_setting('search_path'),','),1)
+            ) as i,
+            string_to_array(current_setting('search_path'),',') s
+            )
+        THEN quote_ident(table_name)
+        ELSE quote_ident(table_schema) || '.' || quote_ident(table_name)
+    END AS "table"
+    FROM information_schema.tables
+    WHERE quote_ident(table_schema) NOT IN ('information_schema',
+                                'pg_catalog',
+                                '_timescaledb_cache',
+                                '_timescaledb_catalog',
+                                '_timescaledb_internal',
+                                '_timescaledb_config',
+                                'timescaledb_information',
+                                'timescaledb_experimental')
+    ORDER BY CASE WHEN
+            quote_ident(table_schema) IN (
+            SELECT
+            CASE WHEN trim(s[i]) = '"$user"' THEN user ELSE trim(s[i]) END
+            FROM
+            generate_series(
+                array_lower(string_to_array(current_setting('search_path'),','),1),
+                array_upper(string_to_array(current_setting('search_path'),','),1)
+            ) as i,
+            string_to_array(current_setting('search_path'),',') s
+            ) THEN 0 ELSE 1 END, 1;
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT quote_ident(column_name) AS "column", data_type AS "type"
+    FROM information_schema.columns
+    WHERE
+        CASE WHEN array_length(parse_ident('my_db.foo'),1) = 2
+        THEN quote_ident(table_schema) = (parse_ident('my_db.foo'))[1]
+            AND quote_ident(table_name) = (parse_ident('my_db.foo'))[2]
+        ELSE quote_ident(table_name) = 'my_db.foo'
+            AND
+            quote_ident(table_schema) IN (
+            SELECT
+            CASE WHEN trim(s[i]) = '"$user"' THEN user ELSE trim(s[i]) END
+            FROM
+            generate_series(
+                array_lower(string_to_array(current_setting('search_path'),','),1),
+                array_upper(string_to_array(current_setting('search_path'),','),1)
+            ) as i,
+            string_to_array(current_setting('search_path'),',') s
+            )
+        END;
+
+-- SQLNESS PROTOCOL POSTGRES
 -- SQLNESS REPLACE (\d+\s*) OID
 select relnamespace, relname, relkind
 from pg_catalog.pg_class
@@ -166,3 +224,37 @@ drop table my_db.foo;
 
 -- SQLNESS PROTOCOL POSTGRES
 use public;
+
+-- PostgreSQL description functions - placeholder returning NULL for compatibility
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT obj_description((SELECT oid FROM pg_class LIMIT 1), 'pg_class') IS NULL AS is_null;
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT obj_description((SELECT oid FROM pg_class LIMIT 1)) IS NULL AS is_null;
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT col_description((SELECT oid FROM pg_class LIMIT 1), 1) IS NULL AS is_null;
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT shobj_description(1, 'pg_database') IS NULL AS is_null;
+
+-- pg_my_temp_schema returns 0 (no temp schema support)
+-- SQLNESS PROTOCOL POSTGRES
+SELECT pg_my_temp_schema();
+
+-- Issue 7313
+-- SQLNESS PROTOCOL POSTGRES
+-- SQLNESS REPLACE (\d+\s*) OID
+SELECT
+	oid
+	,nspname
+	,nspname = ANY (current_schemas(true)) AS is_on_search_path
+
+	    ,obj_description(oid, 'pg_namespace') AS comment
+
+FROM pg_namespace; SELECT
+oid
+,nspname
+FROM pg_namespace
+WHERE oid = pg_my_temp_schema();

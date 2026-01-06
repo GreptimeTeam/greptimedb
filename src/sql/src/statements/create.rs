@@ -14,24 +14,30 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 
 use common_catalog::consts::FILE_ENGINE;
+use datatypes::data_type::ConcreteDataType;
 use datatypes::json::JsonStructureSettings;
-use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
+use datatypes::schema::{
+    FulltextOptions, SkippingIndexOptions, VectorDistanceMetric, VectorIndexEngineType,
+    VectorIndexOptions,
+};
+use datatypes::types::StructType;
 use itertools::Itertools;
 use serde::Serialize;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use sqlparser::ast::{ColumnOptionDef, DataType, Expr, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
 use crate::error::{
-    InvalidFlowQuerySnafu, InvalidSqlSnafu, Result, SetFulltextOptionSnafu,
-    SetSkippingIndexOptionSnafu,
+    InvalidFlowQuerySnafu, InvalidJsonStructureSettingSnafu, InvalidSqlSnafu, Result,
+    SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
 };
-use crate::statements::OptionMap;
 use crate::statements::statement::Statement;
 use crate::statements::tql::Tql;
+use crate::statements::{OptionMap, sql_data_type_to_concrete_data_type};
 use crate::util::OptionValue;
 
 const LINE_SEP: &str = ",\n";
@@ -41,6 +47,7 @@ pub const VECTOR_OPT_DIM: &str = "dim";
 
 pub const JSON_OPT_UNSTRUCTURED_KEYS: &str = "unstructured_keys";
 pub const JSON_OPT_FORMAT: &str = "format";
+pub(crate) const JSON_OPT_FIELDS: &str = "fields";
 pub const JSON_FORMAT_FULL_STRUCTURED: &str = "structured";
 pub const JSON_FORMAT_RAW: &str = "raw";
 pub const JSON_FORMAT_PARTIAL: &str = "partial";
@@ -133,6 +140,8 @@ pub struct ColumnExtensions {
     ///
     /// Inverted index doesn't have options at present. There won't be any options in that map.
     pub inverted_index_options: Option<OptionMap>,
+    /// Vector index options for HNSW-based vector similarity search.
+    pub vector_index_options: Option<OptionMap>,
     pub json_datatype_options: Option<OptionMap>,
 }
 
@@ -208,6 +217,15 @@ impl Display for Column {
                 write!(f, " INVERTED INDEX")?;
             }
         }
+
+        if let Some(vector_index_options) = &self.extensions.vector_index_options {
+            if !vector_index_options.is_empty() {
+                let options = vector_index_options.kv_pairs();
+                write!(f, " VECTOR INDEX WITH({})", format_list_comma!(options))?;
+            } else {
+                write!(f, " VECTOR INDEX")?;
+            }
+        }
         Ok(())
     }
 }
@@ -233,6 +251,89 @@ impl ColumnExtensions {
         ))
     }
 
+    pub fn build_vector_index_options(&self) -> Result<Option<VectorIndexOptions>> {
+        let Some(options) = self.vector_index_options.as_ref() else {
+            return Ok(None);
+        };
+
+        let options_map: HashMap<String, String> = options.clone().into_map();
+        let mut result = VectorIndexOptions::default();
+
+        if let Some(s) = options_map.get("engine") {
+            result.engine = s.parse::<VectorIndexEngineType>().map_err(|e| {
+                InvalidSqlSnafu {
+                    msg: format!("invalid VECTOR INDEX engine: {e}"),
+                }
+                .build()
+            })?;
+        }
+
+        if let Some(s) = options_map.get("metric") {
+            result.metric = s.parse::<VectorDistanceMetric>().map_err(|e| {
+                InvalidSqlSnafu {
+                    msg: format!("invalid VECTOR INDEX metric: {e}"),
+                }
+                .build()
+            })?;
+        }
+
+        if let Some(s) = options_map.get("connectivity") {
+            let value = s.parse::<u32>().map_err(|_| {
+                InvalidSqlSnafu {
+                    msg: format!(
+                        "invalid VECTOR INDEX connectivity: {s}, expected positive integer"
+                    ),
+                }
+                .build()
+            })?;
+            if !(2..=2048).contains(&value) {
+                return InvalidSqlSnafu {
+                    msg: "VECTOR INDEX connectivity must be in the range [2, 2048].".to_string(),
+                }
+                .fail();
+            }
+            result.connectivity = value;
+        }
+
+        if let Some(s) = options_map.get("expansion_add") {
+            let value = s.parse::<u32>().map_err(|_| {
+                InvalidSqlSnafu {
+                    msg: format!(
+                        "invalid VECTOR INDEX expansion_add: {s}, expected positive integer"
+                    ),
+                }
+                .build()
+            })?;
+            if value == 0 {
+                return InvalidSqlSnafu {
+                    msg: "VECTOR INDEX expansion_add must be greater than 0".to_string(),
+                }
+                .fail();
+            }
+            result.expansion_add = value;
+        }
+
+        if let Some(s) = options_map.get("expansion_search") {
+            let value = s.parse::<u32>().map_err(|_| {
+                InvalidSqlSnafu {
+                    msg: format!(
+                        "invalid VECTOR INDEX expansion_search: {s}, expected positive integer"
+                    ),
+                }
+                .build()
+            })?;
+            if value == 0 {
+                return InvalidSqlSnafu {
+                    msg: "VECTOR INDEX expansion_search must be greater than 0".to_string(),
+                }
+                .fail();
+            }
+            result.expansion_search = value;
+        }
+
+        Ok(Some(result))
+    }
+
     pub fn build_json_structure_settings(&self) -> Result<Option<JsonStructureSettings>> {
         let Some(options) = self.json_datatype_options.as_ref() else {
             return Ok(None);
@@ -249,14 +350,51 @@ impl ColumnExtensions {
             })
             .unwrap_or_default();
 
+        let fields = if let Some(value) = options.value(JSON_OPT_FIELDS) {
+            let fields = value
+                .as_struct_fields()
+                .context(InvalidJsonStructureSettingSnafu {
+                    reason: format!(r#"expect "{JSON_OPT_FIELDS}" a struct, actual: "{value}""#,),
+                })?;
+            let fields = fields
+                .iter()
+                .map(|field| {
+                    let name = field.field_name.as_ref().map(|x| x.value.clone()).context(
+                        InvalidJsonStructureSettingSnafu {
+                            reason: format!(r#"missing field name in "{field}""#),
+                        },
+                    )?;
+                    let datatype = sql_data_type_to_concrete_data_type(
+                        &field.field_type,
+                        &Default::default(),
+                    )?;
+                    Ok(datatypes::types::StructField::new(name, datatype, true))
+                })
+                .collect::<Result<_>>()?;
+            Some(StructType::new(Arc::new(fields)))
+        } else {
+            None
+        };
+
         options
             .get(JSON_OPT_FORMAT)
             .map(|format| match format {
-                JSON_FORMAT_FULL_STRUCTURED => Ok(JsonStructureSettings::Structured(None)),
-                JSON_FORMAT_PARTIAL => Ok(JsonStructureSettings::PartialUnstructuredByKey {
-                    fields: None,
-                    unstructured_keys,
-                }),
+                JSON_FORMAT_FULL_STRUCTURED => Ok(JsonStructureSettings::Structured(fields)),
+                JSON_FORMAT_PARTIAL => {
+                    let fields = fields.map(|fields| {
+                        let mut fields = Arc::unwrap_or_clone(fields.fields());
+                        fields.push(datatypes::types::StructField::new(
+                            JsonStructureSettings::RAW_FIELD.to_string(),
+                            ConcreteDataType::string_datatype(),
+                            true,
+                        ));
+                        StructType::new(Arc::new(fields))
+                    });
+                    Ok(JsonStructureSettings::PartialUnstructuredByKey {
+                        fields,
+                        unstructured_keys,
+                    })
+                }
                 JSON_FORMAT_RAW => Ok(JsonStructureSettings::UnstructuredRaw),
                 _ => InvalidSqlSnafu {
                     msg: format!("unknown JSON datatype 'format': {format}"),
@@ -892,5 +1030,93 @@ AS SELECT number FROM numbers_input where number > 10"#,
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_vector_index_options_validation() {
+        use super::{ColumnExtensions, OptionMap};
+
+        // Test zero connectivity should fail
+        let extensions = ColumnExtensions {
+            fulltext_index_options: None,
+            vector_options: None,
+            skipping_index_options: None,
+            inverted_index_options: None,
+            json_datatype_options: None,
+            vector_index_options: Some(OptionMap::from([(
+                "connectivity".to_string(),
+                "0".to_string(),
+            )])),
+        };
+        let result = extensions.build_vector_index_options();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("connectivity must be in the range [2, 2048]")
+        );
+
+        // Test zero expansion_add should fail
+        let extensions = ColumnExtensions {
+            fulltext_index_options: None,
+            vector_options: None,
+            skipping_index_options: None,
+            inverted_index_options: None,
+            json_datatype_options: None,
+            vector_index_options: Some(OptionMap::from([(
+                "expansion_add".to_string(),
+                "0".to_string(),
+            )])),
+        };
+        let result = extensions.build_vector_index_options();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expansion_add must be greater than 0")
+        );
+
+        // Test zero expansion_search should fail
+        let extensions = ColumnExtensions {
+            fulltext_index_options: None,
+            vector_options: None,
+            skipping_index_options: None,
+            inverted_index_options: None,
+            json_datatype_options: None,
+            vector_index_options: Some(OptionMap::from([(
+                "expansion_search".to_string(),
+                "0".to_string(),
+            )])),
+        };
+        let result = extensions.build_vector_index_options();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expansion_search must be greater than 0")
+        );
+
+        // Test valid values should succeed
+        let extensions = ColumnExtensions {
+            fulltext_index_options: None,
+            vector_options: None,
+            skipping_index_options: None,
+            inverted_index_options: None,
+            json_datatype_options: None,
+            vector_index_options: Some(OptionMap::from([
+                ("connectivity".to_string(), "32".to_string()),
+                ("expansion_add".to_string(), "200".to_string()),
+                ("expansion_search".to_string(), "100".to_string()),
+            ])),
+        };
+        let result = extensions.build_vector_index_options();
+        assert!(result.is_ok());
+        let options = result.unwrap().unwrap();
+        assert_eq!(options.connectivity, 32);
+        assert_eq!(options.expansion_add, 200);
+        assert_eq!(options.expansion_search, 100);
     }
 }

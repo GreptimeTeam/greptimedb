@@ -122,9 +122,9 @@ pub struct StructField {
 }
 
 impl StructField {
-    pub fn new(name: String, data_type: ConcreteDataType, nullable: bool) -> Self {
+    pub fn new<T: Into<String>>(name: T, data_type: ConcreteDataType, nullable: bool) -> Self {
         StructField {
-            name,
+            name: name.into(),
             data_type,
             nullable,
             metadata: BTreeMap::new(),
@@ -151,6 +151,7 @@ impl StructField {
         self.metadata.insert(key.to_string(), value.to_string());
     }
 
+    #[expect(unused)]
     pub(crate) fn metadata(&self, key: &str) -> Option<&str> {
         self.metadata.get(key).map(String::as_str)
     }

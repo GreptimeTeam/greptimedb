@@ -22,21 +22,18 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, AsArray};
 use arrow::datatypes::{
-    Date32Type, Date64Type, Decimal128Type, DurationMicrosecondType, DurationMillisecondType,
-    DurationNanosecondType, DurationSecondType, Float32Type, Float64Type, Int8Type, Int16Type,
+    Date32Type, Date64Type, Decimal128Type, Float32Type, Float64Type, Int8Type, Int16Type,
     Int32Type, Int64Type, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType,
     Time32MillisecondType, Time32SecondType, Time64MicrosecondType, Time64NanosecondType,
     TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
 use arrow_schema::{DataType, IntervalUnit, TimeUnit};
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
 use common_decimal::Decimal128;
 use common_recordbatch::RecordBatch;
 use common_time::time::Time;
-use common_time::{
-    Date, Duration, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp,
-};
+use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
@@ -398,13 +395,13 @@ impl Iterator for RecordBatchRowIterator {
     type Item = PgWireResult<DataRow>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let mut encoder = DataRowEncoder::new(self.pg_schema.clone());
         if self.i < self.record_batch.num_rows() {
-            let mut encoder = DataRowEncoder::new(self.pg_schema.clone());
             if let Err(e) = self.encode_row(self.i, &mut encoder) {
                 return Some(Err(e));
             }
             self.i += 1;
-            Some(encoder.finish())
+            Some(Ok(encoder.take_row()))
         } else {
             None
         }
@@ -567,26 +564,8 @@ impl RecordBatchRowIterator {
                     });
                     encoder.encode_field(&date)?;
                 }
-                DataType::Timestamp(time_unit, _) => {
-                    let v = match time_unit {
-                        TimeUnit::Second => {
-                            let array = column.as_primitive::<TimestampSecondType>();
-                            array.value(i)
-                        }
-                        TimeUnit::Millisecond => {
-                            let array = column.as_primitive::<TimestampMillisecondType>();
-                            array.value(i)
-                        }
-                        TimeUnit::Microsecond => {
-                            let array = column.as_primitive::<TimestampMicrosecondType>();
-                            array.value(i)
-                        }
-                        TimeUnit::Nanosecond => {
-                            let array = column.as_primitive::<TimestampNanosecondType>();
-                            array.value(i)
-                        }
-                    };
-                    let v = Timestamp::new(v, time_unit.into());
+                DataType::Timestamp(_, _) => {
+                    let v = datatypes::arrow_array::timestamp_array_value(column, i);
                     let datetime = v
                         .to_chrono_datetime_with_timezone(Some(&self.query_ctx.timezone()))
                         .map(|v| {
@@ -613,26 +592,8 @@ impl RecordBatchRowIterator {
                         encoder.encode_field(&PgInterval::from(v))?;
                     }
                 },
-                DataType::Duration(time_unit) => {
-                    let v = match time_unit {
-                        TimeUnit::Second => {
-                            let array = column.as_primitive::<DurationSecondType>();
-                            array.value(i)
-                        }
-                        TimeUnit::Millisecond => {
-                            let array = column.as_primitive::<DurationMillisecondType>();
-                            array.value(i)
-                        }
-                        TimeUnit::Microsecond => {
-                            let array = column.as_primitive::<DurationMicrosecondType>();
-                            array.value(i)
-                        }
-                        TimeUnit::Nanosecond => {
-                            let array = column.as_primitive::<DurationNanosecondType>();
-                            array.value(i)
-                        }
-                    };
-                    let d = Duration::new(v, time_unit.into());
+                DataType::Duration(_) => {
+                    let d = datatypes::arrow_array::duration_array_value(column, i);
                     match PgInterval::try_from(d) {
                         Ok(i) => encoder.encode_field(&i)?,
                         Err(e) => {
@@ -650,25 +611,8 @@ impl RecordBatchRowIterator {
                 DataType::Struct(_) => {
                     encode_struct(&self.query_ctx, Default::default(), encoder)?;
                 }
-                DataType::Time32(time_unit) | DataType::Time64(time_unit) => {
-                    let v = match time_unit {
-                        TimeUnit::Second => {
-                            let array = column.as_primitive::<Time32SecondType>();
-                            Time::new_second(array.value(i) as i64)
-                        }
-                        TimeUnit::Millisecond => {
-                            let array = column.as_primitive::<Time32MillisecondType>();
-                            Time::new_millisecond(array.value(i) as i64)
-                        }
-                        TimeUnit::Microsecond => {
-                            let array = column.as_primitive::<Time64MicrosecondType>();
-                            Time::new_microsecond(array.value(i))
-                        }
-                        TimeUnit::Nanosecond => {
-                            let array = column.as_primitive::<Time64NanosecondType>();
-                            Time::new_nanosecond(array.value(i))
-                        }
-                    };
+                DataType::Time32(_) | DataType::Time64(_) => {
+                    let v = datatypes::arrow_array::time_array_value(column, i);
                     encoder.encode_field(&v.to_chrono_time())?;
                 }
                 DataType::Decimal128(precision, scale) => {
@@ -773,7 +717,7 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
         &Type::INT4 => Ok(ConcreteDataType::int32_datatype()),
         &Type::INT8 => Ok(ConcreteDataType::int64_datatype()),
         &Type::VARCHAR | &Type::TEXT => Ok(ConcreteDataType::string_datatype()),
-        &Type::TIMESTAMP => Ok(ConcreteDataType::timestamp_datatype(
+        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Ok(ConcreteDataType::timestamp_datatype(
             common_time::timestamp::TimeUnit::Millisecond,
         )),
         &Type::DATE => Ok(ConcreteDataType::date_datatype()),
@@ -805,7 +749,13 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
 pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWireResult<String> {
     // the index is managed from portal's parameters count so it's safe to
     // unwrap here.
-    let param_type = portal.statement.parameter_types.get(idx).unwrap();
+    let param_type = portal
+        .statement
+        .parameter_types
+        .get(idx)
+        .unwrap()
+        .as_ref()
+        .unwrap_or(&Type::UNKNOWN);
     match param_type {
         &Type::VARCHAR | &Type::TEXT => Ok(format!(
             "'{}'",
@@ -884,7 +834,7 @@ pub(super) fn parameters_to_scalar_values(
     let mut results = Vec::with_capacity(param_count);
 
     let client_param_types = &portal.statement.parameter_types;
-    let param_types = plan
+    let server_param_types = plan
         .get_parameter_types()
         .context(DataFusionSnafu)
         .map_err(convert_err)?
@@ -893,11 +843,11 @@ pub(super) fn parameters_to_scalar_values(
         .collect::<HashMap<_, _>>();
 
     for idx in 0..param_count {
-        let server_type = param_types
+        let server_type = server_param_types
             .get(&format!("${}", idx + 1))
             .and_then(|t| t.as_ref());
 
-        let client_type = if let Some(client_given_type) = client_param_types.get(idx) {
+        let client_type = if let Some(Some(client_given_type)) = client_param_types.get(idx) {
             client_given_type.clone()
         } else if let Some(server_provided_type) = &server_type {
             type_gt_to_pg(server_provided_type).map_err(convert_err)?
@@ -1100,7 +1050,7 @@ pub(super) fn parameters_to_scalar_values(
                                 None,
                             ),
                             TimestampType::Nanosecond(_) => ScalarValue::TimestampNanosecond(
-                                data.map(|ts| ts.and_utc().timestamp_micros()),
+                                data.and_then(|ts| ts.and_utc().timestamp_nanos_opt()),
                                 None,
                             ),
                         },
@@ -1116,6 +1066,38 @@ pub(super) fn parameters_to_scalar_values(
                         data.map(|ts| ts.and_utc().timestamp_millis()),
                         None,
                     )
+                }
+            }
+            &Type::TIMESTAMPTZ => {
+                let data = portal.parameter::<DateTime<FixedOffset>>(idx, &client_type)?;
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::Timestamp(unit) => match *unit {
+                            TimestampType::Second(_) => {
+                                ScalarValue::TimestampSecond(data.map(|ts| ts.timestamp()), None)
+                            }
+                            TimestampType::Millisecond(_) => ScalarValue::TimestampMillisecond(
+                                data.map(|ts| ts.timestamp_millis()),
+                                None,
+                            ),
+                            TimestampType::Microsecond(_) => ScalarValue::TimestampMicrosecond(
+                                data.map(|ts| ts.timestamp_micros()),
+                                None,
+                            ),
+                            TimestampType::Nanosecond(_) => ScalarValue::TimestampNanosecond(
+                                data.and_then(|ts| ts.timestamp_nanos_opt()),
+                                None,
+                            ),
+                        },
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ));
+                        }
+                    }
+                } else {
+                    ScalarValue::TimestampMillisecond(data.map(|ts| ts.timestamp_millis()), None)
                 }
             }
             &Type::DATE => {
@@ -1274,6 +1256,204 @@ pub(super) fn parameters_to_scalar_values(
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
                     ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Utf8, true))
+                } else {
+                    ScalarValue::Null
+                }
+            }
+            &Type::TIMESTAMP_ARRAY => {
+                let data = portal.parameter::<Vec<NaiveDateTime>>(idx, &client_type)?;
+                if let Some(data) = data {
+                    if let Some(ConcreteDataType::List(list_type)) = &server_type {
+                        match list_type.item_type() {
+                            ConcreteDataType::Timestamp(unit) => match *unit {
+                                TimestampType::Second(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .map(|ts| {
+                                            ScalarValue::TimestampSecond(
+                                                Some(ts.and_utc().timestamp()),
+                                                None,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Second, None),
+                                        true,
+                                    ))
+                                }
+                                TimestampType::Millisecond(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .map(|ts| {
+                                            ScalarValue::TimestampMillisecond(
+                                                Some(ts.and_utc().timestamp_millis()),
+                                                None,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                                        true,
+                                    ))
+                                }
+                                TimestampType::Microsecond(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .map(|ts| {
+                                            ScalarValue::TimestampMicrosecond(
+                                                Some(ts.and_utc().timestamp_micros()),
+                                                None,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
+                                        true,
+                                    ))
+                                }
+                                TimestampType::Nanosecond(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .filter_map(|ts| {
+                                            ts.and_utc().timestamp_nanos_opt().map(|nanos| {
+                                                ScalarValue::TimestampNanosecond(Some(nanos), None)
+                                            })
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
+                                        true,
+                                    ))
+                                }
+                            },
+                            _ => {
+                                return Err(invalid_parameter_error(
+                                    "invalid_parameter_type",
+                                    Some(format!(
+                                        "Expected: {}, found: {}",
+                                        list_type.item_type(),
+                                        client_type
+                                    )),
+                                ));
+                            }
+                        }
+                    } else {
+                        // Default to millisecond when no server type is specified
+                        let values = data
+                            .into_iter()
+                            .map(|ts| {
+                                ScalarValue::TimestampMillisecond(
+                                    Some(ts.and_utc().timestamp_millis()),
+                                    None,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        ScalarValue::List(ScalarValue::new_list(
+                            &values,
+                            &ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                            true,
+                        ))
+                    }
+                } else {
+                    ScalarValue::Null
+                }
+            }
+            &Type::TIMESTAMPTZ_ARRAY => {
+                let data = portal.parameter::<Vec<DateTime<FixedOffset>>>(idx, &client_type)?;
+                if let Some(data) = data {
+                    if let Some(ConcreteDataType::List(list_type)) = &server_type {
+                        match list_type.item_type() {
+                            ConcreteDataType::Timestamp(unit) => match *unit {
+                                TimestampType::Second(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .map(|ts| {
+                                            ScalarValue::TimestampSecond(Some(ts.timestamp()), None)
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Second, None),
+                                        true,
+                                    ))
+                                }
+                                TimestampType::Millisecond(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .map(|ts| {
+                                            ScalarValue::TimestampMillisecond(
+                                                Some(ts.timestamp_millis()),
+                                                None,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                                        true,
+                                    ))
+                                }
+                                TimestampType::Microsecond(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .map(|ts| {
+                                            ScalarValue::TimestampMicrosecond(
+                                                Some(ts.timestamp_micros()),
+                                                None,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
+                                        true,
+                                    ))
+                                }
+                                TimestampType::Nanosecond(_) => {
+                                    let values = data
+                                        .into_iter()
+                                        .filter_map(|ts| {
+                                            ts.timestamp_nanos_opt().map(|nanos| {
+                                                ScalarValue::TimestampNanosecond(Some(nanos), None)
+                                            })
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
+                                        true,
+                                    ))
+                                }
+                            },
+                            _ => {
+                                return Err(invalid_parameter_error(
+                                    "invalid_parameter_type",
+                                    Some(format!(
+                                        "Expected: {}, found: {}",
+                                        list_type.item_type(),
+                                        client_type
+                                    )),
+                                ));
+                            }
+                        }
+                    } else {
+                        // Default to millisecond when no server type is specified
+                        let values = data
+                            .into_iter()
+                            .map(|ts| {
+                                ScalarValue::TimestampMillisecond(Some(ts.timestamp_millis()), None)
+                            })
+                            .collect::<Vec<_>>();
+                        ScalarValue::List(ScalarValue::new_list(
+                            &values,
+                            &ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                            true,
+                        ))
+                    }
                 } else {
                     ScalarValue::Null
                 }

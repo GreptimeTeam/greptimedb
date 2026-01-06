@@ -40,7 +40,7 @@ impl InstructionHandler for GetFileRefsHandler {
             }));
         };
         match mito_engine
-            .get_snapshot_of_unmanifested_refs(get_file_refs.region_ids)
+            .get_snapshot_of_file_refs(get_file_refs.query_regions, get_file_refs.related_regions)
             .await
         {
             Ok(all_file_refs) => {

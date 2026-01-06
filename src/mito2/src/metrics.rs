@@ -157,6 +157,35 @@ lazy_static! {
             "greptime_mito_inflight_compaction_count",
             "inflight compaction count",
         ).unwrap();
+
+    /// Bytes reserved by compaction memory manager.
+    pub static ref COMPACTION_MEMORY_IN_USE: IntGauge =
+        register_int_gauge!(
+            "greptime_mito_compaction_memory_in_use_bytes",
+            "bytes currently reserved for compaction tasks",
+        )
+        .unwrap();
+    /// Configured compaction memory limit.
+    pub static ref COMPACTION_MEMORY_LIMIT: IntGauge =
+        register_int_gauge!(
+            "greptime_mito_compaction_memory_limit_bytes",
+            "maximum bytes allowed for compaction tasks",
+        )
+        .unwrap();
+    /// Wait time to obtain compaction memory.
+    pub static ref COMPACTION_MEMORY_WAIT: Histogram = register_histogram!(
+        "greptime_mito_compaction_memory_wait_seconds",
+        "time waiting for compaction memory",
+        // 0.01s ~ ~10s
+        exponential_buckets(0.01, 2.0, 10).unwrap(),
+    ).unwrap();
+    /// Counter of rejected compaction memory allocations.
+    pub static ref COMPACTION_MEMORY_REJECTED: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_mito_compaction_memory_rejected_total",
+            "number of compaction tasks rejected due to memory limit",
+            &[TYPE_LABEL]
+        ).unwrap();
 }
 
 // Query metrics.
@@ -478,6 +507,20 @@ lazy_static! {
         register_int_gauge!(
             "greptime_mito_gc_delete_file_count",
             "mito gc deleted file count",
+        ).unwrap();
+
+    /// Counter for the number of unparsable files skipped by GC.
+    pub static ref GC_SKIPPED_UNPARSABLE_FILES: IntCounter =
+        register_int_counter!(
+            "greptime_mito_gc_skipped_unparsable_files",
+            "mito gc skipped unparsable files count",
+        ).unwrap();
+
+    /// Counter for the number of orphaned index files found by GC.
+    pub static ref GC_ORPHANED_INDEX_FILES: IntCounter =
+        register_int_counter!(
+            "greptime_mito_gc_orphaned_index_files",
+            "mito gc orphaned index files count",
         ).unwrap();
 
     /// Total number of files downloaded during cache fill on region open.

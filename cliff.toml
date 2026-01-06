@@ -17,7 +17,7 @@ Release date: {{ timestamp | date(format="%B %d, %Y") }}
 {%- set breakings = commits | filter(attribute="breaking", value=true) -%}
 {%- if breakings | length > 0 %}
 
-## Breaking changes
+### Breaking changes
     {% for commit in breakings %}
       * {{ commit.github.pr_title }}\
         {% if commit.github.username %} by \

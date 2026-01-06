@@ -19,6 +19,7 @@ use common_datasource::compression::CompressionType;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_memory_manager;
 use common_runtime::JoinError;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
@@ -98,6 +99,15 @@ pub enum Error {
 
     #[snafu(display("Failed to serialize column metadata"))]
     SerializeColumnMetadata {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to serialize manifest, region_id: {}", region_id))]
+    SerializeManifest {
+        region_id: RegionId,
         #[snafu(source)]
         error: serde_json::Error,
         #[snafu(implicit)]
@@ -232,6 +242,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Manifest missing for region {}", region_id))]
+    MissingManifest {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("File consistency check failed for file {}: {}", file_id, reason))]
     InconsistentFile {
         file_id: FileId,
@@ -252,6 +269,13 @@ pub enum Error {
     NoOldManifests {
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Failed to fetch manifests"))]
+    FetchManifests {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
     },
 
     #[snafu(display("Partition expression missing for region {}", region_id))]
@@ -1015,8 +1039,34 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "vector_index")]
+    #[snafu(display("Failed to build vector index: {}", reason))]
+    VectorIndexBuild {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "vector_index")]
+    #[snafu(display("Failed to finish vector index: {}", reason))]
+    VectorIndexFinish {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
+
+    #[snafu(display("Compaction memory exhausted for region {region_id} (policy: {policy})",))]
+    CompactionMemoryExhausted {
+        region_id: RegionId,
+        policy: String,
+        #[snafu(source)]
+        source: common_memory_manager::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display(
         "Incompatible WAL provider change. This is typically caused by changing WAL provider in database config file without completely cleaning existing files. Global provider: {}, region provider: {}",
@@ -1127,6 +1177,30 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Staging partition expr mismatch, manifest: {:?}, request: {}",
+        manifest_expr,
+        request_expr
+    ))]
+    StagingPartitionExprMismatch {
+        manifest_expr: Option<String>,
+        request_expr: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Invalid source and target region, source: {}, target: {}",
+        source_region_id,
+        target_region_id
+    ))]
+    InvalidSourceAndTargetRegion {
+        source_region_id: RegionId,
+        target_region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1172,7 +1246,9 @@ impl ErrorExt for Error {
             | FilesLost { .. }
             | InstallManifestTo { .. }
             | Unexpected { .. }
-            | SerializeColumnMetadata { .. } => StatusCode::Unexpected,
+            | SerializeColumnMetadata { .. }
+            | SerializeManifest { .. }
+            | StagingPartitionExprMismatch { .. } => StatusCode::Unexpected,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
@@ -1190,9 +1266,11 @@ impl ErrorExt for Error {
             | DurationOutOfRange { .. }
             | MissingOldManifest { .. }
             | MissingNewManifest { .. }
+            | MissingManifest { .. }
             | NoOldManifests { .. }
             | MissingPartitionExpr { .. }
-            | SerializePartitionExpr { .. } => StatusCode::InvalidArguments,
+            | SerializePartitionExpr { .. }
+            | InvalidSourceAndTargetRegion { .. } => StatusCode::InvalidArguments,
 
             RegionMetadataNotFound { .. }
             | Join { .. }
@@ -1210,6 +1288,8 @@ impl ErrorExt for Error {
             | BuildEntry { .. }
             | Metadata { .. }
             | MitoManifestInfo { .. } => StatusCode::Internal,
+
+            FetchManifests { source, .. } => source.status_code(),
 
             OpenRegion { source, .. } => source.status_code(),
 
@@ -1281,7 +1361,12 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
+            #[cfg(feature = "vector_index")]
+            VectorIndexBuild { .. } | VectorIndexFinish { .. } => StatusCode::Internal,
+
             ManualCompactionOverride {} => StatusCode::Cancelled,
+
+            CompactionMemoryExhausted { source, .. } => source.status_code(),
 
             IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
 

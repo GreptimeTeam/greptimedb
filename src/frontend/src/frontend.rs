@@ -17,6 +17,7 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use common_config::config::Configurable;
 use common_event_recorder::EventRecorderOptions;
+use common_memory_manager::OnExhaustedPolicy;
 use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
@@ -45,6 +46,12 @@ pub struct FrontendOptions {
     pub default_timezone: Option<String>,
     pub default_column_prefix: Option<String>,
     pub heartbeat: HeartbeatOptions,
+    /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
+    /// Set to 0 to disable the limit. Default: "0" (unlimited)
+    pub max_in_flight_write_bytes: ReadableSize,
+    /// Policy when write bytes quota is exhausted.
+    /// Options: "wait" (default, 10s), "wait(<duration>)", "fail"
+    pub write_bytes_exhausted_policy: OnExhaustedPolicy,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
     /// The internal gRPC options for the frontend service.
@@ -63,7 +70,6 @@ pub struct FrontendOptions {
     pub user_provider: Option<String>,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
-    pub max_in_flight_write_bytes: Option<ReadableSize>,
     pub slow_query: SlowQueryOptions,
     pub memory: MemoryOptions,
     /// The event recorder options.
@@ -77,6 +83,8 @@ impl Default for FrontendOptions {
             default_timezone: None,
             default_column_prefix: None,
             heartbeat: HeartbeatOptions::frontend_default(),
+            max_in_flight_write_bytes: ReadableSize(0),
+            write_bytes_exhausted_policy: OnExhaustedPolicy::default(),
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),
             internal_grpc: None,
@@ -93,7 +101,6 @@ impl Default for FrontendOptions {
             user_provider: None,
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
-            max_in_flight_write_bytes: None,
             slow_query: SlowQueryOptions::default(),
             memory: MemoryOptions::default(),
             event_recorder: EventRecorderOptions::default(),
@@ -141,12 +148,325 @@ impl Frontend {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use api::v1::meta::heartbeat_server::HeartbeatServer;
+    use api::v1::meta::mailbox_message::Payload;
+    use api::v1::meta::{
+        AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse, MailboxMessage,
+        Peer, ResponseHeader, Role, heartbeat_server,
+    };
+    use async_trait::async_trait;
+    use client::{Client, Database};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_error::ext::ErrorExt;
+    use common_error::from_header_to_err_code_msg;
+    use common_error::status_code::StatusCode;
+    use common_grpc::channel_manager::ChannelManager;
+    use common_meta::heartbeat::handler::HandlerGroupExecutor;
+    use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+    use common_meta::heartbeat::handler::suspend::SuspendHandler;
+    use common_meta::instruction::Instruction;
+    use common_stat::ResourceStatImpl;
+    use meta_client::MetaClientRef;
+    use meta_client::client::MetaClientBuilder;
+    use meta_srv::service::GrpcStream;
+    use servers::grpc::{FlightCompression, GRPC_SERVER};
+    use servers::http::HTTP_SERVER;
+    use servers::http::result::greptime_result_v1::GreptimedbV1Response;
+    use tokio::sync::mpsc;
+    use tonic::codec::CompressionEncoding;
+    use tonic::codegen::tokio_stream::StreamExt;
+    use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
+    use tonic::{Request, Response, Status, Streaming};
+
     use super::*;
+    use crate::instance::builder::FrontendBuilder;
+    use crate::server::Services;
 
     #[test]
     fn test_toml() {
         let opts = FrontendOptions::default();
         let toml_string = toml::to_string(&opts).unwrap();
         let _parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
+    }
+
+    struct SuspendableHeartbeatServer {
+        suspend: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl heartbeat_server::Heartbeat for SuspendableHeartbeatServer {
+        type HeartbeatStream = GrpcStream<HeartbeatResponse>;
+
+        async fn heartbeat(
+            &self,
+            request: Request<Streaming<HeartbeatRequest>>,
+        ) -> std::result::Result<Response<Self::HeartbeatStream>, Status> {
+            let (tx, rx) = mpsc::channel(4);
+
+            common_runtime::spawn_global({
+                let mut requests = request.into_inner();
+                let suspend = self.suspend.clone();
+                async move {
+                    while let Some(request) = requests.next().await {
+                        if let Err(e) = request {
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
+
+                        let mailbox_message =
+                            suspend.load(Ordering::Relaxed).then(|| MailboxMessage {
+                                payload: Some(Payload::Json(
+                                    serde_json::to_string(&Instruction::Suspend).unwrap(),
+                                )),
+                                ..Default::default()
+                            });
+                        let response = HeartbeatResponse {
+                            header: Some(ResponseHeader::success()),
+                            mailbox_message,
+                            ..Default::default()
+                        };
+
+                        let _ = tx.send(Ok(response)).await;
+                    }
+                }
+            });
+
+            Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+        }
+
+        async fn ask_leader(
+            &self,
+            _: Request<AskLeaderRequest>,
+        ) -> std::result::Result<Response<AskLeaderResponse>, Status> {
+            Ok(Response::new(AskLeaderResponse {
+                header: Some(ResponseHeader::success()),
+                leader: Some(Peer {
+                    addr: "localhost:0".to_string(),
+                    ..Default::default()
+                }),
+            }))
+        }
+    }
+
+    async fn create_meta_client(
+        options: &MetaClientOptions,
+        heartbeat_server: Arc<SuspendableHeartbeatServer>,
+    ) -> MetaClientRef {
+        let (client, server) = tokio::io::duplex(1024);
+
+        // create the heartbeat server:
+        common_runtime::spawn_global(async move {
+            let mut router = tonic::transport::Server::builder();
+            let router = router.add_service(
+                HeartbeatServer::from_arc(heartbeat_server)
+                    .accept_compressed(CompressionEncoding::Zstd)
+                    .send_compressed(CompressionEncoding::Zstd),
+            );
+            router
+                .serve_with_incoming(futures::stream::iter([Ok::<_, std::io::Error>(server)]))
+                .await
+        });
+
+        // Move client to an option so we can _move_ the inner value
+        // on the first attempt to connect. All other attempts will fail.
+        let mut client = Some(client);
+        let connector = tower::service_fn(move |_| {
+            let client = client.take();
+            async move {
+                if let Some(client) = client {
+                    Ok(hyper_util::rt::TokioIo::new(client))
+                } else {
+                    Err(std::io::Error::other("client already taken"))
+                }
+            }
+        });
+        let manager = ChannelManager::new();
+        manager
+            .reset_with_connector("localhost:0", connector)
+            .unwrap();
+
+        // create the heartbeat client:
+        let mut client = MetaClientBuilder::new(0, Role::Frontend)
+            .enable_heartbeat()
+            .heartbeat_channel_manager(manager)
+            .build();
+        client.start(&options.metasrv_addrs).await.unwrap();
+        Arc::new(client)
+    }
+
+    async fn create_frontend(
+        options: &FrontendOptions,
+        meta_client: MetaClientRef,
+    ) -> Result<Frontend> {
+        let instance = Arc::new(
+            FrontendBuilder::new_test(options, meta_client.clone())
+                .try_build()
+                .await?,
+        );
+
+        let servers =
+            Services::new(options.clone(), instance.clone(), Default::default()).build()?;
+
+        let executor = Arc::new(HandlerGroupExecutor::new(vec![
+            Arc::new(ParseMailboxMessageHandler),
+            Arc::new(SuspendHandler::new(instance.suspend_state())),
+        ]));
+        let heartbeat_task = Some(HeartbeatTask::new(
+            options,
+            meta_client,
+            executor,
+            Arc::new(ResourceStatImpl::default()),
+        ));
+
+        let mut frontend = Frontend {
+            instance,
+            servers,
+            heartbeat_task,
+        };
+        frontend.start().await?;
+        Ok(frontend)
+    }
+
+    async fn verify_suspend_state_by_http(
+        frontend: &Frontend,
+        expected: std::result::Result<&str, (StatusCode, &str)>,
+    ) {
+        let addr = frontend.server_handlers().addr(HTTP_SERVER).unwrap();
+        let response = reqwest::get(format!("http://{}/v1/sql?sql=SELECT 1", addr))
+            .await
+            .unwrap();
+
+        let headers = response.headers();
+        let response = if let Some((code, error)) = from_header_to_err_code_msg(headers) {
+            Err((code, error))
+        } else {
+            Ok(response.text().await.unwrap())
+        };
+
+        match (response, expected) {
+            (Ok(response), Ok(expected)) => {
+                let response: GreptimedbV1Response = serde_json::from_str(&response).unwrap();
+                let response = serde_json::to_string(response.output()).unwrap();
+                assert_eq!(&response, expected);
+            }
+            (Err(actual), Err(expected)) => assert_eq!(actual, expected),
+            _ => unreachable!(),
+        }
+    }
+
+    async fn verify_suspend_state_by_grpc(
+        frontend: &Frontend,
+        expected: std::result::Result<&str, (StatusCode, &str)>,
+    ) {
+        let addr = frontend.server_handlers().addr(GRPC_SERVER).unwrap();
+        let client = Client::with_urls([addr.to_string()]);
+        let client = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+        let response = client.sql("SELECT 1").await;
+
+        match (response, expected) {
+            (Ok(response), Ok(expected)) => {
+                let response = response.data.pretty_print().await;
+                assert_eq!(&response, expected.trim());
+            }
+            (Err(actual), Err(expected)) => {
+                assert_eq!(actual.status_code(), expected.0);
+                assert_eq!(actual.output_msg(), expected.1);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_suspend_frontend() -> Result<()> {
+        common_telemetry::init_default_ut_logging();
+
+        let meta_client_options = MetaClientOptions {
+            metasrv_addrs: vec!["localhost:0".to_string()],
+            ..Default::default()
+        };
+        let options = FrontendOptions {
+            http: HttpOptions {
+                addr: "127.0.0.1:0".to_string(),
+                ..Default::default()
+            },
+            grpc: GrpcOptions {
+                bind_addr: "127.0.0.1:0".to_string(),
+                flight_compression: FlightCompression::None,
+                ..Default::default()
+            },
+            mysql: MysqlOptions {
+                enable: false,
+                ..Default::default()
+            },
+            postgres: PostgresOptions {
+                enable: false,
+                ..Default::default()
+            },
+            meta_client: Some(meta_client_options.clone()),
+            heartbeat: HeartbeatOptions {
+                interval: Duration::from_secs(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let server = Arc::new(SuspendableHeartbeatServer {
+            suspend: Arc::new(AtomicBool::new(false)),
+        });
+        let meta_client = create_meta_client(&meta_client_options, server.clone()).await;
+        let frontend = create_frontend(&options, meta_client).await?;
+
+        let frontend_heartbeat_interval = options.heartbeat.interval;
+        tokio::time::sleep(frontend_heartbeat_interval).await;
+        // initial state: not suspend:
+        assert!(!frontend.instance.is_suspended());
+        verify_suspend_state_by_http(&frontend, Ok(r#"[{"records":{"schema":{"column_schemas":[{"name":"Int64(1)","data_type":"Int64"}]},"rows":[[1]],"total_rows":1}}]"#)).await;
+        verify_suspend_state_by_grpc(
+            &frontend,
+            Ok(r#"
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+"#),
+        )
+        .await;
+
+        // make heartbeat server returned "suspend" instruction,
+        server.suspend.store(true, Ordering::Relaxed);
+        tokio::time::sleep(frontend_heartbeat_interval).await;
+        // ... then the frontend is suspended:
+        assert!(frontend.instance.is_suspended());
+        verify_suspend_state_by_http(
+            &frontend,
+            Err((
+                StatusCode::Suspended,
+                "error: Service suspended, execution_time_ms: 0",
+            )),
+        )
+        .await;
+        verify_suspend_state_by_grpc(&frontend, Err((StatusCode::Suspended, "Service suspended")))
+            .await;
+
+        // make heartbeat server NOT returned "suspend" instruction,
+        server.suspend.store(false, Ordering::Relaxed);
+        tokio::time::sleep(frontend_heartbeat_interval).await;
+        // ... then frontend's suspend state is cleared:
+        assert!(!frontend.instance.is_suspended());
+        verify_suspend_state_by_http(&frontend, Ok(r#"[{"records":{"schema":{"column_schemas":[{"name":"Int64(1)","data_type":"Int64"}]},"rows":[[1]],"total_rows":1}}]"#)).await;
+        verify_suspend_state_by_grpc(
+            &frontend,
+            Ok(r#"
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+"#),
+        )
+        .await;
+        Ok(())
     }
 }

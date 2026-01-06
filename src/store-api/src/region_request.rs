@@ -22,9 +22,10 @@ use api::v1::column_def::{
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    AlterRequest, AlterRequests, BulkInsertRequest, CloseRequest, CompactRequest, CreateRequest,
-    CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
-    OpenRequest, TruncateRequest, alter_request, compact_request, region_request, truncate_request,
+    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CloseRequest,
+    CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
+    FlushRequest, InsertRequests, OpenRequest, TruncateRequest, alter_request, compact_request,
+    region_request, truncate_request,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -150,6 +151,8 @@ pub enum RegionRequest {
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
     BulkInserts(RegionBulkInsertsRequest),
+    EnterStaging(EnterStagingRequest),
+    ApplyStagingManifest(ApplyStagingManifestRequest),
 }
 
 impl RegionRequest {
@@ -166,6 +169,7 @@ impl RegionRequest {
             region_request::Body::Alter(alter) => make_region_alter(alter),
             region_request::Body::Flush(flush) => make_region_flush(flush),
             region_request::Body::Compact(compact) => make_region_compact(compact),
+            region_request::Body::BuildIndex(index) => make_region_build_index(index),
             region_request::Body::Truncate(truncate) => make_region_truncate(truncate),
             region_request::Body::Creates(creates) => make_region_creates(creates),
             region_request::Body::Drops(drops) => make_region_drops(drops),
@@ -179,6 +183,9 @@ impl RegionRequest {
                 reason: "ListMetadata request should be handled separately by RegionServer",
             }
             .fail(),
+            region_request::Body::ApplyStagingManifest(apply) => {
+                make_region_apply_staging_manifest(apply)
+            }
         }
     }
 
@@ -354,6 +361,14 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
     )])
 }
 
+fn make_region_build_index(index: BuildIndexRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let region_id = index.region_id.into();
+    Ok(vec![(
+        region_id,
+        RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+    )])
+}
+
 fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = truncate.region_id.into();
     match truncate.kind {
@@ -398,6 +413,25 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
             region_id,
             payload,
             raw_data: request,
+        }),
+    )])
+}
+
+fn make_region_apply_staging_manifest(
+    api::v1::region::ApplyStagingManifestRequest {
+        region_id,
+        partition_expr,
+        central_region_id,
+        manifest_path,
+    }: api::v1::region::ApplyStagingManifestRequest,
+) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let region_id = region_id.into();
+    Ok(vec![(
+        region_id,
+        RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+            partition_expr,
+            central_region_id: central_region_id.into(),
+            manifest_path,
         }),
     )])
 }
@@ -1406,6 +1440,46 @@ impl RegionBulkInsertsRequest {
     }
 }
 
+/// Request to stage a region with a new region rule(partition expression).
+///
+/// This request transitions a region into the staging mode.
+/// It first flushes the memtable for the old region rule if it is not empty,
+/// then enters the staging mode with the new region rule.
+#[derive(Debug, Clone)]
+pub struct EnterStagingRequest {
+    /// The partition expression of the staging region.
+    pub partition_expr: String,
+}
+
+/// This request is used as part of the region repartition.
+///
+/// After a region has entered staging mode with a new region rule (partition
+/// expression) and a separate process (for example, `remap_manifests`) has
+/// generated the new file assignments for the staging region, this request
+/// applies that generated manifest to the region.
+///
+/// In practice, this means:
+/// - The `partition_expr` identifies the staging region rule that the manifest
+///   was generated for.
+/// - `central_region_id` specifies which region holds the staging blob storage
+///   where the manifest was written during the `remap_manifests` operation.
+/// - `manifest_path` is the relative path within the central region's staging
+///   blob storage to fetch the generated manifest.
+///
+/// It should typically be called **after** the staging region has been
+/// initialized by [`EnterStagingRequest`] and the new file layout has been
+/// computed, to finalize the repartition operation.
+#[derive(Debug, Clone)]
+pub struct ApplyStagingManifestRequest {
+    /// The partition expression of the staging region.
+    pub partition_expr: String,
+    /// The region that stores the staging manifests in its staging blob storage.
+    pub central_region_id: RegionId,
+    /// The relative path to the staging manifest within the central region's
+    /// staging blob storage.
+    pub manifest_path: String,
+}
+
 impl fmt::Display for RegionRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1422,6 +1496,8 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
             RegionRequest::BulkInserts(_) => write!(f, "BulkInserts"),
+            RegionRequest::EnterStaging(_) => write!(f, "EnterStaging"),
+            RegionRequest::ApplyStagingManifest(_) => write!(f, "ApplyStagingManifest"),
         }
     }
 }

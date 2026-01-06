@@ -132,7 +132,7 @@ impl tracing_subscriber::Layer<DynSubscriber> for TraceLayer {
         ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
     ) -> bool {
         self.with_layer(|layer| layer.enabled(metadata, ctx))
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     fn on_new_span(
@@ -172,7 +172,7 @@ impl tracing_subscriber::Layer<DynSubscriber> for TraceLayer {
         ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
     ) -> bool {
         self.with_layer(|layer| layer.event_enabled(event, ctx))
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     fn on_event(

@@ -436,10 +436,10 @@ impl Database {
                             .context(ExternalSnafu)?;
                         match flight_message {
                             FlightMessage::RecordBatch(arrow_batch) => {
-                                yield RecordBatch::try_from_df_record_batch(
+                                yield Ok(RecordBatch::from_df_record_batch(
                                     schema_cloned.clone(),
                                     arrow_batch,
-                                )
+                                ))
                             }
                             FlightMessage::Metrics(_) => {}
                             FlightMessage::AffectedRows(_) | FlightMessage::Schema(_) => {

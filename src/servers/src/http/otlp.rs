@@ -18,9 +18,12 @@ use axum::Extension;
 use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
+use axum_extra::TypedHeader;
 use bytes::Bytes;
 use common_catalog::consts::{TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY};
 use common_telemetry::tracing;
+use headers::ContentType;
+use mime_guess::mime;
 use opentelemetry_proto::tonic::collector::logs::v1::{
     ExportLogsServiceRequest, ExportLogsServiceResponse,
 };
@@ -39,10 +42,25 @@ use crate::error::{self, PipelineSnafu, Result};
 use crate::http::extractor::{
     LogTableName, OtlpMetricOptions, PipelineInfo, SelectInfoWrapper, TraceTableName,
 };
-// use crate::http::header::constants::GREPTIME_METRICS_LEGACY_MODE_HEADER_NAME;
 use crate::http::header::{CONTENT_TYPE_PROTOBUF, write_cost_header_map};
 use crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED;
 use crate::query_handler::{OpenTelemetryProtocolHandlerRef, PipelineHandler};
+
+fn is_json_content_type(content_type: Option<&ContentType>) -> bool {
+    match content_type {
+        None => false,
+        Some(ct) => {
+            let mime: mime::Mime = ct.clone().into();
+            mime.subtype() == mime::JSON
+        }
+    }
+}
+
+fn content_type_to_string(content_type: Option<&TypedHeader<ContentType>>) -> String {
+    content_type
+        .map(|h| h.0.to_string())
+        .unwrap_or_else(|| "not specified".to_string())
+}
 
 #[derive(Clone)]
 pub struct OtlpState {
@@ -56,16 +74,24 @@ pub async fn metrics(
     State(state): State<OtlpState>,
     Extension(mut query_ctx): Extension<QueryContext>,
     http_opts: OtlpMetricOptions,
+    content_type: Option<TypedHeader<ContentType>>,
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportMetricsServiceResponse>> {
+    if is_json_content_type(content_type.as_ref().map(|h| &h.0)) {
+        return error::UnsupportedJsonContentTypeSnafu {}.fail();
+    }
+
     let db = query_ctx.get_db_string();
     query_ctx.set_channel(Channel::Otlp);
 
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_METRICS_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
-    let request =
-        ExportMetricsServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
+    let request = ExportMetricsServiceRequest::decode(bytes).with_context(|_| {
+        error::DecodeOtlpRequestSnafu {
+            content_type: content_type_to_string(content_type.as_ref()),
+        }
+    })?;
 
     let OtlpState {
         with_metric_engine,
@@ -101,8 +127,13 @@ pub async fn traces(
     TraceTableName(table_name): TraceTableName,
     pipeline_info: PipelineInfo,
     Extension(mut query_ctx): Extension<QueryContext>,
+    content_type: Option<TypedHeader<ContentType>>,
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportTraceServiceResponse>> {
+    if is_json_content_type(content_type.as_ref().map(|h| &h.0)) {
+        return error::UnsupportedJsonContentTypeSnafu {}.fail();
+    }
+
     let db = query_ctx.get_db_string();
     let table_name = table_name.unwrap_or_else(|| TRACE_TABLE_NAME.to_string());
 
@@ -113,8 +144,11 @@ pub async fn traces(
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_TRACES_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
-    let request =
-        ExportTraceServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
+    let request = ExportTraceServiceRequest::decode(bytes).with_context(|_| {
+        error::DecodeOtlpRequestSnafu {
+            content_type: content_type_to_string(content_type.as_ref()),
+        }
+    })?;
 
     let pipeline = PipelineWay::from_name_and_default(
         pipeline_info.pipeline_name.as_deref(),
@@ -157,8 +191,13 @@ pub async fn logs(
     pipeline_info: PipelineInfo,
     LogTableName(tablename): LogTableName,
     SelectInfoWrapper(select_info): SelectInfoWrapper,
+    content_type: Option<TypedHeader<ContentType>>,
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportLogsServiceResponse>> {
+    if is_json_content_type(content_type.as_ref().map(|h| &h.0)) {
+        return error::UnsupportedJsonContentTypeSnafu {}.fail();
+    }
+
     let tablename = tablename.unwrap_or_else(|| "opentelemetry_logs".to_string());
     let db = query_ctx.get_db_string();
     query_ctx.set_channel(Channel::Otlp);
@@ -166,7 +205,11 @@ pub async fn logs(
     let _timer = METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
-    let request = ExportLogsServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
+    let request = ExportLogsServiceRequest::decode(bytes).with_context(|_| {
+        error::DecodeOtlpRequestSnafu {
+            content_type: content_type_to_string(content_type.as_ref()),
+        }
+    })?;
 
     let pipeline = PipelineWay::from_name_and_default(
         pipeline_info.pipeline_name.as_deref(),

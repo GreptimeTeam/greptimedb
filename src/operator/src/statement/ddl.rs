@@ -50,7 +50,7 @@ use common_time::{Timestamp, Timezone};
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{RawSchema, Schema};
+use datatypes::schema::{ColumnSchema, RawSchema, Schema};
 use datatypes::value::Value;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::multi_dim::MultiDimPartitionRule;
@@ -117,10 +117,13 @@ impl StatementExecutor {
             .map(|v| v.into_inner());
 
         let create_expr = &mut expr_helper::create_to_expr(&stmt, &ctx)?;
-        // We don't put ttl into the table options
-        // Because it will be used directly while compaction.
+        // Don't inherit schema-level TTL/compaction options into table options:
+        // TTL is applied during compaction, and `compaction.*` is handled separately.
         if let Some(schema_options) = schema_options {
             for (key, value) in schema_options.extra_options.iter() {
+                if key.starts_with("compaction.") {
+                    continue;
+                }
                 create_expr
                     .table_options
                     .entry(key.clone())
@@ -2001,8 +2004,7 @@ fn convert_value(
     unary_op: Option<UnaryOperator>,
 ) -> Result<Value> {
     sql_value_to_value(
-        "<NONAME>",
-        &data_type,
+        &ColumnSchema::new("<NONAME>", data_type, true),
         value,
         Some(timezone),
         unary_op,

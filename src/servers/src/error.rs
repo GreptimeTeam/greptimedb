@@ -95,6 +95,13 @@ pub enum Error {
         error: tonic::transport::Error,
     },
 
+    #[snafu(display("Request memory limit exceeded"))]
+    MemoryLimitExceeded {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_memory_manager::Error,
+    },
+
     #[snafu(display("{} server is already started", server))]
     AlreadyStarted {
         server: String,
@@ -229,12 +236,31 @@ pub enum Error {
         error: prost::DecodeError,
     },
 
-    #[snafu(display("Failed to decode OTLP request"))]
+    #[snafu(display(
+        "Failed to decode OTLP request (content-type: {content_type}): {error}. The endpoint only accepts 'application/x-protobuf' format."
+    ))]
     DecodeOtlpRequest {
+        content_type: String,
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: prost::DecodeError,
+    },
+
+    #[snafu(display("Failed to decode Loki request: {error}"))]
+    DecodeLokiRequest {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: prost::DecodeError,
+    },
+
+    #[snafu(display(
+        "Unsupported content type 'application/json'. OTLP endpoint only supports 'application/x-protobuf'. Please configure your OTLP exporter to use protobuf encoding."
+    ))]
+    UnsupportedJsonContentType {
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display(
@@ -632,6 +658,19 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Service suspended"))]
+    Suspended {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(transparent)]
+    GreptimeProto {
+        source: api::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -678,6 +717,8 @@ impl ErrorExt for Error {
             | InvalidOpentsdbJsonRequest { .. }
             | DecodePromRemoteRequest { .. }
             | DecodeOtlpRequest { .. }
+            | DecodeLokiRequest { .. }
+            | UnsupportedJsonContentType { .. }
             | CompressPromRemoteRequest { .. }
             | DecompressSnappyPromRemoteRequest { .. }
             | DecompressZstdPromRemoteRequest { .. }
@@ -756,6 +797,12 @@ impl ErrorExt for Error {
             HandleOtelArrowRequest { .. } => StatusCode::Internal,
 
             Cancelled { .. } => StatusCode::Cancelled,
+
+            Suspended { .. } => StatusCode::Suspended,
+
+            MemoryLimitExceeded { .. } => StatusCode::RateLimited,
+
+            GreptimeProto { source, .. } => source.status_code(),
         }
     }
 
@@ -836,7 +883,8 @@ pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
         | StatusCode::TableUnavailable
         | StatusCode::RegionBusy
         | StatusCode::StorageUnavailable
-        | StatusCode::External => HttpStatusCode::SERVICE_UNAVAILABLE,
+        | StatusCode::External
+        | StatusCode::Suspended => HttpStatusCode::SERVICE_UNAVAILABLE,
 
         StatusCode::Internal
         | StatusCode::Unexpected

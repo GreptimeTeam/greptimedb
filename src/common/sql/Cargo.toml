@@ -5,10 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+arrow-schema.workspace = true
 common-base.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
+common-telemetry.workspace = true
 common-time.workspace = true
 datafusion-sql.workspace = true
 datatypes.workspace = true

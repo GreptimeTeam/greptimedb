@@ -17,6 +17,7 @@ mod catalog;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -52,7 +53,9 @@ pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
 use serde_json;
-use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult};
+use servers::error::{
+    self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult, SuspendedSnafu,
+};
 use servers::grpc::FlightCompression;
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
@@ -62,8 +65,9 @@ use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
 use store_api::region_engine::{
-    RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic, SetRegionRoleStateResponse,
-    SettableRegionRoleState,
+    RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic, RemapManifestsRequest,
+    RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
+    SyncRegionFromRequest,
 };
 use store_api::region_request::{
     AffectedRows, BatchRegionDdlRequest, RegionCatchupRequest, RegionCloseRequest,
@@ -89,6 +93,7 @@ use crate::region_server::catalog::{NameAwareCatalogList, NameAwareDataSourceInj
 pub struct RegionServer {
     inner: Arc<RegionServerInner>,
     flight_compression: FlightCompression,
+    suspend: Arc<AtomicBool>,
 }
 
 pub struct RegionStat {
@@ -136,6 +141,7 @@ impl RegionServer {
                 ),
             )),
             flight_compression,
+            suspend: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -531,10 +537,13 @@ impl RegionServer {
         let tracing_context = TracingContext::from_current_span();
         let span = tracing_context.attach(info_span!("RegionServer::handle_sync_region_request"));
 
-        self.sync_region(region_id, manifest_info)
-            .trace(span)
-            .await
-            .map(|_| RegionResponse::new(AffectedRows::default()))
+        self.sync_region(
+            region_id,
+            SyncRegionFromRequest::from_manifest(manifest_info),
+        )
+        .trace(span)
+        .await
+        .map(|_| RegionResponse::new(AffectedRows::default()))
     }
 
     /// Handles the ListMetadata request and retrieves metadata for specified regions.
@@ -583,7 +592,7 @@ impl RegionServer {
     pub async fn sync_region(
         &self,
         region_id: RegionId,
-        manifest_info: RegionManifestInfo,
+        request: SyncRegionFromRequest,
     ) -> Result<()> {
         let engine_with_status = self
             .inner
@@ -592,8 +601,35 @@ impl RegionServer {
             .with_context(|| RegionNotFoundSnafu { region_id })?;
 
         self.inner
-            .handle_sync_region(engine_with_status.engine(), region_id, manifest_info)
+            .handle_sync_region(engine_with_status.engine(), region_id, request)
             .await
+    }
+
+    /// Remaps manifests from old regions to new regions.
+    pub async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse> {
+        let region_id = request.region_id;
+        let engine_with_status = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .with_context(|| RegionNotFoundSnafu { region_id })?;
+
+        engine_with_status
+            .engine()
+            .remap_manifests(request)
+            .await
+            .with_context(|_| HandleRegionRequestSnafu { region_id })
+    }
+
+    fn is_suspended(&self) -> bool {
+        self.suspend.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn suspend_state(&self) -> Arc<AtomicBool> {
+        self.suspend.clone()
     }
 }
 
@@ -644,6 +680,8 @@ impl FlightCraft for RegionServer {
         &self,
         request: Request<Ticket>,
     ) -> TonicResult<Response<TonicStream<FlightData>>> {
+        ensure!(!self.is_suspended(), SuspendedSnafu);
+
         let ticket = request.into_inner().ticket;
         let request = api::v1::region::QueryRequest::decode(ticket.as_ref())
             .context(servers_error::InvalidFlightTicketSnafu)?;
@@ -1200,7 +1238,9 @@ impl RegionServerInner {
             | RegionRequest::Flush(_)
             | RegionRequest::Compact(_)
             | RegionRequest::Truncate(_)
-            | RegionRequest::BuildIndex(_) => RegionChange::None,
+            | RegionRequest::BuildIndex(_)
+            | RegionRequest::EnterStaging(_)
+            | RegionRequest::ApplyStagingManifest(_) => RegionChange::None,
             RegionRequest::Catchup(_) => RegionChange::Catchup,
         };
 
@@ -1252,15 +1292,14 @@ impl RegionServerInner {
         &self,
         engine: &RegionEngineRef,
         region_id: RegionId,
-        manifest_info: RegionManifestInfo,
+        request: SyncRegionFromRequest,
     ) -> Result<()> {
         let Some(new_opened_regions) = engine
-            .sync_region(region_id, manifest_info)
+            .sync_region(region_id, request)
             .await
             .with_context(|_| HandleRegionRequestSnafu { region_id })?
             .new_opened_logical_region_ids()
         else {
-            warn!("No new opened logical regions");
             return Ok(());
         };
 

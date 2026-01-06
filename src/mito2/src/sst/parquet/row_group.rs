@@ -35,6 +35,175 @@ use crate::cache::{CacheStrategy, PageKey, PageValue};
 use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
 use crate::sst::parquet::helper::{MERGE_GAP, fetch_byte_ranges};
 
+/// Inner data for ParquetFetchMetrics.
+#[derive(Default, Debug, Clone)]
+pub struct ParquetFetchMetricsData {
+    /// Number of page cache hits.
+    pub page_cache_hit: usize,
+    /// Number of write cache hits.
+    pub write_cache_hit: usize,
+    /// Number of cache misses.
+    pub cache_miss: usize,
+    /// Number of pages to fetch from mem cache.
+    pub pages_to_fetch_mem: usize,
+    /// Total size in bytes of pages to fetch from mem cache.
+    pub page_size_to_fetch_mem: u64,
+    /// Number of pages to fetch from write cache.
+    pub pages_to_fetch_write_cache: usize,
+    /// Total size in bytes of pages to fetch from write cache.
+    pub page_size_to_fetch_write_cache: u64,
+    /// Number of pages to fetch from store.
+    pub pages_to_fetch_store: usize,
+    /// Total size in bytes of pages to fetch from store.
+    pub page_size_to_fetch_store: u64,
+    /// Total size in bytes of pages actually returned.
+    pub page_size_needed: u64,
+    /// Elapsed time fetching from write cache.
+    pub write_cache_fetch_elapsed: std::time::Duration,
+    /// Elapsed time fetching from object store.
+    pub store_fetch_elapsed: std::time::Duration,
+    /// Total elapsed time for fetching row groups.
+    pub total_fetch_elapsed: std::time::Duration,
+}
+
+impl ParquetFetchMetricsData {
+    /// Returns true if the metrics are empty (contain no meaningful data).
+    fn is_empty(&self) -> bool {
+        self.total_fetch_elapsed.is_zero()
+    }
+}
+
+/// Metrics for tracking page/row group fetch operations.
+#[derive(Default)]
+pub struct ParquetFetchMetrics {
+    pub data: std::sync::Mutex<ParquetFetchMetricsData>,
+}
+
+impl std::fmt::Debug for ParquetFetchMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let data = self.data.lock().unwrap();
+        if data.is_empty() {
+            return write!(f, "{{}}");
+        }
+
+        let ParquetFetchMetricsData {
+            page_cache_hit,
+            write_cache_hit,
+            cache_miss,
+            pages_to_fetch_mem,
+            page_size_to_fetch_mem,
+            pages_to_fetch_write_cache,
+            page_size_to_fetch_write_cache,
+            pages_to_fetch_store,
+            page_size_to_fetch_store,
+            page_size_needed,
+            write_cache_fetch_elapsed,
+            store_fetch_elapsed,
+            total_fetch_elapsed,
+        } = *data;
+
+        write!(f, "{{")?;
+
+        write!(f, "\"total_fetch_elapsed\":\"{:?}\"", total_fetch_elapsed)?;
+
+        if page_cache_hit > 0 {
+            write!(f, ", \"page_cache_hit\":{}", page_cache_hit)?;
+        }
+        if write_cache_hit > 0 {
+            write!(f, ", \"write_cache_hit\":{}", write_cache_hit)?;
+        }
+        if cache_miss > 0 {
+            write!(f, ", \"cache_miss\":{}", cache_miss)?;
+        }
+        if pages_to_fetch_mem > 0 {
+            write!(f, ", \"pages_to_fetch_mem\":{}", pages_to_fetch_mem)?;
+        }
+        if page_size_to_fetch_mem > 0 {
+            write!(f, ", \"page_size_to_fetch_mem\":{}", page_size_to_fetch_mem)?;
+        }
+        if pages_to_fetch_write_cache > 0 {
+            write!(
+                f,
+                ", \"pages_to_fetch_write_cache\":{}",
+                pages_to_fetch_write_cache
+            )?;
+        }
+        if page_size_to_fetch_write_cache > 0 {
+            write!(
+                f,
+                ", \"page_size_to_fetch_write_cache\":{}",
+                page_size_to_fetch_write_cache
+            )?;
+        }
+        if pages_to_fetch_store > 0 {
+            write!(f, ", \"pages_to_fetch_store\":{}", pages_to_fetch_store)?;
+        }
+        if page_size_to_fetch_store > 0 {
+            write!(
+                f,
+                ", \"page_size_to_fetch_store\":{}",
+                page_size_to_fetch_store
+            )?;
+        }
+        if page_size_needed > 0 {
+            write!(f, ", \"page_size_needed\":{}", page_size_needed)?;
+        }
+        if !write_cache_fetch_elapsed.is_zero() {
+            write!(
+                f,
+                ", \"write_cache_fetch_elapsed\":\"{:?}\"",
+                write_cache_fetch_elapsed
+            )?;
+        }
+        if !store_fetch_elapsed.is_zero() {
+            write!(f, ", \"store_fetch_elapsed\":\"{:?}\"", store_fetch_elapsed)?;
+        }
+
+        write!(f, "}}")
+    }
+}
+
+impl ParquetFetchMetrics {
+    /// Returns true if the metrics are empty (contain no meaningful data).
+    pub fn is_empty(&self) -> bool {
+        self.data.lock().unwrap().is_empty()
+    }
+
+    /// Merges metrics from another [ParquetFetchMetrics].
+    pub fn merge_from(&self, other: &ParquetFetchMetrics) {
+        let ParquetFetchMetricsData {
+            page_cache_hit,
+            write_cache_hit,
+            cache_miss,
+            pages_to_fetch_mem,
+            page_size_to_fetch_mem,
+            pages_to_fetch_write_cache,
+            page_size_to_fetch_write_cache,
+            pages_to_fetch_store,
+            page_size_to_fetch_store,
+            page_size_needed,
+            write_cache_fetch_elapsed,
+            store_fetch_elapsed,
+            total_fetch_elapsed,
+        } = *other.data.lock().unwrap();
+
+        let mut data = self.data.lock().unwrap();
+        data.page_cache_hit += page_cache_hit;
+        data.write_cache_hit += write_cache_hit;
+        data.cache_miss += cache_miss;
+        data.pages_to_fetch_mem += pages_to_fetch_mem;
+        data.page_size_to_fetch_mem += page_size_to_fetch_mem;
+        data.pages_to_fetch_write_cache += pages_to_fetch_write_cache;
+        data.page_size_to_fetch_write_cache += page_size_to_fetch_write_cache;
+        data.pages_to_fetch_store += pages_to_fetch_store;
+        data.page_size_to_fetch_store += page_size_to_fetch_store;
+        data.page_size_needed += page_size_needed;
+        data.write_cache_fetch_elapsed += write_cache_fetch_elapsed;
+        data.store_fetch_elapsed += store_fetch_elapsed;
+        data.total_fetch_elapsed += total_fetch_elapsed;
+    }
+}
+
 pub(crate) struct RowGroupBase<'a> {
     metadata: &'a RowGroupMetaData,
     pub(crate) offset_index: Option<&'a [OffsetIndexMetaData]>,
@@ -244,13 +413,14 @@ impl<'a> InMemoryRowGroup<'a> {
         &mut self,
         projection: &ProjectionMask,
         selection: Option<&RowSelection>,
+        metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<()> {
         if let Some((selection, offset_index)) = selection.zip(self.base.offset_index) {
             let (fetch_ranges, page_start_offsets) =
                 self.base
                     .calc_sparse_read_ranges(projection, offset_index, selection);
 
-            let chunk_data = self.fetch_bytes(&fetch_ranges).await?;
+            let chunk_data = self.fetch_bytes(&fetch_ranges, metrics).await?;
             // Assign sparse chunk data to base.
             self.base
                 .assign_sparse_chunk(projection, chunk_data, page_start_offsets);
@@ -268,7 +438,7 @@ impl<'a> InMemoryRowGroup<'a> {
             }
 
             // Fetch data with ranges
-            let chunk_data = self.fetch_bytes(&fetch_ranges).await?;
+            let chunk_data = self.fetch_bytes(&fetch_ranges, metrics).await?;
 
             // Assigns fetched data to base.
             self.base.assign_dense_chunk(projection, chunk_data);
@@ -279,31 +449,74 @@ impl<'a> InMemoryRowGroup<'a> {
 
     /// Try to fetch data from the memory cache or the WriteCache,
     /// if not in WriteCache, fetch data from object store directly.
-    async fn fetch_bytes(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn fetch_bytes(
+        &self,
+        ranges: &[Range<u64>],
+        metrics: Option<&ParquetFetchMetrics>,
+    ) -> Result<Vec<Bytes>> {
         // Now fetch page timer includes the whole time to read pages.
         let _timer = READ_STAGE_FETCH_PAGES.start_timer();
+
         let page_key = PageKey::new(self.file_id, self.row_group_idx, ranges.to_vec());
         if let Some(pages) = self.cache_strategy.get_pages(&page_key) {
+            if let Some(metrics) = metrics {
+                let total_size: u64 = ranges.iter().map(|r| r.end - r.start).sum();
+                let mut metrics_data = metrics.data.lock().unwrap();
+                metrics_data.page_cache_hit += 1;
+                metrics_data.pages_to_fetch_mem += ranges.len();
+                metrics_data.page_size_to_fetch_mem += total_size;
+                metrics_data.page_size_needed += total_size;
+            }
             return Ok(pages.compressed.clone());
         }
 
+        // Calculate total range size for metrics.
+        let (total_range_size, unaligned_size) = compute_total_range_size(ranges);
+
         let key = IndexKey::new(self.region_id, self.file_id, FileType::Parquet);
-        let pages = match self.fetch_ranges_from_write_cache(key, ranges).await {
-            Some(data) => data,
+        let fetch_write_cache_start = metrics.map(|_| std::time::Instant::now());
+        let write_cache_result = self.fetch_ranges_from_write_cache(key, ranges).await;
+        let pages = match write_cache_result {
+            Some(data) => {
+                if let Some(metrics) = metrics {
+                    let elapsed = fetch_write_cache_start
+                        .map(|start| start.elapsed())
+                        .unwrap_or_default();
+                    let range_size_needed: u64 = ranges.iter().map(|r| r.end - r.start).sum();
+                    let mut metrics_data = metrics.data.lock().unwrap();
+                    metrics_data.write_cache_fetch_elapsed += elapsed;
+                    metrics_data.write_cache_hit += 1;
+                    metrics_data.pages_to_fetch_write_cache += ranges.len();
+                    metrics_data.page_size_to_fetch_write_cache += unaligned_size;
+                    metrics_data.page_size_needed += range_size_needed;
+                }
+                data
+            }
             None => {
                 // Fetch data from object store.
                 let _timer = READ_STAGE_ELAPSED
                     .with_label_values(&["cache_miss_read"])
                     .start_timer();
 
-                fetch_byte_ranges(self.file_path, self.object_store.clone(), ranges)
+                let start = metrics.map(|_| std::time::Instant::now());
+                let data = fetch_byte_ranges(self.file_path, self.object_store.clone(), ranges)
                     .await
-                    .map_err(|e| ParquetError::External(Box::new(e)))?
+                    .map_err(|e| ParquetError::External(Box::new(e)))?;
+                if let Some(metrics) = metrics {
+                    let elapsed = start.map(|start| start.elapsed()).unwrap_or_default();
+                    let range_size_needed: u64 = ranges.iter().map(|r| r.end - r.start).sum();
+                    let mut metrics_data = metrics.data.lock().unwrap();
+                    metrics_data.store_fetch_elapsed += elapsed;
+                    metrics_data.cache_miss += 1;
+                    metrics_data.pages_to_fetch_store += ranges.len();
+                    metrics_data.page_size_to_fetch_store += unaligned_size;
+                    metrics_data.page_size_needed += range_size_needed;
+                }
+                data
             }
         };
 
         // Put pages back to the cache.
-        let total_range_size = compute_total_range_size(ranges);
         let page_value = PageValue::new(pages.clone(), total_range_size);
         self.cache_strategy
             .put_pages(page_key, Arc::new(page_value));
@@ -326,17 +539,21 @@ impl<'a> InMemoryRowGroup<'a> {
 }
 
 /// Computes the max possible buffer size to read the given `ranges`.
+/// Returns (aligned_size, unaligned_size) where:
+/// - aligned_size: total size aligned to pooled buffer size
+/// - unaligned_size: actual total size without alignment
 // See https://github.com/apache/opendal/blob/v0.54.0/core/src/types/read/reader.rs#L166-L192
-fn compute_total_range_size(ranges: &[Range<u64>]) -> u64 {
+fn compute_total_range_size(ranges: &[Range<u64>]) -> (u64, u64) {
     if ranges.is_empty() {
-        return 0;
+        return (0, 0);
     }
 
     let gap = MERGE_GAP as u64;
     let mut sorted_ranges = ranges.to_vec();
     sorted_ranges.sort_unstable_by(|a, b| a.start.cmp(&b.start));
 
-    let mut total_size = 0;
+    let mut total_size_aligned = 0;
+    let mut total_size_unaligned = 0;
     let mut cur = sorted_ranges[0].clone();
 
     for range in sorted_ranges.into_iter().skip(1) {
@@ -345,15 +562,19 @@ fn compute_total_range_size(ranges: &[Range<u64>]) -> u64 {
             cur.end = cur.end.max(range.end);
         } else {
             // No overlap and the gap is too large, add current range to total and start a new one
-            total_size += align_to_pooled_buf_size(cur.end - cur.start);
+            let range_size = cur.end - cur.start;
+            total_size_aligned += align_to_pooled_buf_size(range_size);
+            total_size_unaligned += range_size;
             cur = range;
         }
     }
 
     // Add the last range
-    total_size += align_to_pooled_buf_size(cur.end - cur.start);
+    let range_size = cur.end - cur.start;
+    total_size_aligned += align_to_pooled_buf_size(range_size);
+    total_size_unaligned += range_size;
 
-    total_size
+    (total_size_aligned, total_size_unaligned)
 }
 
 /// Aligns the given size to the multiple of the pooled buffer size.

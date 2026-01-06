@@ -14,6 +14,7 @@
 
 mod binary;
 mod ctx;
+mod if_func;
 mod is_null;
 mod unary;
 
@@ -22,6 +23,7 @@ pub use ctx::EvalContext;
 pub use unary::scalar_unary_op;
 
 use crate::function_registry::FunctionRegistry;
+use crate::scalars::expression::if_func::IfFunction;
 use crate::scalars::expression::is_null::IsNullFunction;
 
 pub(crate) struct ExpressionFunction;
@@ -29,5 +31,6 @@ pub(crate) struct ExpressionFunction;
 impl ExpressionFunction {
     pub fn register(registry: &FunctionRegistry) {
         registry.register_scalar(IsNullFunction::default());
+        registry.register_scalar(IfFunction::default());
     }
 }

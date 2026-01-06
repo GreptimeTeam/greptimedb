@@ -34,7 +34,9 @@ use sql::statements::create::{Column, ColumnExtensions, CreateTable, TableConstr
 use sql::statements::{self, OptionMap};
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::metadata::{TableInfoRef, TableMeta};
-use table::requests::{FILE_TABLE_META_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY};
+use table::requests::{
+    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY,
+};
 
 use crate::error::{
     ConvertSqlTypeSnafu, ConvertSqlValueSnafu, GetFulltextOptionsSnafu,
@@ -54,11 +56,13 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
     if let Some(ttl) = table_opts.ttl.map(|t| t.to_string()) {
         options.insert(TTL_KEY.to_string(), ttl);
     } else if let Some(database_ttl) = schema_options
+        .as_ref()
         .and_then(|o| o.ttl)
         .map(|ttl| ttl.to_string())
     {
         options.insert(TTL_KEY.to_string(), database_ttl);
     };
+
     for (k, v) in table_opts
         .extra_options
         .iter()
@@ -249,6 +253,13 @@ pub fn create_table_stmt(
 
     let constraints = create_table_constraints(&table_meta.engine, schema, table_meta, quote_style);
 
+    let mut options = create_sql_options(table_meta, schema_options);
+    if let Some(comment) = &table_info.desc
+        && options.get(TABLE_COMMENT_KEY).is_none()
+    {
+        options.insert(format!("'{TABLE_COMMENT_KEY}'"), comment.clone());
+    }
+
     Ok(CreateTable {
         if_not_exists: true,
         table_id: table_info.ident.table_id,
@@ -256,7 +267,7 @@ pub fn create_table_stmt(
         columns,
         engine: table_meta.engine.clone(),
         constraints,
-        options: create_sql_options(table_meta, schema_options),
+        options,
         partitions: None,
     })
 }

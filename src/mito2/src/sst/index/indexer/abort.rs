@@ -14,6 +14,8 @@
 
 use common_telemetry::warn;
 
+use crate::access_layer::TempFileCleaner;
+use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::index::Indexer;
 
 impl Indexer {
@@ -21,7 +23,12 @@ impl Indexer {
         self.do_abort_inverted_index().await;
         self.do_abort_fulltext_index().await;
         self.do_abort_bloom_filter().await;
+        #[cfg(feature = "vector_index")]
+        self.do_abort_vector_index().await;
         self.do_prune_intm_sst_dir().await;
+        if self.write_cache_enabled {
+            self.do_abort_clean_fs_temp_dir().await;
+        }
         self.puffin_manager = None;
     }
 
@@ -83,6 +90,42 @@ impl Indexer {
         } else {
             warn!(
                 err; "Failed to abort bloom filter, region_id: {}, file_id: {}",
+                self.region_id, self.file_id,
+            );
+        }
+    }
+
+    async fn do_abort_clean_fs_temp_dir(&mut self) {
+        let Some(puffin_manager) = &self.puffin_manager else {
+            return;
+        };
+        let fs_accessor = puffin_manager.file_accessor();
+
+        let fs_handle = RegionIndexId::new(
+            RegionFileId::new(self.region_id, self.file_id),
+            self.index_version,
+        )
+        .to_string();
+        TempFileCleaner::clean_atomic_dir_files(fs_accessor.store().store(), &[&fs_handle]).await;
+    }
+
+    #[cfg(feature = "vector_index")]
+    async fn do_abort_vector_index(&mut self) {
+        let Some(mut indexer) = self.vector_indexer.take() else {
+            return;
+        };
+        let Err(err) = indexer.abort().await else {
+            return;
+        };
+
+        if cfg!(any(test, feature = "test")) {
+            panic!(
+                "Failed to abort vector index, region_id: {}, file_id: {}, err: {:?}",
+                self.region_id, self.file_id, err
+            );
+        } else {
+            warn!(
+                err; "Failed to abort vector index, region_id: {}, file_id: {}",
                 self.region_id, self.file_id,
             );
         }

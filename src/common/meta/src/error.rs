@@ -224,6 +224,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to find table repartition metadata for table id {}", table_id))]
+    TableRepartNotFound {
+        table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to decode protobuf"))]
     DecodeProto {
         #[snafu(implicit)]
@@ -268,13 +275,6 @@ pub enum Error {
 
     #[snafu(display("Payload not exist"))]
     PayloadNotExist {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to send message: {err_msg}"))]
-    SendMessage {
-        err_msg: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1098,6 +1098,7 @@ impl ErrorExt for Error {
             | DecodeProto { .. }
             | BuildTableMeta { .. }
             | TableRouteNotFound { .. }
+            | TableRepartNotFound { .. }
             | ConvertRawTableInfo { .. }
             | RegionOperatingRace { .. }
             | EncodeWalOptions { .. }
@@ -1118,7 +1119,7 @@ impl ErrorExt for Error {
             | DeserializeFlexbuffers { .. }
             | ConvertTimeRanges { .. } => StatusCode::Unexpected,
 
-            SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
+            GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 
             SchemaAlreadyExists { .. } => StatusCode::DatabaseAlreadyExists,
 

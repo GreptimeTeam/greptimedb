@@ -16,10 +16,11 @@ pub mod builder;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use common_base::range_read::RangeReader;
-use common_telemetry::{tracing, warn};
-use index::inverted_index::format::reader::InvertedIndexBlobReader;
+use common_telemetry::warn;
+use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReadMetrics};
 use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
 };
@@ -39,10 +40,71 @@ use crate::error::{
     ApplyInvertedIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result,
 };
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
-use crate::sst::file::RegionFileId;
-use crate::sst::index::TYPE_INVERTED_INDEX;
+use crate::sst::file::RegionIndexId;
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
+use crate::sst::index::{TYPE_INVERTED_INDEX, trigger_index_background_download};
+
+/// Metrics for tracking inverted index apply operations.
+#[derive(Default, Clone)]
+pub struct InvertedIndexApplyMetrics {
+    /// Total time spent applying the index.
+    pub apply_elapsed: std::time::Duration,
+    /// Number of blob cache misses (0 or 1).
+    pub blob_cache_miss: usize,
+    /// Total size of blobs read (in bytes).
+    pub blob_read_bytes: u64,
+    /// Metrics for inverted index reads.
+    pub inverted_index_read_metrics: InvertedIndexReadMetrics,
+}
+
+impl std::fmt::Debug for InvertedIndexApplyMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            apply_elapsed,
+            blob_cache_miss,
+            blob_read_bytes,
+            inverted_index_read_metrics,
+        } = self;
+
+        if self.is_empty() {
+            return write!(f, "{{}}");
+        }
+        write!(f, "{{")?;
+
+        write!(f, "\"apply_elapsed\":\"{:?}\"", apply_elapsed)?;
+
+        if *blob_cache_miss > 0 {
+            write!(f, ", \"blob_cache_miss\":{}", blob_cache_miss)?;
+        }
+        if *blob_read_bytes > 0 {
+            write!(f, ", \"blob_read_bytes\":{}", blob_read_bytes)?;
+        }
+        write!(
+            f,
+            ", \"inverted_index_read_metrics\":{:?}",
+            inverted_index_read_metrics
+        )?;
+
+        write!(f, "}}")
+    }
+}
+
+impl InvertedIndexApplyMetrics {
+    /// Returns true if the metrics are empty (contain no meaningful data).
+    pub fn is_empty(&self) -> bool {
+        self.apply_elapsed.is_zero()
+    }
+
+    /// Merges another metrics into this one.
+    pub fn merge_from(&mut self, other: &Self) {
+        self.apply_elapsed += other.apply_elapsed;
+        self.blob_cache_miss += other.blob_cache_miss;
+        self.blob_read_bytes += other.blob_read_bytes;
+        self.inverted_index_read_metrics
+            .merge_from(&other.inverted_index_read_metrics);
+    }
+}
 
 /// `InvertedIndexApplier` is responsible for applying predicates to the provided SST files
 /// and returning the relevant row group ids for further scan.
@@ -124,28 +186,34 @@ impl InvertedIndexApplier {
         self
     }
 
-    /// Applies predicates to the provided SST file id and returns the relevant row group ids
+    /// Applies predicates to the provided SST file id and returns the relevant row group ids.
+    ///
+    /// # Arguments
+    /// * `file_id` - The region file ID to apply predicates to
+    /// * `file_size_hint` - Optional hint for file size to avoid extra metadata reads
+    /// * `metrics` - Optional mutable reference to collect metrics on demand
     #[tracing::instrument(
         skip_all,
         fields(file_id = %file_id)
     )]
     pub async fn apply(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
+        mut metrics: Option<&mut InvertedIndexApplyMetrics>,
     ) -> Result<ApplyOutput> {
-        let _timer = INDEX_APPLY_ELAPSED
-            .with_label_values(&[TYPE_INVERTED_INDEX])
-            .start_timer();
+        let start = Instant::now();
 
         let context = SearchContext {
             // Encountering a non-existing column indicates that it doesn't match predicates.
             index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
         };
 
+        let mut cache_miss = 0;
         let blob = match self.cached_blob_reader(file_id, file_size_hint).await {
             Ok(Some(puffin_reader)) => puffin_reader,
             other => {
+                cache_miss += 1;
                 if let Err(err) = other {
                     warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
                 }
@@ -153,38 +221,70 @@ impl InvertedIndexApplier {
             }
         };
 
-        if let Some(index_cache) = &self.inverted_index_cache {
-            let blob_size = blob.metadata().await.context(MetadataSnafu)?.content_length;
+        let blob_size = blob.metadata().await.context(MetadataSnafu)?.content_length;
+
+        let result = if let Some(index_cache) = &self.inverted_index_cache {
             let mut index_reader = CachedInvertedIndexBlobReader::new(
                 file_id.file_id(),
+                file_id.version,
                 blob_size,
                 InvertedIndexBlobReader::new(blob),
                 index_cache.clone(),
             );
             self.index_applier
-                .apply(context, &mut index_reader)
+                .apply(
+                    context,
+                    &mut index_reader,
+                    metrics
+                        .as_deref_mut()
+                        .map(|m| &mut m.inverted_index_read_metrics),
+                )
                 .await
                 .context(ApplyInvertedIndexSnafu)
         } else {
             let mut index_reader = InvertedIndexBlobReader::new(blob);
             self.index_applier
-                .apply(context, &mut index_reader)
+                .apply(
+                    context,
+                    &mut index_reader,
+                    metrics
+                        .as_deref_mut()
+                        .map(|m| &mut m.inverted_index_read_metrics),
+                )
                 .await
                 .context(ApplyInvertedIndexSnafu)
+        };
+
+        // Record elapsed time to histogram and collect metrics if requested
+        let elapsed = start.elapsed();
+        INDEX_APPLY_ELAPSED
+            .with_label_values(&[TYPE_INVERTED_INDEX])
+            .observe(elapsed.as_secs_f64());
+
+        if let Some(metrics) = metrics {
+            metrics.apply_elapsed = elapsed;
+            metrics.blob_cache_miss = cache_miss;
+            metrics.blob_read_bytes = blob_size;
         }
+
+        result
     }
 
     /// Creates a blob reader from the cached index file.
     async fn cached_blob_reader(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
     ) -> Result<Option<BlobReader>> {
         let Some(file_cache) = &self.file_cache else {
             return Ok(None);
         };
 
-        let index_key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Puffin);
+        let index_key = IndexKey::new(
+            file_id.region_id(),
+            file_id.file_id(),
+            FileType::Puffin(file_id.version),
+        );
         if file_cache.get(index_key).await.is_none() {
             return Ok(None);
         };
@@ -212,15 +312,23 @@ impl InvertedIndexApplier {
     /// Creates a blob reader from the remote index file.
     async fn remote_blob_reader(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
     ) -> Result<BlobReader> {
+        let path_factory = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
+
+        // Trigger background download if file cache and file size are available
+        trigger_index_background_download(
+            self.file_cache.as_ref(),
+            &file_id,
+            file_size_hint,
+            &path_factory,
+            &self.store,
+        );
+
         let puffin_manager = self
             .puffin_manager_factory
-            .build(
-                self.store.clone(),
-                RegionFilePathFactory::new(self.table_dir.clone(), self.path_type),
-            )
+            .build(self.store.clone(), path_factory)
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
         puffin_manager
@@ -258,6 +366,7 @@ mod tests {
     use store_api::storage::FileId;
 
     use super::*;
+    use crate::sst::index::RegionFileId;
 
     #[tokio::test]
     async fn test_index_applier_apply_basic() {
@@ -265,13 +374,14 @@ mod tests {
             PuffinManagerFactory::new_for_test_async("test_index_applier_apply_basic_").await;
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
         let file_id = RegionFileId::new(0.into(), FileId::random());
+        let index_id = RegionIndexId::new(file_id, 0);
         let table_dir = "table_dir".to_string();
 
         let puffin_manager = puffin_manager_factory.build(
             object_store.clone(),
             RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
         );
-        let mut writer = puffin_manager.writer(&file_id).await.unwrap();
+        let mut writer = puffin_manager.writer(&index_id).await.unwrap();
         writer
             .put_blob(
                 INDEX_BLOB_TYPE,
@@ -285,7 +395,7 @@ mod tests {
 
         let mut mock_index_applier = MockIndexApplier::new();
         mock_index_applier.expect_memory_usage().returning(|| 100);
-        mock_index_applier.expect_apply().returning(|_, _| {
+        mock_index_applier.expect_apply().returning(|_, _, _| {
             Ok(ApplyOutput {
                 matched_segment_ids: Bitmap::new_bitvec(),
                 total_row_count: 100,
@@ -301,7 +411,7 @@ mod tests {
             puffin_manager_factory,
             Default::default(),
         );
-        let output = sst_index_applier.apply(file_id, None).await.unwrap();
+        let output = sst_index_applier.apply(index_id, None, None).await.unwrap();
         assert_eq!(
             output,
             ApplyOutput {
@@ -319,13 +429,14 @@ mod tests {
                 .await;
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
         let file_id = RegionFileId::new(0.into(), FileId::random());
+        let index_id = RegionIndexId::new(file_id, 0);
         let table_dir = "table_dir".to_string();
 
         let puffin_manager = puffin_manager_factory.build(
             object_store.clone(),
             RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
         );
-        let mut writer = puffin_manager.writer(&file_id).await.unwrap();
+        let mut writer = puffin_manager.writer(&index_id).await.unwrap();
         writer
             .put_blob(
                 "invalid_blob_type",
@@ -349,7 +460,7 @@ mod tests {
             puffin_manager_factory,
             Default::default(),
         );
-        let res = sst_index_applier.apply(file_id, None).await;
+        let res = sst_index_applier.apply(index_id, None, None).await;
         assert!(format!("{:?}", res.unwrap_err()).contains("Blob not found"));
     }
 }

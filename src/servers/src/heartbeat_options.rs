@@ -34,12 +34,10 @@ impl HeartbeatOptions {
     pub fn frontend_default() -> Self {
         Self {
             // Frontend can send heartbeat with a longer interval.
-            interval: Duration::from_millis(
-                distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS,
+            interval: distributed_time_constants::frontend_heartbeat_interval(
+                distributed_time_constants::BASE_HEARTBEAT_INTERVAL,
             ),
-            retry_interval: Duration::from_millis(
-                distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS,
-            ),
+            retry_interval: distributed_time_constants::BASE_HEARTBEAT_INTERVAL,
         }
     }
 }
@@ -47,10 +45,8 @@ impl HeartbeatOptions {
 impl Default for HeartbeatOptions {
     fn default() -> Self {
         Self {
-            interval: Duration::from_millis(distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS),
-            retry_interval: Duration::from_millis(
-                distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS,
-            ),
+            interval: distributed_time_constants::BASE_HEARTBEAT_INTERVAL,
+            retry_interval: distributed_time_constants::BASE_HEARTBEAT_INTERVAL,
         }
     }
 }

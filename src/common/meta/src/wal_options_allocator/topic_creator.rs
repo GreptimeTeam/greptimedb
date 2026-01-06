@@ -205,11 +205,14 @@ impl KafkaTopicCreator {
         self.partition_client(topic).await.unwrap()
     }
 }
+
 /// Builds a kafka [Client](rskafka::client::Client).
 pub async fn build_kafka_client(connection: &KafkaConnectionConfig) -> Result<Client> {
     // Builds an kafka controller client for creating topics.
     let mut builder = ClientBuilder::new(connection.broker_endpoints.clone())
-        .backoff_config(DEFAULT_BACKOFF_CONFIG);
+        .backoff_config(DEFAULT_BACKOFF_CONFIG)
+        .connect_timeout(Some(connection.connect_timeout))
+        .timeout(Some(connection.timeout));
     if let Some(sasl) = &connection.sasl {
         builder = builder.sasl_config(sasl.config.clone().into_sasl_config());
     };

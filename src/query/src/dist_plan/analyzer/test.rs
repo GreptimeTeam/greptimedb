@@ -777,6 +777,67 @@ fn expand_step_aggr_proj() {
     assert_eq!(expected, result.to_string());
 }
 
+/// Make sure that `SeriesDivide` special handling correctly clean up column requirements from it's previous sort
+#[test]
+fn expand_complex_col_req_sort_pql() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+        .unwrap()
+        .sort(vec![
+            col("pk1").sort(true, false),
+            col("pk2").sort(true, false),
+            col("pk3").sort(true, false), // make some col req here
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+    let plan = SeriesDivide::new(
+        vec!["pk1".to_string(), "pk2".to_string(), "pk3".to_string()],
+        "ts".to_string(),
+        plan,
+    );
+    let plan = LogicalPlan::Extension(datafusion_expr::Extension {
+        node: Arc::new(plan),
+    });
+
+    let plan = LogicalPlanBuilder::from(plan)
+        .aggregate(vec![col("pk1"), col("pk2")], vec![min(col("number"))])
+        .unwrap()
+        .sort(vec![
+            col("pk1").sort(true, false),
+            col("pk2").sort(true, false),
+        ])
+        .unwrap()
+        .project(vec![col("pk1"), col("pk2")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Projection: t.pk1, t.pk2",
+        "  MergeSort: t.pk1 ASC NULLS LAST, t.pk2 ASC NULLS LAST",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: t.pk1, t.pk2",
+        "  Sort: t.pk1 ASC NULLS LAST, t.pk2 ASC NULLS LAST",
+        "    Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        r#"      PromSeriesDivide: tags=["pk1", "pk2", "pk3"]"#,
+        "        Sort: t.pk1 ASC NULLS LAST, t.pk2 ASC NULLS LAST, t.pk3 ASC NULLS LAST",
+        "          TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
 /// should only expand `Sort`, notice `Sort` before `Aggregate` usually can and
 /// will be optimized out, and dist planner shouldn't handle that case, but
 /// for now, still handle that be expanding the `Sort` node

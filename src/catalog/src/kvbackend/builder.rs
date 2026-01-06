@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_error::ext::BoxedError;
 use common_meta::cache::LayeredCacheRegistryRef;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
@@ -23,14 +25,26 @@ use common_procedure::ProcedureManagerRef;
 use moka::sync::Cache;
 use partition::manager::PartitionRuleManager;
 
-#[cfg(feature = "enterprise")]
-use crate::information_schema::InformationSchemaTableFactoryRef;
-use crate::information_schema::{InformationExtensionRef, InformationSchemaProvider};
+use crate::information_schema::{
+    InformationExtensionRef, InformationSchemaProvider, InformationSchemaTableFactoryRef,
+};
 use crate::kvbackend::KvBackendCatalogManager;
 use crate::kvbackend::manager::{CATALOG_CACHE_MAX_CAPACITY, SystemCatalog};
 use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::numbers_table_provider::NumbersTableProvider;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
+
+/// The configurator that customizes or enhances the [`KvBackendCatalogManagerBuilder`].
+#[async_trait::async_trait]
+pub trait CatalogManagerConfigurator<C>: Send + Sync {
+    async fn configure(
+        &self,
+        builder: KvBackendCatalogManagerBuilder,
+        ctx: C,
+    ) -> std::result::Result<KvBackendCatalogManagerBuilder, BoxedError>;
+}
+
+pub type CatalogManagerConfiguratorRef<C> = Arc<dyn CatalogManagerConfigurator<C>>;
 
 pub struct KvBackendCatalogManagerBuilder {
     information_extension: InformationExtensionRef,
@@ -38,9 +52,7 @@ pub struct KvBackendCatalogManagerBuilder {
     cache_registry: LayeredCacheRegistryRef,
     procedure_manager: Option<ProcedureManagerRef>,
     process_manager: Option<ProcessManagerRef>,
-    #[cfg(feature = "enterprise")]
-    extra_information_table_factories:
-        std::collections::HashMap<String, InformationSchemaTableFactoryRef>,
+    extra_information_table_factories: HashMap<String, InformationSchemaTableFactoryRef>,
 }
 
 impl KvBackendCatalogManagerBuilder {
@@ -55,8 +67,7 @@ impl KvBackendCatalogManagerBuilder {
             cache_registry,
             procedure_manager: None,
             process_manager: None,
-            #[cfg(feature = "enterprise")]
-            extra_information_table_factories: std::collections::HashMap::new(),
+            extra_information_table_factories: HashMap::new(),
         }
     }
 
@@ -71,10 +82,9 @@ impl KvBackendCatalogManagerBuilder {
     }
 
     /// Sets the extra information tables.
-    #[cfg(feature = "enterprise")]
     pub fn with_extra_information_table_factories(
         mut self,
-        factories: std::collections::HashMap<String, InformationSchemaTableFactoryRef>,
+        factories: HashMap<String, InformationSchemaTableFactoryRef>,
     ) -> Self {
         self.extra_information_table_factories = factories;
         self
@@ -87,7 +97,6 @@ impl KvBackendCatalogManagerBuilder {
             cache_registry,
             procedure_manager,
             process_manager,
-            #[cfg(feature = "enterprise")]
             extra_information_table_factories,
         } = self;
         Arc::new_cyclic(|me| KvBackendCatalogManager {
@@ -111,7 +120,6 @@ impl KvBackendCatalogManagerBuilder {
                         process_manager.clone(),
                         backend.clone(),
                     );
-                    #[cfg(feature = "enterprise")]
                     let provider = provider
                         .with_extra_table_factories(extra_information_table_factories.clone());
                     Arc::new(provider)
@@ -123,7 +131,6 @@ impl KvBackendCatalogManagerBuilder {
                 numbers_table_provider: NumbersTableProvider,
                 backend,
                 process_manager,
-                #[cfg(feature = "enterprise")]
                 extra_information_table_factories,
             },
             cache_registry,

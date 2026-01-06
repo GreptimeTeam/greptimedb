@@ -201,6 +201,7 @@ pub enum Error {
     ShutdownServer {
         #[snafu(implicit)]
         location: Location,
+        #[snafu(source)]
         source: servers::error::Error,
     },
 
@@ -208,6 +209,7 @@ pub enum Error {
     ShutdownInstance {
         #[snafu(implicit)]
         location: Location,
+        #[snafu(source)]
         source: BoxedError,
     },
 
@@ -410,14 +412,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to build cache store"))]
-    BuildCacheStore {
-        #[snafu(source)]
-        error: object_store::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Not yet implemented: {what}"))]
     NotYetImplemented { what: String },
 }
@@ -493,7 +487,6 @@ impl ErrorExt for Error {
             SerializeJson { .. } => StatusCode::Internal,
 
             ObjectStore { source, .. } => source.status_code(),
-            BuildCacheStore { .. } => StatusCode::StorageUnavailable,
         }
     }
 

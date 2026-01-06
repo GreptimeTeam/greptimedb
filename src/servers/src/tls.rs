@@ -15,12 +15,10 @@
 use std::fs::File;
 use std::io::{BufReader, Error as IoError, ErrorKind};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::channel;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use common_telemetry::{error, info};
-use notify::{EventKind, RecursiveMode, Watcher};
+use common_grpc::reloadable_tls::{ReloadableTlsConfig, TlsConfigLoader};
+use common_telemetry::error;
 use rustls::ServerConfig;
 use rustls_pemfile::{Item, certs, read_one};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
@@ -28,10 +26,10 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use strum::EnumString;
 
-use crate::error::{FileWatchSnafu, InternalIoSnafu, Result};
+use crate::error::{InternalIoSnafu, Result};
 
 /// TlsMode is used for Mysql and Postgres server start up.
-#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq, EnumString)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, EnumString)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsMode {
     #[default]
@@ -93,6 +91,58 @@ impl TlsOption {
         tls_option
     }
 
+    /// Creates a new TLS option with the prefer mode.
+    pub fn prefer() -> Self {
+        Self {
+            mode: TlsMode::Prefer,
+            cert_path: String::new(),
+            key_path: String::new(),
+            ca_cert_path: String::new(),
+            watch: false,
+        }
+    }
+
+    /// Validates the TLS configuration.
+    ///
+    /// Returns an error if:
+    /// - TLS mode is enabled (not `Disable`) but `cert_path` or `key_path` is empty
+    /// - TLS mode is `VerifyCa` or `VerifyFull` but `ca_cert_path` is empty
+    pub fn validate(&self) -> Result<()> {
+        if self.mode == TlsMode::Disable {
+            return Ok(());
+        }
+
+        // When TLS is enabled, cert_path and key_path are required
+        if self.cert_path.is_empty() {
+            return Err(crate::error::Error::Internal {
+                err_msg: format!(
+                    "TLS mode is {:?} but cert_path is not configured",
+                    self.mode
+                ),
+            });
+        }
+
+        if self.key_path.is_empty() {
+            return Err(crate::error::Error::Internal {
+                err_msg: format!("TLS mode is {:?} but key_path is not configured", self.mode),
+            });
+        }
+
+        // For VerifyCa and VerifyFull modes, ca_cert_path is required for client verification
+        if matches!(self.mode, TlsMode::VerifyCa | TlsMode::VerifyFull)
+            && self.ca_cert_path.is_empty()
+        {
+            return Err(crate::error::Error::Internal {
+                err_msg: format!(
+                    "TLS mode is {:?} but ca_cert_path is not configured",
+                    self.mode
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
     pub fn setup(&self) -> Result<Option<ServerConfig>> {
         if let TlsMode::Disable = self.mode {
             return Ok(None);
@@ -149,96 +199,41 @@ impl TlsOption {
     }
 }
 
-/// A mutable container for TLS server config
-///
-/// This struct allows dynamic reloading of server certificates and keys
-pub struct ReloadableTlsServerConfig {
-    tls_option: TlsOption,
-    config: RwLock<Option<Arc<ServerConfig>>>,
-    version: AtomicUsize,
+pub fn merge_tls_option(main: &TlsOption, other: TlsOption) -> TlsOption {
+    if other.mode != TlsMode::Disable && other.validate().is_ok() {
+        return other;
+    }
+    main.clone()
 }
 
-impl ReloadableTlsServerConfig {
-    /// Create server config by loading configuration from `TlsOption`
-    pub fn try_new(tls_option: TlsOption) -> Result<ReloadableTlsServerConfig> {
-        let server_config = tls_option.setup()?;
-        Ok(Self {
-            tls_option,
-            config: RwLock::new(server_config.map(Arc::new)),
-            version: AtomicUsize::new(0),
-        })
+impl TlsConfigLoader<Arc<ServerConfig>> for TlsOption {
+    type Error = crate::error::Error;
+
+    fn load(&self) -> Result<Option<Arc<ServerConfig>>> {
+        Ok(self.setup()?.map(Arc::new))
     }
 
-    /// Reread server certificates and keys from file system.
-    pub fn reload(&self) -> Result<()> {
-        let server_config = self.tls_option.setup()?;
-        *self.config.write().unwrap() = server_config.map(Arc::new);
-        self.version.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+    fn watch_paths(&self) -> Vec<&Path> {
+        vec![self.cert_path(), self.key_path()]
     }
 
-    /// Get the server config hold by this container
-    pub fn get_server_config(&self) -> Option<Arc<ServerConfig>> {
-        self.config.read().unwrap().clone()
-    }
-
-    /// Get associated `TlsOption`
-    pub fn get_tls_option(&self) -> &TlsOption {
-        &self.tls_option
-    }
-
-    /// Get version of current config
-    ///
-    /// this version will auto increase when server config get reloaded.
-    pub fn get_version(&self) -> usize {
-        self.version.load(Ordering::Relaxed)
+    fn watch_enabled(&self) -> bool {
+        self.mode != TlsMode::Disable && self.watch
     }
 }
 
-pub fn maybe_watch_tls_config(tls_server_config: Arc<ReloadableTlsServerConfig>) -> Result<()> {
-    if !tls_server_config.get_tls_option().watch_enabled() {
-        return Ok(());
-    }
+/// Type alias for server-side reloadable TLS config
+pub type ReloadableTlsServerConfig = ReloadableTlsConfig<Arc<ServerConfig>, TlsOption>;
 
-    let tls_server_config_for_watcher = tls_server_config.clone();
-
-    let (tx, rx) = channel::<notify::Result<notify::Event>>();
-    let mut watcher = notify::recommended_watcher(tx).context(FileWatchSnafu { path: "<none>" })?;
-
-    let cert_path = tls_server_config.get_tls_option().cert_path();
-    watcher
-        .watch(cert_path, RecursiveMode::NonRecursive)
-        .with_context(|_| FileWatchSnafu {
-            path: cert_path.display().to_string(),
-        })?;
-
-    let key_path = tls_server_config.get_tls_option().key_path();
-    watcher
-        .watch(key_path, RecursiveMode::NonRecursive)
-        .with_context(|_| FileWatchSnafu {
-            path: key_path.display().to_string(),
-        })?;
-
-    std::thread::spawn(move || {
-        let _watcher = watcher;
-        while let Ok(res) = rx.recv() {
-            if let Ok(event) = res {
-                match event.kind {
-                    EventKind::Modify(_) | EventKind::Create(_) => {
-                        info!("Detected TLS cert/key file change: {:?}", event);
-                        if let Err(err) = tls_server_config_for_watcher.reload() {
-                            error!(err; "Failed to reload TLS server config");
-                        } else {
-                            info!("Reloaded TLS cert/key file successfully.");
-                        }
-                    }
-                    _ => {}
-                }
-            }
+/// Convenience function for watching server TLS configuration
+pub fn maybe_watch_server_tls_config(
+    tls_server_config: Arc<ReloadableTlsServerConfig>,
+) -> Result<()> {
+    common_grpc::reloadable_tls::maybe_watch_tls_config(tls_server_config, || {}).map_err(|e| {
+        crate::error::Error::Internal {
+            err_msg: format!("Failed to watch TLS config: {}", e),
         }
-    });
-
-    Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -246,6 +241,118 @@ mod tests {
     use super::*;
     use crate::install_ring_crypto_provider;
     use crate::tls::TlsMode::Disable;
+
+    #[test]
+    fn test_validate_disable_mode() {
+        let tls = TlsOption {
+            mode: TlsMode::Disable,
+            cert_path: String::new(),
+            key_path: String::new(),
+            ca_cert_path: String::new(),
+            watch: false,
+        };
+        assert!(tls.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_missing_cert_path() {
+        let tls = TlsOption {
+            mode: TlsMode::Require,
+            cert_path: String::new(),
+            key_path: "/path/to/key".to_string(),
+            ca_cert_path: String::new(),
+            watch: false,
+        };
+        let err = tls.validate().unwrap_err();
+        assert!(err.to_string().contains("cert_path"));
+    }
+
+    #[test]
+    fn test_validate_missing_key_path() {
+        let tls = TlsOption {
+            mode: TlsMode::Require,
+            cert_path: "/path/to/cert".to_string(),
+            key_path: String::new(),
+            ca_cert_path: String::new(),
+            watch: false,
+        };
+        let err = tls.validate().unwrap_err();
+        assert!(err.to_string().contains("key_path"));
+    }
+
+    #[test]
+    fn test_validate_require_mode_success() {
+        let tls = TlsOption {
+            mode: TlsMode::Require,
+            cert_path: "/path/to/cert".to_string(),
+            key_path: "/path/to/key".to_string(),
+            ca_cert_path: String::new(),
+            watch: false,
+        };
+        assert!(tls.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_verify_ca_missing_ca_cert() {
+        let tls = TlsOption {
+            mode: TlsMode::VerifyCa,
+            cert_path: "/path/to/cert".to_string(),
+            key_path: "/path/to/key".to_string(),
+            ca_cert_path: String::new(),
+            watch: false,
+        };
+        let err = tls.validate().unwrap_err();
+        assert!(err.to_string().contains("ca_cert_path"));
+    }
+
+    #[test]
+    fn test_validate_verify_full_missing_ca_cert() {
+        let tls = TlsOption {
+            mode: TlsMode::VerifyFull,
+            cert_path: "/path/to/cert".to_string(),
+            key_path: "/path/to/key".to_string(),
+            ca_cert_path: String::new(),
+            watch: false,
+        };
+        let err = tls.validate().unwrap_err();
+        assert!(err.to_string().contains("ca_cert_path"));
+    }
+
+    #[test]
+    fn test_validate_verify_ca_success() {
+        let tls = TlsOption {
+            mode: TlsMode::VerifyCa,
+            cert_path: "/path/to/cert".to_string(),
+            key_path: "/path/to/key".to_string(),
+            ca_cert_path: "/path/to/ca".to_string(),
+            watch: false,
+        };
+        assert!(tls.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_verify_full_success() {
+        let tls = TlsOption {
+            mode: TlsMode::VerifyFull,
+            cert_path: "/path/to/cert".to_string(),
+            key_path: "/path/to/key".to_string(),
+            ca_cert_path: "/path/to/ca".to_string(),
+            watch: false,
+        };
+        assert!(tls.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_prefer_mode() {
+        let tls = TlsOption {
+            mode: TlsMode::Prefer,
+            cert_path: "/path/to/cert".to_string(),
+            key_path: "/path/to/key".to_string(),
+            ca_cert_path: String::new(),
+            watch: false,
+        };
+        assert!(tls.validate().is_ok());
+    }
 
     #[test]
     fn test_new_tls_option() {
@@ -266,13 +373,13 @@ mod tests {
                 cert_path: "/path/to/cert_path".to_string(),
                 key_path: "/path/to/key_path".to_string(),
                 ca_cert_path: String::new(),
-                watch: false
+                watch: false,
             },
             TlsOption::new(
                 Some(Disable),
                 Some("/path/to/cert_path".to_string()),
                 Some("/path/to/key_path".to_string()),
-                false
+                false,
             )
         );
     }
@@ -434,10 +541,11 @@ mod tests {
         let server_config = Arc::new(
             ReloadableTlsServerConfig::try_new(server_tls).expect("failed to create server config"),
         );
-        maybe_watch_tls_config(server_config.clone()).expect("failed to watch server config");
+        maybe_watch_server_tls_config(server_config.clone())
+            .expect("failed to watch server config");
 
         assert_eq!(0, server_config.get_version());
-        assert!(server_config.get_server_config().is_some());
+        assert!(server_config.get_config().is_some());
 
         let tmp_file = key_path.with_extension("tmp");
         std::fs::copy("tests/ssl/server-pkcs8.key", &tmp_file)
@@ -459,6 +567,6 @@ mod tests {
 
         assert!(version_updated, "TLS config did not reload in time");
         assert!(server_config.get_version() > 0);
-        assert!(server_config.get_server_config().is_some());
+        assert!(server_config.get_config().is_some());
     }
 }

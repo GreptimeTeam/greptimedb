@@ -19,7 +19,7 @@ use common_error::ext::BoxedError;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
-use meta_srv::metasrv::BackendImpl;
+use meta_srv::metasrv::{BackendClientOptions, BackendImpl};
 use meta_srv::utils::etcd::create_etcd_client_with_tls;
 use servers::tls::{TlsMode, TlsOption};
 
@@ -61,6 +61,12 @@ pub struct StoreConfig {
     #[cfg(feature = "pg_kvbackend")]
     #[clap(long)]
     pub meta_schema_name: Option<String>,
+
+    /// Automatically create PostgreSQL schema if it doesn't exist (default: true).
+    #[cfg(feature = "pg_kvbackend")]
+    #[clap(long, default_value_t = true)]
+    pub auto_create_schema: bool,
+
     /// TLS mode for backend store connections (etcd, PostgreSQL, MySQL)
     #[clap(long = "backend-tls-mode", value_enum, default_value = "disable")]
     pub backend_tls_mode: TlsMode,
@@ -86,7 +92,7 @@ impl StoreConfig {
     pub fn tls_config(&self) -> Option<TlsOption> {
         if self.backend_tls_mode != TlsMode::Disable {
             Some(TlsOption {
-                mode: self.backend_tls_mode.clone(),
+                mode: self.backend_tls_mode,
                 cert_path: self.backend_tls_cert_path.clone(),
                 key_path: self.backend_tls_key_path.clone(),
                 ca_cert_path: self.backend_tls_ca_cert_path.clone(),
@@ -112,9 +118,13 @@ impl StoreConfig {
             let kvbackend = match self.backend {
                 BackendImpl::EtcdStore => {
                     let tls_config = self.tls_config();
-                    let etcd_client = create_etcd_client_with_tls(store_addrs, tls_config.as_ref())
-                        .await
-                        .map_err(BoxedError::new)?;
+                    let etcd_client = create_etcd_client_with_tls(
+                        store_addrs,
+                        &BackendClientOptions::default(),
+                        tls_config.as_ref(),
+                    )
+                    .await
+                    .map_err(BoxedError::new)?;
                     Ok(EtcdStore::with_etcd_client(etcd_client, max_txn_ops))
                 }
                 #[cfg(feature = "pg_kvbackend")]
@@ -134,6 +144,7 @@ impl StoreConfig {
                         schema_name,
                         table_name,
                         max_txn_ops,
+                        self.auto_create_schema,
                     )
                     .await
                     .map_err(BoxedError::new)?)

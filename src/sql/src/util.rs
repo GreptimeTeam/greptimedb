@@ -19,7 +19,8 @@ use itertools::Itertools;
 use serde::Serialize;
 use snafu::ensure;
 use sqlparser::ast::{
-    Array, Expr, Ident, ObjectName, SetExpr, SqlOption, TableFactor, Value, ValueWithSpan,
+    Array, Expr, Ident, ObjectName, SetExpr, SqlOption, StructField, TableFactor, Value,
+    ValueWithSpan,
 };
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -52,9 +53,12 @@ pub fn format_raw_object_name(name: &ObjectName) -> String {
 pub struct OptionValue(Expr);
 
 impl OptionValue {
-    fn try_new(expr: Expr) -> Result<Self> {
+    pub(crate) fn try_new(expr: Expr) -> Result<Self> {
         ensure!(
-            matches!(expr, Expr::Value(_) | Expr::Identifier(_) | Expr::Array(_)),
+            matches!(
+                expr,
+                Expr::Value(_) | Expr::Identifier(_) | Expr::Array(_) | Expr::Struct { .. }
+            ),
             InvalidExprAsOptionValueSnafu {
                 error: format!("{expr} not accepted")
             }
@@ -103,6 +107,13 @@ impl OptionValue {
                 .iter()
                 .map(Self::expr_as_string)
                 .collect::<Option<Vec<_>>>(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_struct_fields(&self) -> Option<&[StructField]> {
+        match &self.0 {
+            Expr::Struct { fields, .. } => Some(fields),
             _ => None,
         }
     }

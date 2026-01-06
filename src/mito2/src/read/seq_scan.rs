@@ -193,7 +193,7 @@ impl SeqScan {
             partition_ranges.len(),
             sources.len()
         );
-        Self::build_reader_from_sources(stream_ctx, sources, None).await
+        Self::build_reader_from_sources(stream_ctx, sources, None, None).await
     }
 
     /// Builds a merge reader that reads all flat ranges.
@@ -227,7 +227,7 @@ impl SeqScan {
             partition_ranges.len(),
             sources.len()
         );
-        Self::build_flat_reader_from_sources(stream_ctx, sources, None).await
+        Self::build_flat_reader_from_sources(stream_ctx, sources, None, None).await
     }
 
     /// Builds a reader to read sources. If `semaphore` is provided, reads sources in parallel
@@ -237,6 +237,7 @@ impl SeqScan {
         stream_ctx: &StreamContext,
         mut sources: Vec<Source>,
         semaphore: Option<Arc<Semaphore>>,
+        part_metrics: Option<&PartitionMetrics>,
     ) -> Result<BoxedBatchReader> {
         if let Some(semaphore) = semaphore.as_ref() {
             // Read sources in parallel.
@@ -248,18 +249,24 @@ impl SeqScan {
         }
 
         let mut builder = MergeReaderBuilder::from_sources(sources);
+        if let Some(metrics) = part_metrics {
+            builder.with_metrics_reporter(Some(metrics.merge_metrics_reporter()));
+        }
         let reader = builder.build().await?;
 
         let dedup = !stream_ctx.input.append_mode;
+        let dedup_metrics_reporter = part_metrics.map(|m| m.dedup_metrics_reporter());
         let reader = if dedup {
             match stream_ctx.input.merge_mode {
                 MergeMode::LastRow => Box::new(DedupReader::new(
                     reader,
                     LastRow::new(stream_ctx.input.filter_deleted),
+                    dedup_metrics_reporter,
                 )) as _,
                 MergeMode::LastNonNull => Box::new(DedupReader::new(
                     reader,
                     LastNonNull::new(stream_ctx.input.filter_deleted),
+                    dedup_metrics_reporter,
                 )) as _,
             }
         } else {
@@ -281,6 +288,7 @@ impl SeqScan {
         stream_ctx: &StreamContext,
         mut sources: Vec<BoxedRecordBatchStream>,
         semaphore: Option<Arc<Semaphore>>,
+        part_metrics: Option<&PartitionMetrics>,
     ) -> Result<BoxedRecordBatchStream> {
         if let Some(semaphore) = semaphore.as_ref() {
             // Read sources in parallel.
@@ -294,15 +302,20 @@ impl SeqScan {
         let mapper = stream_ctx.input.mapper.as_flat().unwrap();
         let schema = mapper.input_arrow_schema(stream_ctx.input.compaction);
 
-        let reader = FlatMergeReader::new(schema, sources, DEFAULT_READ_BATCH_SIZE).await?;
+        let metrics_reporter = part_metrics.map(|m| m.merge_metrics_reporter());
+        let reader =
+            FlatMergeReader::new(schema, sources, DEFAULT_READ_BATCH_SIZE, metrics_reporter)
+                .await?;
 
         let dedup = !stream_ctx.input.append_mode;
+        let dedup_metrics_reporter = part_metrics.map(|m| m.dedup_metrics_reporter());
         let reader = if dedup {
             match stream_ctx.input.merge_mode {
                 MergeMode::LastRow => Box::pin(
                     FlatDedupReader::new(
                         reader.into_stream().boxed(),
                         FlatLastRow::new(stream_ctx.input.filter_deleted),
+                        dedup_metrics_reporter,
                     )
                     .into_stream(),
                 ) as _,
@@ -313,6 +326,7 @@ impl SeqScan {
                             mapper.field_column_start(),
                             stream_ctx.input.filter_deleted,
                         ),
+                        dedup_metrics_reporter,
                     )
                     .into_stream(),
                 ) as _,
@@ -420,7 +434,7 @@ impl SeqScan {
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
                 let mut reader =
-                    Self::build_reader_from_sources(&stream_ctx, sources, semaphore.clone())
+                    Self::build_reader_from_sources(&stream_ctx, sources, semaphore.clone(), Some(&part_metrics))
                         .await?;
                 #[cfg(debug_assertions)]
                 let mut checker = crate::read::BatchChecker::default()
@@ -523,7 +537,7 @@ impl SeqScan {
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
                 let mut reader =
-                    Self::build_flat_reader_from_sources(&stream_ctx, sources, semaphore.clone())
+                    Self::build_flat_reader_from_sources(&stream_ctx, sources, semaphore.clone(), Some(&part_metrics))
                         .await?;
 
                 while let Some(record_batch) = reader.try_next().await? {
@@ -627,6 +641,10 @@ impl SeqScan {
 }
 
 impl RegionScanner for SeqScan {
+    fn name(&self) -> &str {
+        "SeqScan"
+    }
+
     fn properties(&self) -> &ScannerProperties {
         &self.properties
     }

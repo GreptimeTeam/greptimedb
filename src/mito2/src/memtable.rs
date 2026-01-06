@@ -55,8 +55,10 @@ pub mod time_partition;
 pub mod time_series;
 pub(crate) mod version;
 
-#[cfg(any(test, feature = "test"))]
-pub use bulk::part::BulkPart;
+pub use bulk::part::{
+    BulkPart, BulkPartEncoder, BulkPartMeta, UnorderedPart, record_batch_estimated_size,
+    sort_primary_key_record_batch,
+};
 #[cfg(any(test, feature = "test"))]
 pub use time_partition::filter_record_batch;
 
@@ -134,18 +136,18 @@ impl RangesOptions {
 #[derive(Debug, Default, Clone)]
 pub struct MemtableStats {
     /// The estimated bytes allocated by this memtable from heap.
-    estimated_bytes: usize,
+    pub estimated_bytes: usize,
     /// The inclusive time range that this memtable contains. It is None if
     /// and only if the memtable is empty.
-    time_range: Option<(Timestamp, Timestamp)>,
+    pub time_range: Option<(Timestamp, Timestamp)>,
     /// Total rows in memtable
     pub num_rows: usize,
     /// Total number of ranges in the memtable.
     pub num_ranges: usize,
     /// The maximum sequence number in the memtable.
-    max_sequence: SequenceNumber,
+    pub max_sequence: SequenceNumber,
     /// Number of estimated timeseries in memtable.
-    series_count: usize,
+    pub series_count: usize,
 }
 
 impl MemtableStats {
@@ -202,8 +204,27 @@ pub type BoxedRecordBatchIterator = Box<dyn Iterator<Item = Result<RecordBatch>>
 pub struct MemtableRanges {
     /// Range IDs and ranges.
     pub ranges: BTreeMap<usize, MemtableRange>,
-    /// Statistics of the memtable at the query time.
-    pub stats: MemtableStats,
+}
+
+impl MemtableRanges {
+    /// Returns the total number of rows across all ranges.
+    pub fn num_rows(&self) -> usize {
+        self.ranges.values().map(|r| r.stats().num_rows()).sum()
+    }
+
+    /// Returns the total series count across all ranges.
+    pub fn series_count(&self) -> usize {
+        self.ranges.values().map(|r| r.stats().series_count()).sum()
+    }
+
+    /// Returns the maximum sequence number across all ranges.
+    pub fn max_sequence(&self) -> SequenceNumber {
+        self.ranges
+            .values()
+            .map(|r| r.stats().max_sequence())
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 impl IterBuilder for MemtableRanges {
@@ -567,15 +588,19 @@ impl MemtableRangeContext {
 pub struct MemtableRange {
     /// Shared context.
     context: MemtableRangeContextRef,
-    /// Number of rows in current memtable range.
-    // todo(hl): use [MemtableRangeStats] instead.
-    num_rows: usize,
+    /// Statistics for this memtable range.
+    stats: MemtableStats,
 }
 
 impl MemtableRange {
-    /// Creates a new range from context.
-    pub fn new(context: MemtableRangeContextRef, num_rows: usize) -> Self {
-        Self { context, num_rows }
+    /// Creates a new range from context and stats.
+    pub fn new(context: MemtableRangeContextRef, stats: MemtableStats) -> Self {
+        Self { context, stats }
+    }
+
+    /// Returns the statistics for this range.
+    pub fn stats(&self) -> &MemtableStats {
+        &self.stats
     }
 
     /// Returns the id of the memtable to read.
@@ -622,7 +647,7 @@ impl MemtableRange {
     }
 
     pub fn num_rows(&self) -> usize {
-        self.num_rows
+        self.stats.num_rows
     }
 
     /// Returns the encoded range if available.

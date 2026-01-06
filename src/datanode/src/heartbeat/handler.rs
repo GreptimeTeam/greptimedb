@@ -22,20 +22,26 @@ use common_telemetry::error;
 use snafu::OptionExt;
 use store_api::storage::GcReport;
 
+mod apply_staging_manifest;
 mod close_region;
 mod downgrade_region;
+mod enter_staging;
 mod file_ref;
 mod flush_region;
 mod gc_worker;
 mod open_region;
+mod remap_manifest;
 mod upgrade_region;
 
+use crate::heartbeat::handler::apply_staging_manifest::ApplyStagingManifestsHandler;
 use crate::heartbeat::handler::close_region::CloseRegionsHandler;
 use crate::heartbeat::handler::downgrade_region::DowngradeRegionsHandler;
+use crate::heartbeat::handler::enter_staging::EnterStagingRegionsHandler;
 use crate::heartbeat::handler::file_ref::GetFileRefsHandler;
 use crate::heartbeat::handler::flush_region::FlushRegionsHandler;
 use crate::heartbeat::handler::gc_worker::GcRegionsHandler;
 use crate::heartbeat::handler::open_region::OpenRegionsHandler;
+use crate::heartbeat::handler::remap_manifest::RemapManifestHandler;
 use crate::heartbeat::handler::upgrade_region::UpgradeRegionsHandler;
 use crate::heartbeat::task_tracker::TaskTracker;
 use crate::region_server::RegionServer;
@@ -99,26 +105,37 @@ impl RegionHeartbeatResponseHandler {
         self
     }
 
-    fn build_handler(&self, instruction: &Instruction) -> MetaResult<Box<InstructionHandlers>> {
+    fn build_handler(
+        &self,
+        instruction: &Instruction,
+    ) -> MetaResult<Option<Box<InstructionHandlers>>> {
         match instruction {
-            Instruction::CloseRegions(_) => Ok(Box::new(CloseRegionsHandler.into())),
-            Instruction::OpenRegions(_) => Ok(Box::new(
+            Instruction::CloseRegions(_) => Ok(Some(Box::new(CloseRegionsHandler.into()))),
+            Instruction::OpenRegions(_) => Ok(Some(Box::new(
                 OpenRegionsHandler {
                     open_region_parallelism: self.open_region_parallelism,
                 }
                 .into(),
-            )),
-            Instruction::FlushRegions(_) => Ok(Box::new(FlushRegionsHandler.into())),
-            Instruction::DowngradeRegions(_) => Ok(Box::new(DowngradeRegionsHandler.into())),
-            Instruction::UpgradeRegions(_) => Ok(Box::new(
+            ))),
+            Instruction::FlushRegions(_) => Ok(Some(Box::new(FlushRegionsHandler.into()))),
+            Instruction::DowngradeRegions(_) => Ok(Some(Box::new(DowngradeRegionsHandler.into()))),
+            Instruction::UpgradeRegions(_) => Ok(Some(Box::new(
                 UpgradeRegionsHandler {
                     upgrade_region_parallelism: self.open_region_parallelism,
                 }
                 .into(),
-            )),
-            Instruction::GetFileRefs(_) => Ok(Box::new(GetFileRefsHandler.into())),
-            Instruction::GcRegions(_) => Ok(Box::new(GcRegionsHandler.into())),
+            ))),
+            Instruction::GetFileRefs(_) => Ok(Some(Box::new(GetFileRefsHandler.into()))),
+            Instruction::GcRegions(_) => Ok(Some(Box::new(GcRegionsHandler.into()))),
             Instruction::InvalidateCaches(_) => InvalidHeartbeatResponseSnafu.fail(),
+            Instruction::Suspend => Ok(None),
+            Instruction::EnterStagingRegions(_) => {
+                Ok(Some(Box::new(EnterStagingRegionsHandler.into())))
+            }
+            Instruction::RemapManifest(_) => Ok(Some(Box::new(RemapManifestHandler.into()))),
+            Instruction::ApplyStagingManifests(_) => {
+                Ok(Some(Box::new(ApplyStagingManifestsHandler.into())))
+            }
         }
     }
 }
@@ -132,6 +149,9 @@ pub enum InstructionHandlers {
     UpgradeRegions(UpgradeRegionsHandler),
     GetFileRefs(GetFileRefsHandler),
     GcRegions(GcRegionsHandler),
+    EnterStagingRegions(EnterStagingRegionsHandler),
+    RemapManifest(RemapManifestHandler),
+    ApplyStagingManifests(ApplyStagingManifestsHandler),
 }
 
 macro_rules! impl_from_handler {
@@ -153,7 +173,10 @@ impl_from_handler!(
     DowngradeRegionsHandler => DowngradeRegions,
     UpgradeRegionsHandler => UpgradeRegions,
     GetFileRefsHandler => GetFileRefs,
-    GcRegionsHandler => GcRegions
+    GcRegionsHandler => GcRegions,
+    EnterStagingRegionsHandler => EnterStagingRegions,
+    RemapManifestHandler => RemapManifest,
+    ApplyStagingManifestsHandler => ApplyStagingManifests
 );
 
 macro_rules! dispatch_instr {
@@ -198,6 +221,9 @@ dispatch_instr!(
     UpgradeRegions => UpgradeRegions,
     GetFileRefs => GetFileRefs,
     GcRegions => GcRegions,
+    EnterStagingRegions => EnterStagingRegions,
+    RemapManifest => RemapManifest,
+    ApplyStagingManifests => ApplyStagingManifests,
 );
 
 #[async_trait]
@@ -216,30 +242,24 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
             .context(InvalidHeartbeatResponseSnafu)?;
 
         let mailbox = ctx.mailbox.clone();
-        let region_server = self.region_server.clone();
-        let downgrade_tasks = self.downgrade_tasks.clone();
-        let flush_tasks = self.flush_tasks.clone();
-        let gc_tasks = self.gc_tasks.clone();
-        let handler = self.build_handler(&instruction)?;
-        let _handle = common_runtime::spawn_global(async move {
-            let reply = handler
-                .handle(
-                    &HandlerContext {
-                        region_server,
-                        downgrade_tasks,
-                        flush_tasks,
-                        gc_tasks,
-                    },
-                    instruction,
-                )
-                .await;
-
-            if let Some(reply) = reply
-                && let Err(e) = mailbox.send((meta, reply)).await
-            {
-                error!(e; "Failed to send reply to mailbox");
-            }
-        });
+        if let Some(handler) = self.build_handler(&instruction)? {
+            let context = HandlerContext {
+                region_server: self.region_server.clone(),
+                downgrade_tasks: self.downgrade_tasks.clone(),
+                flush_tasks: self.flush_tasks.clone(),
+                gc_tasks: self.gc_tasks.clone(),
+            };
+            let _handle = common_runtime::spawn_global(async move {
+                let reply = handler.handle(&context, instruction).await;
+                if let Some(reply) = reply
+                    && let Err(e) = mailbox.send((meta, reply)).await
+                {
+                    let error = e.to_string();
+                    let (meta, reply) = e.0;
+                    error!("Failed to send reply {reply} to {meta:?}: {error}");
+                }
+            });
+        }
 
         Ok(HandleControl::Continue)
     }
@@ -256,7 +276,9 @@ mod tests {
     use common_meta::heartbeat::mailbox::{
         HeartbeatMailbox, IncomingMessage, MailboxRef, MessageMeta,
     };
-    use common_meta::instruction::{DowngradeRegion, OpenRegion, UpgradeRegion};
+    use common_meta::instruction::{
+        DowngradeRegion, EnterStagingRegion, OpenRegion, UpgradeRegion,
+    };
     use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
@@ -336,6 +358,16 @@ mod tests {
         let instruction = Instruction::UpgradeRegions(vec![UpgradeRegion {
             region_id,
             ..Default::default()
+        }]);
+        assert!(
+            heartbeat_handler
+                .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction)))
+        );
+
+        // Enter staging region
+        let instruction = Instruction::EnterStagingRegions(vec![EnterStagingRegion {
+            region_id,
+            partition_expr: "".to_string(),
         }]);
         assert!(
             heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((meta, instruction)))

@@ -43,7 +43,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    DecodeOtlpRequestSnafu, InvalidLokiLabelsSnafu, InvalidLokiPayloadSnafu, ParseJsonSnafu,
+    DecodeLokiRequestSnafu, InvalidLokiLabelsSnafu, InvalidLokiPayloadSnafu, ParseJsonSnafu,
     PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
 use crate::http::HttpResponse;
@@ -152,7 +152,7 @@ pub async fn loki_ingest(
             rows.push(row);
         }
 
-        let schemas = schema_info.schema;
+        let schemas = schema_info.column_schemas()?;
         // fill Null for missing values
         for row in rows.iter_mut() {
             row.resize(schemas.len(), GreptimeValue::default());
@@ -492,7 +492,7 @@ impl LokiPbParser {
     pub fn from_bytes(bytes: Bytes) -> Result<Self> {
         let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
         let req = loki_proto::logproto::PushRequest::decode(&decompressed[..])
-            .context(DecodeOtlpRequestSnafu)?;
+            .context(DecodeLokiRequestSnafu)?;
 
         Ok(Self {
             streams: req.streams.into(),
@@ -746,13 +746,16 @@ fn process_labels(
         } else {
             // not exist
             // add schema and append to values
-            schemas.push(ColumnSchema {
-                column_name: k.clone(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Tag.into(),
-                datatype_extension: None,
-                options: None,
-            });
+            schemas.push(
+                ColumnSchema {
+                    column_name: k.clone(),
+                    datatype: ColumnDataType::String.into(),
+                    semantic_type: SemanticType::Tag.into(),
+                    datatype_extension: None,
+                    options: None,
+                }
+                .into(),
+            );
             column_indexer.insert(k, schemas.len() - 1);
 
             row.push(GreptimeValue {

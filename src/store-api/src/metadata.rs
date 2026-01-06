@@ -29,7 +29,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow;
 use datatypes::arrow::datatypes::FieldRef;
-use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef, VectorIndexOptions};
 use datatypes::types::TimestampType;
 use itertools::Itertools;
 use serde::de::Error;
@@ -384,6 +384,22 @@ impl RegionMetadata {
         inverted_index
     }
 
+    /// Gets the column IDs that have vector indexes along with their options.
+    /// Returns a map from column ID to the vector index options.
+    pub fn vector_indexed_column_ids(&self) -> HashMap<ColumnId, VectorIndexOptions> {
+        self.column_metadatas
+            .iter()
+            .filter_map(|column| {
+                column
+                    .column_schema
+                    .vector_index_options()
+                    .ok()
+                    .flatten()
+                    .map(|options| (column.column_id, options))
+            })
+            .collect()
+    }
+
     /// Checks whether the metadata is valid.
     fn validate(&self) -> Result<()> {
         // Id to name.
@@ -640,6 +656,18 @@ impl RegionMetadataBuilder {
 
     /// Consumes the builder and build a [RegionMetadata].
     pub fn build(self) -> Result<RegionMetadata> {
+        self.build_with_options(true)
+    }
+
+    /// Builds metadata without running validation.
+    ///
+    /// Intended for file/external engines that should accept arbitrary schemas
+    /// coming from files.
+    pub fn build_without_validation(self) -> Result<RegionMetadata> {
+        self.build_with_options(false)
+    }
+
+    fn build_with_options(self, validate: bool) -> Result<RegionMetadata> {
         let skipped = SkippedFields::new(&self.column_metadatas)?;
 
         let meta = RegionMetadata {
@@ -654,7 +682,9 @@ impl RegionMetadataBuilder {
             partition_expr: self.partition_expr,
         };
 
-        meta.validate()?;
+        if validate {
+            meta.validate()?;
+        }
 
         Ok(meta)
     }
@@ -1926,6 +1956,96 @@ mod test {
             err.to_string()
                 .contains("internal column name that can not be used"),
             "unexpected err: {err}",
+        );
+    }
+
+    #[test]
+    fn test_allow_internal_column_name() {
+        let mut builder = create_builder();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "__primary_key",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![1]);
+
+        let metadata = builder.build_without_validation().unwrap();
+        assert_eq!(
+            "__primary_key",
+            metadata.column_metadatas[0].column_schema.name
+        );
+    }
+
+    #[test]
+    fn test_build_without_validation() {
+        // Primary key points to a Field column, which would normally fail validation.
+        let mut builder = create_builder();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .primary_key(vec![2]);
+
+        // Unvalidated build should succeed.
+        let metadata = builder.build_without_validation().unwrap();
+        assert_eq!(vec![2], metadata.primary_key);
+
+        // Validated build still rejects it.
+        let mut builder = create_builder();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .primary_key(vec![2]);
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("semantic type of column field should be Tag"),
+            "unexpected err: {err}"
         );
     }
 

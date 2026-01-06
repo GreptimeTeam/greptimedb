@@ -14,13 +14,14 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use api::v1::index::{BloomFilterLoc, BloomFilterMeta};
 use async_trait::async_trait;
 use bytes::Bytes;
 use index::bloom_filter::error::Result;
-use index::bloom_filter::reader::BloomFilterReader;
-use store_api::storage::{ColumnId, FileId};
+use index::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReader};
+use store_api::storage::{ColumnId, FileId, IndexVersion};
 
 use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache, PageKey};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
@@ -34,8 +35,10 @@ pub enum Tag {
     Fulltext,
 }
 
+pub type BloomFilterIndexKey = (FileId, IndexVersion, ColumnId, Tag);
+
 /// Cache for bloom filter index.
-pub type BloomFilterIndexCache = IndexCache<(FileId, ColumnId, Tag), BloomFilterMeta>;
+pub type BloomFilterIndexCache = IndexCache<BloomFilterIndexKey, BloomFilterMeta>;
 pub type BloomFilterIndexCacheRef = Arc<BloomFilterIndexCache>;
 
 impl BloomFilterIndexCache {
@@ -58,11 +61,9 @@ impl BloomFilterIndexCache {
 }
 
 /// Calculates weight for bloom filter index metadata.
-fn bloom_filter_index_metadata_weight(
-    k: &(FileId, ColumnId, Tag),
-    meta: &Arc<BloomFilterMeta>,
-) -> u32 {
+fn bloom_filter_index_metadata_weight(k: &BloomFilterIndexKey, meta: &Arc<BloomFilterMeta>) -> u32 {
     let base = k.0.as_bytes().len()
+        + std::mem::size_of::<IndexVersion>()
         + std::mem::size_of::<ColumnId>()
         + std::mem::size_of::<Tag>()
         + std::mem::size_of::<BloomFilterMeta>();
@@ -74,16 +75,14 @@ fn bloom_filter_index_metadata_weight(
 }
 
 /// Calculates weight for bloom filter index content.
-fn bloom_filter_index_content_weight(
-    (k, _): &((FileId, ColumnId, Tag), PageKey),
-    v: &Bytes,
-) -> u32 {
+fn bloom_filter_index_content_weight((k, _): &(BloomFilterIndexKey, PageKey), v: &Bytes) -> u32 {
     (k.0.as_bytes().len() + std::mem::size_of::<ColumnId>() + v.len()) as u32
 }
 
 /// Bloom filter index blob reader with cache.
 pub struct CachedBloomFilterIndexBlobReader<R> {
     file_id: FileId,
+    index_version: IndexVersion,
     column_id: ColumnId,
     tag: Tag,
     blob_size: u64,
@@ -95,6 +94,7 @@ impl<R> CachedBloomFilterIndexBlobReader<R> {
     /// Creates a new bloom filter index blob reader with cache.
     pub fn new(
         file_id: FileId,
+        index_version: IndexVersion,
         column_id: ColumnId,
         tag: Tag,
         blob_size: u64,
@@ -103,6 +103,7 @@ impl<R> CachedBloomFilterIndexBlobReader<R> {
     ) -> Self {
         Self {
             file_id,
+            index_version,
             column_id,
             tag,
             blob_size,
@@ -114,53 +115,95 @@ impl<R> CachedBloomFilterIndexBlobReader<R> {
 
 #[async_trait]
 impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBlobReader<R> {
-    async fn range_read(&self, offset: u64, size: u32) -> Result<Bytes> {
+    async fn range_read(
+        &self,
+        offset: u64,
+        size: u32,
+        metrics: Option<&mut BloomFilterReadMetrics>,
+    ) -> Result<Bytes> {
+        let start = metrics.as_ref().map(|_| Instant::now());
         let inner = &self.inner;
-        self.cache
+        let (result, cache_metrics) = self
+            .cache
             .get_or_load(
-                (self.file_id, self.column_id, self.tag),
+                (self.file_id, self.index_version, self.column_id, self.tag),
                 self.blob_size,
                 offset,
                 size,
-                move |ranges| async move { inner.read_vec(&ranges).await },
+                move |ranges| async move { inner.read_vec(&ranges, None).await },
             )
-            .await
-            .map(|b| b.into())
+            .await?;
+
+        if let Some(m) = metrics {
+            m.total_ranges += cache_metrics.num_pages;
+            m.total_bytes += cache_metrics.page_bytes;
+            m.cache_hit += cache_metrics.cache_hit;
+            m.cache_miss += cache_metrics.cache_miss;
+            if let Some(start) = start {
+                m.fetch_elapsed += start.elapsed();
+            }
+        }
+
+        Ok(result.into())
     }
 
-    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn read_vec(
+        &self,
+        ranges: &[Range<u64>],
+        metrics: Option<&mut BloomFilterReadMetrics>,
+    ) -> Result<Vec<Bytes>> {
+        let start = metrics.as_ref().map(|_| Instant::now());
+
         let mut pages = Vec::with_capacity(ranges.len());
+        let mut total_cache_metrics = crate::cache::index::IndexCacheMetrics::default();
         for range in ranges {
             let inner = &self.inner;
-            let page = self
+            let (page, cache_metrics) = self
                 .cache
                 .get_or_load(
-                    (self.file_id, self.column_id, self.tag),
+                    (self.file_id, self.index_version, self.column_id, self.tag),
                     self.blob_size,
                     range.start,
                     (range.end - range.start) as u32,
-                    move |ranges| async move { inner.read_vec(&ranges).await },
+                    move |ranges| async move { inner.read_vec(&ranges, None).await },
                 )
                 .await?;
 
+            total_cache_metrics.merge(&cache_metrics);
             pages.push(Bytes::from(page));
+        }
+
+        if let Some(m) = metrics {
+            m.total_ranges += total_cache_metrics.num_pages;
+            m.total_bytes += total_cache_metrics.page_bytes;
+            m.cache_hit += total_cache_metrics.cache_hit;
+            m.cache_miss += total_cache_metrics.cache_miss;
+            if let Some(start) = start {
+                m.fetch_elapsed += start.elapsed();
+            }
         }
 
         Ok(pages)
     }
 
     /// Reads the meta information of the bloom filter.
-    async fn metadata(&self) -> Result<BloomFilterMeta> {
-        if let Some(cached) = self
-            .cache
-            .get_metadata((self.file_id, self.column_id, self.tag))
+    async fn metadata(
+        &self,
+        metrics: Option<&mut BloomFilterReadMetrics>,
+    ) -> Result<BloomFilterMeta> {
+        if let Some(cached) =
+            self.cache
+                .get_metadata((self.file_id, self.index_version, self.column_id, self.tag))
         {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
+            if let Some(m) = metrics {
+                m.cache_hit += 1;
+            }
             Ok((*cached).clone())
         } else {
-            let meta = self.inner.metadata().await?;
+            let meta = self.inner.metadata(metrics).await?;
             self.cache.put_metadata(
-                (self.file_id, self.column_id, self.tag),
+                (self.file_id, self.index_version, self.column_id, self.tag),
                 Arc::new(meta.clone()),
             );
             CACHE_MISS.with_label_values(&[INDEX_METADATA_TYPE]).inc();
@@ -180,6 +223,7 @@ mod test {
     #[test]
     fn bloom_filter_metadata_weight_counts_vec_contents() {
         let file_id = FileId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let version = 0;
         let column_id: ColumnId = 42;
         let tag = Tag::Skipping;
 
@@ -203,10 +247,13 @@ mod test {
             ],
         };
 
-        let weight =
-            bloom_filter_index_metadata_weight(&(file_id, column_id, tag), &Arc::new(meta.clone()));
+        let weight = bloom_filter_index_metadata_weight(
+            &(file_id, version, column_id, tag),
+            &Arc::new(meta.clone()),
+        );
 
         let base = file_id.as_bytes().len()
+            + std::mem::size_of::<IndexVersion>()
             + std::mem::size_of::<ColumnId>()
             + std::mem::size_of::<Tag>()
             + std::mem::size_of::<BloomFilterMeta>();

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -99,7 +100,7 @@ impl MysqlSpawnConfig {
     }
 
     fn tls(&self) -> Option<Arc<ServerConfig>> {
-        self.tls.get_server_config()
+        self.tls.get_config()
     }
 }
 
@@ -264,5 +265,9 @@ impl Server for MysqlServer {
 
     fn bind_addr(&self) -> Option<SocketAddr> {
         self.bind_addr
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

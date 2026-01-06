@@ -214,7 +214,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 impl<S> RegionWorkerLoop<S> {
     /// Handles region edit request.
-    pub(crate) async fn handle_region_edit(&mut self, request: RegionEditRequest) {
+    pub(crate) fn handle_region_edit(&mut self, request: RegionEditRequest) {
         let region_id = request.region_id;
         let Some(region) = self.regions.get_region(region_id) else {
             let _ = request.tx.send(RegionNotFoundSnafu { region_id }.fail());
@@ -246,8 +246,15 @@ impl<S> RegionWorkerLoop<S> {
             file.sequence = NonZeroU64::new(file_sequence);
         }
 
+        // Allow retrieving `is_staging` before spawn the edit region task.
+        let is_staging = region.is_staging();
+        let expect_state = if is_staging {
+            RegionLeaderState::Staging
+        } else {
+            RegionLeaderState::Writable
+        };
         // Marks the region as editing.
-        if let Err(e) = region.set_editing() {
+        if let Err(e) = region.set_editing(expect_state) {
             let _ = sender.send(Err(e));
             return;
         }
@@ -258,7 +265,8 @@ impl<S> RegionWorkerLoop<S> {
         // Now the region is in editing state.
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
-            let result = edit_region(&region, edit.clone(), cache_manager, listener).await;
+            let result =
+                edit_region(&region, edit.clone(), cache_manager, listener, is_staging).await;
             let notify = WorkerRequest::Background {
                 region_id,
                 notify: BackgroundNotify::RegionEdit(RegionEditResult {
@@ -268,6 +276,7 @@ impl<S> RegionWorkerLoop<S> {
                     result,
                     // we always need to restore region state after region edit
                     update_region_state: true,
+                    is_staging,
                 }),
             };
 
@@ -299,29 +308,39 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
 
-        let need_compaction =
-            edit_result.result.is_ok() && !edit_result.edit.files_to_add.is_empty();
+        let need_compaction = if edit_result.is_staging {
+            if edit_result.update_region_state {
+                // For staging regions, edits are not applied immediately,
+                // as they remain invisible until the region exits the staging state.
+                region.switch_state_to_staging(RegionLeaderState::Editing);
+            }
 
-        if edit_result.result.is_ok() {
-            // Applies the edit to the region.
-            region.version_control.apply_edit(
-                Some(edit_result.edit),
-                &[],
-                region.file_purger.clone(),
-            );
-        }
+            false
+        } else {
+            let need_compaction =
+                edit_result.result.is_ok() && !edit_result.edit.files_to_add.is_empty();
+            // Only apply the edit if the result is ok and region is not in staging state.
+            if edit_result.result.is_ok() {
+                // Applies the edit to the region.
+                region.version_control.apply_edit(
+                    Some(edit_result.edit),
+                    &[],
+                    region.file_purger.clone(),
+                );
+            }
+            if edit_result.update_region_state {
+                region.switch_state_to_writable(RegionLeaderState::Editing);
+            }
 
-        if edit_result.update_region_state {
-            // Sets the region as writable.
-            region.switch_state_to_writable(RegionLeaderState::Editing);
-        }
+            need_compaction
+        };
 
         let _ = edit_result.sender.send(edit_result.result);
 
         if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id)
             && let Some(request) = edit_queue.dequeue()
         {
-            self.handle_region_edit(request).await;
+            self.handle_region_edit(request);
         }
 
         if need_compaction {
@@ -346,6 +365,7 @@ impl<S> RegionWorkerLoop<S> {
 
         let request_sender = self.sender.clone();
         let manifest_ctx = region.manifest_ctx.clone();
+        let is_staging = region.is_staging();
 
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
@@ -354,7 +374,7 @@ impl<S> RegionWorkerLoop<S> {
                 RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
 
             let result = manifest_ctx
-                .update_manifest(RegionLeaderState::Truncating, action_list)
+                .update_manifest(RegionLeaderState::Truncating, action_list, is_staging)
                 .await
                 .map(|_| ());
 
@@ -391,6 +411,7 @@ impl<S> RegionWorkerLoop<S> {
         }
         let listener = self.listener.clone();
         let request_sender = self.sender.clone();
+        let is_staging = region.is_staging();
         // Now the region is in altering state.
         common_runtime::spawn_global(async move {
             let new_meta = change.metadata.clone();
@@ -398,7 +419,7 @@ impl<S> RegionWorkerLoop<S> {
 
             let result = region
                 .manifest_ctx
-                .update_manifest(RegionLeaderState::Altering, action_list)
+                .update_manifest(RegionLeaderState::Altering, action_list, is_staging)
                 .await
                 .map(|_| ());
             let notify = WorkerRequest::Background {
@@ -461,6 +482,7 @@ async fn edit_region(
     edit: RegionEdit,
     cache_manager: CacheManagerRef,
     listener: WorkerListener,
+    is_staging: bool,
 ) -> Result<()> {
     let region_id = region.region_id;
     if let Some(write_cache) = cache_manager.write_cache() {
@@ -478,12 +500,12 @@ async fn edit_region(
 
             let index_file_index_key = IndexKey::new(
                 region_id,
-                file_meta.index_file_id().file_id(),
-                FileType::Puffin,
+                file_meta.index_id().file_id.file_id(),
+                FileType::Puffin(file_meta.index_version),
             );
             let index_remote_path = location::index_file_path(
                 layer.table_dir(),
-                file_meta.file_id(),
+                file_meta.index_id(),
                 layer.path_type(),
             );
 
@@ -527,12 +549,15 @@ async fn edit_region(
         }
     }
 
-    info!("Applying {edit:?} to region {}", region_id);
+    info!(
+        "Applying {edit:?} to region {}, is_staging: {}",
+        region_id, is_staging
+    );
 
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
     region
         .manifest_ctx
-        .update_manifest(RegionLeaderState::Editing, action_list)
+        .update_manifest(RegionLeaderState::Editing, action_list, is_staging)
         .await
         .map(|_| ())
 }

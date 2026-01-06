@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use common_base::memory_limit::MemoryLimit;
 use common_base::readable_size::ReadableSize;
+use common_memory_manager::OnExhaustedPolicy;
 use common_stat::{get_total_cpu_cores, get_total_memory_readable};
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
@@ -92,6 +93,10 @@ pub struct MitoConfig {
     pub max_background_compactions: usize,
     /// Max number of running background purge jobs (default: number of cpu cores).
     pub max_background_purges: usize,
+    /// Memory budget for compaction tasks. Setting it to 0 or "unlimited" disables the limit.
+    pub experimental_compaction_memory_limit: MemoryLimit,
+    /// Behavior when compaction cannot acquire memory from the budget.
+    pub experimental_compaction_on_exhausted: OnExhaustedPolicy,
 
     // Flush configs:
     /// Interval to auto flush a region if it has not flushed yet (default 30 min).
@@ -126,6 +131,11 @@ pub struct MitoConfig {
     /// The remaining capacity is used for data (parquet) files.
     /// Must be between 0 and 100 (exclusive).
     pub index_cache_percent: u8,
+    /// Enable background downloading of files to the local cache when accessed during queries (default: true).
+    /// When enabled, files will be asynchronously downloaded to improve performance for subsequent reads.
+    pub enable_refill_cache_on_read: bool,
+    /// Capacity for manifest cache (default: 256MB).
+    pub manifest_cache_size: ReadableSize,
 
     // Other configs:
     /// Buffer size for SST writing.
@@ -148,6 +158,9 @@ pub struct MitoConfig {
     pub fulltext_index: FulltextIndexConfig,
     /// Bloom filter index configs.
     pub bloom_filter_index: BloomFilterConfig,
+    /// Vector index configs (HNSW).
+    #[cfg(feature = "vector_index")]
+    pub vector_index: VectorIndexConfig,
 
     /// Memtable config
     pub memtable: MemtableConfig,
@@ -178,6 +191,8 @@ impl Default for MitoConfig {
             max_background_flushes: divide_num_cpus(2),
             max_background_compactions: divide_num_cpus(4),
             max_background_purges: get_total_cpu_cores(),
+            experimental_compaction_memory_limit: MemoryLimit::Unlimited,
+            experimental_compaction_on_exhausted: OnExhaustedPolicy::default(),
             auto_flush_interval: Duration::from_secs(30 * 60),
             global_write_buffer_size: ReadableSize::gb(1),
             global_write_buffer_reject_size: ReadableSize::gb(2),
@@ -191,6 +206,8 @@ impl Default for MitoConfig {
             write_cache_ttl: None,
             preload_index_cache: true,
             index_cache_percent: DEFAULT_INDEX_CACHE_PERCENT,
+            enable_refill_cache_on_read: true,
+            manifest_cache_size: ReadableSize::mb(256),
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
@@ -200,6 +217,8 @@ impl Default for MitoConfig {
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),
             bloom_filter_index: BloomFilterConfig::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index: VectorIndexConfig::default(),
             memtable: MemtableConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
             default_experimental_flat_format: false,
@@ -614,6 +633,51 @@ impl Default for BloomFilterConfig {
 }
 
 impl BloomFilterConfig {
+    pub fn mem_threshold_on_create(&self) -> Option<usize> {
+        match self.mem_threshold_on_create {
+            MemoryThreshold::Auto => {
+                if let Some(sys_memory) = get_total_memory_readable() {
+                    Some((sys_memory / INDEX_CREATE_MEM_THRESHOLD_FACTOR).as_bytes() as usize)
+                } else {
+                    Some(ReadableSize::mb(64).as_bytes() as usize)
+                }
+            }
+            MemoryThreshold::Unlimited => None,
+            MemoryThreshold::Size(size) => Some(size.as_bytes() as usize),
+        }
+    }
+}
+
+/// Configuration options for the vector index (HNSW).
+#[cfg(feature = "vector_index")]
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct VectorIndexConfig {
+    /// Whether to create the index on flush: automatically or never.
+    pub create_on_flush: Mode,
+    /// Whether to create the index on compaction: automatically or never.
+    pub create_on_compaction: Mode,
+    /// Whether to apply the index on query: automatically or never.
+    pub apply_on_query: Mode,
+    /// Memory threshold for creating the index.
+    pub mem_threshold_on_create: MemoryThreshold,
+}
+
+#[cfg(feature = "vector_index")]
+impl Default for VectorIndexConfig {
+    fn default() -> Self {
+        Self {
+            create_on_flush: Mode::Auto,
+            create_on_compaction: Mode::Auto,
+            apply_on_query: Mode::Auto,
+            mem_threshold_on_create: MemoryThreshold::Auto,
+        }
+    }
+}
+
+#[cfg(feature = "vector_index")]
+impl VectorIndexConfig {
     pub fn mem_threshold_on_create(&self) -> Option<usize> {
         match self.mem_threshold_on_create {
             MemoryThreshold::Auto => {

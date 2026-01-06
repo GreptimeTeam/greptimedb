@@ -22,19 +22,19 @@ use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo, QueryResponse
 use pgwire::error::PgWireResult;
 use pgwire::messages::data::DataRow;
 use regex::Regex;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 
 fn build_string_data_rows(
     schema: Arc<Vec<FieldInfo>>,
     rows: Vec<Vec<String>>,
 ) -> Vec<PgWireResult<DataRow>> {
+    let mut encoder = DataRowEncoder::new(schema.clone());
     rows.iter()
         .map(|row| {
-            let mut encoder = DataRowEncoder::new(schema.clone());
             for value in row {
                 encoder.encode_field(&Some(value))?;
             }
-            encoder.finish()
+            Ok(encoder.take_row())
         })
         .collect()
 }
@@ -60,11 +60,7 @@ static ABORT_TRANSACTION_PATTERN: Lazy<Regex> =
 
 /// Test if given query statement matches the patterns
 pub(crate) fn matches(query: &str) -> bool {
-    START_TRANSACTION_PATTERN.is_match(query)
-        || COMMIT_TRANSACTION_PATTERN.is_match(query)
-        || ABORT_TRANSACTION_PATTERN.is_match(query)
-        || SHOW_PATTERN.captures(query).is_some()
-        || SET_TRANSACTION_PATTERN.is_match(query)
+    process(query, QueryContext::arc()).is_some()
 }
 
 fn set_transaction_warning(query_ctx: QueryContextRef) {

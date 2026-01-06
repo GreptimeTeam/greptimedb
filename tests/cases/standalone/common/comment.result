@@ -1,0 +1,250 @@
+-- Test: COMMENT ON TABLE add & remove
+CREATE TABLE comment_table_test (
+	pk INT,
+	val DOUBLE,
+	ts TIMESTAMP TIME INDEX,
+	PRIMARY KEY(pk)
+);
+
+Affected Rows: 0
+
+-- Add table comment
+COMMENT ON TABLE comment_table_test IS 'table level description';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE comment_table_test;
+
++--------------------+---------------------------------------------------+
+| Table              | Create Table                                      |
++--------------------+---------------------------------------------------+
+| comment_table_test | CREATE TABLE IF NOT EXISTS "comment_table_test" ( |
+|                    |   "pk" INT NULL,                                  |
+|                    |   "val" DOUBLE NULL,                              |
+|                    |   "ts" TIMESTAMP(3) NOT NULL,                     |
+|                    |   TIME INDEX ("ts"),                              |
+|                    |   PRIMARY KEY ("pk")                              |
+|                    | )                                                 |
+|                    |                                                   |
+|                    | ENGINE=mito                                       |
+|                    | WITH(                                             |
+|                    |   comment = 'table level description'             |
+|                    | )                                                 |
++--------------------+---------------------------------------------------+
+
+SELECT table_comment
+FROM information_schema.tables
+WHERE table_schema = 'public'
+  AND table_name = 'comment_table_test';
+
++-------------------------+
+| table_comment           |
++-------------------------+
+| table level description |
++-------------------------+
+
+-- Remove table comment
+COMMENT ON TABLE comment_table_test IS NULL;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE comment_table_test;
+
++--------------------+---------------------------------------------------+
+| Table              | Create Table                                      |
++--------------------+---------------------------------------------------+
+| comment_table_test | CREATE TABLE IF NOT EXISTS "comment_table_test" ( |
+|                    |   "pk" INT NULL,                                  |
+|                    |   "val" DOUBLE NULL,                              |
+|                    |   "ts" TIMESTAMP(3) NOT NULL,                     |
+|                    |   TIME INDEX ("ts"),                              |
+|                    |   PRIMARY KEY ("pk")                              |
+|                    | )                                                 |
+|                    |                                                   |
+|                    | ENGINE=mito                                       |
+|                    |                                                   |
++--------------------+---------------------------------------------------+
+
+SELECT table_comment
+FROM information_schema.tables
+WHERE table_schema = 'public'
+  AND table_name = 'comment_table_test';
+
++---------------+
+| table_comment |
++---------------+
+|               |
++---------------+
+
+DROP TABLE comment_table_test;
+
+Affected Rows: 0
+
+-- Test: COMMENT ON COLUMN add & remove
+CREATE TABLE comment_column_test (
+	pk INT,
+	val DOUBLE,
+	ts TIMESTAMP TIME INDEX,
+	PRIMARY KEY(pk)
+);
+
+Affected Rows: 0
+
+-- Add column comment
+COMMENT ON COLUMN comment_column_test.val IS 'value column description';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE comment_column_test;
+
++---------------------+---------------------------------------------------------+
+| Table               | Create Table                                            |
++---------------------+---------------------------------------------------------+
+| comment_column_test | CREATE TABLE IF NOT EXISTS "comment_column_test" (      |
+|                     |   "pk" INT NULL,                                        |
+|                     |   "val" DOUBLE NULL COMMENT 'value column description', |
+|                     |   "ts" TIMESTAMP(3) NOT NULL,                           |
+|                     |   TIME INDEX ("ts"),                                    |
+|                     |   PRIMARY KEY ("pk")                                    |
+|                     | )                                                       |
+|                     |                                                         |
+|                     | ENGINE=mito                                             |
+|                     |                                                         |
++---------------------+---------------------------------------------------------+
+
+SELECT column_comment
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'comment_column_test'
+  AND column_name = 'val';
+
++--------------------------+
+| column_comment           |
++--------------------------+
+| value column description |
++--------------------------+
+
+-- Remove column comment
+COMMENT ON COLUMN comment_column_test.val IS NULL;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE comment_column_test;
+
++---------------------+----------------------------------------------------+
+| Table               | Create Table                                       |
++---------------------+----------------------------------------------------+
+| comment_column_test | CREATE TABLE IF NOT EXISTS "comment_column_test" ( |
+|                     |   "pk" INT NULL,                                   |
+|                     |   "val" DOUBLE NULL,                               |
+|                     |   "ts" TIMESTAMP(3) NOT NULL,                      |
+|                     |   TIME INDEX ("ts"),                               |
+|                     |   PRIMARY KEY ("pk")                               |
+|                     | )                                                  |
+|                     |                                                    |
+|                     | ENGINE=mito                                        |
+|                     |                                                    |
++---------------------+----------------------------------------------------+
+
+SELECT column_comment
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'comment_column_test'
+  AND column_name = 'val';
+
++----------------+
+| column_comment |
++----------------+
+|                |
++----------------+
+
+DROP TABLE comment_column_test;
+
+Affected Rows: 0
+
+-- Test: COMMENT ON FLOW add & remove
+-- Prepare source & sink tables
+CREATE TABLE flow_source_comment_test (
+	desc_str STRING,
+	ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+CREATE TABLE flow_sink_comment_test (
+	desc_str STRING,
+	ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+CREATE FLOW flow_comment_test
+SINK TO flow_sink_comment_test
+AS
+SELECT desc_str, ts FROM flow_source_comment_test;
+
+Affected Rows: 0
+
+-- Add flow comment
+COMMENT ON FLOW flow_comment_test IS 'flow level description';
+
+Affected Rows: 0
+
+SHOW CREATE FLOW flow_comment_test;
+
++-------------------+------------------------------------------------------+
+| Flow              | Create Flow                                          |
++-------------------+------------------------------------------------------+
+| flow_comment_test | CREATE FLOW IF NOT EXISTS flow_comment_test          |
+|                   | SINK TO flow_sink_comment_test                       |
+|                   | COMMENT 'flow level description'                     |
+|                   | AS SELECT desc_str, ts FROM flow_source_comment_test |
++-------------------+------------------------------------------------------+
+
+SELECT comment
+FROM information_schema.flows
+WHERE flow_name = 'flow_comment_test';
+
++------------------------+
+| comment                |
++------------------------+
+| flow level description |
++------------------------+
+
+-- Remove flow comment
+COMMENT ON FLOW flow_comment_test IS NULL;
+
+Affected Rows: 0
+
+SHOW CREATE FLOW flow_comment_test;
+
++-------------------+------------------------------------------------------+
+| Flow              | Create Flow                                          |
++-------------------+------------------------------------------------------+
+| flow_comment_test | CREATE FLOW IF NOT EXISTS flow_comment_test          |
+|                   | SINK TO flow_sink_comment_test                       |
+|                   | AS SELECT desc_str, ts FROM flow_source_comment_test |
++-------------------+------------------------------------------------------+
+
+SELECT comment
+FROM information_schema.flows
+WHERE flow_name = 'flow_comment_test';
+
++---------+
+| comment |
++---------+
+|         |
++---------+
+
+DROP FLOW flow_comment_test;
+
+Affected Rows: 0
+
+DROP TABLE flow_source_comment_test;
+
+Affected Rows: 0
+
+DROP TABLE flow_sink_comment_test;
+
+Affected Rows: 0
+

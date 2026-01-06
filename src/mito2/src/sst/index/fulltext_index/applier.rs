@@ -16,11 +16,12 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use common_base::range_read::RangeReader;
 use common_telemetry::{tracing, warn};
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
-use index::bloom_filter::reader::BloomFilterReaderImpl;
+use index::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReaderImpl};
 use index::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
 use index::fulltext_index::tokenizer::{ChineseTokenizer, EnglishTokenizer, Tokenizer};
 use index::fulltext_index::{Analyzer, Config};
@@ -43,15 +44,104 @@ use crate::error::{
     PuffinReadBlobSnafu, Result,
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
-use crate::sst::file::RegionFileId;
-use crate::sst::index::TYPE_FULLTEXT_INDEX;
+use crate::sst::file::RegionIndexId;
 use crate::sst::index::fulltext_index::applier::builder::{FulltextRequest, FulltextTerm};
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::puffin_manager::{
     PuffinManagerFactory, SstPuffinBlob, SstPuffinDir, SstPuffinReader,
 };
+use crate::sst::index::{TYPE_FULLTEXT_INDEX, trigger_index_background_download};
 
 pub mod builder;
+
+/// Metrics for tracking fulltext index apply operations.
+#[derive(Default, Clone)]
+pub struct FulltextIndexApplyMetrics {
+    /// Total time spent applying the index.
+    pub apply_elapsed: std::time::Duration,
+    /// Number of blob cache misses.
+    pub blob_cache_miss: usize,
+    /// Number of directory cache hits.
+    pub dir_cache_hit: usize,
+    /// Number of directory cache misses.
+    pub dir_cache_miss: usize,
+    /// Elapsed time to initialize directory data.
+    pub dir_init_elapsed: std::time::Duration,
+    /// Metrics for bloom filter reads.
+    pub bloom_filter_read_metrics: BloomFilterReadMetrics,
+}
+
+impl std::fmt::Debug for FulltextIndexApplyMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            apply_elapsed,
+            blob_cache_miss,
+            dir_cache_hit,
+            dir_cache_miss,
+            dir_init_elapsed,
+            bloom_filter_read_metrics,
+        } = self;
+
+        if self.is_empty() {
+            return write!(f, "{{}}");
+        }
+        write!(f, "{{")?;
+
+        write!(f, "\"apply_elapsed\":\"{:?}\"", apply_elapsed)?;
+
+        if *blob_cache_miss > 0 {
+            write!(f, ", \"blob_cache_miss\":{}", blob_cache_miss)?;
+        }
+        if *dir_cache_hit > 0 {
+            write!(f, ", \"dir_cache_hit\":{}", dir_cache_hit)?;
+        }
+        if *dir_cache_miss > 0 {
+            write!(f, ", \"dir_cache_miss\":{}", dir_cache_miss)?;
+        }
+        if !dir_init_elapsed.is_zero() {
+            write!(f, ", \"dir_init_elapsed\":\"{:?}\"", dir_init_elapsed)?;
+        }
+        write!(
+            f,
+            ", \"bloom_filter_read_metrics\":{:?}",
+            bloom_filter_read_metrics
+        )?;
+
+        write!(f, "}}")
+    }
+}
+
+impl FulltextIndexApplyMetrics {
+    /// Returns true if the metrics are empty (contain no meaningful data).
+    pub fn is_empty(&self) -> bool {
+        self.apply_elapsed.is_zero()
+    }
+
+    /// Collects metrics from a directory read operation.
+    pub fn collect_dir_metrics(
+        &mut self,
+        elapsed: std::time::Duration,
+        dir_metrics: puffin::puffin_manager::DirMetrics,
+    ) {
+        self.dir_init_elapsed += elapsed;
+        if dir_metrics.cache_hit {
+            self.dir_cache_hit += 1;
+        } else {
+            self.dir_cache_miss += 1;
+        }
+    }
+
+    /// Merges another metrics into this one.
+    pub fn merge_from(&mut self, other: &Self) {
+        self.apply_elapsed += other.apply_elapsed;
+        self.blob_cache_miss += other.blob_cache_miss;
+        self.dir_cache_hit += other.dir_cache_hit;
+        self.dir_cache_miss += other.dir_cache_miss;
+        self.dir_init_elapsed += other.dir_init_elapsed;
+        self.bloom_filter_read_metrics
+            .merge_from(&other.bloom_filter_read_metrics);
+    }
+}
 
 /// `FulltextIndexApplier` is responsible for applying fulltext index to the provided SST files
 pub struct FulltextIndexApplier {
@@ -124,18 +214,22 @@ impl FulltextIndexApplier {
 impl FulltextIndexApplier {
     /// Applies fine-grained fulltext index to the specified SST file.
     /// Returns the row ids that match the queries.
+    ///
+    /// # Arguments
+    /// * `file_id` - The region file ID to apply predicates to
+    /// * `file_size_hint` - Optional hint for file size to avoid extra metadata reads
+    /// * `metrics` - Optional mutable reference to collect metrics on demand
     #[tracing::instrument(
         skip_all,
         fields(file_id = %file_id)
     )]
     pub async fn apply_fine(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
+        mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<BTreeSet<RowId>>> {
-        let timer = INDEX_APPLY_ELAPSED
-            .with_label_values(&[TYPE_FULLTEXT_INDEX])
-            .start_timer();
+        let apply_start = Instant::now();
 
         let mut row_ids: Option<BTreeSet<RowId>> = None;
         for (column_id, request) in self.requests.iter() {
@@ -144,7 +238,13 @@ impl FulltextIndexApplier {
             }
 
             let Some(result) = self
-                .apply_fine_one_column(file_size_hint, file_id, *column_id, request)
+                .apply_fine_one_column(
+                    file_size_hint,
+                    file_id,
+                    *column_id,
+                    request,
+                    metrics.as_deref_mut(),
+                )
                 .await?
             else {
                 continue;
@@ -163,18 +263,26 @@ impl FulltextIndexApplier {
             }
         }
 
-        if row_ids.is_none() {
-            timer.stop_and_discard();
+        // Record elapsed time to histogram and collect metrics if requested
+        let elapsed = apply_start.elapsed();
+        INDEX_APPLY_ELAPSED
+            .with_label_values(&[TYPE_FULLTEXT_INDEX])
+            .observe(elapsed.as_secs_f64());
+
+        if let Some(m) = metrics {
+            m.apply_elapsed += elapsed;
         }
+
         Ok(row_ids)
     }
 
     async fn apply_fine_one_column(
         &self,
         file_size_hint: Option<u64>,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         column_id: ColumnId,
         request: &FulltextRequest,
+        metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<BTreeSet<RowId>>> {
         let blob_key = format!(
             "{INDEX_BLOB_TYPE_TANTIVY}-{}",
@@ -182,7 +290,7 @@ impl FulltextIndexApplier {
         );
         let dir = self
             .index_source
-            .dir(file_id, &blob_key, file_size_hint)
+            .dir(file_id, &blob_key, file_size_hint, metrics)
             .await?;
 
         let dir = match &dir {
@@ -244,19 +352,25 @@ impl FulltextIndexApplier {
     ///
     /// Row group id existing in the returned result means that the row group is searched.
     /// Empty ranges means that the row group is searched but no rows are found.
+    ///
+    /// # Arguments
+    /// * `file_id` - The region file ID to apply predicates to
+    /// * `file_size_hint` - Optional hint for file size to avoid extra metadata reads
+    /// * `row_groups` - Iterator of row group lengths and whether to search in the row group
+    /// * `metrics` - Optional mutable reference to collect metrics on demand
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         skip_all,
         fields(file_id = %file_id)
     )]
     pub async fn apply_coarse(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
         row_groups: impl Iterator<Item = (usize, bool)>,
+        mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<Vec<(usize, Vec<Range<usize>>)>>> {
-        let timer = INDEX_APPLY_ELAPSED
-            .with_label_values(&[TYPE_FULLTEXT_INDEX])
-            .start_timer();
+        let apply_start = Instant::now();
 
         let (input, mut output) = Self::init_coarse_output(row_groups);
         let mut applied = false;
@@ -274,26 +388,38 @@ impl FulltextIndexApplier {
                     *column_id,
                     &request.terms,
                     &mut output,
+                    metrics.as_deref_mut(),
                 )
                 .await?;
         }
 
         if !applied {
-            timer.stop_and_discard();
             return Ok(None);
         }
 
         Self::adjust_coarse_output(input, &mut output);
+
+        // Record elapsed time to histogram and collect metrics if requested
+        let elapsed = apply_start.elapsed();
+        INDEX_APPLY_ELAPSED
+            .with_label_values(&[TYPE_FULLTEXT_INDEX])
+            .observe(elapsed.as_secs_f64());
+
+        if let Some(m) = metrics {
+            m.apply_elapsed += elapsed;
+        }
+
         Ok(Some(output))
     }
 
     async fn apply_coarse_one_column(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
         column_id: ColumnId,
         terms: &[FulltextTerm],
         output: &mut [(usize, Vec<Range<usize>>)],
+        mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<bool> {
         let blob_key = format!(
             "{INDEX_BLOB_TYPE_BLOOM}-{}",
@@ -301,7 +427,7 @@ impl FulltextIndexApplier {
         );
         let Some(reader) = self
             .index_source
-            .blob(file_id, &blob_key, file_size_hint)
+            .blob(file_id, &blob_key, file_size_hint, metrics.as_deref_mut())
             .await?
         else {
             return Ok(false);
@@ -323,6 +449,7 @@ impl FulltextIndexApplier {
                 .content_length;
             let reader = CachedBloomFilterIndexBlobReader::new(
                 file_id.file_id(),
+                file_id.version,
                 column_id,
                 Tag::Fulltext,
                 blob_size,
@@ -344,7 +471,13 @@ impl FulltextIndexApplier {
             }
 
             *row_group_output = applier
-                .search(&predicates, row_group_output)
+                .search(
+                    &predicates,
+                    row_group_output,
+                    metrics
+                        .as_deref_mut()
+                        .map(|m| &mut m.bloom_filter_read_metrics),
+                )
                 .await
                 .context(ApplyBloomFilterIndexSnafu)?;
         }
@@ -488,11 +621,18 @@ impl IndexSource {
     /// Returns `None` if the blob is not found.
     async fn blob(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         key: &str,
         file_size_hint: Option<u64>,
+        metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<GuardWithMetadata<SstPuffinBlob>>> {
         let (reader, fallbacked) = self.ensure_reader(file_id, file_size_hint).await?;
+
+        // Track cache miss if fallbacked to remote
+        if fallbacked && let Some(m) = metrics {
+            m.blob_cache_miss += 1;
+        }
+
         let res = reader.blob(key).await;
         match res {
             Ok(blob) => Ok(Some(blob)),
@@ -519,14 +659,28 @@ impl IndexSource {
     /// Returns `None` if the directory is not found.
     async fn dir(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         key: &str,
         file_size_hint: Option<u64>,
+        mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<GuardWithMetadata<SstPuffinDir>>> {
         let (reader, fallbacked) = self.ensure_reader(file_id, file_size_hint).await?;
+
+        // Track cache miss if fallbacked to remote
+        if fallbacked && let Some(m) = &mut metrics {
+            m.blob_cache_miss += 1;
+        }
+
+        let start = metrics.as_ref().map(|_| Instant::now());
         let res = reader.dir(key).await;
         match res {
-            Ok(dir) => Ok(Some(dir)),
+            Ok((dir, dir_metrics)) => {
+                if let Some(m) = metrics {
+                    // Safety: start is Some when metrics is Some
+                    m.collect_dir_metrics(start.unwrap().elapsed(), dir_metrics);
+                }
+                Ok(Some(dir))
+            }
             Err(err) if err.is_blob_not_found() => Ok(None),
             Err(err) => {
                 if fallbacked {
@@ -534,9 +688,16 @@ impl IndexSource {
                 } else {
                     warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.");
                     let reader = self.build_remote(file_id, file_size_hint).await?;
+                    let start = metrics.as_ref().map(|_| Instant::now());
                     let res = reader.dir(key).await;
                     match res {
-                        Ok(dir) => Ok(Some(dir)),
+                        Ok((dir, dir_metrics)) => {
+                            if let Some(m) = metrics {
+                                // Safety: start is Some when metrics is Some
+                                m.collect_dir_metrics(start.unwrap().elapsed(), dir_metrics);
+                            }
+                            Ok(Some(dir))
+                        }
                         Err(err) if err.is_blob_not_found() => Ok(None),
                         Err(err) => Err(err).context(PuffinReadBlobSnafu),
                     }
@@ -548,7 +709,7 @@ impl IndexSource {
     /// Return reader and whether it is fallbacked to remote store.
     async fn ensure_reader(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
     ) -> Result<(SstPuffinReader, bool)> {
         match self.build_local_cache(file_id, file_size_hint).await {
@@ -560,14 +721,18 @@ impl IndexSource {
 
     async fn build_local_cache(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
     ) -> Result<Option<SstPuffinReader>> {
         let Some(file_cache) = &self.file_cache else {
             return Ok(None);
         };
 
-        let index_key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Puffin);
+        let index_key = IndexKey::new(
+            file_id.region_id(),
+            file_id.file_id(),
+            FileType::Puffin(file_id.version),
+        );
         if file_cache.get(index_key).await.is_none() {
             return Ok(None);
         };
@@ -589,15 +754,23 @@ impl IndexSource {
 
     async fn build_remote(
         &self,
-        file_id: RegionFileId,
+        file_id: RegionIndexId,
         file_size_hint: Option<u64>,
     ) -> Result<SstPuffinReader> {
+        let path_factory = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
+
+        // Trigger background download if file cache and file size are available
+        trigger_index_background_download(
+            self.file_cache.as_ref(),
+            &file_id,
+            file_size_hint,
+            &path_factory,
+            &self.remote_store,
+        );
+
         let puffin_manager = self
             .puffin_manager_factory
-            .build(
-                self.remote_store.clone(),
-                RegionFilePathFactory::new(self.table_dir.clone(), self.path_type),
-            )
+            .build(self.remote_store.clone(), path_factory)
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
         let reader = puffin_manager

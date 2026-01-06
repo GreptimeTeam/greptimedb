@@ -755,7 +755,7 @@ jobs:
         run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
 
       - name: Run nextest cases
-        run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend
+        run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend -F vector_index
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           RUST_BACKTRACE: 1
@@ -813,7 +813,7 @@ jobs:
         run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
 
       - name: Run nextest cases
-        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend -F vector_index
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           RUST_BACKTRACE: 1

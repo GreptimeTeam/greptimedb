@@ -16,10 +16,10 @@ use catalog::system_schema::information_schema::tables::{
     ENGINE as TABLE_ENGINE, TABLE_CATALOG, TABLE_NAME, TABLE_SCHEMA,
 };
 use common_telemetry::tracing;
+use datafusion::dataframe::DataFrame;
 use datafusion::prelude::{Expr, col, lit, regexp_match};
 use datafusion_expr::LogicalPlan;
 use promql_parser::label::{MatchOp, Matcher};
-use query::dataframe::DataFrame;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
@@ -71,7 +71,6 @@ pub fn metric_name_matchers_to_plan(
     // Safety: conditions MUST not be empty, reduce always return Some(expr).
     let conditions = conditions.into_iter().reduce(Expr::and).unwrap();
 
-    let DataFrame::DataFusion(dataframe) = dataframe;
     let dataframe = dataframe
         .filter(conditions)
         .context(error::DataFrameSnafu)?

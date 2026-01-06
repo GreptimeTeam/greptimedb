@@ -19,6 +19,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::timestamp::TimestampNanosecond;
 use snafu::{Location, Snafu};
+use vrl::value::Kind;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -608,10 +609,14 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Multiple pipelines with different schemas found, but none under current schema. Please replicate one of them or delete until only one schema left. schemas: {}",
-        schemas
+        "Multiple pipelines with different schemas found, but none under current schema. Please replicate one of them or delete until only one schema left. name: {}, current_schema: {}, schemas: {}",
+        name,
+        current_schema,
+        schemas,
     ))]
     MultiPipelineWithDiffSchema {
+        name: String,
+        current_schema: String,
         schemas: String,
         #[snafu(implicit)]
         location: Location,
@@ -676,8 +681,12 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Vrl script should return `.` in the end"))]
+    #[snafu(display(
+        "Vrl script should return object or array in the end, got `{:?}`",
+        result_kind
+    ))]
     VrlReturnValue {
+        result_kind: Kind,
         #[snafu(implicit)]
         location: Location,
     },
@@ -691,6 +700,25 @@ pub enum Error {
 
     #[snafu(display("Top level value must be map"))]
     ValueMustBeMap {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Array element at index {index} must be an object for one-to-many transformation, got {actual_type}"
+    ))]
+    ArrayElementMustBeObject {
+        index: usize,
+        actual_type: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to transform array element at index {index}: {source}"))]
+    TransformArrayElement {
+        index: usize,
+        #[snafu(source)]
+        source: Box<Error>,
         #[snafu(implicit)]
         location: Location,
     },
@@ -776,6 +804,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(transparent)]
+    GreptimeProto {
+        source: api::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(transparent)]
+    Datatypes {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -792,7 +834,10 @@ impl ErrorExt for Error {
             | InvalidPipelineVersion { .. }
             | InvalidCustomTimeIndex { .. }
             | TimeIndexMustBeNonNull { .. } => StatusCode::InvalidArguments,
-            MultiPipelineWithDiffSchema { .. } | ValueMustBeMap { .. } => StatusCode::IllegalState,
+            MultiPipelineWithDiffSchema { .. }
+            | ValueMustBeMap { .. }
+            | ArrayElementMustBeObject { .. } => StatusCode::IllegalState,
+            TransformArrayElement { source, .. } => source.status_code(),
             BuildDfLogicalPlan { .. } | RecordBatchLenNotMatch { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             DataFrame { source, .. } => source.status_code(),
@@ -893,6 +938,9 @@ impl ErrorExt for Error {
             FloatIsNan { .. }
             | InvalidEpochForResolution { .. }
             | UnsupportedTypeInPipeline { .. } => StatusCode::InvalidArguments,
+
+            GreptimeProto { source, .. } => source.status_code(),
+            Datatypes { source, .. } => source.status_code(),
         }
     }
 

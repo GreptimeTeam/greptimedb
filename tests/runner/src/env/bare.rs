@@ -293,7 +293,7 @@ impl Env {
             .write(true)
             .truncate(truncate_log)
             .append(!truncate_log)
-            .open(stdout_file_name)
+            .open(&stdout_file_name)
             .unwrap();
 
         let args = mode.get_args(&self.sqlness_home, self, db_ctx, id);
@@ -333,9 +333,13 @@ impl Env {
             });
 
         for check_ip_addr in &check_ip_addrs {
-            if !util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(10)).await {
+            if !util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(30)).await {
                 Env::stop_server(&mut process);
-                panic!("{} doesn't up in 10 seconds, quit.", mode.name())
+                panic!(
+                    "{} doesn't up in 30 seconds, check {} for more details.",
+                    mode.name(),
+                    stdout_file_name
+                )
             }
         }
 

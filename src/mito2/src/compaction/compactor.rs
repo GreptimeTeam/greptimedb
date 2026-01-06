@@ -35,17 +35,15 @@ use crate::access_layer::{
 };
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::{PickerOutput, new_picker};
-use crate::compaction::{CompactionOutput, CompactionSstReaderBuilder, find_ttl};
+use crate::compaction::{CompactionOutput, CompactionSstReaderBuilder, find_dynamic_options};
 use crate::config::MitoConfig;
 use crate::error::{
     EmptyRegionDirSnafu, InvalidPartitionExprSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
-use crate::manifest::storage::manifest_compress_type;
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::metrics;
 use crate::read::{FlatSource, Source};
-use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
@@ -162,19 +160,9 @@ pub async fn open_compaction_region(
     };
 
     let manifest_manager = {
-        let region_manifest_options = RegionManifestOptions {
-            manifest_dir: new_manifest_dir(&region_dir_from_table_dir(
-                &req.table_dir,
-                req.region_id,
-                req.path_type,
-            )),
-            object_store: object_store.clone(),
-            compress_type: manifest_compress_type(mito_config.compress_manifest),
-            checkpoint_distance: mito_config.manifest_checkpoint_distance,
-            remove_file_options: RemoveFileOptions {
-                enable_gc: mito_config.gc.enable,
-            },
-        };
+        let region_dir = region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type);
+        let region_manifest_options =
+            RegionManifestOptions::new(mito_config, &region_dir, object_store);
 
         RegionManifestManager::open(region_manifest_options, &Default::default())
             .await?
@@ -215,16 +203,22 @@ pub async fn open_compaction_region(
         // Use the specified ttl.
         Either::Left(ttl) => ttl,
         // Get the ttl from the schema metadata manager.
-        Either::Right(schema_metadata_manager) => find_ttl(
-            req.region_id.table_id(),
-            current_version.options.ttl,
-            &schema_metadata_manager,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
-            TimeToLive::default()
-        }),
+        Either::Right(schema_metadata_manager) => {
+            let (_, ttl) = find_dynamic_options(
+                req.region_id.table_id(),
+                &req.region_options,
+                &schema_metadata_manager,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
+                (
+                    crate::region::options::CompactionOptions::default(),
+                    TimeToLive::default(),
+                )
+            });
+            ttl
+        }
     };
 
     Ok(CompactionRegion {
@@ -338,6 +332,8 @@ impl DefaultCompactor {
         let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
         let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
         let bloom_filter_index_config = compaction_region.engine_config.bloom_filter_index.clone();
+        #[cfg(feature = "vector_index")]
+        let vector_index_config = compaction_region.engine_config.vector_index.clone();
 
         let input_file_names = output
             .inputs
@@ -384,6 +380,8 @@ impl DefaultCompactor {
                     inverted_index_config,
                     fulltext_index_config,
                     bloom_filter_index_config,
+                    #[cfg(feature = "vector_index")]
+                    vector_index_config,
                 },
                 &write_opts,
                 &mut metrics,
@@ -408,9 +406,11 @@ impl DefaultCompactor {
                 time_range: sst_info.time_range,
                 level: output.output_level,
                 file_size: sst_info.file_size,
+                max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
                 available_indexes: sst_info.index_metadata.build_available_indexes(),
+                indexes: sst_info.index_metadata.build_indexes(),
                 index_file_size: sst_info.index_metadata.file_size,
-                index_file_id: None,
+                index_version: 0,
                 num_rows: sst_info.num_rows as u64,
                 num_row_groups: sst_info.num_row_groups,
                 sequence: max_sequence,
@@ -512,7 +512,7 @@ impl Compactor for DefaultCompactor {
         // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
         compaction_region
             .manifest_ctx
-            .update_manifest(RegionLeaderState::Writable, action_list)
+            .update_manifest(RegionLeaderState::Writable, action_list, false)
             .await?;
 
         Ok(edit)

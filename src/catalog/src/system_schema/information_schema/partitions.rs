@@ -211,6 +211,7 @@ struct InformationSchemaPartitionsBuilder {
     partition_names: StringVectorBuilder,
     partition_ordinal_positions: Int64VectorBuilder,
     partition_expressions: StringVectorBuilder,
+    partition_descriptions: StringVectorBuilder,
     create_times: TimestampSecondVectorBuilder,
     partition_ids: UInt64VectorBuilder,
 }
@@ -231,6 +232,7 @@ impl InformationSchemaPartitionsBuilder {
             partition_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             partition_ordinal_positions: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
             partition_expressions: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            partition_descriptions: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             create_times: TimestampSecondVectorBuilder::with_capacity(INIT_CAPACITY),
             partition_ids: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
         }
@@ -319,6 +321,21 @@ impl InformationSchemaPartitionsBuilder {
             return;
         }
 
+        // Get partition column names (shared by all partitions)
+        // In MySQL, PARTITION_EXPRESSION is the partitioning function expression (e.g., column name)
+        let partition_columns: String = table_info
+            .meta
+            .partition_column_names()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let partition_expr_str = if partition_columns.is_empty() {
+            None
+        } else {
+            Some(partition_columns)
+        };
+
         for (index, partition) in partitions.iter().enumerate() {
             let partition_name = format!("p{index}");
 
@@ -328,8 +345,12 @@ impl InformationSchemaPartitionsBuilder {
             self.partition_names.push(Some(&partition_name));
             self.partition_ordinal_positions
                 .push(Some((index + 1) as i64));
-            let expression = partition.partition_expr.as_ref().map(|e| e.to_string());
-            self.partition_expressions.push(expression.as_deref());
+            // PARTITION_EXPRESSION: partition column names (same for all partitions)
+            self.partition_expressions
+                .push(partition_expr_str.as_deref());
+            // PARTITION_DESCRIPTION: partition boundary expression (different for each partition)
+            let description = partition.partition_expr.as_ref().map(|e| e.to_string());
+            self.partition_descriptions.push(description.as_deref());
             self.create_times.push(Some(TimestampSecond::from(
                 table_info.meta.created_on.timestamp(),
             )));
@@ -369,7 +390,7 @@ impl InformationSchemaPartitionsBuilder {
             null_string_vector.clone(),
             Arc::new(self.partition_expressions.finish()),
             null_string_vector.clone(),
-            null_string_vector.clone(),
+            Arc::new(self.partition_descriptions.finish()),
             // TODO(dennis): rows and index statistics info
             null_i64_vector.clone(),
             null_i64_vector.clone(),

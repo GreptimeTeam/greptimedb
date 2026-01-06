@@ -16,8 +16,9 @@ default = [
     "meta-srv/pg_kvbackend",
     "meta-srv/mysql_kvbackend",
 ]
-enterprise = ["common-meta/enterprise", "frontend/enterprise", "meta-srv/enterprise", "catalog/enterprise"]
+enterprise = ["common-meta/enterprise", "frontend/enterprise", "meta-srv/enterprise"]
 tokio-console = ["common-telemetry/tokio-console"]
+vector_index = ["mito2/vector_index"]
 
 [lints]
 workspace = true

@@ -33,7 +33,8 @@ pub use crate::schema::column_schema::{
     COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE, COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY,
     COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY, ColumnExtType, ColumnSchema, FULLTEXT_KEY,
     FulltextAnalyzer, FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata,
-    SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType, TIME_INDEX_KEY,
+    SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType, TIME_INDEX_KEY, VECTOR_INDEX_KEY,
+    VectorDistanceMetric, VectorIndexEngineType, VectorIndexOptions,
 };
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
@@ -273,8 +274,9 @@ fn collect_fields(column_schemas: &[ColumnSchema]) -> Result<FieldsAndIndices> {
             _ => None,
         };
         if let Some(extype) = extype {
-            let metadata = HashMap::from([(TYPE_KEY.to_string(), extype.to_string())]);
-            field = field.with_metadata(metadata);
+            field
+                .metadata_mut()
+                .insert(TYPE_KEY.to_string(), extype.to_string());
         }
         fields.push(field);
         ensure!(

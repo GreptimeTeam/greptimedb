@@ -373,7 +373,8 @@ EXPLAIN SELECT DISTINCT x FROM (SELECT a AS x FROM t) sq ORDER BY x;
 | logical_plan_| Sort: sq.x ASC NULLS LAST_|
 |_|_Aggregate: groupBy=[[sq.x]], aggr=[[]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Projection: sq.x_|
+|_| Distinct:_|
+|_|_Projection: sq.x_|
 |_|_SubqueryAlias: sq_|
 |_|_Projection: t.a AS x_|
 |_|_TableScan: t_|

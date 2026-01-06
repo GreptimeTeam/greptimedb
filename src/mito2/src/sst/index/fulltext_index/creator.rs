@@ -481,7 +481,7 @@ mod tests {
     use super::*;
     use crate::access_layer::RegionFilePathFactory;
     use crate::read::{Batch, BatchColumn};
-    use crate::sst::file::RegionFileId;
+    use crate::sst::file::{RegionFileId, RegionIndexId};
     use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
     use crate::sst::index::fulltext_index::applier::builder::{
         FulltextQuery, FulltextRequest, FulltextTerm,
@@ -672,7 +672,8 @@ mod tests {
             RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
         );
         let region_file_id = RegionFileId::new(region_metadata.region_id, sst_file_id);
-        let mut writer = puffin_manager.writer(&region_file_id).await.unwrap();
+        let index_id = RegionIndexId::new(region_file_id, 0);
+        let mut writer = puffin_manager.writer(&index_id).await.unwrap();
         let _ = indexer.finish(&mut writer).await.unwrap();
         writer.finish().await.unwrap();
 
@@ -724,14 +725,14 @@ mod tests {
             async move {
                 match backend {
                     FulltextBackend::Tantivy => {
-                        applier.apply_fine(region_file_id, None).await.unwrap()
+                        applier.apply_fine(index_id, None, None).await.unwrap()
                     }
                     FulltextBackend::Bloom => {
                         let coarse_mask = coarse_mask.unwrap_or_default();
                         let row_groups = (0..coarse_mask.len()).map(|i| (1, coarse_mask[i]));
                         // row group id == row id
                         let resp = applier
-                            .apply_coarse(region_file_id, None, row_groups)
+                            .apply_coarse(index_id, None, row_groups, None)
                             .await
                             .unwrap();
                         resp.map(|r| {
