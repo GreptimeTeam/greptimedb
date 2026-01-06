@@ -16,14 +16,14 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
 use common_meta::ddl::drop_table::executor::DropTableExecutor;
+use common_meta::lock_key::TableLock;
 use common_meta::node_manager::NodeManagerRef;
-use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_meta::region_registry::LeaderRegionRegistryRef;
-use common_meta::rpc::router::{RegionRoute, operating_leader_regions};
+use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -42,7 +42,7 @@ impl State for DeallocateRegion {
     async fn next(
         &mut self,
         ctx: &mut Context,
-        _procedure_ctx: &ProcedureContext,
+        procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         let region_to_deallocate = ctx
             .persistent_ctx
@@ -62,7 +62,10 @@ impl State for DeallocateRegion {
             .flat_map(|p| p.pending_deallocate_region_ids.iter())
             .cloned()
             .collect::<HashSet<_>>();
-        let table_route_value = ctx.get_table_route_value().await?.into_inner();
+
+        let table_lock = TableLock::Write(table_id).into();
+        let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
+        let table_route_value = ctx.get_table_route_value().await?;
         let deallocating_regions = {
             let region_routes = region_routes(table_id, &table_route_value)?;
             Self::filter_deallocatable_region_routes(
@@ -72,16 +75,12 @@ impl State for DeallocateRegion {
             )
         };
 
-        Self::register_deallocating_regions(
-            &ctx.memory_region_keeper,
-            &mut ctx.volatile_ctx.deallocating_regions,
-            &deallocating_regions,
-        )?;
         let table_ref = TableReference::full(
             &ctx.persistent_ctx.catalog_name,
             &ctx.persistent_ctx.schema_name,
             &ctx.persistent_ctx.table_name,
         );
+        // Deallocates the regions on datanodes.
         Self::deallocate_regions(
             &ctx.node_manager,
             &ctx.leader_region_registry,
@@ -90,8 +89,13 @@ impl State for DeallocateRegion {
             &deallocating_regions,
         )
         .await?;
-        // Clear the deallocating regions.
-        ctx.volatile_ctx.deallocating_regions.clear();
+
+        // Safety: the table route must be physical, so we can safely unwrap the region routes.
+        let region_routes = table_route_value.region_routes().unwrap();
+        let new_region_routes =
+            Self::generate_region_routes(region_routes, &pending_deallocate_region_ids);
+        ctx.update_table_route(&table_route_value, new_region_routes)
+            .await?;
         ctx.invalidate_table_cache().await?;
 
         Ok((Box::new(RepartitionEnd), Status::executing(false)))
@@ -115,33 +119,16 @@ impl DeallocateRegion {
         // Note: Consider adding an option to forcefully drop the physical region,
         // which would involve dropping all logical regions associated with that physical region.
         executor
-            .on_drop_regions(node_manager, leader_region_registry, region_routes, false)
+            .on_drop_regions(
+                node_manager,
+                leader_region_registry,
+                region_routes,
+                false,
+                true,
+            )
             .await
             .context(error::DeallocateRegionsSnafu { table_id })?;
 
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    fn register_deallocating_regions(
-        memory_region_keeper: &MemoryRegionKeeperRef,
-        deallocating_regions: &mut Vec<OperatingRegionGuard>,
-        region_routes: &[RegionRoute],
-    ) -> Result<()> {
-        if !deallocating_regions.is_empty() {
-            return Ok(());
-        }
-        let deallocatable_regions = operating_leader_regions(region_routes);
-        for (region_id, datanode_id) in deallocatable_regions {
-            let guard = memory_region_keeper
-                .register(datanode_id, region_id)
-                .context(error::RegionOperatingRaceSnafu {
-                    region_id,
-                    peer_id: datanode_id,
-                })?;
-
-            deallocating_regions.push(guard);
-        }
         Ok(())
     }
 
@@ -168,5 +155,80 @@ impl DeallocateRegion {
                 }
             })
             .collect::<Vec<_>>()
+    }
+
+    #[allow(dead_code)]
+    fn generate_region_routes(
+        region_routes: &[RegionRoute],
+        pending_deallocate_region_ids: &HashSet<RegionId>,
+    ) -> Vec<RegionRoute> {
+        // Safety: the table route must be physical, so we can safely unwrap the region routes.
+        region_routes
+            .iter()
+            .filter(|r| !pending_deallocate_region_ids.contains(&r.region.id))
+            .cloned()
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use common_meta::peer::Peer;
+    use common_meta::rpc::router::{Region, RegionRoute};
+    use store_api::storage::{RegionId, TableId};
+
+    use crate::procedure::repartition::deallocate_region::DeallocateRegion;
+
+    fn test_region_routes(table_id: TableId) -> Vec<RegionRoute> {
+        vec![
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, 1),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            },
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, 2),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(2)),
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn test_filter_deallocatable_region_routes() {
+        let table_id = 1024;
+        let region_routes = test_region_routes(table_id);
+        let pending_deallocate_region_ids = HashSet::from([RegionId::new(table_id, 1)]);
+        let deallocatable_region_routes = DeallocateRegion::filter_deallocatable_region_routes(
+            table_id,
+            &region_routes,
+            &pending_deallocate_region_ids,
+        );
+        assert_eq!(deallocatable_region_routes.len(), 1);
+        assert_eq!(
+            deallocatable_region_routes[0].region.id,
+            RegionId::new(table_id, 1)
+        );
+    }
+
+    #[test]
+    fn test_generate_region_routes() {
+        let table_id = 1024;
+        let region_routes = test_region_routes(table_id);
+        let pending_deallocate_region_ids = HashSet::from([RegionId::new(table_id, 1)]);
+        let new_region_routes = DeallocateRegion::generate_region_routes(
+            &region_routes,
+            &pending_deallocate_region_ids,
+        );
+        assert_eq!(new_region_routes.len(), 1);
+        assert_eq!(new_region_routes[0].region.id, RegionId::new(table_id, 2));
     }
 }

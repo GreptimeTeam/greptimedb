@@ -218,6 +218,7 @@ impl DropTableExecutor {
         leader_region_registry: &LeaderRegionRegistryRef,
         region_routes: &[RegionRoute],
         fast_path: bool,
+        force: bool,
     ) -> Result<()> {
         // Drops leader regions on datanodes.
         let leaders = find_leaders(region_routes);
@@ -241,7 +242,7 @@ impl DropTableExecutor {
                     body: Some(region_request::Body::Drop(PbDropRegionRequest {
                         region_id: region_id.as_u64(),
                         fast_path,
-                        force: false,
+                        force,
                     })),
                 };
                 let datanode = datanode.clone();

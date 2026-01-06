@@ -161,6 +161,7 @@ impl DropTableProcedure {
                 &self.context.leader_region_registry,
                 &self.data.physical_region_routes,
                 false,
+                false,
             )
             .await?;
         self.data.state = DropTableState::DeleteTombstone;

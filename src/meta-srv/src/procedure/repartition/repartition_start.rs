@@ -19,7 +19,7 @@ use common_procedure::{Context as ProcedureContext, Status};
 use partition::expr::PartitionExpr;
 use partition::subtask::{self, RepartitionSubtask};
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use uuid::Uuid;
 
 use crate::error::{self, Result};
@@ -51,12 +51,22 @@ impl State for RepartitionStart {
         ctx: &mut Context,
         _: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
-        let (_, table_route) = ctx
+        let (physical_table_id, table_route) = ctx
             .table_metadata_manager
             .table_route_manager()
             .get_physical_table_route(ctx.persistent_ctx.table_id)
             .await
             .context(error::TableMetadataManagerSnafu)?;
+        let table_id = ctx.persistent_ctx.table_id;
+        ensure!(
+            physical_table_id == table_id,
+            error::UnexpectedSnafu {
+                violated: format!(
+                    "Repartition only works on the physical table, but got logical table: {}, physical table id: {}",
+                    table_id, physical_table_id
+                ),
+            }
+        );
 
         let plans = Self::build_plan(&table_route, &self.from_exprs, &self.to_exprs)?;
 

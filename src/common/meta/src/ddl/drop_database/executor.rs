@@ -125,6 +125,7 @@ impl State for DropDatabaseExecutor {
                 &ddl_ctx.leader_region_registry,
                 &self.physical_region_routes,
                 true,
+                false,
             )
             .await?;
         info!("Table: {}({}) is dropped", self.table_name, self.table_id);
