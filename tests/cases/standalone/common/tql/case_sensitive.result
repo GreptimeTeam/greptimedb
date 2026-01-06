@@ -122,7 +122,16 @@ tql eval (0,10,'5s') sum by (AbCdE) (metric);
 -- not allowed by the parser
 tql eval (0,10,'5s') sum by (`AbCdE`) (metric);
 
-Error: 2000(InvalidSyntax), invalid promql query
++-------+---------------------+-----------------+
+| AbCdE | ts                  | sum(metric.val) |
++-------+---------------------+-----------------+
+| host1 | 1970-01-01T00:00:00 | 1.0             |
+| host1 | 1970-01-01T00:00:05 | 2.0             |
+| host1 | 1970-01-01T00:00:10 | 3.0             |
+| host2 | 1970-01-01T00:00:00 | 4.0             |
+| host2 | 1970-01-01T00:00:05 | 5.0             |
+| host2 | 1970-01-01T00:00:10 | 6.0             |
++-------+---------------------+-----------------+
 
 drop table metric;
 
