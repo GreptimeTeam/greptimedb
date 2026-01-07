@@ -420,7 +420,7 @@ order by time_window, ordered_host;
 |_|_Projection: last_value(t.host) ORDER BY [t.ts ASC NULLS LAST] AS ordered_host, last_value(t.val) ORDER BY [t.ts ASC NULLS LAST], last_value(t.ts) ORDER BY [t.ts ASC NULLS LAST], date_bin(Utf8("5 milliseconds"),t.ts) AS time_window_|
 |_|_Aggregate: groupBy=[[date_bin(Utf8("5 milliseconds"),t.ts)]], aggr=[[__last_value_merge(__last_value_state(t.host) ORDER BY [t.ts ASC NULLS LAST]) AS last_value(t.host) ORDER BY [t.ts ASC NULLS LAST], __last_value_merge(__last_value_state(t.val) ORDER BY [t.ts ASC NULLS LAST]) AS last_value(t.val) ORDER BY [t.ts ASC NULLS LAST], __last_value_merge(__last_value_state(t.ts) ORDER BY [t.ts ASC NULLS LAST]) AS last_value(t.ts) ORDER BY [t.ts ASC NULLS LAST]]] |
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Aggregate: groupBy=[[date_bin(CAST(Utf8("5 milliseconds") AS Interval(MonthDayNano)), t.ts)]], aggr=[[__last_value_state(t.host) ORDER BY [t.ts ASC NULLS LAST], __last_value_state(t.val) ORDER BY [t.ts ASC NULLS LAST], __last_value_state(t.ts) ORDER BY [t.ts ASC NULLS LAST]]]_|
+|_| Aggregate: groupBy=[[date_bin(IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 5000000 }"), t.ts) AS date_bin(Utf8("5 milliseconds"),t.ts)]], aggr=[[__last_value_state(t.host) ORDER BY [t.ts ASC NULLS LAST], __last_value_state(t.val) ORDER BY [t.ts ASC NULLS LAST], __last_value_state(t.ts) ORDER BY [t.ts ASC NULLS LAST]]]_|
 |_|_TableScan: t_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [time_window@3 ASC NULLS LAST, ordered_host@0 ASC NULLS LAST]_|
@@ -739,7 +739,7 @@ order by time_window, ordered_host;
 |_|_Projection: last_value(t1.host) ORDER BY [t1.ts ASC NULLS LAST] AS ordered_host, last_value(t1.val) ORDER BY [t1.ts ASC NULLS LAST], last_value(t1.ts) ORDER BY [t1.ts ASC NULLS LAST], date_bin(Utf8("5 milliseconds"),t1.ts) AS time_window_|
 |_|_Aggregate: groupBy=[[date_bin(Utf8("5 milliseconds"),t1.ts)]], aggr=[[__last_value_merge(__last_value_state(t1.host) ORDER BY [t1.ts ASC NULLS LAST]) AS last_value(t1.host) ORDER BY [t1.ts ASC NULLS LAST], __last_value_merge(__last_value_state(t1.val) ORDER BY [t1.ts ASC NULLS LAST]) AS last_value(t1.val) ORDER BY [t1.ts ASC NULLS LAST], __last_value_merge(__last_value_state(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]) AS last_value(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]]] |
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Aggregate: groupBy=[[date_bin(CAST(Utf8("5 milliseconds") AS Interval(MonthDayNano)), t1.ts)]], aggr=[[__last_value_state(t1.host) ORDER BY [t1.ts ASC NULLS LAST], __last_value_state(t1.val) ORDER BY [t1.ts ASC NULLS LAST], __last_value_state(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]]]_|
+|_| Aggregate: groupBy=[[date_bin(IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 5000000 }"), t1.ts) AS date_bin(Utf8("5 milliseconds"),t1.ts)]], aggr=[[__last_value_state(t1.host) ORDER BY [t1.ts ASC NULLS LAST], __last_value_state(t1.val) ORDER BY [t1.ts ASC NULLS LAST], __last_value_state(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]]]_|
 |_|_TableScan: t1_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [time_window@3 ASC NULLS LAST, ordered_host@0 ASC NULLS LAST]_|

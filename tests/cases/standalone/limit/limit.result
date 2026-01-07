@@ -27,7 +27,7 @@ EXPLAIN SELECT * FROM (SELECT SUM(number) FROM numbers LIMIT 100000000000) WHERE
 +---------------+-------------------------------------------------------------------------------+
 | logical_plan  | MergeScan [is_placeholder=false, remote_input=[                               |
 |               | Projection: sum(numbers.number)                                               |
-|               |   Filter: Int64(1) = Int64(0)                                                 |
+|               |   Filter: Boolean(false)                                                      |
 |               |     Limit: skip=0, fetch=100000000000                                         |
 |               |       Projection: sum(numbers.number)                                         |
 |               |         Aggregate: groupBy=[[]], aggr=[[sum(CAST(numbers.number AS UInt64))]] |

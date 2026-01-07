@@ -15,27 +15,26 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use common_telemetry::debug;
 use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::Column;
-use datafusion_common::alias::AliasGenerator;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
 use datafusion_optimizer::analyzer::AnalyzerRule;
-use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use promql::extension_plan::SeriesDivide;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::dist_plan::analyzer::utils::{aliased_columns_for, rewrite_merge_sort_exprs};
+use crate::dist_plan::analyzer::utils::{
+    PatchOptimizerContext, PlanTreeExpressionSimplifier, aliased_columns_for,
+    rewrite_merge_sort_exprs,
+};
 use crate::dist_plan::commutativity::{
     Categorizer, Commutativity, partial_commutative_transformer,
 };
@@ -49,7 +48,7 @@ use crate::query_engine::DefaultSerializer;
 mod test;
 
 mod fallback;
-mod utils;
+pub(crate) mod utils;
 
 pub(crate) use utils::AliasMapping;
 
@@ -111,41 +110,13 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         config.optimizer.filter_null_join_keys = true;
         let config = Arc::new(config);
 
-        // The `ConstEvaluator` in `SimplifyExpressions` might evaluate some UDFs early in the
-        // planning stage, by executing them directly. For example, the `database()` function.
-        // So the `ConfigOptions` here (which is set from the session context) should be present
-        // in the UDF's `ScalarFunctionArgs`. However, the default implementation in DataFusion
-        // seems to lost track on it: the `ConfigOptions` is recreated with its default values again.
-        // So we create a custom `OptimizerConfig` with the desired `ConfigOptions`
-        // to walk around the issue.
-        // TODO(LFC): Maybe use DataFusion's `OptimizerContext` again
-        //   once https://github.com/apache/datafusion/pull/17742 is merged.
-        struct OptimizerContext {
-            inner: datafusion_optimizer::OptimizerContext,
-            config: Arc<ConfigOptions>,
-        }
-
-        impl OptimizerConfig for OptimizerContext {
-            fn query_execution_start_time(&self) -> DateTime<Utc> {
-                self.inner.query_execution_start_time()
-            }
-
-            fn alias_generator(&self) -> &Arc<AliasGenerator> {
-                self.inner.alias_generator()
-            }
-
-            fn options(&self) -> Arc<ConfigOptions> {
-                self.config.clone()
-            }
-        }
-
-        let optimizer_context = OptimizerContext {
+        let optimizer_context = PatchOptimizerContext {
             inner: datafusion_optimizer::OptimizerContext::new(),
             config: config.clone(),
         };
 
-        let plan = SimplifyExpressions::new()
-            .rewrite(plan, &optimizer_context)?
+        let plan = plan
+            .rewrite_with_subqueries(&mut PlanTreeExpressionSimplifier::new(optimizer_context))?
             .data;
 
         let opt = config.extensions.get::<DistPlannerOptions>();

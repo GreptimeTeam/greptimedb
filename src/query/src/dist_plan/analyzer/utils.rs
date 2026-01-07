@@ -15,14 +15,101 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
+use arrow::array::ArrayRef;
+use arrow_schema::{ArrowError, DataType};
+use chrono::{DateTime, Utc};
+use datafusion::common::alias::AliasGenerator;
+use datafusion::config::ConfigOptions;
 use datafusion::error::Result as DfResult;
 use datafusion_common::Column;
-use datafusion_common::tree_node::{Transformed, TreeNode as _};
+use datafusion_common::tree_node::{Transformed, TreeNode as _, TreeNodeRewriter};
 use datafusion_expr::expr::Alias;
 use datafusion_expr::{Expr, Extension, LogicalPlan};
+use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
+use datafusion_optimizer::{OptimizerConfig, OptimizerRule as _};
 
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::plan::ExtractExpr as _;
+
+/// The `ConstEvaluator` in `SimplifyExpressions` might evaluate some UDFs early in the
+/// planning stage, by executing them directly. For example, the `database()` function.
+/// So the `ConfigOptions` here (which is set from the session context) should be present
+/// in the UDF's `ScalarFunctionArgs`. However, the default implementation in DataFusion
+/// seems to lost track on it: the `ConfigOptions` is recreated with its default values again.
+/// So we create a custom `OptimizerConfig` with the desired `ConfigOptions`
+/// to walk around the issue.
+/// TODO(LFC): Maybe use DataFusion's `OptimizerContext` again
+///   once https://github.com/apache/datafusion/pull/17742 is merged.
+pub(crate) struct PatchOptimizerContext {
+    pub(crate) inner: datafusion_optimizer::OptimizerContext,
+    pub(crate) config: Arc<ConfigOptions>,
+}
+
+impl OptimizerConfig for PatchOptimizerContext {
+    fn query_execution_start_time(&self) -> DateTime<Utc> {
+        self.inner.query_execution_start_time()
+    }
+
+    fn alias_generator(&self) -> &Arc<AliasGenerator> {
+        self.inner.alias_generator()
+    }
+
+    fn options(&self) -> Arc<ConfigOptions> {
+        self.config.clone()
+    }
+}
+
+/// Simplify all expressions recursively in the plan tree
+/// which keeping the output schema unchanged
+pub(crate) struct PlanTreeExpressionSimplifier {
+    optimizer_context: PatchOptimizerContext,
+}
+
+impl PlanTreeExpressionSimplifier {
+    pub fn new(optimizer_context: PatchOptimizerContext) -> Self {
+        Self { optimizer_context }
+    }
+}
+
+impl TreeNodeRewriter for PlanTreeExpressionSimplifier {
+    type Node = LogicalPlan;
+    fn f_down(&mut self, plan: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        let simp = SimplifyExpressions::new()
+            .rewrite(plan, &self.optimizer_context)?
+            .data;
+        Ok(Transformed::yes(simp))
+    }
+}
+
+/// A patch for substrait simply throw timezone away, so when decoding, if columns have different timezone then expected schema, use expected schema's timezone
+pub fn patch_batch_timezone(
+    expected_schema: arrow_schema::SchemaRef,
+    columns: Vec<ArrayRef>,
+) -> Result<arrow::record_batch::RecordBatch, ArrowError> {
+    let patched_columns: Vec<ArrayRef> = expected_schema
+        .fields()
+        .iter()
+        .zip(columns.into_iter())
+        .map(|(expected_field, column)| {
+            let expected_type = expected_field.data_type();
+            let actual_type = column.data_type();
+
+            // Check if both are timestamp types with different timezones
+            match (expected_type, actual_type) {
+                (
+                    DataType::Timestamp(expected_unit, expected_tz),
+                    DataType::Timestamp(actual_unit, actual_tz),
+                ) if expected_unit == actual_unit && expected_tz != actual_tz => {
+                    // Cast the column to the expected timezone
+                    arrow::compute::cast(&column, expected_type)
+                }
+                _ => Ok(column),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    arrow::record_batch::RecordBatch::try_new(expected_schema.clone(), patched_columns)
+}
 
 fn rewrite_column(
     mapping: &BTreeMap<Column, BTreeSet<Column>>,

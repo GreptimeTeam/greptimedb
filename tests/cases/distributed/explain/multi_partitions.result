@@ -27,7 +27,7 @@ explain SELECT * FROM multi_partitions_test_table WHERE ts > cast(1000000000 as 
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| Sort: multi_partitions_test_table.host ASC NULLS LAST_|
 |_|_Projection: multi_partitions_test_table.host, multi_partitions_test_table.ts, multi_partitions_test_table.cpu, multi_partitions_test_table.memory, multi_partitions_test_table.disk_util |
-|_|_Filter: multi_partitions_test_table.ts > arrow_cast(Int64(1000000000), Utf8("Timestamp(Millisecond, None)"))_|
+|_|_Filter: multi_partitions_test_table.ts > TimestampMillisecond(1000000000, None)_|
 |_|_TableScan: multi_partitions_test_table_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [host@0 ASC NULLS LAST]_|

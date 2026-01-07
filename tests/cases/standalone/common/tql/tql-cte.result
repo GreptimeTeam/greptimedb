@@ -158,7 +158,7 @@ SELECT count(*) FROM filtered;
 |               |   Aggregate: groupBy=[[]], aggr=[[count(Int64(1))]]                                                                            |
 |               |     SubqueryAlias: filtered                                                                                                    |
 |               |       Projection: tql_data.ts, tql_data.val                                                                                    |
-|               |         Filter: tql_data.val > CAST(Int64(5) AS Float64)                                                                       |
+|               |         Filter: tql_data.val > Float64(5)                                                                                      |
 |               |           SubqueryAlias: tql_data                                                                                              |
 |               |             Projection: metric.ts AS ts, metric.val AS val                                                                     |
 |               |               PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                    |
@@ -199,7 +199,7 @@ SELECT sum(val) FROM filtered;
 |               |     SubqueryAlias: filtered                                                                                                            |
 |               |       Projection: tql_data.ts AS ts, tql_data.val AS val                                                                               |
 |               |         Projection: tql_data.ts, tql_data.val                                                                                          |
-|               |           Filter: tql_data.val > CAST(Int64(0) AS Float64)                                                                             |
+|               |           Filter: tql_data.val > Float64(0)                                                                                            |
 |               |             SubqueryAlias: tql_data                                                                                                    |
 |               |               Projection: metric.ts AS ts, prom_rate(ts_range,val,ts,Int64(20000)) AS val                                              |
 |               |                 Filter: prom_rate(ts_range,val,ts,Int64(20000)) IS NOT NULL                                                            |
@@ -653,11 +653,11 @@ SELECT count(*) as high_values FROM final;
 |               |     SubqueryAlias: final                                                                                                                 |
 |               |       Projection: processed.ts AS ts, processed.percent AS percent                                                                       |
 |               |         Projection: processed.ts, processed.percent                                                                                      |
-|               |           Filter: processed.percent > CAST(Int64(200) AS Float64)                                                                        |
+|               |           Filter: processed.percent > Float64(200)                                                                                       |
 |               |             SubqueryAlias: processed                                                                                                     |
 |               |               Projection: base_tql.ts AS ts, percent AS percent                                                                          |
-|               |                 Projection: base_tql.ts, base_tql.val * CAST(Int64(100) AS Float64) AS percent                                           |
-|               |                   Filter: base_tql.val > CAST(Int64(0) AS Float64)                                                                       |
+|               |                 Projection: base_tql.ts, base_tql.val * Float64(100) AS percent                                                          |
+|               |                   Filter: base_tql.val > Float64(0)                                                                                      |
 |               |                     SubqueryAlias: base_tql                                                                                              |
 |               |                       Projection: metric.ts AS ts, metric.val AS val                                                                     |
 |               |                         PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                    |
