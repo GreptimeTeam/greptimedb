@@ -17,16 +17,16 @@ use std::sync::Arc;
 
 use common_telemetry::{debug, info};
 use snafu::ensure;
-use store_api::storage::{RegionId, RegionNumber, TableId};
+use store_api::storage::{RegionNumber, TableId};
 
 use crate::ddl::TableMetadata;
 use crate::ddl::allocator::resource_id::ResourceIdAllocatorRef;
+use crate::ddl::allocator::table_route::TableRouteAllocatorRef;
 use crate::ddl::allocator::wal_option::WalOptionsAllocatorRef;
 use crate::error::{Result, UnsupportedSnafu};
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::peer::{NoopPeerAllocator, PeerAllocatorRef};
 use crate::rpc::ddl::CreateTableTask;
-use crate::rpc::router::{Region, RegionRoute};
 
 pub type TableMetadataAllocatorRef = Arc<TableMetadataAllocator>;
 
@@ -34,7 +34,7 @@ pub type TableMetadataAllocatorRef = Arc<TableMetadataAllocator>;
 pub struct TableMetadataAllocator {
     table_id_allocator: ResourceIdAllocatorRef,
     wal_options_allocator: WalOptionsAllocatorRef,
-    peer_allocator: PeerAllocatorRef,
+    table_route_allocator: TableRouteAllocatorRef,
 }
 
 impl TableMetadataAllocator {
@@ -57,7 +57,7 @@ impl TableMetadataAllocator {
         Self {
             table_id_allocator,
             wal_options_allocator,
-            peer_allocator,
+            table_route_allocator: Arc::new(peer_allocator) as _,
         }
     }
 
@@ -110,45 +110,10 @@ impl TableMetadataAllocator {
         partition_exprs: &[&str],
         next_region_number: u32,
     ) -> Result<PhysicalTableRouteValue> {
-        let regions = partition_exprs.len().max(1);
-        let peers = self.peer_allocator.alloc(regions).await?;
-        debug!(
-            "Allocated peers {:?} for table {}, next region number: {}",
-            peers, table_id, next_region_number
-        );
-
-        let mut region_routes = partition_exprs
-            .iter()
-            .enumerate()
-            .map(|(i, partition)| {
-                let region_number = next_region_number + i as u32;
-                let region = Region {
-                    id: RegionId::new(table_id, region_number),
-                    partition_expr: partition.to_string(),
-                    ..Default::default()
-                };
-
-                let peer = peers[i % peers.len()].clone();
-
-                RegionRoute {
-                    region,
-                    leader_peer: Some(peer),
-                    ..Default::default()
-                }
-            })
-            .collect::<Vec<_>>();
-
-        // If the table has no partitions, we need to create a default region.
-        if region_routes.is_empty() {
-            region_routes.push(RegionRoute {
-                region: Region {
-                    id: RegionId::new(table_id, next_region_number),
-                    ..Default::default()
-                },
-                leader_peer: Some(peers[0].clone()),
-                ..Default::default()
-            });
-        }
+        let region_routes = self
+            .table_route_allocator
+            .allocate(table_id, partition_exprs, next_region_number)
+            .await?;
 
         Ok(PhysicalTableRouteValue::new(region_routes))
     }
