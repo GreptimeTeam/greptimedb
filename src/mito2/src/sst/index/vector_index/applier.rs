@@ -185,10 +185,11 @@ impl VectorIndexApplier {
             Ok(None) => self.remote_blob_reader(file_id, file_size_hint).await?,
             Err(err) => {
                 if is_blob_not_found(&err) {
-                    return Ok(None);
+                    self.remote_blob_reader(file_id, file_size_hint).await?
+                } else {
+                    warn!(err; "Failed to read cached vector index blob, fallback to remote");
+                    self.remote_blob_reader(file_id, file_size_hint).await?
                 }
-                warn!(err; "Failed to read cached vector index blob, fallback to remote");
-                self.remote_blob_reader(file_id, file_size_hint).await?
             }
         };
 
