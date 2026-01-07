@@ -145,7 +145,7 @@ impl GcRegionsHandler {
         // TODO(discord9): add integration test for this drop case
         let mito_regions = region_ids
             .iter()
-            .filter_map(|rid| mito_engine.find_region(*rid).map(|r| (*rid, r)))
+            .map(|rid| (*rid, mito_engine.find_region(*rid)))
             .collect();
 
         let cache_manager = mito_engine.cache_manager();
