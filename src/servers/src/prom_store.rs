@@ -47,8 +47,10 @@ pub const DATABASE_LABEL_BYTES: &[u8] = b"x_greptime_database";
 pub const DATABASE_LABEL_ALT: &str = "__database__";
 pub const DATABASE_LABEL_ALT_BYTES: &[u8] = b"__database__";
 
-// deprecated
+/// deprecated, use DATABASE_LABEL instead
+#[deprecated(note = "use DATABASE_LABEL instead")]
 pub const SCHEMA_LABEL: &str = "__schema__";
+#[deprecated(note = "use DATABASE_LABEL_BYTES instead")]
 pub const SCHEMA_LABEL_BYTES: &[u8] = b"__schema__";
 
 /// special label for selecting physical table name on remote write
@@ -61,6 +63,7 @@ pub const PHYSICAL_TABLE_LABEL_ALT_BYTES: &[u8] = b"__physical_table__";
 pub const FIELD_NAME_LABEL: &str = "__field__";
 
 /// Check if given label is a special label for remote write
+#[allow(deprecated)]
 pub fn is_remote_write_special_label(label: &str) -> bool {
     label == DATABASE_LABEL
         || label == DATABASE_LABEL_ALT
@@ -69,6 +72,7 @@ pub fn is_remote_write_special_label(label: &str) -> bool {
         || label == SCHEMA_LABEL
 }
 
+#[allow(deprecated)]
 pub fn is_remote_read_special_label(label: &str) -> bool {
     label == METRIC_NAME_LABEL
         || label == DATABASE_LABEL
@@ -77,6 +81,7 @@ pub fn is_remote_read_special_label(label: &str) -> bool {
 }
 
 /// Check if given label is a database selection label
+#[allow(deprecated)]
 pub fn is_database_selection_label(label: &str) -> bool {
     label == DATABASE_LABEL || label == DATABASE_LABEL_ALT || label == SCHEMA_LABEL
 }
