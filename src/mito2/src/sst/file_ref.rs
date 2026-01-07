@@ -87,7 +87,7 @@ impl FileReferenceManager {
     pub(crate) async fn get_snapshot_of_file_refs(
         &self,
         query_regions_for_mem: Vec<MitoRegionRef>,
-        related_regions_in_manifest: Vec<(MitoRegionRef, Vec<RegionId>)>,
+        dst_region_to_src_regions: Vec<(MitoRegionRef, HashSet<RegionId>)>,
     ) -> Result<FileRefsManifest> {
         let mut ref_files = HashMap::new();
         // get from in memory file handles
@@ -99,10 +99,12 @@ impl FileReferenceManager {
 
         let mut manifest_version = HashMap::new();
 
+        let mut cross_region_refs = HashMap::new();
+
         // get file refs from related regions' manifests
-        for (related_region, queries) in &related_regions_in_manifest {
-            let queries = queries.iter().cloned().collect::<HashSet<_>>();
-            let manifest = related_region.manifest_ctx.manifest().await;
+        for (dst_region, src_regions) in &dst_region_to_src_regions {
+            let src_regions = src_regions.iter().cloned().collect::<HashSet<_>>();
+            let manifest = dst_region.manifest_ctx.manifest().await;
             for meta in manifest.files.values() {
                 if src_regions.contains(&meta.region_id) {
                     cross_region_refs

@@ -250,7 +250,7 @@ impl BatchGcProcedure {
         let repart_mgr = self.table_metadata_manager.table_repart_manager();
         let mut related_regions: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
         for src_region in regions {
-            // TODO: batch get?
+            // TODO(discord9): batch get
             let Some(dst_regions) = repart_mgr
                 .get_dst_regions(*src_region)
                 .await
@@ -267,7 +267,7 @@ impl BatchGcProcedure {
     /// according to cross reference in `FileRefsManifest`.
     async fn cleanup_region_repartition(&self) -> Result<()> {
         for (src_region, dst_regions) in self.data.file_refs.cross_region_refs.iter() {
-            // TODO: batch update
+            // TODO(discord9): batch update
             self.table_metadata_manager
                 .table_repart_manager()
                 .update_mappings(*src_region, &dst_regions.iter().cloned().collect_vec())
