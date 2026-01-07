@@ -163,6 +163,18 @@ pub(crate) struct ScanMetricsSet {
     rows_bloom_filtered: usize,
     /// Number of rows filtered by precise filter.
     rows_precise_filtered: usize,
+    /// Number of index result cache hits for fulltext index.
+    fulltext_index_cache_hit: usize,
+    /// Number of index result cache misses for fulltext index.
+    fulltext_index_cache_miss: usize,
+    /// Number of index result cache hits for inverted index.
+    inverted_index_cache_hit: usize,
+    /// Number of index result cache misses for inverted index.
+    inverted_index_cache_miss: usize,
+    /// Number of index result cache hits for bloom filter index.
+    bloom_filter_cache_hit: usize,
+    /// Number of index result cache misses for bloom filter index.
+    bloom_filter_cache_miss: usize,
     /// Number of record batches read from SST.
     num_sst_record_batches: usize,
     /// Number of batches decoded from SST.
@@ -263,6 +275,12 @@ impl fmt::Debug for ScanMetricsSet {
             rows_inverted_filtered,
             rows_bloom_filtered,
             rows_precise_filtered,
+            fulltext_index_cache_hit,
+            fulltext_index_cache_miss,
+            inverted_index_cache_hit,
+            inverted_index_cache_miss,
+            bloom_filter_cache_hit,
+            bloom_filter_cache_miss,
             num_sst_record_batches,
             num_sst_batches,
             num_sst_rows,
@@ -340,6 +358,36 @@ impl fmt::Debug for ScanMetricsSet {
         }
         if *rows_precise_filtered > 0 {
             write!(f, ", \"rows_precise_filtered\":{rows_precise_filtered}")?;
+        }
+        if *fulltext_index_cache_hit > 0 {
+            write!(
+                f,
+                ", \"fulltext_index_cache_hit\":{fulltext_index_cache_hit}"
+            )?;
+        }
+        if *fulltext_index_cache_miss > 0 {
+            write!(
+                f,
+                ", \"fulltext_index_cache_miss\":{fulltext_index_cache_miss}"
+            )?;
+        }
+        if *inverted_index_cache_hit > 0 {
+            write!(
+                f,
+                ", \"inverted_index_cache_hit\":{inverted_index_cache_hit}"
+            )?;
+        }
+        if *inverted_index_cache_miss > 0 {
+            write!(
+                f,
+                ", \"inverted_index_cache_miss\":{inverted_index_cache_miss}"
+            )?;
+        }
+        if *bloom_filter_cache_hit > 0 {
+            write!(f, ", \"bloom_filter_cache_hit\":{bloom_filter_cache_hit}")?;
+        }
+        if *bloom_filter_cache_miss > 0 {
+            write!(f, ", \"bloom_filter_cache_miss\":{bloom_filter_cache_miss}")?;
         }
 
         // Write non-zero distributor metrics
@@ -520,6 +568,12 @@ impl ScanMetricsSet {
                     rows_inverted_filtered,
                     rows_bloom_filtered,
                     rows_precise_filtered,
+                    fulltext_index_cache_hit,
+                    fulltext_index_cache_miss,
+                    inverted_index_cache_hit,
+                    inverted_index_cache_miss,
+                    bloom_filter_cache_hit,
+                    bloom_filter_cache_miss,
                     inverted_index_apply_metrics,
                     bloom_filter_apply_metrics,
                     fulltext_index_apply_metrics,
@@ -546,6 +600,13 @@ impl ScanMetricsSet {
         self.rows_inverted_filtered += *rows_inverted_filtered;
         self.rows_bloom_filtered += *rows_bloom_filtered;
         self.rows_precise_filtered += *rows_precise_filtered;
+
+        self.fulltext_index_cache_hit += *fulltext_index_cache_hit;
+        self.fulltext_index_cache_miss += *fulltext_index_cache_miss;
+        self.inverted_index_cache_hit += *inverted_index_cache_hit;
+        self.inverted_index_cache_miss += *inverted_index_cache_miss;
+        self.bloom_filter_cache_hit += *bloom_filter_cache_hit;
+        self.bloom_filter_cache_miss += *bloom_filter_cache_miss;
 
         self.num_sst_record_batches += *num_record_batches;
         self.num_sst_batches += *num_batches;
