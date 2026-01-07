@@ -78,7 +78,24 @@ group by
 +---------+----------+
 | os      | count(*) |
 +---------+----------+
-| linux   | 2        |
+| linux   | 1        |
+| windows | 2        |
++---------+----------+
+
+select
+    os,
+    count(*)
+from
+    cpu
+where
+    greptime_timestamp > '2023-06-12 01:05:00'
+group by
+    os;
+
++---------+----------+
+| os      | count(*) |
++---------+----------+
+| linux   | 1        |
 | windows | 2        |
 +---------+----------+
 

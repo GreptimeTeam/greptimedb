@@ -57,4 +57,14 @@ where
 group by
     os;
 
+select
+    os,
+    count(*)
+from
+    cpu
+where
+    greptime_timestamp > '2023-06-12 01:05:00'
+group by
+    os;
+
 drop table cpu;
