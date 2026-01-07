@@ -54,6 +54,8 @@ impl GcScheduler {
             .aggregate_candidates_by_datanode(per_table_candidates)
             .await?;
 
+        // TODO(discord9): add deleted regions from repartition mapping
+
         if datanode_to_candidates.is_empty() {
             info!("No valid datanode candidates found, skipping GC cycle");
             return Ok(Default::default());
