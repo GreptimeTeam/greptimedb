@@ -44,7 +44,9 @@ use crate::read::compat::CompatBatch;
 use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::prune::{FlatPruneReader, PruneReader};
 use crate::sst::file::FileHandle;
-use crate::sst::parquet::flat_format::{DecodedPrimaryKeys, decode_primary_keys};
+use crate::sst::parquet::flat_format::{
+    DecodedPrimaryKeys, decode_primary_keys, time_index_column_index,
+};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{
     FlatRowGroupReader, MaybeFilter, RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext,
@@ -605,6 +607,11 @@ impl RangeBase {
                 let result = filter
                     .evaluate_array(&tag_column)
                     .context(RecordBatchSnafu)?;
+                mask = mask.bitand(&result);
+            } else if filter_ctx.semantic_type() == SemanticType::Timestamp {
+                let time_index_pos = time_index_column_index(input.num_columns());
+                let column = &input.columns()[time_index_pos];
+                let result = filter.evaluate_array(column).context(RecordBatchSnafu)?;
                 mask = mask.bitand(&result);
             }
             // Non-tag column not found in projection.
