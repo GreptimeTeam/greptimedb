@@ -21,7 +21,7 @@ use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};
@@ -62,6 +62,10 @@ impl State for DeallocateRegion {
             .flat_map(|p| p.pending_deallocate_region_ids.iter())
             .cloned()
             .collect::<HashSet<_>>();
+        info!(
+            "Deallocating regions: {:?} for table: {} during repartition procedure",
+            pending_deallocate_region_ids, table_id
+        );
 
         let table_lock = TableLock::Write(table_id).into();
         let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;

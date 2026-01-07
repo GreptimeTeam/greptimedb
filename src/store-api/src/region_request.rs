@@ -535,10 +535,12 @@ impl RegionCreateRequest {
 
 #[derive(Debug, Clone)]
 pub struct RegionDropRequest {
-    // Only used by Metric Engine, for fast path drop.
-    // It only works for Metric Engine, and will be ignored by other engines.
+    /// Enables fast-path drop optimizations for logical regions.
+    /// Only applicable to the Metric Engine; ignored by others.
     pub fast_path: bool,
-    // Used only by the Metric Engine, to forcibly drop a physical region and all its associated logical regions.
+
+    /// Forces the drop of a physical region and all its associated logical regions.
+    /// Only relevant for physical regions managed by the Metric Engine.
     pub force: bool,
 }
 
