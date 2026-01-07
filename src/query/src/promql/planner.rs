@@ -187,14 +187,6 @@ pub struct PromPlanner {
     ctx: PromPlannerContext,
 }
 
-/// Unescapes the value of the matcher
-pub fn normalize_matcher(mut matcher: Matcher) -> Matcher {
-    if let Ok(unescaped_value) = unescaper::unescape(&matcher.value) {
-        matcher.value = unescaped_value;
-    }
-    matcher
-}
-
 impl PromPlanner {
     pub async fn stmt_to_plan_with_alias(
         table_provider: DfTableSourceProvider,
@@ -1060,9 +1052,7 @@ impl PromPlanner {
             }
         }
 
-        Ok(Matchers::new(
-            matchers.into_iter().map(normalize_matcher).collect(),
-        ))
+        Ok(Matchers::new(matchers.into_iter().collect()))
     }
 
     async fn selector_to_series_normalize_plan(

@@ -9953,9 +9953,9 @@ dependencies = [
 
 [[package]]
 name = "promql-parser"
-version = "0.6.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "328fe69c2443ec4f8e6c33ea925dde04a1026e6c95928e89ed02343944cac9bf"
+checksum = "6c3c2199b84e1253aade469e92ae16cd8dbe1de031c66a00f4f5cdd650290a86"
 dependencies = [
  "cfgrammar",
  "chrono",
@@ -9965,7 +9965,6 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "unescaper",
 ]
 
 [[package]]
@@ -10326,7 +10325,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
- "unescaper",
  "uuid",
 ]
 
@@ -14167,15 +14165,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1b88fcfe09e89d3866a5c11019378088af2d24c3fbd4f0543f96b479ec90697"
 dependencies = [
  "version_check",
-]
-
-[[package]]
-name = "unescaper"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c01d12e3a56a4432a8b436f293c25f4808bdf9e9f9f98f9260bba1f1bc5a1f26"
-dependencies = [
- "thiserror 2.0.17",
 ]
 
 [[package]]
