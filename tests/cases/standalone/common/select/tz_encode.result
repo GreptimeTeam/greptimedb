@@ -46,22 +46,24 @@ FROM
 +--------------------------------+
 
 -- SQLNESS REPLACE TimestampNanosecond\(\d+ TimestampNanosecond(NOW
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
 EXPLAIN SELECT
     now()
 FROM
     ngx_access_log;
 
-+---------------+----------------------------------------------------------------------------+
-| plan_type     | plan                                                                       |
-+---------------+----------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                            |
-|               | Projection: TimestampNanosecond(NOW, Some("UTC")) AS now() |
-|               |   TableScan: ngx_access_log                                                |
-|               | ]]                                                                         |
-| physical_plan | CooperativeExec                                                            |
-|               |   MergeScanExec: peers=[4398046511104(1024, 0), ]                          |
-|               |                                                                            |
-+---------------+----------------------------------------------------------------------------+
++---------------+-------------------------------------------------------------------------------+
+| plan_type     | plan                                                                          |
++---------------+-------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                               |
+|               | Projection: TimestampNanosecond(NOW, Some("+00:00")) AS now() |
+|               |   TableScan: ngx_access_log                                                   |
+|               | ]]                                                                            |
+| physical_plan | CooperativeExec                                                               |
+|               |   MergeScanExec: REDACTED
+|               |                                                                               |
++---------------+-------------------------------------------------------------------------------+
 
 DROP TABLE ngx_access_log;
 

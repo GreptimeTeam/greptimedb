@@ -15,23 +15,21 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use arrow_schema::DataType;
+use arrow::array::ArrayRef;
+use arrow_schema::{ArrowError, DataType};
 use chrono::{DateTime, Utc};
 use datafusion::common::alias::AliasGenerator;
 use datafusion::config::ConfigOptions;
 use datafusion::error::Result as DfResult;
+use datafusion_common::Column;
 use datafusion_common::tree_node::{Transformed, TreeNode as _, TreeNodeRewriter};
-use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::Alias;
-use datafusion_expr::{Cast, Expr, Extension, LogicalPlan};
+use datafusion_expr::{Expr, Extension, LogicalPlan};
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule as _};
 
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::plan::ExtractExpr as _;
-
-/// UTC timezone string, which is the default timezone in substrait encode/decode
-pub(super) const DEFAULT_TIMEZONE: &str = "UTC";
 
 /// The `ConstEvaluator` in `SimplifyExpressions` might evaluate some UDFs early in the
 /// planning stage, by executing them directly. For example, the `database()` function.
@@ -79,80 +77,38 @@ impl TreeNodeRewriter for PlanTreeExpressionSimplifier {
         let simp = SimplifyExpressions::new()
             .rewrite(plan, &self.optimizer_context)?
             .data;
-        let patched = patch_cur_plan_ts_lit(simp)?.data;
-        Ok(Transformed::yes(patched))
+        Ok(Transformed::yes(simp))
     }
 }
 
-/// found all timestamp literal, and convert them to UTC timezone to make sure they are consistent
-/// across substrait encode/decode
-fn patch_cur_plan_ts_lit(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
-    fn patch_lit(e: Expr) -> DfResult<Transformed<Expr>> {
-        let Expr::Literal(scalar, meta) = &e else {
-            return Ok(Transformed::no(e));
-        };
+/// A patch for substrait simply throw timezone away, so when decoding, if columns have different timezone then expected schema, use expected schema's timezone
+pub fn patch_batch_timezone(
+    expected_schema: arrow_schema::SchemaRef,
+    columns: Vec<ArrayRef>,
+) -> Result<arrow::record_batch::RecordBatch, ArrowError> {
+    let patched_columns: Vec<ArrayRef> = expected_schema
+        .fields()
+        .iter()
+        .zip(columns.into_iter())
+        .map(|(expected_field, column)| {
+            let expected_type = expected_field.data_type();
+            let actual_type = column.data_type();
 
-        let (old_ty, utc_ty) = match scalar {
-            ScalarValue::TimestampSecond(_, tz) => {
-                if tz.is_none() {
-                    return Ok(Transformed::no(e));
+            // Check if both are timestamp types with different timezones
+            match (expected_type, actual_type) {
+                (
+                    DataType::Timestamp(expected_unit, expected_tz),
+                    DataType::Timestamp(actual_unit, actual_tz),
+                ) if expected_unit == actual_unit && expected_tz != actual_tz => {
+                    // Cast the column to the expected timezone
+                    arrow::compute::cast(&column, expected_type)
                 }
-                let old_ty = DataType::Timestamp(arrow_schema::TimeUnit::Second, tz.clone());
-                let utc_ty = DataType::Timestamp(
-                    arrow_schema::TimeUnit::Second,
-                    Some(DEFAULT_TIMEZONE.into()),
-                );
-                (old_ty, utc_ty)
+                _ => Ok(column),
             }
-            ScalarValue::TimestampMillisecond(_, tz) => {
-                if tz.is_none() {
-                    return Ok(Transformed::no(e));
-                }
-                let old_ty = DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, tz.clone());
-                let utc_ty = DataType::Timestamp(
-                    arrow_schema::TimeUnit::Millisecond,
-                    Some(DEFAULT_TIMEZONE.into()),
-                );
-                (old_ty, utc_ty)
-            }
-            ScalarValue::TimestampMicrosecond(_, tz) => {
-                if tz.is_none() {
-                    return Ok(Transformed::no(e));
-                }
-                let old_ty = DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, tz.clone());
-                let utc_ty = DataType::Timestamp(
-                    arrow_schema::TimeUnit::Microsecond,
-                    Some(DEFAULT_TIMEZONE.into()),
-                );
-                (old_ty, utc_ty)
-            }
-            ScalarValue::TimestampNanosecond(_, tz) => {
-                if tz.is_none() {
-                    return Ok(Transformed::no(e));
-                }
-                let old_ty = DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, tz.clone());
-                let utc_ty = DataType::Timestamp(
-                    arrow_schema::TimeUnit::Nanosecond,
-                    Some(DEFAULT_TIMEZONE.into()),
-                );
-                (old_ty, utc_ty)
-            }
-            _ => return Ok(Transformed::no(e)),
-        };
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
-        let utc_time = scalar.cast_to(&utc_ty)?;
-        let utc_expr = Expr::Literal(utc_time, meta.clone());
-        let cast_expr = Expr::Cast(Cast {
-            expr: Box::new(utc_expr.clone()),
-            data_type: old_ty,
-        });
-
-        Ok(Transformed::yes(utc_expr))
-    }
-    plan.map_expressions(|e| {
-        let e = patch_lit(e)?.data;
-        e.map_children(|e| patch_lit(e))
-    })
+    arrow::record_batch::RecordBatch::try_new(expected_schema.clone(), patched_columns)
 }
 
 fn rewrite_column(

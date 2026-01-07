@@ -24,7 +24,6 @@ use common_plugins::GREPTIME_EXEC_READ_COST;
 use common_query::request::QueryRequest;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_telemetry::tracing_context::TracingContext;
-use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::execution::{SessionState, TaskContext};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{
@@ -49,6 +48,7 @@ use table::table_name::TableName;
 use tokio::time::Instant;
 
 use crate::dist_plan::analyzer::AliasMapping;
+use crate::dist_plan::analyzer::utils::patch_batch_timezone;
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
 use crate::region_query::RegionQueryHandlerRef;
 
@@ -322,7 +322,7 @@ impl MergeScanExec {
                     poll_duration += poll_elapsed;
 
                     let batch = batch.map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    let batch = RecordBatch::try_new(
+                    let batch = patch_batch_timezone(
                         arrow_schema.clone(),
                         batch.into_df_record_batch().columns().to_vec(),
                     )?;

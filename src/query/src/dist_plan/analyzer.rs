@@ -15,21 +15,17 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use common_telemetry::debug;
 use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::Column;
-use datafusion_common::alias::AliasGenerator;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
 use datafusion_optimizer::analyzer::AnalyzerRule;
-use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use promql::extension_plan::SeriesDivide;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
@@ -52,7 +48,7 @@ use crate::query_engine::DefaultSerializer;
 mod test;
 
 mod fallback;
-mod utils;
+pub(crate) mod utils;
 
 pub(crate) use utils::AliasMapping;
 

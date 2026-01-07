@@ -41,6 +41,7 @@ use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::Stream;
 use futures::task::{Context, Poll};
 use pretty_assertions::assert_eq;
+use regex::Regex;
 use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
 use table::metadata::{
@@ -179,12 +180,7 @@ fn try_encode_decode_substrait(plan: &LogicalPlan, state: SessionState) {
     })
     .unwrap();
 
-    let simp = SimplifyExpressions::new()
-        .rewrite(decoded_plan, &state)
-        .unwrap()
-        .data;
-
-    assert_eq!(*plan, simp);
+    assert_eq!(*plan, decoded_plan);
 }
 
 #[test]
@@ -1105,18 +1101,21 @@ fn test_simplify_select_now_expression() {
         .unwrap();
 
     common_telemetry::info!("Analyzed plan: {}", result);
-    let LogicalPlan::Extension(e) = result.inputs()[0].clone() else {
-        panic!("Expected Extension plan node");
-    };
-    let merge_scan_input = e
-        .node
-        .as_any()
-        .downcast_ref::<MergeScanLogicalPlan>()
-        .unwrap()
-        .input()
-        .clone();
 
-    try_encode_decode_substrait(&merge_scan_input, ctx.state());
+    let result_str = result.to_string();
+    // Normalize timestamp values to make test deterministic
+    let re = Regex::new(r"TimestampNanosecond\(\d+,").unwrap();
+    let normalized = re.replace_all(&result_str, "TimestampNanosecond(<TIME>,");
+
+    let expected = [
+        "Projection: now()",
+        "  MergeScan [is_placeholder=false, remote_input=[",
+        r#"Projection: TimestampNanosecond(<TIME>, Some("+00:00")) AS now()"#,
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, normalized);
 }
 
 #[test]

@@ -28,6 +28,8 @@ FROM
     ngx_access_log;
 
 -- SQLNESS REPLACE TimestampNanosecond\(\d+ TimestampNanosecond(NOW
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
 EXPLAIN SELECT
     now()
 FROM
