@@ -1,0 +1,84 @@
+-- Corresponding to issue TBD
+-- An append-only mito table without primary key, and partitioned by a field column.
+CREATE TABLE
+    IF NOT EXISTS `cpu` (
+        `rack` STRING NULL,
+        `os` STRING NULL,
+        `usage_user` BIGINT NULL,
+        `greptime_timestamp` TIMESTAMP(9) NOT NULL,
+        TIME INDEX (`greptime_timestamp`),
+    ) PARTITION ON COLUMNS (`rack`) (
+        rack < '2',
+        rack >= '2'
+        AND rack < '4',
+        rack >= '4'
+        AND rack < '6',
+        rack >= '6'
+        AND rack < '8',
+        rack >= '8'
+    ) ENGINE = mito
+WITH
+    (append_mode = 'true', sst_format = 'flat');
+
+Affected Rows: 0
+
+INSERT INTO
+    cpu
+VALUES
+    ("1", "linux", 10, "2023-06-12 01:04:49"),
+    ("1", "linux", 15, "2023-06-12 01:04:50"),
+    ("3", "windows", 25, "2023-06-12 01:05:00"),
+    ("5", "mac", 30, "2023-06-12 01:03:00"),
+    ("7", "linux", 45, "2023-06-12 02:00:00");
+
+Affected Rows: 5
+
+ADMIN FLUSH_TABLE ('cpu');
+
++--------------------------+
+| ADMIN FLUSH_TABLE('cpu') |
++--------------------------+
+| 0                        |
++--------------------------+
+
+INSERT INTO
+    cpu
+VALUES
+    ("2", "linux", 20, "2023-06-12 01:04:51"),
+    ("2", "windows", 22, "2023-06-12 01:06:00"),
+    ("4", "mac", 12, "2023-06-12 00:59:00"),
+    ("6", "linux", 35, "2023-06-12 01:04:55"),
+    ("8", "windows", 50, "2023-06-12 02:10:00");
+
+Affected Rows: 5
+
+select
+    count(*)
+from
+    cpu
+where
+    greptime_timestamp > '2023-06-12 01:05:00';
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+select
+    os,
+    count(*)
+from
+    cpu
+where
+    greptime_timestamp > '2023-06-12 01:05:00'
+group by
+    os;
+
++---------+----------+
+| os      | count(*) |
++---------+----------+
+| linux   | 1        |
+| windows | 2        |
++---------+----------+
+
