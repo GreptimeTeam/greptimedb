@@ -115,6 +115,8 @@ pub(crate) struct ScanMetricsSet {
     scan_cost: Duration,
     /// Duration while waiting for `yield`.
     yield_cost: Duration,
+    /// Duration to convert [`Batch`]es.
+    convert_cost: Option<Time>,
     /// Duration of the scan.
     total_cost: Duration,
     /// Number of rows returned.
@@ -243,6 +245,7 @@ impl fmt::Debug for ScanMetricsSet {
             build_reader_cost,
             scan_cost,
             yield_cost,
+            convert_cost,
             total_cost,
             num_rows,
             num_batches,
@@ -306,6 +309,12 @@ impl fmt::Debug for ScanMetricsSet {
             \"num_sst_rows\":{num_sst_rows}, \
             \"first_poll\":\"{first_poll:?}\""
         )?;
+
+        // Write convert_cost if present
+        if let Some(time) = convert_cost {
+            let duration = Duration::from_nanos(time.value() as u64);
+            write!(f, ", \"convert_cost\":\"{duration:?}\"")?;
+        }
 
         // Write non-zero filter counters
         if *rg_fulltext_filtered > 0 {
@@ -466,6 +475,12 @@ impl ScanMetricsSet {
         self
     }
 
+    /// Attaches the `convert_cost` to the metrics set.
+    fn with_convert_cost(mut self, time: Time) -> Self {
+        self.convert_cost = Some(time);
+        self
+    }
+
     /// Merges the local scanner metrics.
     fn merge_scanner_metrics(&mut self, other: &ScannerMetrics) {
         let ScannerMetrics {
@@ -606,6 +621,11 @@ impl ScanMetricsSet {
         READ_STAGE_ELAPSED
             .with_label_values(&["yield"])
             .observe(self.yield_cost.as_secs_f64());
+        if let Some(time) = &self.convert_cost {
+            READ_STAGE_ELAPSED
+                .with_label_values(&["convert"])
+                .observe(Duration::from_nanos(time.value() as u64).as_secs_f64());
+        }
         READ_STAGE_ELAPSED
             .with_label_values(&["total"])
             .observe(self.total_cost.as_secs_f64());
@@ -722,21 +742,19 @@ impl Drop for PartitionMetricsInner {
 
         if self.explain_verbose {
             common_telemetry::info!(
-                "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}, convert_batch_costs: {}",
+                "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}",
                 self.scanner_type,
                 self.region_id,
                 self.partition,
                 metrics,
-                self.convert_cost,
             );
         } else {
             common_telemetry::debug!(
-                "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}, convert_batch_costs: {}",
+                "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}",
                 self.scanner_type,
                 self.region_id,
                 self.partition,
                 metrics,
-                self.convert_cost,
             );
         }
     }
@@ -783,7 +801,10 @@ impl PartitionMetrics {
         let partition_str = partition.to_string();
         let in_progress_scan = IN_PROGRESS_SCAN.with_label_values(&[scanner_type, &partition_str]);
         in_progress_scan.inc();
-        let metrics = ScanMetricsSet::default().with_prepare_scan_cost(query_start.elapsed());
+        let convert_cost = MetricBuilder::new(metrics_set).subset_time("convert_cost", partition);
+        let metrics = ScanMetricsSet::default()
+            .with_prepare_scan_cost(query_start.elapsed())
+            .with_convert_cost(convert_cost.clone());
         let inner = PartitionMetricsInner {
             region_id,
             partition,
@@ -798,7 +819,7 @@ impl PartitionMetrics {
                 .subset_time("build_reader_cost", partition),
             scan_cost: MetricBuilder::new(metrics_set).subset_time("scan_cost", partition),
             yield_cost: MetricBuilder::new(metrics_set).subset_time("yield_cost", partition),
-            convert_cost: MetricBuilder::new(metrics_set).subset_time("convert_cost", partition),
+            convert_cost,
             elapsed_compute: MetricBuilder::new(metrics_set).elapsed_compute(partition),
         };
         Self(Arc::new(inner))
