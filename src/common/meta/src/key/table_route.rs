@@ -208,6 +208,20 @@ impl TableRouteValue {
         Ok(&self.as_physical_table_route_ref().region_routes)
     }
 
+    /// Returns the max region number of this [TableRouteValue::Physical].
+    ///
+    /// # Panic
+    /// If it is not the [`PhysicalTableRouteValue`].
+    pub fn max_region_number(&self) -> Result<RegionNumber> {
+        ensure!(
+            self.is_physical(),
+            UnexpectedLogicalRouteTableSnafu {
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
+            }
+        );
+        Ok(self.as_physical_table_route_ref().max_region_number)
+    }
+
     /// Returns the reference of [`PhysicalTableRouteValue`].
     ///
     /// # Panic

@@ -1474,7 +1474,7 @@ mod tests {
 
     use super::datanode_table::DatanodeTableKey;
     use super::test_utils;
-    use crate::ddl::allocator::wal_option::WalOptionsAllocator;
+    use crate::ddl::allocator::wal_options::WalOptionsAllocator;
     use crate::ddl::test_util::create_table::test_create_table_task;
     use crate::ddl::utils::region_storage_path;
     use crate::error::Result;

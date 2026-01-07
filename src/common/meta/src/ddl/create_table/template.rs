@@ -20,18 +20,19 @@ use api::v1::region::{CreateRequest, RegionColumnDef};
 use api::v1::{ColumnDef, CreateTableExpr, SemanticType};
 use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
-use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
+use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{RawTableInfo, TableId};
 
 use crate::error::{self, Result};
 use crate::wal_provider::prepare_wal_options;
 
-/// Builds a [CreateRequest] from a [RawTableInfo].
+/// Constructs a [CreateRequest] based on the provided [RawTableInfo].
 ///
-/// Note: **This method is only used for creating logical tables.**
-pub(crate) fn build_template_from_raw_table_info(
+/// Note: This function is primarily intended for creating logical tables or allocating placeholder regions.
+pub fn build_template_from_raw_table_info(
     raw_table_info: &RawTableInfo,
+    engine: &str,
 ) -> Result<CreateRequest> {
     let primary_key_indices = &raw_table_info.meta.primary_key_indices;
     let column_defs = raw_table_info
@@ -57,7 +58,7 @@ pub(crate) fn build_template_from_raw_table_info(
     let options = HashMap::from(&raw_table_info.meta.options);
     let template = CreateRequest {
         region_id: 0,
-        engine: METRIC_ENGINE_NAME.to_string(),
+        engine: engine.to_string(),
         column_defs,
         primary_key: primary_key_indices.iter().map(|i| *i as u32).collect(),
         path: String::new(),
@@ -138,7 +139,7 @@ pub struct CreateRequestBuilder {
 }
 
 impl CreateRequestBuilder {
-    pub(crate) fn new(template: CreateRequest, physical_table_id: Option<TableId>) -> Self {
+    pub fn new(template: CreateRequest, physical_table_id: Option<TableId>) -> Self {
         Self {
             template,
             physical_table_id,

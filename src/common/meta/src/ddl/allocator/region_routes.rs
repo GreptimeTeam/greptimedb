@@ -28,8 +28,7 @@ pub trait RegionRoutesAllocator: Send + Sync {
     async fn allocate(
         &self,
         table_id: TableId,
-        partition_exprs: &[&str],
-        next_region_number: u32,
+        region_number_and_partition_exprs: &[(u32, &str)],
     ) -> Result<Vec<RegionRoute>>;
 }
 
@@ -38,23 +37,18 @@ impl<T: PeerAllocator> RegionRoutesAllocator for T {
     async fn allocate(
         &self,
         table_id: TableId,
-        partition_exprs: &[&str],
-        next_region_number: u32,
+        region_number_and_partition_exprs: &[(u32, &str)],
     ) -> Result<Vec<RegionRoute>> {
-        let regions = partition_exprs.len().max(1);
+        let regions = region_number_and_partition_exprs.len().max(1);
         let peers = self.alloc(regions).await?;
-        debug!(
-            "Allocated peers {:?} for table {}, next region number: {}",
-            peers, table_id, next_region_number
-        );
+        debug!("Allocated peers {:?} for table {}", peers, table_id,);
 
-        let mut region_routes = partition_exprs
+        let mut region_routes = region_number_and_partition_exprs
             .iter()
             .enumerate()
-            .map(|(i, partition)| {
-                let region_number = next_region_number + i as u32;
+            .map(|(i, (region_number, partition))| {
                 let region = Region {
-                    id: RegionId::new(table_id, region_number),
+                    id: RegionId::new(table_id, *region_number),
                     partition_expr: partition.to_string(),
                     ..Default::default()
                 };
@@ -73,7 +67,7 @@ impl<T: PeerAllocator> RegionRoutesAllocator for T {
         if region_routes.is_empty() {
             region_routes.push(RegionRoute {
                 region: Region {
-                    id: RegionId::new(table_id, next_region_number),
+                    id: RegionId::new(table_id, 0),
                     ..Default::default()
                 },
                 leader_peer: Some(peers[0].clone()),

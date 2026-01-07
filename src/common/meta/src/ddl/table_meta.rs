@@ -108,11 +108,15 @@ impl TableMetadataAllocator {
         &self,
         table_id: TableId,
         partition_exprs: &[&str],
-        next_region_number: u32,
     ) -> Result<PhysicalTableRouteValue> {
+        let region_number_and_partition_exprs = partition_exprs
+            .iter()
+            .enumerate()
+            .map(|(i, partition)| (i as u32, *partition))
+            .collect::<Vec<_>>();
         let region_routes = self
             .region_routes_allocator
-            .allocate(table_id, partition_exprs, next_region_number)
+            .allocate(table_id, &region_number_and_partition_exprs)
             .await?;
 
         Ok(PhysicalTableRouteValue::new(region_routes))
@@ -135,9 +139,7 @@ impl TableMetadataAllocator {
             .iter()
             .map(|p| p.expression.as_str())
             .collect::<Vec<_>>();
-        let table_route = self
-            .create_table_route(table_id, &partition_exprs, 0)
-            .await?;
+        let table_route = self.create_table_route(table_id, &partition_exprs).await?;
         let region_numbers = table_route
             .region_routes
             .iter()

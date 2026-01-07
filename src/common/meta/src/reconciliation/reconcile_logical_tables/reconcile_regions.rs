@@ -21,6 +21,7 @@ use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
 use futures::future;
 use serde::{Deserialize, Serialize};
+use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::storage::{RegionId, RegionNumber, TableId};
 use table::metadata::RawTableInfo;
 
@@ -144,11 +145,13 @@ impl ReconcileRegions {
 }
 
 /// Creates a region request builder from a raw table info.
+///
+/// Note: This function is primarily intended for creating logical tables or allocating placeholder regions.
 fn create_region_request_from_raw_table_info(
     raw_table_info: &RawTableInfo,
     physical_table_id: TableId,
 ) -> Result<CreateRequestBuilder> {
-    let template = build_template_from_raw_table_info(raw_table_info)?;
+    let template = build_template_from_raw_table_info(raw_table_info, METRIC_ENGINE_NAME)?;
     Ok(CreateRequestBuilder::new(template, Some(physical_table_id)))
 }
 

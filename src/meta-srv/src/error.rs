@@ -1060,8 +1060,44 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to allocate regions for table: {}", table_id))]
+    AllocateRegions {
+        #[snafu(implicit)]
+        location: Location,
+        table_id: TableId,
+        #[snafu(source)]
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to deallocate regions for table: {}", table_id))]
     DeallocateRegions {
+        #[snafu(implicit)]
+        location: Location,
+        table_id: TableId,
+        #[snafu(source)]
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to build create request for table: {}", table_id))]
+    BuildCreateRequest {
+        #[snafu(implicit)]
+        location: Location,
+        table_id: TableId,
+        #[snafu(source)]
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to allocate region routes for table: {}", table_id))]
+    AllocateRegionRoutes {
+        #[snafu(implicit)]
+        location: Location,
+        table_id: TableId,
+        #[snafu(source)]
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to allocate wal options for table: {}", table_id))]
+    AllocateWalOptions {
         #[snafu(implicit)]
         location: Location,
         table_id: TableId,
@@ -1215,7 +1251,11 @@ impl ErrorExt for Error {
             Error::Other { source, .. } => source.status_code(),
             Error::RepartitionCreateSubtasks { source, .. } => source.status_code(),
             Error::RepartitionSubprocedureStateReceiver { source, .. } => source.status_code(),
+            Error::AllocateRegions { source, .. } => source.status_code(),
             Error::DeallocateRegions { source, .. } => source.status_code(),
+            Error::AllocateRegionRoutes { source, .. } => source.status_code(),
+            Error::AllocateWalOptions { source, .. } => source.status_code(),
+            Error::BuildCreateRequest { source, .. } => source.status_code(),
             Error::NoEnoughAvailableNode { .. } => StatusCode::RuntimeResourcesExhausted,
 
             #[cfg(feature = "pg_kvbackend")]

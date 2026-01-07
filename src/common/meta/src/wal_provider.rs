@@ -26,7 +26,7 @@ use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use snafu::{ResultExt, ensure};
 use store_api::storage::{RegionId, RegionNumber};
 
-use crate::ddl::allocator::wal_option::WalOptionsAllocator;
+use crate::ddl::allocator::wal_options::WalOptionsAllocator;
 use crate::error::{EncodeWalOptionsSnafu, InvalidTopicNamePrefixSnafu, Result};
 use crate::key::TOPIC_NAME_PATTERN_REGEX;
 use crate::kv_backend::KvBackendRef;

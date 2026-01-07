@@ -12,6 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod resource_id;
 pub mod region_routes;
+pub mod resource_id;
 pub mod wal_options;
