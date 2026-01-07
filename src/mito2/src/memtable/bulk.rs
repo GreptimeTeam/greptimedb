@@ -66,18 +66,10 @@ enum MergedPart {
 
 /// Result of collecting parts to merge
 struct CollectedParts {
-    /// Non-encoded parts (BulkPart and MultiBulkPart)
-    bulk_parts: Vec<PartToMerge>,
-    /// Encoded parts
-    encoded_parts: Vec<PartToMerge>,
+    /// Groups of parts ready for merging (each group has up to 16 parts)
+    groups: Vec<Vec<PartToMerge>>,
 }
 
-/// Result of merging a list of parts
-struct MergeResult {
-    parts: Vec<MergedPart>,
-    num_groups: usize,
-    num_parts: usize,
-}
 
 /// All parts in a bulk memtable.
 #[derive(Default)]
@@ -133,50 +125,64 @@ impl BulkParts {
 
     /// Collects unmerged parts and marks them as being merged.
     /// Only collects parts of types that meet the threshold.
+    /// Parts are pre-grouped into chunks for parallel processing.
     fn collect_parts_to_merge(&mut self) -> CollectedParts {
-        // First pass: count parts by type
-        let mut bulk_count = 0;
-        let mut encoded_count = 0;
+        // First pass: collect indices and row counts for each type
+        let mut bulk_indices: Vec<(usize, usize)> = Vec::new();
+        let mut encoded_indices: Vec<(usize, usize)> = Vec::new();
 
-        for wrapper in &self.parts {
+        for (idx, wrapper) in self.parts.iter().enumerate() {
             if wrapper.merging {
                 continue;
             }
+            let num_rows = wrapper.part.num_rows();
             if wrapper.part.is_encoded() {
-                encoded_count += 1;
+                encoded_indices.push((idx, num_rows));
             } else {
-                bulk_count += 1;
+                bulk_indices.push((idx, num_rows));
             }
         }
 
-        // Determine which types to collect based on threshold
-        let collect_bulk = bulk_count >= MERGE_THRESHOLD;
-        let collect_encoded = encoded_count >= MERGE_THRESHOLD;
+        let mut groups = Vec::new();
 
-        // Second pass: collect and mark parts
-        let mut bulk_parts = Vec::new();
-        let mut encoded_parts = Vec::new();
-
-        for wrapper in &mut self.parts {
-            if wrapper.merging {
-                continue;
-            }
-
-            if wrapper.part.is_encoded() {
-                if collect_encoded {
-                    wrapper.merging = true;
-                    encoded_parts.push(wrapper.part.clone());
-                }
-            } else if collect_bulk {
-                wrapper.merging = true;
-                bulk_parts.push(wrapper.part.clone());
-            }
+        // Process bulk parts if threshold met
+        if bulk_indices.len() >= MERGE_THRESHOLD {
+            groups.extend(self.collect_and_group_parts(bulk_indices));
         }
 
-        CollectedParts {
-            bulk_parts,
-            encoded_parts,
+        // Process encoded parts if threshold met
+        if encoded_indices.len() >= MERGE_THRESHOLD {
+            groups.extend(self.collect_and_group_parts(encoded_indices));
         }
+
+        CollectedParts { groups }
+    }
+
+    /// Sorts indices by row count, groups into chunks, marks as merging, and returns groups.
+    fn collect_and_group_parts(
+        &mut self,
+        mut indices: Vec<(usize, usize)>,
+    ) -> Vec<Vec<PartToMerge>> {
+        // Sort by row count for better grouping
+        indices.sort_unstable_by_key(|(_, num_rows)| *num_rows);
+
+        // Compute group size: total_parts / MERGE_THRESHOLD, clamped to [16, 64]
+        let group_size = (indices.len() / MERGE_THRESHOLD).clamp(16, 64);
+
+        // Group into chunks and collect parts
+        indices
+            .chunks(group_size)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|(idx, _)| {
+                        let wrapper = &mut self.parts[*idx];
+                        wrapper.merging = true;
+                        wrapper.part.clone()
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     /// Installs merged parts and removes the original parts by file ids.
@@ -938,58 +944,36 @@ impl MemtableCompactor {
     ) -> Result<()> {
         let start = Instant::now();
 
-        // Collect parts (only types that meet threshold)
+        // Collect pre-grouped parts
         let collected = bulk_parts.write().unwrap().collect_parts_to_merge();
 
-        if collected.bulk_parts.is_empty() && collected.encoded_parts.is_empty() {
+        if collected.groups.is_empty() {
             return Ok(());
         }
 
         // Collect all file IDs for tracking
         let merged_file_ids: HashSet<FileId> = collected
-            .bulk_parts
+            .groups
             .iter()
-            .chain(collected.encoded_parts.iter())
+            .flatten()
             .map(|part| part.file_id())
             .collect();
         let mut guard = MergingFlagsGuard::new(bulk_parts, &merged_file_ids);
 
-        let mut all_merged_parts = Vec::new();
-        let mut total_groups = 0;
-        let mut total_parts_to_merge = 0;
+        let num_groups = collected.groups.len();
+        let num_parts: usize = collected.groups.iter().map(|g| g.len()).sum();
 
-        // Merge bulk parts if any
-        if !collected.bulk_parts.is_empty() {
-            let merged = Self::merge_part_list(
-                collected.bulk_parts,
-                arrow_schema,
-                metadata,
-                dedup,
-                merge_mode,
-            )?;
-            total_groups += merged.num_groups;
-            total_parts_to_merge += merged.num_parts;
-            all_merged_parts.extend(merged.parts);
-        }
-
-        // Merge encoded parts if any
-        if !collected.encoded_parts.is_empty() {
-            let merged = Self::merge_part_list(
-                collected.encoded_parts,
-                arrow_schema,
-                metadata,
-                dedup,
-                merge_mode,
-            )?;
-            total_groups += merged.num_groups;
-            total_parts_to_merge += merged.num_parts;
-            all_merged_parts.extend(merged.parts);
-        }
+        // Merge all groups in parallel
+        let merged_parts = collected
+            .groups
+            .into_par_iter()
+            .map(|group| Self::merge_parts_group(group, arrow_schema, metadata, dedup, merge_mode))
+            .collect::<Result<Vec<Option<MergedPart>>>>()?;
 
         // Install all merged parts
         let total_output_rows = {
             let mut parts = bulk_parts.write().unwrap();
-            parts.install_merged_parts(all_merged_parts, &merged_file_ids)
+            parts.install_merged_parts(merged_parts.into_iter().flatten(), &merged_file_ids)
         };
 
         guard.mark_success();
@@ -998,45 +982,13 @@ impl MemtableCompactor {
             "BulkMemtable {} {} concurrent compact {} groups, {} parts, {} rows, cost: {:?}",
             self.region_id,
             self.memtable_id,
-            total_groups,
-            total_parts_to_merge,
+            num_groups,
+            num_parts,
             total_output_rows,
             start.elapsed()
         );
 
         Ok(())
-    }
-
-    /// Shared merge logic for a list of parts (bulk or encoded).
-    fn merge_part_list(
-        mut parts_to_merge: Vec<PartToMerge>,
-        arrow_schema: &SchemaRef,
-        metadata: &RegionMetadataRef,
-        dedup: bool,
-        merge_mode: MergeMode,
-    ) -> Result<MergeResult> {
-        // Sort parts by row count for better grouping
-        parts_to_merge.sort_unstable_by_key(|part| part.num_rows());
-
-        // Group parts into chunks for concurrent processing
-        let part_groups: Vec<Vec<PartToMerge>> = parts_to_merge
-            .chunks(16)
-            .map(|chunk| chunk.to_vec())
-            .collect();
-
-        let num_groups = part_groups.len();
-        let num_parts: usize = part_groups.iter().map(|group| group.len()).sum();
-
-        let merged_parts = part_groups
-            .into_par_iter()
-            .map(|group| Self::merge_parts_group(group, arrow_schema, metadata, dedup, merge_mode))
-            .collect::<Result<Vec<Option<MergedPart>>>>()?;
-
-        Ok(MergeResult {
-            parts: merged_parts.into_iter().flatten().collect(),
-            num_groups,
-            num_parts,
-        })
     }
 
     /// Merges a group of parts into a single part (either MultiBulkPart or EncodedBulkPart).
