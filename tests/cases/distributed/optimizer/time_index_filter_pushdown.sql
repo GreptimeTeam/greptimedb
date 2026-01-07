@@ -40,6 +40,7 @@ VALUES
     ("6", "linux", 35, "2023-06-12 01:04:55"),
     ("8", "windows", 50, "2023-06-12 02:10:00");
 
+-- SQLNESS SORT_RESULT 3 1
 select
     count(*)
 from
@@ -47,6 +48,7 @@ from
 where
     greptime_timestamp > '2023-06-12 01:05:00';
 
+-- SQLNESS SORT_RESULT 3 1
 select
     os,
     count(*)
