@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
+use common_telemetry::tracing::Span;
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
 use snafu::ResultExt;
@@ -163,6 +164,7 @@ impl DataSource for SystemTableDataSource {
             stream: Box::pin(stream),
             output_ordering: None,
             metrics: Default::default(),
+            span: Span::current(),
         };
 
         Ok(Box::pin(stream))

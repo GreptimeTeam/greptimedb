@@ -40,6 +40,7 @@ use servers::query_handler::{
 };
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use tracing::instrument;
 
 use crate::error::{
     CatalogSnafu, ExecLogicalPlanSnafu, PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result,
@@ -78,6 +79,7 @@ fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<Resp
     Ok(ResponseType::try_from(*response_type).unwrap())
 }
 
+#[instrument(skip_all, fields(table_name))]
 async fn to_query_result(table_name: &str, output: Output) -> ServerResult<QueryResult> {
     let OutputData::Stream(stream) = output.data else {
         unreachable!()
@@ -194,6 +196,7 @@ impl PromStoreProtocolHandler for Instance {
         Ok(output)
     }
 
+    #[instrument(skip_all, fields(table_name))]
     async fn read(
         &self,
         request: ReadRequest,

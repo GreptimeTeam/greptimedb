@@ -91,6 +91,7 @@ use sql::statements::tql::Tql;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
+use tracing::Span;
 
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, InvalidSqlSnafu,
@@ -508,6 +509,7 @@ fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
                 stream: s,
                 output_ordering: None,
                 metrics: Default::default(),
+                span: Span::current(),
             };
             Output::new(OutputData::Stream(Box::pin(stream)), output.meta)
         }

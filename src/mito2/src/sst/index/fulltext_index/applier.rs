@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use common_base::range_read::RangeReader;
-use common_telemetry::warn;
+use common_telemetry::{tracing, warn};
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
 use index::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReaderImpl};
 use index::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
@@ -219,6 +219,10 @@ impl FulltextIndexApplier {
     /// * `file_id` - The region file ID to apply predicates to
     /// * `file_size_hint` - Optional hint for file size to avoid extra metadata reads
     /// * `metrics` - Optional mutable reference to collect metrics on demand
+    #[tracing::instrument(
+        skip_all,
+        fields(file_id = %file_id)
+    )]
     pub async fn apply_fine(
         &self,
         file_id: RegionIndexId,
@@ -354,6 +358,11 @@ impl FulltextIndexApplier {
     /// * `file_size_hint` - Optional hint for file size to avoid extra metadata reads
     /// * `row_groups` - Iterator of row group lengths and whether to search in the row group
     /// * `metrics` - Optional mutable reference to collect metrics on demand
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        skip_all,
+        fields(file_id = %file_id)
+    )]
     pub async fn apply_coarse(
         &self,
         file_id: RegionIndexId,

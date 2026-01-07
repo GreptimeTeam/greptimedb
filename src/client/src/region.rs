@@ -30,6 +30,7 @@ use common_query::request::QueryRequest;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::error;
+use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
 use prost::Message;
 use query::query_engine::DefaultSerializer;
@@ -242,6 +243,7 @@ impl RegionRequester {
             stream,
             output_ordering: None,
             metrics,
+            span: Span::current(),
         };
         Ok(Box::pin(record_batch_stream))
     }

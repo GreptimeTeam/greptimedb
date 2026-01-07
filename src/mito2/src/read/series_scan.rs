@@ -22,6 +22,7 @@ use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
+use common_telemetry::tracing::{self, Instrument};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::arrow::array::BinaryArray;
@@ -91,6 +92,13 @@ impl SeriesScan {
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        )
+    )]
     fn scan_partition_impl(
         &self,
         ctx: &QueryScanContext,
@@ -122,6 +130,13 @@ impl SeriesScan {
         )))
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        )
+    )]
     fn scan_batch_in_partition(
         &self,
         ctx: &QueryScanContext,
@@ -183,6 +198,10 @@ impl SeriesScan {
     }
 
     /// Starts the distributor if the receiver list is empty.
+    #[tracing::instrument(
+        skip(self, metrics_set, metrics_list),
+        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
+    )]
     fn maybe_start_distributor(
         &self,
         metrics_set: &ExecutionPlanMetricsSet,
@@ -202,14 +221,23 @@ impl SeriesScan {
             metrics_set: metrics_set.clone(),
             metrics_list: metrics_list.clone(),
         };
-        common_runtime::spawn_global(async move {
-            distributor.execute().await;
-        });
+        let region_id = distributor.stream_ctx.input.mapper.metadata().region_id;
+        let span = tracing::info_span!("SeriesScan::distributor", region_id = %region_id);
+        common_runtime::spawn_global(
+            async move {
+                distributor.execute().await;
+            }
+            .instrument(span),
+        );
 
         *rx_list = receivers;
     }
 
     /// Scans the region and returns a stream.
+    #[tracing::instrument(
+        skip_all,
+        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
+    )]
     pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         let part_num = self.properties.num_partitions();
         let metrics_set = ExecutionPlanMetricsSet::default();
@@ -388,6 +416,10 @@ struct SeriesDistributor {
 
 impl SeriesDistributor {
     /// Executes the distributor.
+    #[tracing::instrument(
+        skip_all,
+        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
+    )]
     async fn execute(&mut self) {
         let result = if self.stream_ctx.input.flat_format {
             self.scan_partitions_flat().await
@@ -401,6 +433,10 @@ impl SeriesDistributor {
     }
 
     /// Scans all parts in flat format using FlatSeriesBatchDivider.
+    #[tracing::instrument(
+        skip_all,
+        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
+    )]
     async fn scan_partitions_flat(&mut self) -> Result<()> {
         let part_metrics = new_partition_metrics(
             &self.stream_ctx,
@@ -487,6 +523,10 @@ impl SeriesDistributor {
     }
 
     /// Scans all parts.
+    #[tracing::instrument(
+        skip_all,
+        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
+    )]
     async fn scan_partitions(&mut self) -> Result<()> {
         let part_metrics = new_partition_metrics(
             &self.stream_ctx,
