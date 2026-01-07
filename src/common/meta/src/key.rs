@@ -1474,6 +1474,7 @@ mod tests {
 
     use super::datanode_table::DatanodeTableKey;
     use super::test_utils;
+    use crate::ddl::allocator::wal_option::WalOptionsAllocator;
     use crate::ddl::test_util::create_table::test_create_table_task;
     use crate::ddl::utils::region_storage_path;
     use crate::error::Result;
@@ -1490,7 +1491,7 @@ mod tests {
     use crate::peer::Peer;
     use crate::rpc::router::{LeaderState, Region, RegionRoute, region_distribution};
     use crate::rpc::store::RangeRequest;
-    use crate::wal_provider::{WalProvider, allocate_region_wal_options};
+    use crate::wal_provider::WalProvider;
 
     #[test]
     fn test_deserialized_value_with_bytes() {
@@ -1601,9 +1602,8 @@ mod tests {
         let region_routes = &vec![region_route.clone()];
         let table_info: RawTableInfo = new_test_table_info().into();
         let wal_provider = WalProvider::RaftEngine;
-        let regions = (0..16).collect();
-        let region_wal_options =
-            allocate_region_wal_options(regions, &wal_provider, false).unwrap();
+        let regions: Vec<_> = (0..16).collect();
+        let region_wal_options = wal_provider.allocate(&regions, false).await.unwrap();
         create_physical_table_metadata(
             &table_metadata_manager,
             table_info.clone(),

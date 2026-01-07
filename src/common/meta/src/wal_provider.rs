@@ -26,6 +26,7 @@ use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use snafu::{ResultExt, ensure};
 use store_api::storage::{RegionId, RegionNumber};
 
+use crate::ddl::allocator::wal_option::WalOptionsAllocator;
 use crate::error::{EncodeWalOptionsSnafu, InvalidTopicNamePrefixSnafu, Result};
 use crate::key::TOPIC_NAME_PATTERN_REGEX;
 use crate::kv_backend::KvBackendRef;
@@ -43,6 +44,25 @@ pub enum WalProvider {
 
 /// Arc wrapper of WalProvider.
 pub type WalProviderRef = Arc<WalProvider>;
+
+#[async_trait::async_trait]
+impl WalOptionsAllocator for WalProvider {
+    async fn allocate(
+        &self,
+        region_numbers: &[RegionNumber],
+        skip_wal: bool,
+    ) -> Result<HashMap<RegionNumber, String>> {
+        let wal_options = self
+            .alloc_batch(region_numbers.len(), skip_wal)?
+            .into_iter()
+            .map(|wal_options| {
+                serde_json::to_string(&wal_options).context(EncodeWalOptionsSnafu { wal_options })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(region_numbers.iter().copied().zip(wal_options).collect())
+    }
+}
 
 impl WalProvider {
     /// Tries to start the provider.
@@ -119,23 +139,6 @@ pub async fn build_wal_provider(
     }
 }
 
-/// Allocates a wal options for each region. The allocated wal options is encoded immediately.
-pub fn allocate_region_wal_options(
-    regions: Vec<RegionNumber>,
-    wal_provider: &WalProvider,
-    skip_wal: bool,
-) -> Result<HashMap<RegionNumber, String>> {
-    let wal_options = wal_provider
-        .alloc_batch(regions.len(), skip_wal)?
-        .into_iter()
-        .map(|wal_options| {
-            serde_json::to_string(&wal_options).context(EncodeWalOptionsSnafu { wal_options })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    Ok(regions.into_iter().zip(wal_options).collect())
-}
-
 /// Inserts wal options into options.
 pub fn prepare_wal_options(
     options: &mut HashMap<String, String>,
@@ -192,7 +195,7 @@ mod tests {
 
         let num_regions = 32;
         let regions = (0..num_regions).collect::<Vec<_>>();
-        let got = allocate_region_wal_options(regions.clone(), &provider, false).unwrap();
+        let got = provider.allocate(&regions, false).await.unwrap();
 
         let encoded_wal_options = serde_json::to_string(&WalOptions::RaftEngine).unwrap();
         let expected = regions
@@ -242,7 +245,7 @@ mod tests {
 
         let num_regions = 3;
         let regions = (0..num_regions).collect::<Vec<_>>();
-        let got = allocate_region_wal_options(regions.clone(), &provider, false).unwrap();
+        let got = provider.allocate(&regions, false).await.unwrap();
 
         // Check the allocated wal options contain the expected topics.
         let expected = (0..num_regions)
@@ -263,7 +266,7 @@ mod tests {
 
         let num_regions = 32;
         let regions = (0..num_regions).collect::<Vec<_>>();
-        let got = allocate_region_wal_options(regions.clone(), &provider, true).unwrap();
+        let got = provider.allocate(&regions, true).await.unwrap();
         assert_eq!(got.len(), num_regions as usize);
         for wal_options in got.values() {
             assert_eq!(wal_options, &"{\"wal.provider\":\"noop\"}");

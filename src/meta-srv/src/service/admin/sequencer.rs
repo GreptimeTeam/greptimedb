@@ -16,8 +16,8 @@ use axum::Json;
 use axum::extract::{self, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use common_meta::ddl::allocator::resource_id::ResourceIdAllocatorRef;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
-use common_meta::sequence::SequenceRef;
 use serde::{Deserialize, Serialize};
 use servers::http::result::error_result::ErrorResponse;
 use snafu::{ResultExt, ensure};
@@ -27,12 +27,12 @@ use crate::error::{
 };
 
 #[derive(Clone)]
-pub(crate) struct TableIdSequenceHandler {
-    pub(crate) table_id_sequence: SequenceRef,
+pub(crate) struct TableIdAllocatorHandler {
+    pub(crate) table_id_allocator: ResourceIdAllocatorRef,
     pub(crate) runtime_switch_manager: RuntimeSwitchManagerRef,
 }
 
-impl TableIdSequenceHandler {
+impl TableIdAllocatorHandler {
     async fn set_next_table_id(&self, next_table_id: u32) -> Result<()> {
         ensure!(
             self.runtime_switch_manager
@@ -44,7 +44,7 @@ impl TableIdSequenceHandler {
             }
         );
 
-        self.table_id_sequence
+        self.table_id_allocator
             .jump_to(next_table_id as u64)
             .await
             .context(SetNextSequenceSnafu)
@@ -52,7 +52,7 @@ impl TableIdSequenceHandler {
 
     async fn peek_table_id(&self) -> Result<u32> {
         let next_table_id = self
-            .table_id_sequence
+            .table_id_allocator
             .peek()
             .await
             .context(PeekSequenceSnafu)?;
@@ -73,7 +73,7 @@ pub(crate) struct ResetTableIdRequest {
 /// Set the next table id.
 #[axum_macros::debug_handler]
 pub(crate) async fn set_next_table_id(
-    State(handler): State<TableIdSequenceHandler>,
+    State(handler): State<TableIdAllocatorHandler>,
     extract::Json(ResetTableIdRequest { next_table_id }): extract::Json<ResetTableIdRequest>,
 ) -> Response {
     match handler.set_next_table_id(next_table_id).await {
@@ -84,7 +84,7 @@ pub(crate) async fn set_next_table_id(
 
 /// Get the next table id without incrementing the sequence.
 #[axum_macros::debug_handler]
-pub(crate) async fn get_next_table_id(State(handler): State<TableIdSequenceHandler>) -> Response {
+pub(crate) async fn get_next_table_id(State(handler): State<TableIdAllocatorHandler>) -> Response {
     match handler.peek_table_id().await {
         Ok(next_table_id) => {
             (StatusCode::OK, Json(NextTableIdResponse { next_table_id })).into_response()

@@ -27,6 +27,7 @@ use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_event_recorder::EventRecorderOptions;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
+use common_meta::ddl::allocator::resource_id::ResourceIdAllocatorRef;
 use common_meta::ddl_manager::DdlManagerRef;
 use common_meta::distributed_time_constants::{
     self, BASE_HEARTBEAT_INTERVAL, default_distributed_time_constants, frontend_heartbeat_interval,
@@ -42,7 +43,6 @@ use common_meta::peer::{Peer, PeerDiscoveryRef};
 use common_meta::reconciliation::manager::ReconciliationManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
-use common_meta::sequence::SequenceRef;
 use common_meta::stats::topic::TopicStatsRegistryRef;
 use common_meta::wal_provider::WalProviderRef;
 use common_options::datanode::DatanodeClientOptions;
@@ -636,7 +636,7 @@ pub struct Metasrv {
     topic_stats_registry: TopicStatsRegistryRef,
     wal_prune_ticker: Option<WalPruneTickerRef>,
     region_flush_ticker: Option<RegionFlushTickerRef>,
-    table_id_sequence: SequenceRef,
+    table_id_allocator: ResourceIdAllocatorRef,
     reconciliation_manager: ReconciliationManagerRef,
     resource_stat: ResourceStatRef,
     gc_ticker: Option<GcTickerRef>,
@@ -931,8 +931,8 @@ impl Metasrv {
         self.plugins.get::<SubscriptionManagerRef>()
     }
 
-    pub fn table_id_sequence(&self) -> &SequenceRef {
-        &self.table_id_sequence
+    pub fn table_id_allocator(&self) -> &ResourceIdAllocatorRef {
+        &self.table_id_allocator
     }
 
     pub fn reconciliation_manager(&self) -> &ReconciliationManagerRef {

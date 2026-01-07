@@ -20,36 +20,43 @@ use snafu::ensure;
 use store_api::storage::{RegionId, RegionNumber, TableId};
 
 use crate::ddl::TableMetadata;
+use crate::ddl::allocator::resource_id::ResourceIdAllocatorRef;
+use crate::ddl::allocator::wal_option::WalOptionsAllocatorRef;
 use crate::error::{Result, UnsupportedSnafu};
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::peer::{NoopPeerAllocator, PeerAllocatorRef};
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{Region, RegionRoute};
-use crate::sequence::SequenceRef;
-use crate::wal_provider::{WalProviderRef, allocate_region_wal_options};
 
 pub type TableMetadataAllocatorRef = Arc<TableMetadataAllocator>;
 
 #[derive(Clone)]
 pub struct TableMetadataAllocator {
-    table_id_sequence: SequenceRef,
-    wal_provider: WalProviderRef,
+    table_id_allocator: ResourceIdAllocatorRef,
+    wal_options_allocator: WalOptionsAllocatorRef,
     peer_allocator: PeerAllocatorRef,
 }
 
 impl TableMetadataAllocator {
-    pub fn new(table_id_sequence: SequenceRef, wal_provider: WalProviderRef) -> Self {
-        Self::with_peer_allocator(table_id_sequence, wal_provider, Arc::new(NoopPeerAllocator))
+    pub fn new(
+        table_id_allocator: ResourceIdAllocatorRef,
+        wal_options_allocator: WalOptionsAllocatorRef,
+    ) -> Self {
+        Self::with_peer_allocator(
+            table_id_allocator,
+            wal_options_allocator,
+            Arc::new(NoopPeerAllocator),
+        )
     }
 
     pub fn with_peer_allocator(
-        table_id_sequence: SequenceRef,
-        wal_provider: WalProviderRef,
+        table_id_allocator: ResourceIdAllocatorRef,
+        wal_options_allocator: WalOptionsAllocatorRef,
         peer_allocator: PeerAllocatorRef,
     ) -> Self {
         Self {
-            table_id_sequence,
-            wal_provider,
+            table_id_allocator,
+            wal_options_allocator,
             peer_allocator,
         }
     }
@@ -63,7 +70,7 @@ impl TableMetadataAllocator {
 
             ensure!(
                 !self
-                    .table_id_sequence
+                    .table_id_allocator
                     .min_max()
                     .await
                     .contains(&(table_id as u64)),
@@ -82,41 +89,42 @@ impl TableMetadataAllocator {
 
             table_id
         } else {
-            self.table_id_sequence.next().await? as TableId
+            self.table_id_allocator.next().await? as TableId
         };
         Ok(table_id)
     }
 
-    fn create_wal_options(
+    async fn create_wal_options(
         &self,
-        table_route: &PhysicalTableRouteValue,
+        region_numbers: &[RegionNumber],
         skip_wal: bool,
     ) -> Result<HashMap<RegionNumber, String>> {
-        let region_numbers = table_route
-            .region_routes
-            .iter()
-            .map(|route| route.region.id.region_number())
-            .collect();
-        allocate_region_wal_options(region_numbers, &self.wal_provider, skip_wal)
+        self.wal_options_allocator
+            .allocate(region_numbers, skip_wal)
+            .await
     }
 
     async fn create_table_route(
         &self,
         table_id: TableId,
-        task: &CreateTableTask,
+        partition_exprs: &[&str],
+        next_region_number: u32,
     ) -> Result<PhysicalTableRouteValue> {
-        let regions = task.partitions.len().max(1);
+        let regions = partition_exprs.len().max(1);
         let peers = self.peer_allocator.alloc(regions).await?;
-        debug!("Allocated peers {:?} for table {}", peers, table_id);
+        debug!(
+            "Allocated peers {:?} for table {}, next region number: {}",
+            peers, table_id, next_region_number
+        );
 
-        let mut region_routes = task
-            .partitions
+        let mut region_routes = partition_exprs
             .iter()
             .enumerate()
             .map(|(i, partition)| {
+                let region_number = next_region_number + i as u32;
                 let region = Region {
-                    id: RegionId::new(table_id, i as u32),
-                    partition_expr: partition.expression.clone(),
+                    id: RegionId::new(table_id, region_number),
+                    partition_expr: partition.to_string(),
                     ..Default::default()
                 };
 
@@ -134,7 +142,7 @@ impl TableMetadataAllocator {
         if region_routes.is_empty() {
             region_routes.push(RegionRoute {
                 region: Region {
-                    id: RegionId::new(table_id, 0),
+                    id: RegionId::new(table_id, next_region_number),
                     ..Default::default()
                 },
                 leader_peer: Some(peers[0].clone()),
@@ -157,10 +165,22 @@ impl TableMetadataAllocator {
 
     pub async fn create(&self, task: &CreateTableTask) -> Result<TableMetadata> {
         let table_id = self.allocate_table_id(&task.create_table.table_id).await?;
-        let table_route = self.create_table_route(table_id, task).await?;
-
-        let region_wal_options =
-            self.create_wal_options(&table_route, task.table_info.meta.options.skip_wal)?;
+        let partition_exprs = task
+            .partitions
+            .iter()
+            .map(|p| p.expression.as_str())
+            .collect::<Vec<_>>();
+        let table_route = self
+            .create_table_route(table_id, &partition_exprs, 0)
+            .await?;
+        let region_numbers = table_route
+            .region_routes
+            .iter()
+            .map(|route| route.region.id.region_number())
+            .collect::<Vec<_>>();
+        let region_wal_options = self
+            .create_wal_options(&region_numbers, task.table_info.meta.options.skip_wal)
+            .await?;
 
         debug!(
             "Allocated region wal options {:?} for table {}",
@@ -174,7 +194,7 @@ impl TableMetadataAllocator {
         })
     }
 
-    pub fn table_id_sequence(&self) -> SequenceRef {
-        self.table_id_sequence.clone()
+    pub fn table_id_allocator(&self) -> ResourceIdAllocatorRef {
+        self.table_id_allocator.clone()
     }
 }

@@ -263,7 +263,7 @@ impl MetasrvBuilder {
                 peer_allocator,
             ))
         });
-        let table_id_sequence = table_metadata_allocator.table_id_sequence();
+        let table_id_allocator = table_metadata_allocator.table_id_allocator();
 
         let flow_selector =
             Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)) as SelectorRef;
@@ -585,7 +585,7 @@ impl MetasrvBuilder {
             leader_region_registry,
             wal_prune_ticker,
             region_flush_ticker,
-            table_id_sequence,
+            table_id_allocator,
             reconciliation_manager,
             topic_stats_registry,
             resource_stat: Arc::new(resource_stat),

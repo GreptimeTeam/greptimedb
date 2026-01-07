@@ -468,7 +468,7 @@ impl StartCommand {
             flow_server: flownode.flow_engine(),
         });
 
-        let table_id_sequence = Arc::new(
+        let table_id_allocator = Arc::new(
             SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
                 .initial(MIN_USER_TABLE_ID as u64)
                 .step(10)
@@ -490,7 +490,7 @@ impl StartCommand {
             .context(error::BuildWalProviderSnafu)?;
         let wal_provider = Arc::new(wal_provider);
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
-            table_id_sequence,
+            table_id_allocator,
             wal_provider.clone(),
         ));
         let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
