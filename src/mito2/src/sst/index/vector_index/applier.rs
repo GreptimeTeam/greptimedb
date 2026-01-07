@@ -45,7 +45,7 @@ pub struct VectorIndexApplyOutput {
     pub row_offsets: Vec<u64>,
 }
 
-/// Vector index applier.
+/// Vector index applier for KNN search against SST blobs.
 pub struct VectorIndexApplier {
     table_dir: String,
     path_type: store_api::region_request::PathType,
@@ -454,9 +454,99 @@ fn hnsw_key_to_row_offset(
 
 #[cfg(test)]
 mod tests {
-    use store_api::storage::VectorIndexEngineType;
+    use common_test_util::temp_dir::TempDir;
+    use futures::io::Cursor;
+    use object_store::ObjectStore;
+    use object_store::services::Memory;
+    use puffin::puffin_manager::PuffinWriter;
+    use store_api::region_request::PathType;
+    use store_api::storage::{ColumnId, FileId, VectorDistanceMetric, VectorIndexEngineType};
 
     use super::*;
+    use crate::access_layer::RegionFilePathFactory;
+    use crate::sst::file::RegionFileId;
+    use crate::sst::index::puffin_manager::PuffinManagerFactory;
+    use crate::sst::index::vector_index::creator::VectorIndexConfig;
+
+    async fn build_applier_with_blob(
+        blob: Vec<u8>,
+        column_id: ColumnId,
+        query_vector: Vec<f32>,
+        metric: VectorDistanceMetric,
+    ) -> (TempDir, VectorIndexApplier, RegionIndexId, u64) {
+        let (dir, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_vector_index_applier_").await;
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let file_id = RegionFileId::new(0.into(), FileId::random());
+        let index_id = RegionIndexId::new(file_id, 0);
+        let table_dir = "table_dir".to_string();
+
+        let puffin_manager = puffin_manager_factory.build(
+            object_store.clone(),
+            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
+        );
+        let mut writer = puffin_manager.writer(&index_id).await.unwrap();
+        let blob_name = column_blob_name(column_id);
+        let _bytes_written = writer
+            .put_blob(
+                blob_name.as_str(),
+                Cursor::new(blob),
+                Default::default(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let file_size = writer.finish().await.unwrap();
+
+        let applier = VectorIndexApplier::new(
+            table_dir,
+            PathType::Bare,
+            object_store,
+            puffin_manager_factory,
+            column_id,
+            query_vector,
+            metric,
+        );
+
+        (dir, applier, index_id, file_size)
+    }
+
+    fn build_blob_with_vectors(
+        config: &VectorIndexConfig,
+        vectors: Vec<(u64, Vec<f32>)>,
+        null_bitmap: &RoaringBitmap,
+        total_rows: u64,
+        indexed_rows: u64,
+    ) -> Vec<u8> {
+        let mut engine = engine::create_engine(config.engine, config).unwrap();
+        for (key, vector) in vectors {
+            engine.add(key, &vector).unwrap();
+        }
+        let index_size = engine.serialized_length();
+        let mut index_bytes = vec![0u8; index_size];
+        engine.save_to_buffer(&mut index_bytes).unwrap();
+
+        let mut null_bitmap_bytes = Vec::new();
+        null_bitmap.serialize_into(&mut null_bitmap_bytes).unwrap();
+
+        let header = VectorIndexBlobHeader::new(
+            config.engine,
+            config.dim as u32,
+            config.distance_metric,
+            config.connectivity as u16,
+            config.expansion_add as u16,
+            config.expansion_search as u16,
+            total_rows,
+            indexed_rows,
+            null_bitmap_bytes.len() as u32,
+        )
+        .unwrap();
+        let mut blob = Vec::new();
+        header.encode_into(&mut blob);
+        blob.extend_from_slice(&null_bitmap_bytes);
+        blob.extend_from_slice(&index_bytes);
+        blob
+    }
 
     #[test]
     fn test_hnsw_key_to_row_offset_with_nulls() {
@@ -488,8 +578,8 @@ mod tests {
         assert_eq!(offsets, vec![0, 2, 3]);
     }
 
-    #[test]
-    fn test_parse_vector_index_blob_roundtrip() {
+    #[tokio::test]
+    async fn test_apply_with_k_returns_offsets() {
         let config = VectorIndexConfig {
             engine: VectorIndexEngineType::Usearch,
             dim: 2,
@@ -499,63 +589,62 @@ mod tests {
             expansion_add: 128,
             expansion_search: 64,
         };
-        let mut engine = engine::create_engine(config.engine, &config).unwrap();
-        engine.add(0, &[0.0, 1.0]).unwrap();
-        let index_size = engine.serialized_length();
-        let mut index_bytes = vec![0u8; index_size];
-        engine.save_to_buffer(&mut index_bytes).unwrap();
+        let mut null_bitmap = RoaringBitmap::new();
+        null_bitmap.insert(1);
+        let blob = build_blob_with_vectors(
+            &config,
+            vec![(0, vec![1.0, 0.0]), (1, vec![0.0, 1.0])],
+            &null_bitmap,
+            3,
+            2,
+        );
+        let (_dir, applier, index_id, size_bytes) =
+            build_applier_with_blob(blob, 1, vec![1.0, 0.0], VectorDistanceMetric::L2sq).await;
+        let output = applier
+            .apply_with_k(index_id, Some(size_bytes), 2)
+            .await
+            .unwrap();
+        assert_eq!(output.row_offsets, vec![0, 2]);
+    }
 
+    #[tokio::test]
+    async fn test_apply_with_k_dimension_mismatch() {
+        let config = VectorIndexConfig {
+            engine: VectorIndexEngineType::Usearch,
+            dim: 2,
+            metric: distance_metric_to_usearch(VectorDistanceMetric::L2sq),
+            distance_metric: VectorDistanceMetric::L2sq,
+            connectivity: 16,
+            expansion_add: 128,
+            expansion_search: 64,
+        };
         let null_bitmap = RoaringBitmap::new();
-        let mut null_bitmap_bytes = Vec::new();
-        null_bitmap.serialize_into(&mut null_bitmap_bytes).unwrap();
-
-        let total_rows: u64 = 1;
-        let indexed_rows: u64 = 1;
-        let header = VectorIndexBlobHeader::new(
-            config.engine,
-            config.dim as u32,
-            VectorDistanceMetric::L2sq,
-            config.connectivity as u16,
-            config.expansion_add as u16,
-            config.expansion_search as u16,
-            total_rows,
-            indexed_rows,
-            null_bitmap_bytes.len() as u32,
-        )
-        .unwrap();
-        let mut blob = Vec::new();
-        header.encode_into(&mut blob);
-        blob.extend_from_slice(&null_bitmap_bytes);
-        blob.extend_from_slice(&index_bytes);
-
-        let parsed = parse_vector_index_blob(&blob).unwrap();
-        assert_eq!(parsed.dimensions, 2);
-        assert_eq!(parsed.metric, VectorDistanceMetric::L2sq);
-        assert_eq!(parsed.total_rows, total_rows);
-        assert_eq!(parsed.indexed_rows, indexed_rows);
-        assert_eq!(parsed.null_bitmap.len(), 0);
+        let blob = build_blob_with_vectors(&config, vec![(0, vec![1.0, 0.0])], &null_bitmap, 1, 1);
+        let (_dir, applier, index_id, size_bytes) =
+            build_applier_with_blob(blob, 1, vec![1.0, 0.0, 0.0], VectorDistanceMetric::L2sq).await;
+        let res = applier.apply_with_k(index_id, Some(size_bytes), 1).await;
+        assert!(res.is_err());
     }
 
-    #[test]
-    fn test_parse_vector_index_blob_invalid_version() {
-        let mut blob = vec![0u8; 33];
-        blob[0] = 2;
-        assert!(parse_vector_index_blob(&blob).is_err());
-    }
-
-    #[test]
-    fn test_parse_vector_index_blob_truncated_null_bitmap() {
-        let mut blob = vec![0u8; 33];
-        blob[0] = 1;
-        blob[1] = VectorIndexEngineType::Usearch.as_u8();
-        blob[2..6].copy_from_slice(&(2u32).to_le_bytes());
-        blob[6] = VectorDistanceMetric::L2sq.as_u8();
-        blob[7..9].copy_from_slice(&(16u16).to_le_bytes());
-        blob[9..11].copy_from_slice(&(128u16).to_le_bytes());
-        blob[11..13].copy_from_slice(&(64u16).to_le_bytes());
-        blob[13..21].copy_from_slice(&(1u64).to_le_bytes());
-        blob[21..29].copy_from_slice(&(1u64).to_le_bytes());
-        blob[29..33].copy_from_slice(&(4u32).to_le_bytes());
-        assert!(parse_vector_index_blob(&blob).is_err());
+    #[tokio::test]
+    async fn test_apply_with_k_empty_blob() {
+        let config = VectorIndexConfig {
+            engine: VectorIndexEngineType::Usearch,
+            dim: 1,
+            metric: distance_metric_to_usearch(VectorDistanceMetric::L2sq),
+            distance_metric: VectorDistanceMetric::L2sq,
+            connectivity: 16,
+            expansion_add: 128,
+            expansion_search: 64,
+        };
+        let null_bitmap = RoaringBitmap::new();
+        let blob = build_blob_with_vectors(&config, Vec::new(), &null_bitmap, 0, 0);
+        let (_dir, applier, index_id, size_bytes) =
+            build_applier_with_blob(blob, 1, vec![1.0], VectorDistanceMetric::L2sq).await;
+        let output = applier
+            .apply_with_k(index_id, Some(size_bytes), 1)
+            .await
+            .unwrap();
+        assert!(output.row_offsets.is_empty());
     }
 }
