@@ -221,7 +221,7 @@ fn expand_proj_sort_proj() {
         "Projection: t.number, t.pk1 = t.pk2",
         "  Projection: t.number, t.pk1 = t.pk2", // notice both projections added `t.pk1 = t.pk2` column requirement
         "    Sort: t.pk1 = t.pk2 ASC NULLS FIRST",
-        "      Projection: t.number, t.pk1, t.pk3, t.pk1 = t.pk2",
+        "      Projection: t.number, t.pk1, t.pk3, t.pk2 = t.pk1 AS t.pk1 = t.pk2",
         "        Projection: t.number, t.pk1, t.pk2, t.pk3", // notice this projection doesn't add `t.pk1 = t.pk2` column requirement
         "          TableScan: t",
         "]]",
