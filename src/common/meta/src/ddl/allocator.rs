@@ -13,5 +13,5 @@
 // limitations under the License.
 
 pub mod resource_id;
-pub mod table_route;
-pub mod wal_option;
+pub mod region_routes;
+pub mod wal_options;

@@ -21,10 +21,10 @@ use crate::error::Result;
 use crate::peer::PeerAllocator;
 use crate::rpc::router::{Region, RegionRoute};
 
-pub type TableRouteAllocatorRef = Arc<dyn TableRouteAllocator>;
+pub type RegionRoutesAllocatorRef = Arc<dyn RegionRoutesAllocator>;
 
 #[async_trait::async_trait]
-pub trait TableRouteAllocator: Send + Sync {
+pub trait RegionRoutesAllocator: Send + Sync {
     async fn allocate(
         &self,
         table_id: TableId,
@@ -34,7 +34,7 @@ pub trait TableRouteAllocator: Send + Sync {
 }
 
 #[async_trait::async_trait]
-impl<T: PeerAllocator> TableRouteAllocator for T {
+impl<T: PeerAllocator> RegionRoutesAllocator for T {
     async fn allocate(
         &self,
         table_id: TableId,

@@ -20,9 +20,9 @@ use snafu::ensure;
 use store_api::storage::{RegionNumber, TableId};
 
 use crate::ddl::TableMetadata;
+use crate::ddl::allocator::region_routes::RegionRoutesAllocatorRef;
 use crate::ddl::allocator::resource_id::ResourceIdAllocatorRef;
-use crate::ddl::allocator::table_route::TableRouteAllocatorRef;
-use crate::ddl::allocator::wal_option::WalOptionsAllocatorRef;
+use crate::ddl::allocator::wal_options::WalOptionsAllocatorRef;
 use crate::error::{Result, UnsupportedSnafu};
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::peer::{NoopPeerAllocator, PeerAllocatorRef};
@@ -34,7 +34,7 @@ pub type TableMetadataAllocatorRef = Arc<TableMetadataAllocator>;
 pub struct TableMetadataAllocator {
     table_id_allocator: ResourceIdAllocatorRef,
     wal_options_allocator: WalOptionsAllocatorRef,
-    table_route_allocator: TableRouteAllocatorRef,
+    region_routes_allocator: RegionRoutesAllocatorRef,
 }
 
 impl TableMetadataAllocator {
@@ -57,7 +57,7 @@ impl TableMetadataAllocator {
         Self {
             table_id_allocator,
             wal_options_allocator,
-            table_route_allocator: Arc::new(peer_allocator) as _,
+            region_routes_allocator: Arc::new(peer_allocator) as _,
         }
     }
 
@@ -111,7 +111,7 @@ impl TableMetadataAllocator {
         next_region_number: u32,
     ) -> Result<PhysicalTableRouteValue> {
         let region_routes = self
-            .table_route_allocator
+            .region_routes_allocator
             .allocate(table_id, partition_exprs, next_region_number)
             .await?;
 
