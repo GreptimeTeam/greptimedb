@@ -92,7 +92,8 @@ fn test_region_request_builder() {
     let mut procedure = CreateTableProcedure::new(
         create_table_task(None),
         test_data::new_ddl_context(Arc::new(NodeClients::default())),
-    );
+    )
+    .unwrap();
 
     procedure.set_allocated_metadata(
         1024,
@@ -100,7 +101,7 @@ fn test_region_request_builder() {
         HashMap::default(),
     );
 
-    let template = procedure.new_region_request_builder(None).unwrap();
+    let template = procedure.executor.builder();
 
     let expected = PbCreateRegionRequest {
         region_id: 0,
@@ -187,7 +188,8 @@ async fn test_on_datanode_create_regions() {
     let mut procedure = CreateTableProcedure::new(
         create_table_task(None),
         test_data::new_ddl_context(node_manager),
-    );
+    )
+    .unwrap();
 
     procedure.set_allocated_metadata(
         42,
@@ -226,7 +228,7 @@ async fn test_on_datanode_create_regions() {
         }
     ));
     assert!(matches!(
-        procedure.creator.data.state,
+        procedure.data.state,
         CreateTableState::CreateMetadata
     ));
 
