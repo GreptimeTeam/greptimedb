@@ -123,7 +123,7 @@
 # Row title
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
-| Trigger Count | `greptime_trigger_count{}` | `timeseries` |  | `prometheus` | -- | `__auto` |
+| Trigger Count | `greptime_trigger_count{}` | `timeseries` | Number of triggers currently defined. | `prometheus` | -- | `__auto` |
 | Trigger Eval Elapsed | `histogram_quantile(0.99, 
   rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])
 )`<br/>`histogram_quantile(0.75, 

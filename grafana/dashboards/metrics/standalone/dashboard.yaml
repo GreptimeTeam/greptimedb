@@ -1071,6 +1071,7 @@ groups:
       panels:
         - title: Trigger Count
           type: timeseries
+          description: Number of triggers currently defined.
           queries:
             - expr: greptime_trigger_count{}
               datasource:

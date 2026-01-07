@@ -9552,6 +9552,7 @@
         "y": 188
       },
       "id": 358,
+      "description": "Number of triggers currently defined.",
       "options": {
         "legend": {
           "calcs": [],
