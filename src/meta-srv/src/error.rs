@@ -110,11 +110,11 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Another procedure is opening the region: {} on peer: {}",
+        "Another procedure is operating the region: {} on peer: {}",
         region_id,
         peer_id
     ))]
-    RegionOpeningRace {
+    RegionOperatingRace {
         #[snafu(implicit)]
         location: Location,
         peer_id: DatanodeId,
@@ -1059,6 +1059,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to deallocate regions for table: {}", table_id))]
+    DeallocateRegions {
+        #[snafu(implicit)]
+        location: Location,
+        table_id: TableId,
+        #[snafu(source)]
+        source: common_meta::error::Error,
+    },
 }
 
 impl Error {
@@ -1154,7 +1163,7 @@ impl ErrorExt for Error {
             | Error::InvalidUtf8Value { .. }
             | Error::UnexpectedInstructionReply { .. }
             | Error::Unexpected { .. }
-            | Error::RegionOpeningRace { .. }
+            | Error::RegionOperatingRace { .. }
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
             | Error::MigrationRunning { .. }
@@ -1206,6 +1215,7 @@ impl ErrorExt for Error {
             Error::Other { source, .. } => source.status_code(),
             Error::RepartitionCreateSubtasks { source, .. } => source.status_code(),
             Error::RepartitionSubprocedureStateReceiver { source, .. } => source.status_code(),
+            Error::DeallocateRegions { source, .. } => source.status_code(),
             Error::NoEnoughAvailableNode { .. } => StatusCode::RuntimeResourcesExhausted,
 
             #[cfg(feature = "pg_kvbackend")]

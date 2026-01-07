@@ -20,18 +20,29 @@ pub mod group;
 pub mod plan;
 pub mod repartition_end;
 pub mod repartition_start;
+pub mod utils;
 
 use std::any::Any;
 use std::fmt::Debug;
 
+use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::key::TableMetadataManagerRef;
+use common_meta::instruction::CacheIdent;
+use common_meta::key::datanode_table::RegionInfo;
+use common_meta::key::table_route::TableRouteValue;
+use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
+use common_meta::node_manager::NodeManagerRef;
+use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
+use common_meta::region_registry::LeaderRegionRegistryRef;
+use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
 use serde::{Deserialize, Serialize};
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::TableId;
 
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::procedure::repartition::plan::RepartitionPlanEntry;
+use crate::procedure::repartition::utils::get_datanode_table_value;
 use crate::service::mailbox::MailboxRef;
 
 #[cfg(test)]
@@ -46,12 +57,113 @@ pub struct PersistentContext {
     pub plans: Vec<RepartitionPlanEntry>,
 }
 
+pub struct VolatileContext {
+    pub allocating_regions: Vec<OperatingRegionGuard>,
+}
+
 pub struct Context {
     pub persistent_ctx: PersistentContext,
+    pub volatile_ctx: VolatileContext,
     pub table_metadata_manager: TableMetadataManagerRef,
+    pub memory_region_keeper: MemoryRegionKeeperRef,
+    pub node_manager: NodeManagerRef,
+    pub leader_region_registry: LeaderRegionRegistryRef,
     pub mailbox: MailboxRef,
     pub server_addr: String,
     pub cache_invalidator: CacheInvalidatorRef,
+}
+
+impl Context {
+    /// Retrieves the table route value for the given table id.
+    ///
+    /// Retry:
+    /// - Failed to retrieve the metadata of table.
+    ///
+    /// Abort:
+    /// - Table route not found.
+    pub async fn get_table_route_value(
+        &self,
+    ) -> Result<DeserializedValueWithBytes<TableRouteValue>> {
+        let table_id = self.persistent_ctx.table_id;
+        let table_route_value = self
+            .table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .get_with_raw_bytes(table_id)
+            .await
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: format!("Failed to get table route for table: {}", table_id),
+            })?
+            .context(error::TableRouteNotFoundSnafu { table_id })?;
+
+        Ok(table_route_value)
+    }
+
+    /// Updates the table route.
+    ///
+    /// Retry:
+    /// - Failed to retrieve the metadata of datanode table.
+    ///
+    /// Abort:
+    /// - Table route not found.
+    /// - Failed to update the table route.
+    pub async fn update_table_route(
+        &self,
+        current_table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
+        new_region_routes: Vec<RegionRoute>,
+    ) -> Result<()> {
+        let table_id = self.persistent_ctx.table_id;
+        if new_region_routes.is_empty() {
+            return error::UnexpectedSnafu {
+                violated: format!("new_region_routes is empty for table: {}", table_id),
+            }
+            .fail();
+        }
+        let datanode_id = new_region_routes
+            .first()
+            .unwrap()
+            .leader_peer
+            .as_ref()
+            .context(error::NoLeaderSnafu)?
+            .id;
+        let datanode_table_value =
+            get_datanode_table_value(&self.table_metadata_manager, table_id, datanode_id).await?;
+
+        let RegionInfo {
+            region_options,
+            region_wal_options,
+            ..
+        } = &datanode_table_value.region_info;
+        self.table_metadata_manager
+            .update_table_route(
+                table_id,
+                datanode_table_value.region_info.clone(),
+                current_table_route_value,
+                new_region_routes,
+                region_options,
+                region_wal_options,
+            )
+            .await
+            .context(error::TableMetadataManagerSnafu)
+    }
+
+    /// Broadcasts the invalidate table cache message.
+    pub async fn invalidate_table_cache(&self) -> Result<()> {
+        let table_id = self.persistent_ctx.table_id;
+        let subject = format!(
+            "Invalidate table cache for repartition table, table: {}",
+            table_id,
+        );
+        let ctx = common_meta::cache_invalidator::Context {
+            subject: Some(subject),
+        };
+        let _ = self
+            .cache_invalidator
+            .invalidate(&ctx, &[CacheIdent::TableId(table_id)])
+            .await;
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]

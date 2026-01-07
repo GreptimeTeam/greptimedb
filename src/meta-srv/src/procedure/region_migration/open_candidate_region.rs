@@ -129,7 +129,7 @@ impl OpenCandidateRegion {
                 let guard = ctx
                     .opening_region_keeper
                     .register(candidate.id, *region_id)
-                    .context(error::RegionOpeningRaceSnafu {
+                    .context(error::RegionOperatingRaceSnafu {
                         peer_id: candidate.id,
                         region_id: *region_id,
                     })?;
@@ -302,7 +302,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_matches!(err, Error::RegionOpeningRace { .. });
+        assert_matches!(err, Error::RegionOperatingRace { .. });
         assert!(!err.is_retryable());
     }
 

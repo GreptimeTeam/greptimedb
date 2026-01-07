@@ -28,7 +28,7 @@ use std::time::Duration;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::instruction::CacheIdent;
-use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue, RegionInfo};
+use common_meta::key::datanode_table::{DatanodeTableValue, RegionInfo};
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock};
@@ -48,6 +48,7 @@ use uuid::Uuid;
 use crate::error::{self, Result};
 use crate::procedure::repartition::group::repartition_start::RepartitionStart;
 use crate::procedure::repartition::plan::RegionDescriptor;
+use crate::procedure::repartition::utils::get_datanode_table_value;
 use crate::procedure::repartition::{self};
 use crate::service::mailbox::MailboxRef;
 
@@ -261,24 +262,7 @@ impl Context {
         table_id: TableId,
         datanode_id: u64,
     ) -> Result<DatanodeTableValue> {
-        let datanode_table_value = self
-            .table_metadata_manager
-            .datanode_table_manager()
-            .get(&DatanodeTableKey {
-                datanode_id,
-                table_id,
-            })
-            .await
-            .context(error::TableMetadataManagerSnafu)
-            .map_err(BoxedError::new)
-            .with_context(|_| error::RetryLaterWithSourceSnafu {
-                reason: format!("Failed to get DatanodeTable: {table_id}"),
-            })?
-            .context(error::DatanodeTableNotFoundSnafu {
-                table_id,
-                datanode_id,
-            })?;
-        Ok(datanode_table_value)
+        get_datanode_table_value(&self.table_metadata_manager, table_id, datanode_id).await
     }
 
     /// Broadcasts the invalidate table cache message.
