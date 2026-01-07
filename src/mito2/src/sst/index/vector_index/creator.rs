@@ -44,6 +44,9 @@ use crate::sst::index::intermediate::{
 };
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
+use crate::sst::index::vector_index::format::{
+    VECTOR_INDEX_BLOB_HEADER_SIZE, VectorIndexBlobHeader,
+};
 use crate::sst::index::vector_index::util::bytes_to_f32_slice;
 use crate::sst::index::vector_index::{INDEX_BLOB_TYPE, engine};
 
@@ -561,36 +564,12 @@ impl VectorIndexer {
         creator.save_to_buffer(&mut index_bytes)?;
 
         // Header size: version(1) + engine(1) + dim(4) + metric(1) +
-        //              connectivity(2) + expansion_add(2) + expansion_search(2) +
-        //              total_rows(8) + indexed_rows(8) + bitmap_len(4) = 33 bytes
-        /// Size of the vector index blob header in bytes.
-        /// Header format: version(1) + engine(1) + dim(4) + metric(1) +
-        /// connectivity(2) + expansion_add(2) + expansion_search(2) +
-        /// total_rows(8) + indexed_rows(8) + bitmap_len(4) = 33 bytes
-        const VECTOR_INDEX_BLOB_HEADER_SIZE: usize = 33;
+        // connectivity(2) + expansion_add(2) + expansion_search(2) +
+        // total_rows(8) + indexed_rows(8) + bitmap_len(4) = 33 bytes.
         let total_size =
             VECTOR_INDEX_BLOB_HEADER_SIZE + null_bitmap_bytes.len() + index_bytes.len();
         let mut blob_data = Vec::with_capacity(total_size);
 
-        // Write version (1 byte)
-        blob_data.push(1u8);
-        // Write engine type (1 byte)
-        blob_data.push(creator.engine_type().as_u8());
-        // Write dimension (4 bytes, little-endian)
-        blob_data.extend_from_slice(&(creator.config.dim as u32).to_le_bytes());
-        // Write metric (1 byte)
-        blob_data.push(creator.metric().as_u8());
-        // Write connectivity/M (2 bytes, little-endian)
-        blob_data.extend_from_slice(&(creator.config.connectivity as u16).to_le_bytes());
-        // Write expansion_add/ef_construction (2 bytes, little-endian)
-        blob_data.extend_from_slice(&(creator.config.expansion_add as u16).to_le_bytes());
-        // Write expansion_search/ef_search (2 bytes, little-endian)
-        blob_data.extend_from_slice(&(creator.config.expansion_search as u16).to_le_bytes());
-        // Write total_rows (8 bytes, little-endian)
-        blob_data.extend_from_slice(&creator.current_row_offset.to_le_bytes());
-        // Write indexed_rows (8 bytes, little-endian)
-        blob_data.extend_from_slice(&creator.next_hnsw_key.to_le_bytes());
-        // Write NULL bitmap length (4 bytes, little-endian)
         let bitmap_len: u32 = null_bitmap_bytes.len().try_into().map_err(|_| {
             VectorIndexBuildSnafu {
                 reason: format!(
@@ -601,7 +580,24 @@ impl VectorIndexer {
             }
             .build()
         })?;
-        blob_data.extend_from_slice(&bitmap_len.to_le_bytes());
+        let header = VectorIndexBlobHeader::new(
+            creator.engine_type(),
+            creator.config.dim as u32,
+            creator.metric(),
+            creator.config.connectivity as u16,
+            creator.config.expansion_add as u16,
+            creator.config.expansion_search as u16,
+            creator.current_row_offset,
+            creator.next_hnsw_key,
+            bitmap_len,
+        )
+        .map_err(|e| {
+            VectorIndexFinishSnafu {
+                reason: e.to_string(),
+            }
+            .build()
+        })?;
+        header.encode_into(&mut blob_data);
         // Write NULL bitmap
         blob_data.extend_from_slice(&null_bitmap_bytes);
         // Write vector index
@@ -837,23 +833,24 @@ mod tests {
         let mut index_bytes = vec![0u8; index_size];
         creator.save_to_buffer(&mut index_bytes).unwrap();
 
-        // Header: 33 bytes
-        let header_size = 33;
-        let total_size = header_size + null_bitmap_bytes.len() + index_bytes.len();
+        let total_size =
+            VECTOR_INDEX_BLOB_HEADER_SIZE + null_bitmap_bytes.len() + index_bytes.len();
         let mut blob_data = Vec::with_capacity(total_size);
 
-        // Write header fields
-        blob_data.push(1u8); // version
-        blob_data.push(creator.engine_type().as_u8()); // engine type
-        blob_data.extend_from_slice(&(creator.config.dim as u32).to_le_bytes()); // dimension
-        blob_data.push(creator.metric().as_u8()); // metric
-        blob_data.extend_from_slice(&(creator.config.connectivity as u16).to_le_bytes());
-        blob_data.extend_from_slice(&(creator.config.expansion_add as u16).to_le_bytes());
-        blob_data.extend_from_slice(&(creator.config.expansion_search as u16).to_le_bytes());
-        blob_data.extend_from_slice(&creator.current_row_offset.to_le_bytes()); // total_rows
-        blob_data.extend_from_slice(&creator.next_hnsw_key.to_le_bytes()); // indexed_rows
         let bitmap_len: u32 = null_bitmap_bytes.len().try_into().unwrap();
-        blob_data.extend_from_slice(&bitmap_len.to_le_bytes());
+        let header = VectorIndexBlobHeader::new(
+            creator.engine_type(),
+            creator.config.dim as u32,
+            creator.metric(),
+            creator.config.connectivity as u16,
+            creator.config.expansion_add as u16,
+            creator.config.expansion_search as u16,
+            creator.current_row_offset,
+            creator.next_hnsw_key,
+            bitmap_len,
+        )
+        .unwrap();
+        header.encode_into(&mut blob_data);
         blob_data.extend_from_slice(&null_bitmap_bytes);
         blob_data.extend_from_slice(&index_bytes);
 
@@ -861,57 +858,24 @@ mod tests {
         assert_eq!(blob_data.len(), total_size);
 
         // Parse header and verify values
-        assert_eq!(blob_data[0], 1); // version
-        assert_eq!(blob_data[1], VectorIndexEngineType::Usearch.as_u8()); // engine
-
-        let dim = u32::from_le_bytes([blob_data[2], blob_data[3], blob_data[4], blob_data[5]]);
-        assert_eq!(dim, 4);
-
-        let metric = blob_data[6];
+        let (decoded, header_size) = VectorIndexBlobHeader::decode(&blob_data).unwrap();
+        assert_eq!(header_size, VECTOR_INDEX_BLOB_HEADER_SIZE);
+        assert_eq!(decoded.engine_type, VectorIndexEngineType::Usearch);
+        assert_eq!(decoded.dim, 4);
         assert_eq!(
-            metric,
-            datatypes::schema::VectorDistanceMetric::L2sq.as_u8()
+            decoded.metric,
+            datatypes::schema::VectorDistanceMetric::L2sq
         );
-
-        let connectivity = u16::from_le_bytes([blob_data[7], blob_data[8]]);
-        assert_eq!(connectivity, 24);
-
-        let expansion_add = u16::from_le_bytes([blob_data[9], blob_data[10]]);
-        assert_eq!(expansion_add, 200);
-
-        let expansion_search = u16::from_le_bytes([blob_data[11], blob_data[12]]);
-        assert_eq!(expansion_search, 100);
-
-        let total_rows = u64::from_le_bytes([
-            blob_data[13],
-            blob_data[14],
-            blob_data[15],
-            blob_data[16],
-            blob_data[17],
-            blob_data[18],
-            blob_data[19],
-            blob_data[20],
-        ]);
-        assert_eq!(total_rows, 5);
-
-        let indexed_rows = u64::from_le_bytes([
-            blob_data[21],
-            blob_data[22],
-            blob_data[23],
-            blob_data[24],
-            blob_data[25],
-            blob_data[26],
-            blob_data[27],
-            blob_data[28],
-        ]);
-        assert_eq!(indexed_rows, 3);
-
-        let null_bitmap_len =
-            u32::from_le_bytes([blob_data[29], blob_data[30], blob_data[31], blob_data[32]]);
-        assert_eq!(null_bitmap_len as usize, null_bitmap_bytes.len());
+        assert_eq!(decoded.connectivity, 24);
+        assert_eq!(decoded.expansion_add, 200);
+        assert_eq!(decoded.expansion_search, 100);
+        assert_eq!(decoded.total_rows, 5);
+        assert_eq!(decoded.indexed_rows, 3);
+        assert_eq!(decoded.null_bitmap_len as usize, null_bitmap_bytes.len());
 
         // Verify null bitmap can be deserialized
-        let null_bitmap_data = &blob_data[header_size..header_size + null_bitmap_len as usize];
+        let null_bitmap_data =
+            &blob_data[header_size..header_size + decoded.null_bitmap_len as usize];
         let restored_bitmap = RoaringBitmap::deserialize_from(null_bitmap_data).unwrap();
         assert_eq!(restored_bitmap.len(), 2); // 2 nulls
         assert!(restored_bitmap.contains(1));

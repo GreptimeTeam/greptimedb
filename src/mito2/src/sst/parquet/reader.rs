@@ -43,6 +43,8 @@ use table::predicate::Predicate;
 
 use crate::cache::CacheStrategy;
 use crate::cache::index::result_cache::PredicateKey;
+#[cfg(feature = "vector_index")]
+use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
     ReadParquetSnafu, Result,
@@ -850,7 +852,14 @@ impl ParquetReaderBuilder {
             }
         };
 
-        let selection = vector_selection_from_offsets(row_ids, row_group_size, num_row_groups);
+        let selection = match vector_selection_from_offsets(row_ids, row_group_size, num_row_groups)
+        {
+            Ok(selection) => selection,
+            Err(err) => {
+                handle_index_error!(err, self.file_handle, INDEX_TYPE_VECTOR);
+                return;
+            }
+        };
         apply_selection_and_update_metrics(output, &selection, metrics, INDEX_TYPE_VECTOR);
     }
 
@@ -1043,12 +1052,22 @@ fn vector_selection_from_offsets(
     row_offsets: Vec<u64>,
     row_group_size: usize,
     num_row_groups: usize,
-) -> RowGroupSelection {
-    let row_ids = row_offsets
-        .into_iter()
-        .filter_map(|offset| u32::try_from(offset).ok())
-        .collect::<BTreeSet<_>>();
-    RowGroupSelection::from_row_ids(row_ids, row_group_size, num_row_groups)
+) -> Result<RowGroupSelection> {
+    let mut row_ids = BTreeSet::new();
+    for offset in row_offsets {
+        let row_id = u32::try_from(offset).map_err(|_| {
+            ApplyVectorIndexSnafu {
+                reason: format!("Row offset {} exceeds u32::MAX", offset),
+            }
+            .build()
+        })?;
+        row_ids.insert(row_id);
+    }
+    Ok(RowGroupSelection::from_row_ids(
+        row_ids,
+        row_group_size,
+        num_row_groups,
+    ))
 }
 
 fn all_required_row_groups_searched(
@@ -1208,7 +1227,8 @@ mod tests {
         let row_group_size = 4;
         let num_row_groups = 3;
         let selection =
-            vector_selection_from_offsets(vec![0, 1, 5, 9], row_group_size, num_row_groups);
+            vector_selection_from_offsets(vec![0, 1, 5, 9], row_group_size, num_row_groups)
+                .unwrap();
 
         assert_eq!(selection.row_group_count(), 3);
         assert_eq!(selection.row_count(), 4);
@@ -1226,11 +1246,7 @@ mod tests {
             row_group_size,
             num_row_groups,
         );
-
-        assert_eq!(selection.row_group_count(), 2);
-        assert_eq!(selection.row_count(), 2);
-        assert!(selection.contains_non_empty_row_group(0));
-        assert!(selection.contains_non_empty_row_group(1));
+        assert!(selection.is_err());
     }
 
     #[test]
@@ -1238,7 +1254,7 @@ mod tests {
         let row_group_size = 4;
         let total_rows = 8;
         let mut output = RowGroupSelection::new(row_group_size, total_rows);
-        let selection = vector_selection_from_offsets(vec![1], row_group_size, 2);
+        let selection = vector_selection_from_offsets(vec![1], row_group_size, 2).unwrap();
         let mut metrics = ReaderFilterMetrics::default();
 
         apply_selection_and_update_metrics(

@@ -23,7 +23,7 @@ use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use roaring::RoaringBitmap;
 use snafu::ResultExt;
-use store_api::storage::{ColumnId, VectorDistanceMetric, VectorIndexEngineType};
+use store_api::storage::{ColumnId, VectorDistanceMetric};
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
@@ -35,6 +35,7 @@ use crate::sst::file::RegionIndexId;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::trigger_index_background_download;
 use crate::sst::index::vector_index::creator::VectorIndexConfig;
+use crate::sst::index::vector_index::format::VectorIndexBlobHeader;
 use crate::sst::index::vector_index::{INDEX_BLOB_TYPE, engine};
 
 /// Result of applying vector index.
@@ -103,6 +104,11 @@ impl VectorIndexApplier {
     }
 
     /// Applies vector index to the file and returns candidates.
+    ///
+    /// This method loads the vector index blob (from cache or remote), runs
+    /// a KNN search against the indexed vectors, and maps the HNSW keys back
+    /// to row offsets in the SST file. It returns only row offsets; callers
+    /// are responsible for any higher-level ordering or limit enforcement.
     pub async fn apply_with_k(
         &self,
         file_id: RegionIndexId,
@@ -193,7 +199,7 @@ impl VectorIndexApplier {
             }
         };
 
-        let blob_data = read_all_blob(reader).await?;
+        let blob_data = read_all_blob(reader, file_size_hint).await?;
         if blob_data.is_empty() {
             return Ok(None);
         }
@@ -294,13 +300,24 @@ fn is_blob_not_found(err: &crate::error::Error) -> bool {
     )
 }
 
-async fn read_all_blob(reader: BlobReader) -> Result<Vec<u8>> {
+async fn read_all_blob(reader: BlobReader, file_size_hint: Option<u64>) -> Result<Vec<u8>> {
     let metadata = reader.metadata().await.map_err(|e| {
         ApplyVectorIndexSnafu {
             reason: format!("Failed to read vector index metadata: {}", e),
         }
         .build()
     })?;
+    if let Some(limit) = file_size_hint
+        && metadata.content_length > limit
+    {
+        return ApplyVectorIndexSnafu {
+            reason: format!(
+                "Vector index blob size {} exceeds file size hint {}",
+                metadata.content_length, limit
+            ),
+        }
+        .fail();
+    }
     let bytes = reader.read(0..metadata.content_length).await.map_err(|e| {
         ApplyVectorIndexSnafu {
             reason: format!("Failed to read vector index data: {}", e),
@@ -311,48 +328,13 @@ async fn read_all_blob(reader: BlobReader) -> Result<Vec<u8>> {
 }
 
 fn parse_vector_index_blob(data: &[u8]) -> Result<CachedVectorIndex> {
-    const HEADER_SIZE: usize = 33;
-    if data.len() < HEADER_SIZE {
-        return ApplyVectorIndexSnafu {
-            reason: format!(
-                "Invalid vector index blob size {} < header {}",
-                data.len(),
-                HEADER_SIZE
-            ),
+    let (header, mut offset) = VectorIndexBlobHeader::decode(data).map_err(|e| {
+        ApplyVectorIndexSnafu {
+            reason: e.to_string(),
         }
-        .fail();
-    }
-
-    let mut offset = 0;
-    let version = read_u8(data, &mut offset)?;
-    if version != 1 {
-        return ApplyVectorIndexSnafu {
-            reason: format!("Unsupported vector index version {}", version),
-        }
-        .fail();
-    }
-
-    let engine_type =
-        VectorIndexEngineType::try_from_u8(read_u8(data, &mut offset)?).ok_or_else(|| {
-            ApplyVectorIndexSnafu {
-                reason: "Unknown vector index engine type".to_string(),
-            }
-            .build()
-        })?;
-    let dim = read_u32(data, &mut offset)?;
-    let metric =
-        VectorDistanceMetric::try_from_u8(read_u8(data, &mut offset)?).ok_or_else(|| {
-            ApplyVectorIndexSnafu {
-                reason: "Unknown vector index metric".to_string(),
-            }
-            .build()
-        })?;
-    let connectivity = read_u16(data, &mut offset)?;
-    let expansion_add = read_u16(data, &mut offset)?;
-    let expansion_search = read_u16(data, &mut offset)?;
-    let total_rows = read_u64(data, &mut offset)?;
-    let indexed_rows = read_u64(data, &mut offset)?;
-    let null_bitmap_len = read_u32(data, &mut offset)? as usize;
+        .build()
+    })?;
+    let null_bitmap_len = header.null_bitmap_len as usize;
 
     if data.len() < offset + null_bitmap_len {
         return ApplyVectorIndexSnafu {
@@ -372,15 +354,15 @@ fn parse_vector_index_blob(data: &[u8]) -> Result<CachedVectorIndex> {
 
     let index_bytes = &data[offset..];
     let config = VectorIndexConfig {
-        engine: engine_type,
-        dim: dim as usize,
-        metric: distance_metric_to_usearch(metric),
-        distance_metric: metric,
-        connectivity: connectivity as usize,
-        expansion_add: expansion_add as usize,
-        expansion_search: expansion_search as usize,
+        engine: header.engine_type,
+        dim: header.dim as usize,
+        metric: distance_metric_to_usearch(header.metric),
+        distance_metric: header.metric,
+        connectivity: header.connectivity as usize,
+        expansion_add: header.expansion_add as usize,
+        expansion_search: header.expansion_search as usize,
     };
-    let engine = engine::load_engine(engine_type, &config, index_bytes).map_err(|e| {
+    let engine = engine::load_engine(header.engine_type, &config, index_bytes).map_err(|e| {
         ApplyVectorIndexSnafu {
             reason: e.to_string(),
         }
@@ -390,73 +372,11 @@ fn parse_vector_index_blob(data: &[u8]) -> Result<CachedVectorIndex> {
     Ok(CachedVectorIndex::new(
         engine,
         null_bitmap,
-        dim,
-        metric,
-        total_rows,
-        indexed_rows,
+        header.dim,
+        header.metric,
+        header.total_rows,
+        header.indexed_rows,
     ))
-}
-
-fn read_u8(data: &[u8], offset: &mut usize) -> Result<u8> {
-    if *offset + 1 > data.len() {
-        return ApplyVectorIndexSnafu {
-            reason: "Vector index blob truncated while reading u8".to_string(),
-        }
-        .fail();
-    }
-    let value = data[*offset];
-    *offset += 1;
-    Ok(value)
-}
-
-fn read_u16(data: &[u8], offset: &mut usize) -> Result<u16> {
-    if *offset + 2 > data.len() {
-        return ApplyVectorIndexSnafu {
-            reason: "Vector index blob truncated while reading u16".to_string(),
-        }
-        .fail();
-    }
-    let value = u16::from_le_bytes([data[*offset], data[*offset + 1]]);
-    *offset += 2;
-    Ok(value)
-}
-
-fn read_u32(data: &[u8], offset: &mut usize) -> Result<u32> {
-    if *offset + 4 > data.len() {
-        return ApplyVectorIndexSnafu {
-            reason: "Vector index blob truncated while reading u32".to_string(),
-        }
-        .fail();
-    }
-    let value = u32::from_le_bytes([
-        data[*offset],
-        data[*offset + 1],
-        data[*offset + 2],
-        data[*offset + 3],
-    ]);
-    *offset += 4;
-    Ok(value)
-}
-
-fn read_u64(data: &[u8], offset: &mut usize) -> Result<u64> {
-    if *offset + 8 > data.len() {
-        return ApplyVectorIndexSnafu {
-            reason: "Vector index blob truncated while reading u64".to_string(),
-        }
-        .fail();
-    }
-    let value = u64::from_le_bytes([
-        data[*offset],
-        data[*offset + 1],
-        data[*offset + 2],
-        data[*offset + 3],
-        data[*offset + 4],
-        data[*offset + 5],
-        data[*offset + 6],
-        data[*offset + 7],
-    ]);
-    *offset += 8;
-    Ok(value)
 }
 
 fn map_hnsw_keys_to_row_offsets(
@@ -489,6 +409,12 @@ fn hnsw_key_to_row_offset(
     indexed_rows: u64,
     key: u64,
 ) -> Result<u32> {
+    if total_rows == 0 {
+        return ApplyVectorIndexSnafu {
+            reason: "Total rows is zero".to_string(),
+        }
+        .fail();
+    }
     if key >= indexed_rows {
         return ApplyVectorIndexSnafu {
             reason: format!("HNSW key {} exceeds indexed rows {}", key, indexed_rows),
@@ -528,6 +454,8 @@ fn hnsw_key_to_row_offset(
 
 #[cfg(test)]
 mod tests {
+    use store_api::storage::VectorIndexEngineType;
+
     use super::*;
 
     #[test]
@@ -539,6 +467,25 @@ mod tests {
         assert_eq!(hnsw_key_to_row_offset(&bitmap, 6, 4, 0).unwrap(), 0);
         assert_eq!(hnsw_key_to_row_offset(&bitmap, 6, 4, 1).unwrap(), 2);
         assert_eq!(hnsw_key_to_row_offset(&bitmap, 6, 4, 2).unwrap(), 4);
+    }
+
+    #[test]
+    fn test_hnsw_key_to_row_offset_without_nulls() {
+        let bitmap = RoaringBitmap::new();
+        assert_eq!(hnsw_key_to_row_offset(&bitmap, 4, 4, 3).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_hnsw_key_to_row_offset_out_of_range() {
+        let bitmap = RoaringBitmap::new();
+        assert!(hnsw_key_to_row_offset(&bitmap, 4, 4, 4).is_err());
+    }
+
+    #[test]
+    fn test_map_hnsw_keys_to_row_offsets_multiple_keys() {
+        let bitmap = RoaringBitmap::new();
+        let offsets = map_hnsw_keys_to_row_offsets(&bitmap, 4, 4, vec![0, 2, 3]).unwrap();
+        assert_eq!(offsets, vec![0, 2, 3]);
     }
 
     #[test]
@@ -564,17 +511,20 @@ mod tests {
 
         let total_rows: u64 = 1;
         let indexed_rows: u64 = 1;
+        let header = VectorIndexBlobHeader::new(
+            config.engine,
+            config.dim as u32,
+            VectorDistanceMetric::L2sq,
+            config.connectivity as u16,
+            config.expansion_add as u16,
+            config.expansion_search as u16,
+            total_rows,
+            indexed_rows,
+            null_bitmap_bytes.len() as u32,
+        )
+        .unwrap();
         let mut blob = Vec::new();
-        blob.push(1u8);
-        blob.push(config.engine.as_u8());
-        blob.extend_from_slice(&(config.dim as u32).to_le_bytes());
-        blob.push(VectorDistanceMetric::L2sq.as_u8());
-        blob.extend_from_slice(&(config.connectivity as u16).to_le_bytes());
-        blob.extend_from_slice(&(config.expansion_add as u16).to_le_bytes());
-        blob.extend_from_slice(&(config.expansion_search as u16).to_le_bytes());
-        blob.extend_from_slice(&total_rows.to_le_bytes());
-        blob.extend_from_slice(&indexed_rows.to_le_bytes());
-        blob.extend_from_slice(&(null_bitmap_bytes.len() as u32).to_le_bytes());
+        header.encode_into(&mut blob);
         blob.extend_from_slice(&null_bitmap_bytes);
         blob.extend_from_slice(&index_bytes);
 
@@ -590,6 +540,22 @@ mod tests {
     fn test_parse_vector_index_blob_invalid_version() {
         let mut blob = vec![0u8; 33];
         blob[0] = 2;
+        assert!(parse_vector_index_blob(&blob).is_err());
+    }
+
+    #[test]
+    fn test_parse_vector_index_blob_truncated_null_bitmap() {
+        let mut blob = vec![0u8; 33];
+        blob[0] = 1;
+        blob[1] = VectorIndexEngineType::Usearch.as_u8();
+        blob[2..6].copy_from_slice(&(2u32).to_le_bytes());
+        blob[6] = VectorDistanceMetric::L2sq.as_u8();
+        blob[7..9].copy_from_slice(&(16u16).to_le_bytes());
+        blob[9..11].copy_from_slice(&(128u16).to_le_bytes());
+        blob[11..13].copy_from_slice(&(64u16).to_le_bytes());
+        blob[13..21].copy_from_slice(&(1u64).to_le_bytes());
+        blob[21..29].copy_from_slice(&(1u64).to_le_bytes());
+        blob[29..33].copy_from_slice(&(4u32).to_le_bytes());
         assert!(parse_vector_index_blob(&blob).is_err());
     }
 }
