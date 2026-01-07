@@ -381,7 +381,7 @@ impl LocalGcWorker {
         };
 
         let recently_removed_files = if let Some(manifest) = &manifest {
-            self.get_removed_files_expel_times(&manifest).await?
+            self.get_removed_files_expel_times(manifest).await?
         } else {
             Default::default()
         };
@@ -426,7 +426,11 @@ impl LocalGcWorker {
 
         debug!(
             "gc: for region{} {region_id}: In manifest files: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete: {} ",
-            region.is_none().then(|| " (region dropped) ").unwrap_or(""),
+            if region.is_none() {
+                " (region dropped) "
+            } else {
+                ""
+            },
             current_files.map(|c| c.len()).unwrap_or(0),
             tmp_ref_files.len(),
             removed_file_cnt,
@@ -446,7 +450,7 @@ impl LocalGcWorker {
             unused_file_cnt, region_id
         );
         if let Some(region) = &region {
-            self.update_manifest_removed_files(&region, deletable_files.clone())
+            self.update_manifest_removed_files(region, deletable_files.clone())
                 .await?;
         }
 
