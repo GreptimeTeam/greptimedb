@@ -496,6 +496,17 @@ impl MetricEngine {
         self.inner.mito.clone()
     }
 
+    /// Batch put operation for multiple logical regions.
+    ///
+    /// This is an optimized path for writing to multiple logical regions that share
+    /// the same physical region. It merges all requests into a single physical write.
+    pub async fn put_regions_batch(
+        &self,
+        requests: Vec<(RegionId, store_api::region_request::RegionPutRequest)>,
+    ) -> Result<HashMap<RegionId, Result<store_api::region_request::AffectedRows>>> {
+        self.inner.put_regions_batch(requests).await
+    }
+
     /// Returns all logical regions associated with the physical region.
     pub async fn logical_regions(&self, physical_region_id: RegionId) -> Result<Vec<RegionId>> {
         self.inner

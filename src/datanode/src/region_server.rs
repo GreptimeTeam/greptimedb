@@ -44,6 +44,7 @@ use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use datafusion::datasource::TableProvider;
 use datafusion_common::tree_node::TreeNode;
+use either::Either;
 use futures_util::future::try_join_all;
 use metric_engine::engine::MetricEngine;
 use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
@@ -71,7 +72,7 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{
     AffectedRows, BatchRegionDdlRequest, RegionCatchupRequest, RegionCloseRequest,
-    RegionOpenRequest, RegionRequest,
+    RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -453,35 +454,46 @@ impl RegionServer {
     ) -> Result<RegionResponse> {
         let requests =
             RegionRequest::try_from_request_body(request).context(BuildRegionRequestsSnafu)?;
-        let tracing_context = TracingContext::from_current_span();
 
-        let join_tasks = requests.into_iter().map(|(region_id, req)| {
-            let self_to_move = self;
-            let span = tracing_context.attach(info_span!(
-                "RegionServer::handle_region_request",
-                region_id = region_id.to_string()
-            ));
-            async move {
-                self_to_move
-                    .handle_request(region_id, req)
-                    .trace(span)
-                    .await
+        // Try to optimize batch Put requests for metric engine
+        // Returns either Some(response) or None(requests_back)
+        match self.try_handle_metric_batch_puts(requests).await? {
+            Either::Left(response) => return Ok(response),
+            Either::Right(requests) => {
+                // Fallback: original parallel processing
+                let tracing_context = TracingContext::from_current_span();
+                let join_tasks =
+                    requests
+                        .into_iter()
+                        .map(|(region_id, req): (RegionId, RegionRequest)| {
+                            let self_to_move = self;
+                            let span = tracing_context.attach(info_span!(
+                                "RegionServer::handle_region_request",
+                                region_id = region_id.to_string()
+                            ));
+                            async move {
+                                self_to_move
+                                    .handle_request(region_id, req)
+                                    .trace(span)
+                                    .await
+                            }
+                        });
+
+                let results = try_join_all(join_tasks).await?;
+                let mut affected_rows = 0;
+                let mut extensions = HashMap::new();
+                for result in results {
+                    affected_rows += result.affected_rows;
+                    extensions.extend(result.extensions);
+                }
+
+                Ok(RegionResponse {
+                    affected_rows,
+                    extensions,
+                    metadata: Vec::new(),
+                })
             }
-        });
-
-        let results = try_join_all(join_tasks).await?;
-        let mut affected_rows = 0;
-        let mut extensions = HashMap::new();
-        for result in results {
-            affected_rows += result.affected_rows;
-            extensions.extend(result.extensions);
         }
-
-        Ok(RegionResponse {
-            affected_rows,
-            extensions,
-            metadata: Vec::new(),
-        })
     }
 
     async fn handle_requests_in_serial(
@@ -494,8 +506,6 @@ impl RegionServer {
 
         let mut affected_rows = 0;
         let mut extensions = HashMap::new();
-        // FIXME(jeremy, ruihang): Once the engine supports merged calls, we should immediately
-        // modify this part to avoid inefficient serial loop calls.
         for (region_id, req) in requests {
             let span = tracing_context.attach(info_span!(
                 "RegionServer::handle_region_request",
@@ -512,6 +522,96 @@ impl RegionServer {
             extensions,
             metadata: Vec::new(),
         })
+    }
+
+    /// Attempts to optimize batch Put requests for metric engine.
+    ///
+    /// Returns Either::Left(response) if optimization succeeded,
+    /// or Either::Right(original_requests) to fall back to parallel processing.
+    ///
+    /// This avoids cloning requests when optimization cannot be applied.
+    async fn try_handle_metric_batch_puts(
+        &self,
+        requests: Vec<(RegionId, RegionRequest)>,
+    ) -> Result<Either<RegionResponse, Vec<(RegionId, RegionRequest)>>> {
+        if requests.is_empty() {
+            return Ok(Either::Right(requests));
+        }
+
+        // Quick check: verify first request is Put and is metric engine
+        let first_region_id = requests[0].0;
+        if !matches!(requests[0].1, RegionRequest::Put(_)) {
+            return Ok(Either::Right(requests));
+        }
+
+        let engine = match self
+            .inner
+            .get_engine(first_region_id, &RegionChange::None)?
+        {
+            CurrentEngine::Engine(e) => e,
+            _ => return Ok(Either::Right(requests)),
+        };
+
+        if engine.name() != METRIC_ENGINE_NAME {
+            return Ok(Either::Right(requests));
+        }
+
+        // Check if ALL requests are Put (now we know it's worth checking)
+        let mut all_puts = true;
+        for (_, req) in &requests {
+            if !matches!(req, RegionRequest::Put(_)) {
+                all_puts = false;
+                break;
+            }
+        }
+
+        if !all_puts {
+            return Ok(Either::Right(requests));
+        }
+
+        // Now extract Put requests by consuming ownership (zero clone!)
+        let put_requests: Vec<(RegionId, RegionPutRequest)> = requests
+            .into_iter()
+            .map(|(region_id, req)| {
+                if let RegionRequest::Put(put) = req {
+                    (region_id, put)
+                } else {
+                    unreachable!("Already checked all are Put")
+                }
+            })
+            .collect();
+
+        // Downcast to MetricEngine and call batch API
+        let metric_engine =
+            engine
+                .as_any()
+                .downcast_ref::<MetricEngine>()
+                .context(UnexpectedSnafu {
+                    violated: "Failed to downcast to MetricEngine",
+                })?;
+
+        let results = metric_engine
+            .put_regions_batch(put_requests)
+            .await
+            .map_err(BoxedError::new)
+            .context(HandleRegionRequestSnafu {
+                region_id: first_region_id,
+            })?;
+
+        // Aggregate results
+        let mut total_affected = 0;
+        for (region_id, result) in results {
+            let affected = result
+                .map_err(BoxedError::new)
+                .context(HandleRegionRequestSnafu { region_id })?;
+            total_affected += affected;
+        }
+
+        Ok(Either::Left(RegionResponse {
+            affected_rows: total_affected,
+            extensions: HashMap::new(),
+            metadata: Vec::new(),
+        }))
     }
 
     async fn handle_sync_region_request(&self, request: &SyncRequest) -> Result<RegionResponse> {
