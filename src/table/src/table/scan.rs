@@ -343,7 +343,7 @@ impl ExecutionPlan for RegionScanExec {
             "read_from_region",
             partition = partition
         ));
-        let _enter = span.enter();
+        let enter = span.enter();
 
         let ctx = QueryScanContext {
             explain_verbose: self.explain_verbose,
@@ -361,7 +361,7 @@ impl ExecutionPlan for RegionScanExec {
             stream
         };
 
-        drop(_enter);
+        drop(enter);
         let stream_metrics = StreamMetrics::new(&self.metric, partition);
         Ok(Box::pin(StreamWithMetricWrapper {
             stream,

@@ -939,7 +939,8 @@ pub(crate) struct SeriesDistributorMetrics {
     skip_all,
     fields(
         region_id = %stream_ctx.input.region_metadata().region_id,
-        row_group_index = %index.index,
+        file_or_mem_index = %index.index,
+        row_group_index = %index.row_group_index,
         source = "mem"
     )
 )]
