@@ -458,7 +458,7 @@ impl RegionServer {
         // Try to optimize batch Put requests for metric engine
         // Returns either Some(response) or None(requests_back)
         match self.try_handle_metric_batch_puts(requests).await? {
-            Either::Left(response) => return Ok(response),
+            Either::Left(response) => Ok(response),
             Either::Right(requests) => {
                 // Fallback: original parallel processing
                 let tracing_context = TracingContext::from_current_span();

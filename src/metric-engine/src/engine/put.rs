@@ -502,7 +502,7 @@ mod tests {
         // logical_region_1: ts 0, 1, 2
         // logical_region_2: ts 10, 11  (offset to avoid overlap)
         // logical_region_3: ts 20, 21, 22, 23, 24  (offset to avoid overlap)
-        let mut rows1 = test_util::build_rows(1, 3);
+        let rows1 = test_util::build_rows(1, 3);
         let mut rows2 = test_util::build_rows(1, 2);
         let mut rows3 = test_util::build_rows(1, 5);
 
