@@ -1002,7 +1002,7 @@ groups:
               legendFormat: '{{pod}}-{{table_type}}-{{type}}'
         - title: Reconciliation steps
           type: timeseries
-          description: 'Elapsed of Reconciliation steps '
+          description: Time spent evaluating triggers.
           unit: s
           queries:
             - expr: histogram_quantile(0.9, greptime_meta_reconciliation_procedure_bucket)
@@ -1067,3 +1067,88 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{code}}]'
+    - title: Row title
+      panels:
+        - title: Trigger Count
+          type: timeseries
+          queries:
+            - expr: greptime_trigger_count{}
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: __auto
+        - title: Trigger Eval Elapsed
+          type: timeseries
+          description: Failure rate of trigger evaluation.
+          unit: s
+          queries:
+            - expr: "histogram_quantile(0.99, \n  rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])\n)"
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-p99'
+            - expr: "histogram_quantile(0.75, \n  rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])\n)"
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-p75'
+        - title: Trigger Eval Failure Rate
+          type: timeseries
+          description: Time to send trigger alerts.
+          unit: s
+          queries:
+            - expr: rate(greptime_trigger_evaluate_failure_count[$__rate_interval])
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: __auto
+        - title: Send Alert Elapsed
+          type: timeseries
+          description: Failure rate while sending trigger alerts.
+          unit: s
+          queries:
+            - expr: "histogram_quantile(0.99, \n  rate(greptime_trigger_send_alert_elapsed_bucket[$__rate_interval])\n)"
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{channel_type}}]-p99'
+            - expr: "histogram_quantile(0.75, \n  rate(greptime_trigger_send_alert_elapsed_bucket[$__rate_interval])\n)"
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{channel_type}}]-p75'
+        - title: Send Alert Failure Rate
+          type: timeseries
+          description: Time to persist trigger alert records.
+          unit: s
+          queries:
+            - expr: rate(greptime_trigger_send_alert_failure_count[$__rate_interval])
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: __auto
+        - title: Save Alert Elapsed
+          type: timeseries
+          description: Time to persist trigger alert records.
+          unit: s
+          queries:
+            - expr: "histogram_quantile(0.99, \n  rate(greptime_trigger_save_alert_record_elapsed_bucket[$__rate_interval])\n)"
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{storage_type}}]-p99'
+            - expr: "histogram_quantile(0.75, \n  rate(greptime_trigger_save_alert_record_elapsed_bucket[$__rate_interval])\n)"
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{storage_type}}]-p75'
+        - title: Save Alert Failure Rate
+          type: timeseries
+          description: Failure rate of saving trigger alert records.
+          unit: s
+          queries:
+            - expr: rate(greptime_trigger_save_alert_record_failure_count[$__rate_interval])
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: __auto

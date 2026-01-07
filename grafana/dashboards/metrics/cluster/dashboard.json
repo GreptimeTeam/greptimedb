@@ -8863,7 +8863,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Elapsed of Reconciliation steps ",
+      "description": "Time spent evaluating triggers.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -9568,6 +9568,10 @@
       "pluginVersion": "11.6.0",
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
           "editorMode": "code",
           "expr": "greptime_trigger_count{}",
           "legendFormat": "__auto",
@@ -9583,7 +9587,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Elapsed of Reconciliation steps ",
+      "description": "Failure rate of trigger evaluation.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -9696,7 +9700,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Elapsed of Reconciliation steps ",
+      "description": "Time to send trigger alerts.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -9796,7 +9800,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Elapsed of Reconciliation steps ",
+      "description": "Failure rate while sending trigger alerts.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -9909,7 +9913,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Elapsed of Reconciliation steps ",
+      "description": "Time to persist trigger alert records.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -10009,7 +10013,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Elapsed of Reconciliation steps ",
+      "description": "Time to persist trigger alert records.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -10122,7 +10126,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Elapsed of Reconciliation steps ",
+      "description": "Failure rate of saving trigger alert records.",
       "fieldConfig": {
         "defaults": {
           "color": {
