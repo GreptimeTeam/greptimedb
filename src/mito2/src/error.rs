@@ -652,6 +652,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "vector_index")]
+    #[snafu(display("Failed to apply vector index: {}", reason))]
+    ApplyVectorIndex {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to push index value"))]
     PushIndexValue {
         source: index::inverted_index::error::Error,
@@ -1324,6 +1332,8 @@ impl ErrorExt for Error {
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }
             | IndexFinish { source, .. } => source.status_code(),
+            #[cfg(feature = "vector_index")]
+            ApplyVectorIndex { .. } => StatusCode::Internal,
             PuffinReadBlob { source, .. }
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }

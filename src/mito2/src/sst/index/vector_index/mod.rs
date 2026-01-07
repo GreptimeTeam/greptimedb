@@ -14,6 +14,7 @@
 
 //! Vector index module for HNSW-based approximate nearest neighbor search.
 
+pub(crate) mod applier;
 pub(crate) mod creator;
 pub(crate) mod engine;
 pub(crate) mod util;
