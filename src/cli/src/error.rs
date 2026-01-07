@@ -68,8 +68,8 @@ pub enum Error {
         source: common_procedure::error::Error,
     },
 
-    #[snafu(display("Failed to start wal options allocator"))]
-    StartWalOptionsAllocator {
+    #[snafu(display("Failed to start wal provider"))]
+    StartWalProvider {
         #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
@@ -343,7 +343,7 @@ impl ErrorExt for Error {
 
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),
-            Error::StartWalOptionsAllocator { source, .. } => source.status_code(),
+            Error::StartWalProvider { source, .. } => source.status_code(),
             Error::HttpQuerySql { .. } => StatusCode::Internal,
             Error::ParseSql { source, .. } | Error::PlanStatement { source, .. } => {
                 source.status_code()

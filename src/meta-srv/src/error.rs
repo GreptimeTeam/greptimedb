@@ -936,8 +936,8 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to build wal options allocator"))]
-    BuildWalOptionsAllocator {
+    #[snafu(display("Failed to build wal provider"))]
+    BuildWalProvider {
         #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
@@ -1113,7 +1113,7 @@ impl ErrorExt for Error {
             | Error::Join { .. }
             | Error::ChooseItems { .. }
             | Error::FlowStateHandler { .. }
-            | Error::BuildWalOptionsAllocator { .. }
+            | Error::BuildWalProvider { .. }
             | Error::BuildPartitionClient { .. }
             | Error::BuildKafkaClient { .. } => StatusCode::Internal,
 

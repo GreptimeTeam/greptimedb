@@ -26,37 +26,30 @@ use crate::peer::{NoopPeerAllocator, PeerAllocatorRef};
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{Region, RegionRoute};
 use crate::sequence::SequenceRef;
-use crate::wal_options_allocator::{WalOptionsAllocatorRef, allocate_region_wal_options};
+use crate::wal_provider::{WalProviderRef, allocate_region_wal_options};
 
 pub type TableMetadataAllocatorRef = Arc<TableMetadataAllocator>;
 
 #[derive(Clone)]
 pub struct TableMetadataAllocator {
     table_id_sequence: SequenceRef,
-    wal_options_allocator: WalOptionsAllocatorRef,
+    wal_provider: WalProviderRef,
     peer_allocator: PeerAllocatorRef,
 }
 
 impl TableMetadataAllocator {
-    pub fn new(
-        table_id_sequence: SequenceRef,
-        wal_options_allocator: WalOptionsAllocatorRef,
-    ) -> Self {
-        Self::with_peer_allocator(
-            table_id_sequence,
-            wal_options_allocator,
-            Arc::new(NoopPeerAllocator),
-        )
+    pub fn new(table_id_sequence: SequenceRef, wal_provider: WalProviderRef) -> Self {
+        Self::with_peer_allocator(table_id_sequence, wal_provider, Arc::new(NoopPeerAllocator))
     }
 
     pub fn with_peer_allocator(
         table_id_sequence: SequenceRef,
-        wal_options_allocator: WalOptionsAllocatorRef,
+        wal_provider: WalProviderRef,
         peer_allocator: PeerAllocatorRef,
     ) -> Self {
         Self {
             table_id_sequence,
-            wal_options_allocator,
+            wal_provider,
             peer_allocator,
         }
     }
@@ -104,7 +97,7 @@ impl TableMetadataAllocator {
             .iter()
             .map(|route| route.region.id.region_number())
             .collect();
-        allocate_region_wal_options(region_numbers, &self.wal_options_allocator, skip_wal)
+        allocate_region_wal_options(region_numbers, &self.wal_provider, skip_wal)
     }
 
     async fn create_table_route(

@@ -25,7 +25,7 @@ use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{RawTableInfo, TableId};
 
 use crate::error::{self, Result};
-use crate::wal_options_allocator::prepare_wal_options;
+use crate::wal_provider::prepare_wal_options;
 
 /// Builds a [CreateRequest] from a [RawTableInfo].
 ///

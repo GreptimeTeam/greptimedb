@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_meta::instruction::{InstructionReply, OpenRegion, SimpleReply};
-use common_meta::wal_options_allocator::prepare_wal_options;
+use common_meta::wal_provider::prepare_wal_options;
 use store_api::path_utils::table_dir;
 use store_api::region_request::{PathType, RegionOpenRequest};
 use store_api::storage::RegionId;

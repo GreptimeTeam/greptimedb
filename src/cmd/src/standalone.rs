@@ -40,7 +40,7 @@ use common_meta::procedure_executor::LocalProcedureExecutor;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal_options_allocator::{WalOptionsAllocatorRef, build_wal_options_allocator};
+use common_meta::wal_provider::{WalProviderRef, build_wal_provider};
 use common_procedure::ProcedureManagerRef;
 use common_query::prelude::set_default_prefix;
 use common_telemetry::info;
@@ -120,7 +120,7 @@ pub struct Instance {
     frontend: Frontend,
     flownode: FlownodeInstance,
     procedure_manager: ProcedureManagerRef,
-    wal_options_allocator: WalOptionsAllocatorRef,
+    wal_provider: WalProviderRef,
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
 }
@@ -146,10 +146,10 @@ impl App for Instance {
             .await
             .context(error::StartProcedureManagerSnafu)?;
 
-        self.wal_options_allocator
+        self.wal_provider
             .start()
             .await
-            .context(error::StartWalOptionsAllocatorSnafu)?;
+            .context(error::StartWalProviderSnafu)?;
 
         plugins::start_frontend_plugins(self.frontend.instance.plugins().clone())
             .await
@@ -485,13 +485,13 @@ impl StartCommand {
             .clone()
             .try_into()
             .context(error::InvalidWalProviderSnafu)?;
-        let wal_options_allocator = build_wal_options_allocator(&kafka_options, kv_backend.clone())
+        let wal_provider = build_wal_provider(&kafka_options, kv_backend.clone())
             .await
-            .context(error::BuildWalOptionsAllocatorSnafu)?;
-        let wal_options_allocator = Arc::new(wal_options_allocator);
+            .context(error::BuildWalProviderSnafu)?;
+        let wal_provider = Arc::new(wal_provider);
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
-            wal_options_allocator.clone(),
+            wal_provider.clone(),
         ));
         let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
             flow_id_sequence,
@@ -585,7 +585,7 @@ impl StartCommand {
             frontend,
             flownode,
             procedure_manager,
-            wal_options_allocator,
+            wal_provider,
             _guard: guard,
         })
     }

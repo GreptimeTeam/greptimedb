@@ -1490,7 +1490,7 @@ mod tests {
     use crate::peer::Peer;
     use crate::rpc::router::{LeaderState, Region, RegionRoute, region_distribution};
     use crate::rpc::store::RangeRequest;
-    use crate::wal_options_allocator::{WalOptionsAllocator, allocate_region_wal_options};
+    use crate::wal_provider::{WalProvider, allocate_region_wal_options};
 
     #[test]
     fn test_deserialized_value_with_bytes() {
@@ -1600,10 +1600,10 @@ mod tests {
         let region_route = new_test_region_route();
         let region_routes = &vec![region_route.clone()];
         let table_info: RawTableInfo = new_test_table_info().into();
-        let wal_allocator = WalOptionsAllocator::RaftEngine;
+        let wal_provider = WalProvider::RaftEngine;
         let regions = (0..16).collect();
         let region_wal_options =
-            allocate_region_wal_options(regions, &wal_allocator, false).unwrap();
+            allocate_region_wal_options(regions, &wal_provider, false).unwrap();
         create_physical_table_metadata(
             &table_metadata_manager,
             table_info.clone(),

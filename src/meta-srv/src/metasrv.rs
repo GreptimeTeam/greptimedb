@@ -44,7 +44,7 @@ use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_meta::sequence::SequenceRef;
 use common_meta::stats::topic::TopicStatsRegistryRef;
-use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
+use common_meta::wal_provider::WalProviderRef;
 use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_procedure::ProcedureManagerRef;
@@ -624,7 +624,7 @@ pub struct Metasrv {
     procedure_manager: ProcedureManagerRef,
     mailbox: MailboxRef,
     ddl_manager: DdlManagerRef,
-    wal_options_allocator: WalOptionsAllocatorRef,
+    wal_provider: WalProviderRef,
     table_metadata_manager: TableMetadataManagerRef,
     runtime_switch_manager: RuntimeSwitchManagerRef,
     memory_region_keeper: MemoryRegionKeeperRef,
@@ -684,7 +684,7 @@ impl Metasrv {
 
             // Builds leadership change notifier.
             let mut leadership_change_notifier = LeadershipChangeNotifier::default();
-            leadership_change_notifier.add_listener(self.wal_options_allocator.clone());
+            leadership_change_notifier.add_listener(self.wal_provider.clone());
             leadership_change_notifier
                 .add_listener(Arc::new(ProcedureManagerListenerAdapter(procedure_manager)));
             leadership_change_notifier.add_listener(Arc::new(NodeExpiryListener::new(
@@ -782,8 +782,8 @@ impl Metasrv {
                 "Ensure only one instance of Metasrv is running, as there is no election service."
             );
 
-            if let Err(e) = self.wal_options_allocator.start().await {
-                error!(e; "Failed to start wal options allocator");
+            if let Err(e) = self.wal_provider.start().await {
+                error!(e; "Failed to start wal provider");
             }
             // Always load kv into cached kv store.
             self.leader_cached_kv_backend
