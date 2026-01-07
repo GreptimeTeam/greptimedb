@@ -167,18 +167,24 @@ fn try_encode_decode_substrait(plan: &LogicalPlan, state: SessionState) {
         .encode(plan, crate::query_engine::DefaultSerializer)
         .unwrap();
     let inner = sub_plan_bytes.clone();
+    let inner_state = state.clone();
     let decoded_plan = futures::executor::block_on(async move {
         substrait::DFLogicalSubstraitConvertor
-            .decode(inner, state)
+            .decode(inner, inner_state)
             .await
     }).inspect_err(|e|{
-    use prost::Message;
+        use prost::Message;
         let sub_plan = substrait::substrait_proto_df::proto::Plan::decode(sub_plan_bytes).unwrap();
         common_telemetry::error!("Failed to decode substrait plan: {e},substrait plan: {sub_plan:#?}\nlogical plan: {plan:#?}");
     })
     .unwrap();
 
-    assert_eq!(*plan, decoded_plan);
+    let simp = SimplifyExpressions::new()
+        .rewrite(decoded_plan, &state)
+        .unwrap()
+        .data;
+
+    assert_eq!(*plan, simp);
 }
 
 #[test]
@@ -1074,6 +1080,43 @@ fn expand_proj_part_col_aggr_sort_limit() {
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn test_simplify_select_now_expression() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_provider = Arc::new(DfTableProviderAdapter::new(test_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider.clone()));
+    let ctx = SessionContext::new();
+    ctx.register_table(TableReference::bare("t"), table_provider.clone() as _)
+        .unwrap();
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+        .unwrap()
+        .project(vec![now()])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan.clone(), &config)
+        .unwrap();
+
+    common_telemetry::info!("Analyzed plan: {}", result);
+    let LogicalPlan::Extension(e) = result.inputs()[0].clone() else {
+        panic!("Expected Extension plan node");
+    };
+    let merge_scan_input = e
+        .node
+        .as_any()
+        .downcast_ref::<MergeScanLogicalPlan>()
+        .unwrap()
+        .input()
+        .clone();
+
+    try_encode_decode_substrait(&merge_scan_input, ctx.state());
 }
 
 #[test]

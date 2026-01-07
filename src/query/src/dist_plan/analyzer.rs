@@ -35,7 +35,10 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::dist_plan::analyzer::utils::{aliased_columns_for, rewrite_merge_sort_exprs};
+use crate::dist_plan::analyzer::utils::{
+    PatchOptimizerContext, PlanTreeExpressionSimplifier, aliased_columns_for,
+    rewrite_merge_sort_exprs,
+};
 use crate::dist_plan::commutativity::{
     Categorizer, Commutativity, partial_commutative_transformer,
 };
@@ -111,56 +114,13 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         config.optimizer.filter_null_join_keys = true;
         let config = Arc::new(config);
 
-        // The `ConstEvaluator` in `SimplifyExpressions` might evaluate some UDFs early in the
-        // planning stage, by executing them directly. For example, the `database()` function.
-        // So the `ConfigOptions` here (which is set from the session context) should be present
-        // in the UDF's `ScalarFunctionArgs`. However, the default implementation in DataFusion
-        // seems to lost track on it: the `ConfigOptions` is recreated with its default values again.
-        // So we create a custom `OptimizerConfig` with the desired `ConfigOptions`
-        // to walk around the issue.
-        // TODO(LFC): Maybe use DataFusion's `OptimizerContext` again
-        //   once https://github.com/apache/datafusion/pull/17742 is merged.
-        struct OptimizerContext {
-            inner: datafusion_optimizer::OptimizerContext,
-            config: Arc<ConfigOptions>,
-        }
-
-        impl OptimizerConfig for OptimizerContext {
-            fn query_execution_start_time(&self) -> DateTime<Utc> {
-                self.inner.query_execution_start_time()
-            }
-
-            fn alias_generator(&self) -> &Arc<AliasGenerator> {
-                self.inner.alias_generator()
-            }
-
-            fn options(&self) -> Arc<ConfigOptions> {
-                self.config.clone()
-            }
-        }
-
-        /// Simplify all expressions recursively in the plan tree
-        struct PlanTreeExpressionSimplifier {
-            optimizer_context: OptimizerContext,
-        }
-
-        impl TreeNodeRewriter for PlanTreeExpressionSimplifier {
-            type Node = LogicalPlan;
-            fn f_down(&mut self, plan: Self::Node) -> DfResult<Transformed<Self::Node>> {
-                let simp = SimplifyExpressions::new()
-                    .rewrite(plan, &self.optimizer_context)?
-                    .data;
-                Ok(Transformed::yes(simp))
-            }
-        }
-
-        let optimizer_context = OptimizerContext {
+        let optimizer_context = PatchOptimizerContext {
             inner: datafusion_optimizer::OptimizerContext::new(),
             config: config.clone(),
         };
 
         let plan = plan
-            .rewrite_with_subqueries(&mut PlanTreeExpressionSimplifier { optimizer_context })?
+            .rewrite_with_subqueries(&mut PlanTreeExpressionSimplifier::new(optimizer_context))?
             .data;
 
         let opt = config.extensions.get::<DistPlannerOptions>();
