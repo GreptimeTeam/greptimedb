@@ -446,6 +446,9 @@ impl SeriesDistributor {
             &self.metrics_list,
         );
         part_metrics.on_first_poll();
+        // Start fetch time before building sources so scan cost contains
+        // build part cost.
+        let mut fetch_start = Instant::now();
 
         let range_builder_list = Arc::new(RangeBuilderList::new(
             self.stream_ctx.input.num_memtables(),
@@ -478,7 +481,6 @@ impl SeriesDistributor {
         )
         .await?;
         let mut metrics = SeriesDistributorMetrics::default();
-        let mut fetch_start = Instant::now();
 
         let mut divider = FlatSeriesBatchDivider::default();
         while let Some(record_batch) = reader.try_next().await? {
@@ -536,6 +538,9 @@ impl SeriesDistributor {
             &self.metrics_list,
         );
         part_metrics.on_first_poll();
+        // Start fetch time before building sources so scan cost contains
+        // build part cost.
+        let mut fetch_start = Instant::now();
 
         let range_builder_list = Arc::new(RangeBuilderList::new(
             self.stream_ctx.input.num_memtables(),
@@ -568,7 +573,6 @@ impl SeriesDistributor {
         )
         .await?;
         let mut metrics = SeriesDistributorMetrics::default();
-        let mut fetch_start = Instant::now();
 
         let mut current_series = PrimaryKeySeriesBatch::default();
         while let Some(batch) = reader.next_batch().await? {
