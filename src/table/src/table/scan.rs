@@ -53,6 +53,7 @@ use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 use crate::table::metrics::StreamMetrics;
 
 /// A plan to read multiple partitions from a region of a table.
+#[derive(Clone)]
 pub struct RegionScanExec {
     scanner: Arc<Mutex<RegionScannerRef>>,
     arrow_schema: ArrowSchemaRef,
@@ -445,7 +446,14 @@ impl ExecutionPlan for RegionScanExec {
         _config: &datafusion::config::ConfigOptions,
     ) -> DfResult<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
         // TODO(discord9): use the pushdown result to update the scanner's predicate
-        Ok(FilterPushdownPropagation::if_all(child_pushdown_result))
+
+        let parent_filters = child_pushdown_result
+            .parent_filters
+            .into_iter()
+            .map(|f| f.filter)
+            .collect::<Vec<_>>();
+
+        todo!()
     }
 }
 

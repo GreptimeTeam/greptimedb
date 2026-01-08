@@ -27,6 +27,7 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
+use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion_common::Column;
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
@@ -803,6 +804,7 @@ fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
 }
 
 /// Common input for different scanners.
+#[derive(Clone)]
 pub struct ScanInput {
     /// Region SST access layer.
     access_layer: AccessLayerRef,
@@ -1413,6 +1415,7 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
 
 /// Context shared by different streams from a scanner.
 /// It contains the input and ranges to scan.
+#[derive(Clone)]
 pub struct StreamContext {
     /// Input memtables and files.
     pub input: ScanInput,
@@ -1597,6 +1600,30 @@ impl StreamContext {
 
         write!(f, "{:?}", InputWrapper { input: &self.input })
     }
+
+    pub(crate) fn update_predicate_with_dyn_filter(
+        &mut self,
+        filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
+    ) -> Vec<bool> {
+        let mut supported = Vec::with_capacity(filter_exprs.len());
+        let filter_expr = filter_exprs
+            .into_iter()
+            .filter_map(|expr| {
+                let expr: Arc<dyn std::any::Any + Send + Sync + 'static> = expr;
+                if let Ok(dyn_filter) = expr
+                .downcast::<datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr>()
+            {
+                supported.push(true);
+                Some(dyn_filter.clone())
+            } else {
+                supported.push(false);
+                None
+            }
+            })
+            .collect();
+        self.input.predicate.update_dyn_filters(filter_expr);
+        supported
+    }
 }
 
 /// Predicates to evaluate.
@@ -1681,6 +1708,17 @@ impl PredicateGroup {
     /// Returns predicate that excludes region partition expr.
     pub(crate) fn predicate_without_region(&self) -> Option<&Predicate> {
         self.predicate_without_region.as_ref()
+    }
+
+    /// Updates dynamic filters in the predicates.
+    pub(crate) fn update_dyn_filters(&mut self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) {
+        if let Some(predicate) = &mut self.predicate_all {
+            *predicate = predicate.clone().with_dyn_filters(dyn_filters.clone());
+        }
+
+        if let Some(predicate) = &mut self.predicate_without_region {
+            *predicate = predicate.clone().with_dyn_filters(dyn_filters.clone());
+        }
     }
 
     /// Returns the region partition expr from metadata, if any.

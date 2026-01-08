@@ -495,6 +495,17 @@ impl RegionScanner for UnorderedScan {
         predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
     }
 
+    fn update_predicate_with_dyn_filter(
+        &mut self,
+        filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
+    ) -> Vec<bool> {
+        let mut new_stream_ctx = self.stream_ctx.as_ref().clone();
+        let supported = new_stream_ctx.update_predicate_with_dyn_filter(filter_exprs);
+        self.stream_ctx = Arc::new(new_stream_ctx);
+
+        supported
+    }
+
     fn set_logical_region(&mut self, logical_region: bool) {
         self.properties.set_logical_region(logical_region);
     }
