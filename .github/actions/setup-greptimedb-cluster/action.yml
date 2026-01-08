@@ -51,7 +51,7 @@ runs:
     run: |
       helm upgrade \
         --install my-greptimedb \
-        --set meta.backendStorage.etcd.endpoints=${{ inputs.etcd-endpoints }} \
+        --set 'meta.backendStorage.etcd.endpoints[0]=${{ inputs.etcd-endpoints }}' \
         --set meta.enableRegionFailover=${{ inputs.enable-region-failover }} \
         --set image.registry=${{ inputs.image-registry }} \
         --set image.repository=${{ inputs.image-repository }}  \
