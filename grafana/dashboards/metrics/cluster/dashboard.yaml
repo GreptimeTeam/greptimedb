@@ -1080,7 +1080,7 @@ groups:
               legendFormat: __auto
         - title: Trigger Eval Elapsed
           type: timeseries
-          description: Failure rate of trigger evaluation.
+          description: Time to eval trigger.
           unit: s
           queries:
             - expr: "histogram_quantile(0.99, \n  rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])\n)"
@@ -1095,8 +1095,8 @@ groups:
               legendFormat: '[{{instance}}]-[{{pod}}]-p75'
         - title: Trigger Eval Failure Rate
           type: timeseries
-          description: Time to send trigger alerts.
-          unit: s
+          description: Failure rate of trigger evaluation.
+          unit: none
           queries:
             - expr: rate(greptime_trigger_evaluate_failure_count[$__rate_interval])
               datasource:
@@ -1105,7 +1105,7 @@ groups:
               legendFormat: __auto
         - title: Send Alert Elapsed
           type: timeseries
-          description: Failure rate while sending trigger alerts.
+          description: Time to send trigger alerts.
           unit: s
           queries:
             - expr: "histogram_quantile(0.99, \n  rate(greptime_trigger_send_alert_elapsed_bucket[$__rate_interval])\n)"
@@ -1120,8 +1120,8 @@ groups:
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{channel_type}}]-p75'
         - title: Send Alert Failure Rate
           type: timeseries
-          description: Time to persist trigger alert records.
-          unit: s
+          description: Failure rate of sending trigger alerts.
+          unit: none
           queries:
             - expr: rate(greptime_trigger_send_alert_failure_count[$__rate_interval])
               datasource:
@@ -1146,7 +1146,7 @@ groups:
         - title: Save Alert Failure Rate
           type: timeseries
           description: Failure rate of saving trigger alert records.
-          unit: s
+          unit: none
           queries:
             - expr: rate(greptime_trigger_save_alert_record_failure_count[$__rate_interval])
               datasource:

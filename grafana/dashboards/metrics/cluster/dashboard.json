@@ -9491,6 +9491,7 @@
         "type": "prometheus",
         "uid": "bf9fzta69bhtsa"
       },
+      "description": "Number of triggers currently defined.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -9552,7 +9553,6 @@
         "y": 188
       },
       "id": 358,
-      "description": "Number of triggers currently defined.",
       "options": {
         "legend": {
           "calcs": [],
@@ -9588,7 +9588,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Failure rate of trigger evaluation.",
+      "description": "Time to eval trigger.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -9701,7 +9701,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Time to send trigger alerts.",
+      "description": "Failure rate of trigger evaluation.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -9753,7 +9753,7 @@
               }
             ]
           },
-          "unit": "s"
+          "unit": "none"
         },
         "overrides": []
       },
@@ -9801,7 +9801,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Failure rate while sending trigger alerts.",
+      "description": "Time to send trigger alerts.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -9914,7 +9914,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Time to persist trigger alert records.",
+      "description": "Failure rate of sending trigger alerts.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -9966,7 +9966,7 @@
               }
             ]
           },
-          "unit": "s"
+          "unit": "none"
         },
         "overrides": []
       },
@@ -10179,7 +10179,7 @@
               }
             ]
           },
-          "unit": "s"
+          "unit": "none"
         },
         "overrides": []
       },
