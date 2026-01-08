@@ -495,7 +495,10 @@ impl SeriesDistributor {
             }
 
             // Use divider to split series
-            if let Some(series_batch) = divider.push(record_batch) {
+            let divider_start = Instant::now();
+            let series_batch = divider.push(record_batch);
+            metrics.divider_cost += divider_start.elapsed();
+            if let Some(series_batch) = series_batch {
                 let yield_start = Instant::now();
                 self.senders
                     .send_batch(SeriesBatch::Flat(series_batch))
@@ -506,7 +509,10 @@ impl SeriesDistributor {
         }
 
         // Send any remaining batch in the divider
-        if let Some(series_batch) = divider.finish() {
+        let divider_start = Instant::now();
+        let series_batch = divider.finish();
+        metrics.divider_cost += divider_start.elapsed();
+        if let Some(series_batch) = series_batch {
             let yield_start = Instant::now();
             self.senders
                 .send_batch(SeriesBatch::Flat(series_batch))

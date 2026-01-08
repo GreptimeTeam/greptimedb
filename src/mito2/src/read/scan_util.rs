@@ -197,6 +197,8 @@ pub(crate) struct ScanMetricsSet {
     distributor_scan_cost: Duration,
     /// Duration of the series distributor to yield.
     distributor_yield_cost: Duration,
+    /// Duration spent in divider operations.
+    distributor_divider_cost: Duration,
 
     /// Merge metrics.
     merge_metrics: MergeMetrics,
@@ -291,6 +293,7 @@ impl fmt::Debug for ScanMetricsSet {
             num_distributor_batches,
             distributor_scan_cost,
             distributor_yield_cost,
+            distributor_divider_cost,
             merge_metrics,
             dedup_metrics,
             stream_eof,
@@ -413,6 +416,12 @@ impl fmt::Debug for ScanMetricsSet {
             write!(
                 f,
                 ", \"distributor_yield_cost\":\"{distributor_yield_cost:?}\""
+            )?;
+        }
+        if !distributor_divider_cost.is_zero() {
+            write!(
+                f,
+                ", \"distributor_divider_cost\":\"{distributor_divider_cost:?}\""
             )?;
         }
 
@@ -658,6 +667,7 @@ impl ScanMetricsSet {
             num_batches,
             scan_cost,
             yield_cost,
+            divider_cost,
         } = distributor_metrics;
 
         self.num_series_send_timeout += *num_series_send_timeout;
@@ -666,6 +676,7 @@ impl ScanMetricsSet {
         self.num_distributor_batches += *num_batches;
         self.distributor_scan_cost += *scan_cost;
         self.distributor_yield_cost += *yield_cost;
+        self.distributor_divider_cost += *divider_cost;
     }
 
     /// Observes metrics.
@@ -1014,6 +1025,8 @@ pub(crate) struct SeriesDistributorMetrics {
     pub(crate) scan_cost: Duration,
     /// Duration of the series distributor to yield.
     pub(crate) yield_cost: Duration,
+    /// Duration spent in divider operations.
+    pub(crate) divider_cost: Duration,
 }
 
 /// Scans memtable ranges at `index`.
