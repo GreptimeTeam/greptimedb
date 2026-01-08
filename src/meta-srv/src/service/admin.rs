@@ -39,7 +39,7 @@ use crate::service::admin::maintenance::MaintenanceHandler;
 use crate::service::admin::node_lease::NodeLeaseHandler;
 use crate::service::admin::procedure::ProcedureManagerHandler;
 use crate::service::admin::recovery::RecoveryHandler;
-use crate::service::admin::sequencer::TableIdSequenceHandler;
+use crate::service::admin::sequencer::TableIdAllocatorHandler;
 
 /// Expose admin http service on rpc port(3002).
 ///
@@ -249,8 +249,8 @@ pub fn admin_axum_router(metasrv: Arc<Metasrv>) -> AxumRouter {
     let recovery_handler = RecoveryHandler {
         manager: metasrv.runtime_switch_manager().clone(),
     };
-    let table_id_sequence_handler = TableIdSequenceHandler {
-        table_id_sequence: metasrv.table_id_sequence().clone(),
+    let table_id_allocator_handler = TableIdAllocatorHandler {
+        table_id_allocator: metasrv.table_id_allocator().clone(),
         runtime_switch_manager: metasrv.runtime_switch_manager().clone(),
     };
 
@@ -303,7 +303,7 @@ pub fn admin_axum_router(metasrv: Arc<Metasrv>) -> AxumRouter {
                 AxumRouter::new()
                     .route("/next-id", routing::get(sequencer::get_next_table_id))
                     .route("/set-next-id", routing::post(sequencer::set_next_table_id))
-                    .with_state(table_id_sequence_handler.clone()),
+                    .with_state(table_id_allocator_handler.clone()),
             ),
         );
 

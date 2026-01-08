@@ -127,18 +127,10 @@ impl RepartitionStart {
                     .iter()
                     .map(|&idx| target_exprs[idx].clone())
                     .collect::<Vec<_>>();
-                let regions_to_allocate = target_partition_exprs
-                    .len()
-                    .saturating_sub(source_regions.len());
-                let regions_to_deallocate = source_regions
-                    .len()
-                    .saturating_sub(target_partition_exprs.len());
                 AllocationPlanEntry {
                     group_id,
                     source_regions,
                     target_partition_exprs,
-                    regions_to_allocate,
-                    regions_to_deallocate,
                     transition_map: subtask.transition_map,
                 }
             })

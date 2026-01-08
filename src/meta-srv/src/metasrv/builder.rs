@@ -43,7 +43,7 @@ use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
 use common_meta::stats::topic::TopicStatsRegistry;
-use common_meta::wal_options_allocator::{build_kafka_client, build_wal_options_allocator};
+use common_meta::wal_provider::{build_kafka_client, build_wal_provider};
 use common_procedure::ProcedureManagerRef;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_stat::ResourceStatImpl;
@@ -54,7 +54,7 @@ use store_api::storage::MAX_REGION_SEQ;
 use crate::bootstrap::build_default_meta_peer_client;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
-use crate::error::{self, BuildWalOptionsAllocatorSnafu, OtherSnafu, Result};
+use crate::error::{self, BuildWalProviderSnafu, OtherSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::gc::GcScheduler;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
@@ -241,11 +241,11 @@ impl MetasrvBuilder {
             peer_discovery: meta_peer_client.clone(),
         };
 
-        let wal_options_allocator = build_wal_options_allocator(&options.wal, kv_backend.clone())
+        let wal_provider = build_wal_provider(&options.wal, kv_backend.clone())
             .await
-            .context(BuildWalOptionsAllocatorSnafu)?;
-        let wal_options_allocator = Arc::new(wal_options_allocator);
-        let is_remote_wal = wal_options_allocator.is_remote_wal();
+            .context(BuildWalProviderSnafu)?;
+        let wal_provider = Arc::new(wal_provider);
+        let is_remote_wal = wal_provider.is_remote_wal();
         let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
             let sequence = Arc::new(
                 SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
@@ -259,11 +259,11 @@ impl MetasrvBuilder {
             );
             Arc::new(TableMetadataAllocator::with_peer_allocator(
                 sequence,
-                wal_options_allocator.clone(),
+                wal_provider.clone(),
                 peer_allocator,
             ))
         });
-        let table_id_sequence = table_metadata_allocator.table_id_sequence();
+        let table_id_allocator = table_metadata_allocator.table_id_allocator();
 
         let flow_selector =
             Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)) as SelectorRef;
@@ -568,7 +568,7 @@ impl MetasrvBuilder {
             procedure_manager,
             mailbox,
             ddl_manager,
-            wal_options_allocator,
+            wal_provider,
             table_metadata_manager,
             runtime_switch_manager,
             greptimedb_telemetry_task: get_greptimedb_telemetry_task(
@@ -585,7 +585,7 @@ impl MetasrvBuilder {
             leader_region_registry,
             wal_prune_ticker,
             region_flush_ticker,
-            table_id_sequence,
+            table_id_allocator,
             reconciliation_manager,
             topic_stats_registry,
             resource_stat: Arc::new(resource_stat),

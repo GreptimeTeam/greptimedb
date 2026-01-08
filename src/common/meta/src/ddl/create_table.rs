@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod executor;
-pub(crate) mod template;
+pub mod executor;
+pub mod template;
 
 use std::collections::HashMap;
 

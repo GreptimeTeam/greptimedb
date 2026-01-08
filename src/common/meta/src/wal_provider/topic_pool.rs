@@ -22,9 +22,9 @@ use snafu::ensure;
 
 use crate::error::{InvalidNumTopicsSnafu, Result};
 use crate::kv_backend::KvBackendRef;
-use crate::wal_options_allocator::selector::{RoundRobinTopicSelector, TopicSelectorRef};
-use crate::wal_options_allocator::topic_creator::KafkaTopicCreator;
-use crate::wal_options_allocator::topic_manager::KafkaTopicManager;
+use crate::wal_provider::selector::{RoundRobinTopicSelector, TopicSelectorRef};
+use crate::wal_provider::topic_creator::KafkaTopicCreator;
+use crate::wal_provider::topic_manager::KafkaTopicManager;
 
 /// Topic pool for kafka remote wal.
 /// Responsible for:
@@ -144,7 +144,7 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::test_util::test_kafka_topic_pool;
-    use crate::wal_options_allocator::selector::RoundRobinTopicSelector;
+    use crate::wal_provider::selector::RoundRobinTopicSelector;
 
     #[tokio::test]
     async fn test_pool_invalid_number_topics_err() {

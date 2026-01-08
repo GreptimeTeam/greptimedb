@@ -38,7 +38,7 @@ use common_meta::procedure_executor::LocalProcedureExecutor;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal_options_allocator::build_wal_options_allocator;
+use common_meta::wal_provider::build_wal_provider;
 use common_procedure::ProcedureManagerRef;
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::SlowQueryOptions;
@@ -190,7 +190,7 @@ impl GreptimeDbStandaloneBuilder {
             flow_server: flownode.flow_engine(),
         });
 
-        let table_id_sequence = Arc::new(
+        let table_id_allocator = Arc::new(
             SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
                 .initial(MIN_USER_TABLE_ID as u64)
                 .step(10)
@@ -203,13 +203,13 @@ impl GreptimeDbStandaloneBuilder {
                 .build(),
         );
         let kafka_options = opts.wal.clone().try_into().unwrap();
-        let wal_options_allocator = build_wal_options_allocator(&kafka_options, kv_backend.clone())
+        let wal_provider = build_wal_provider(&kafka_options, kv_backend.clone())
             .await
             .unwrap();
-        let wal_options_allocator = Arc::new(wal_options_allocator);
+        let wal_provider = Arc::new(wal_provider);
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
-            table_id_sequence,
-            wal_options_allocator.clone(),
+            table_id_allocator,
+            wal_provider.clone(),
         ));
         let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
             flow_id_sequence,
@@ -278,7 +278,7 @@ impl GreptimeDbStandaloneBuilder {
         flow_streaming_engine.set_frontend_invoker(invoker).await;
 
         procedure_manager.start().await.unwrap();
-        wal_options_allocator.start().await.unwrap();
+        wal_provider.start().await.unwrap();
 
         test_util::prepare_another_catalog_and_schema(&instance).await;
 
