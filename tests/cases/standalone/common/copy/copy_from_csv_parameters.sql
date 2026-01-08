@@ -21,19 +21,19 @@ Copy demo_1 TO '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format=
 
 Copy demo_2 TO '${SQLNESS_HOME}/demo/export/csv_header/demo_2.csv' with (format='csv');
 
--- Test the case where a CSV has more fields than the table. (header=true) (table: 4, file: 5)
+-- Test the case where a CSV has more fields than the table. (header=true, continue_on_error=false) (table: 4, file: 5)
 
 CREATE TABLE enable_long_fields(host string, cpu double, jsons JSON, ts TIMESTAMP time index);
 
-Copy enable_long_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='true');
+Copy enable_long_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='true', continue_on_error='false');
 
 SELECT count(*) FROM enable_long_fields;
 
--- Test the number of CSV fields is fewer than the table’s. (header=true) (table: 5, file: 3)
+-- Test the number of CSV fields is fewer than the table’s. (header=true, continue_on_error=false) (table: 5, file: 3)
 
 CREATE TABLE enable_short_fields(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
 
-Copy enable_short_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_2.csv' with (format='csv', header='true');
+Copy enable_short_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_2.csv' with (format='csv', header='true', continue_on_error='false');
 
 SELECT count(*) FROM enable_short_fields;
 
@@ -45,6 +45,8 @@ Copy disable_long_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv
 
 SELECT count(*) FROM disable_long_fields;
 
+SELECT * FROM disable_long_fields;
+
 -- Test the number of CSV fields is fewer than the table’s. (header=false) (table: 5, file: 3)
 
 CREATE TABLE disable_short_fields(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
@@ -53,11 +55,13 @@ Copy disable_short_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_2.cs
 
 SELECT count(*) FROM disable_short_fields;
 
--- Test the order of CSV fields differs from the table’s. (header=true)
+SELECT * FROM disable_short_fields;
+
+-- Test the order of CSV fields differs from the table’s. (header=true, continue_on_error=false)
 
 CREATE TABLE enable_different_order(host string, memory double, jsons JSON, cpu double, ts TIMESTAMP time index);
 
-Copy enable_different_order FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='true');
+Copy enable_different_order FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='true', continue_on_error='false');
 
 SELECT count(*) FROM enable_different_order;
 
@@ -69,11 +73,11 @@ Copy disable_different_order FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1
 
 SELECT count(*) FROM disable_different_order;
 
--- Test the order of CSV fields differs from the table’s.
+-- Test the order of CSV fields differs from the table’s. (header=true, continue_on_error=false)
 
 CREATE TABLE different_order(host string, memory double, jsons JSON, cpu double, ts TIMESTAMP time index);
 
-Copy different_order FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='true');
+Copy different_order FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='true', continue_on_error='false');
 
 SELECT count(*) FROM different_order;
 
@@ -82,9 +86,15 @@ SELECT count(*) FROM different_order;
 
 CREATE TABLE check_header(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
 
-Copy check_header FROM '${SQLNESS_HOME}/demo/export/csv_header/' with (pattern = 'demo*', format='csv', header='true');
+Copy check_header FROM '${SQLNESS_HOME}/demo/export/csv_header/' with (pattern = 'demo*', format='csv', header='true', continue_on_error='false');
 
-SELECT * from check_header order by ts;
+SELECT count(*) from check_header;
+
+CREATE TABLE check_header_continue_error(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
+
+Copy check_header_continue_error FROM '${SQLNESS_HOME}/demo/export/csv_header/' with (pattern = 'demo*', format='csv', header='true', continue_on_error='true');
+
+SELECT count(*) from check_header_continue_error;
 
 -- Test to skip the header validation
 
@@ -113,5 +123,7 @@ drop table disable_different_order;
 drop table different_order;
 
 drop table check_header;
+
+drop table check_header_continue_error;
 
 drop table non_check_header;

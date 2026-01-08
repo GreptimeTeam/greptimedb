@@ -120,8 +120,8 @@ impl Default for CsvFormat {
     fn default() -> Self {
         Self {
             has_header: true,
-            header: false,
-            continue_on_error: true,
+            header: true,
+            continue_on_error: false,
             delimiter: b',',
             schema_infer_max_record: Some(file_format::DEFAULT_SCHEMA_INFER_MAX_RECORD),
             compression_type: CompressionType::Uncompressed,
