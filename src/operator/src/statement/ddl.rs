@@ -83,14 +83,14 @@ use table::table_name::TableName;
 use crate::error::{
     self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu,
-    EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu, FlowNotFoundSnafu,
-    InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu,
-    InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu, PartitionExprToPbSnafu, Result,
-    SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu,
-    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    DeserializePartitionExprSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
+    FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
+    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu,
+    PartitionExprToPbSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu,
+    SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
     UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
-use crate::expr_helper;
+use crate::expr_helper::{self, RepartitionRequest};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
 
@@ -1262,15 +1262,173 @@ impl StatementExecutor {
             alter_table.alter_operation(),
             AlterTableOperation::Repartition { .. }
         ) {
-            let _request = expr_helper::to_repartition_request(alter_table, &query_context)?;
-            return NotSupportedSnafu {
-                feat: "ALTER TABLE REPARTITION",
-            }
-            .fail();
+            let request = expr_helper::to_repartition_request(alter_table, &query_context)?;
+            return self.repartition_table(request, &query_context).await;
         }
 
         let expr = expr_helper::to_alter_table_expr(alter_table, &query_context)?;
         self.alter_table_inner(expr, query_context).await
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn repartition_table(
+        &self,
+        request: RepartitionRequest,
+        query_context: &QueryContextRef,
+    ) -> Result<Output> {
+        // Check if the schema is read-only.
+        ensure!(
+            !is_readonly_schema(&request.schema_name),
+            SchemaReadOnlySnafu {
+                name: request.schema_name.clone()
+            }
+        );
+
+        let catalog_name = request.catalog_name;
+        let schema_name = request.schema_name;
+        let table_name = request.table_name;
+        // Get the table from the catalog.
+        let table = self
+            .catalog_manager
+            .table(
+                &catalog_name,
+                &schema_name,
+                &table_name,
+                Some(query_context),
+            )
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: format_full_table_name(&catalog_name, &schema_name, &table_name),
+            })?;
+        let table_id = table.table_info().ident.table_id;
+        // Get existing partition expressions from the table route.
+        let (physical_table_id, physical_table_route) = self
+            .table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(table_id)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        ensure!(
+            physical_table_id == table_id,
+            NotSupportedSnafu {
+                feat: "REPARTITION on logical tables"
+            }
+        );
+
+        let table_info = table.table_info();
+        // Get partition column names from the table metadata.
+        let existing_partition_columns: Vec<String> =
+            table_info.meta.partition_column_names().cloned().collect();
+        // Repartition requires the table to have partition columns.
+        ensure!(
+            !existing_partition_columns.is_empty(),
+            InvalidPartitionRuleSnafu {
+                reason: format!(
+                    "table {}.{}.{} does not have partition columns, cannot repartition",
+                    catalog_name, schema_name, table_name
+                )
+            }
+        );
+
+        // Build column name to type mapping for partition columns only.
+        let table_schema = &table_info.meta.schema;
+        let column_schemas = table_schema.column_schemas();
+        // Repartition operations involving columns outside the existing partition columns are not supported.
+        // This restriction ensures repartition only applies to current partition columns.
+        let column_name_and_type: HashMap<&String, ConcreteDataType> = existing_partition_columns
+            .iter()
+            .map(|pc| {
+                let column = column_schemas
+                    .iter()
+                    .find(|c| &c.name == pc)
+                    // partition column must exist in schema
+                    .unwrap();
+                (&column.name, column.data_type.clone())
+            })
+            .collect();
+        let timezone = query_context.timezone();
+        // Convert SQL Exprs to PartitionExprs.
+        let from_partition_exprs = request
+            .from_exprs
+            .iter()
+            .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
+            .collect::<Result<Vec<_>>>()?;
+
+        let into_partition_exprs = request
+            .into_exprs
+            .iter()
+            .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
+            .collect::<Result<Vec<_>>>()?;
+
+        // Parse existing partition expressions from region routes.
+        let mut existing_partition_exprs =
+            Vec::with_capacity(physical_table_route.region_routes.len());
+        for route in &physical_table_route.region_routes {
+            let expr_json = route.region.partition_expr();
+            if !expr_json.is_empty() {
+                match PartitionExpr::from_json_str(&expr_json) {
+                    Ok(Some(expr)) => existing_partition_exprs.push(expr),
+                    Ok(None) => {
+                        // Empty
+                    }
+                    Err(e) => {
+                        return Err(e).context(DeserializePartitionExprSnafu);
+                    }
+                }
+            }
+        }
+
+        // Validate that from_partition_exprs are a subset of existing partition exprs.
+        // We compare PartitionExpr directly since it implements Eq.
+        for from_expr in &from_partition_exprs {
+            ensure!(
+                existing_partition_exprs.contains(from_expr),
+                InvalidPartitionRuleSnafu {
+                    reason: format!(
+                        "partition expression '{}' does not exist in table {}.{}.{}",
+                        from_expr, catalog_name, schema_name, table_name
+                    )
+                }
+            );
+        }
+
+        // Build the new partition expressions:
+        // new_exprs = existing_exprs - from_exprs + into_exprs
+        let new_partition_exprs: Vec<PartitionExpr> = existing_partition_exprs
+            .into_iter()
+            .filter(|expr| !from_partition_exprs.contains(expr))
+            .chain(into_partition_exprs.clone().into_iter())
+            .collect();
+        let new_partition_exprs_len = new_partition_exprs.len();
+
+        // Validate the new partition expressions using MultiDimPartitionRule and PartitionChecker.
+        let _ = MultiDimPartitionRule::try_new(
+            existing_partition_columns.clone(),
+            vec![],
+            new_partition_exprs,
+            true,
+        )
+        .context(InvalidPartitionSnafu)?;
+
+        info!(
+            "Repartition table {}.{}.{} (table_id={}) from {:?} to {:?}, new partition count: {}",
+            catalog_name,
+            schema_name,
+            table_name,
+            table_id,
+            from_partition_exprs,
+            into_partition_exprs,
+            new_partition_exprs_len
+        );
+
+        // TODO(weny): Implement the repartition procedure submission.
+        // The repartition procedure infrastructure is not yet fully integrated with the DDL task system.
+        NotSupportedSnafu {
+            feat: "ALTER TABLE REPARTITION",
+        }
+        .fail()
     }
 
     #[tracing::instrument(skip_all)]
