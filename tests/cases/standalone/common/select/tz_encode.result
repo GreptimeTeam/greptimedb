@@ -30,9 +30,9 @@ SELECT
 FROM
     ngx_access_log;
 
-+--------------------------------+
-| now()                          |
-+--------------------------------+
++-----------------------------+
+| now()                       |
++-----------------------------+
 | NOW |
 | NOW |
 | NOW |
@@ -43,7 +43,7 @@ FROM
 | NOW |
 | NOW |
 | NOW |
-+--------------------------------+
++-----------------------------+
 
 -- SQLNESS REPLACE TimestampNanosecond\(\d+ TimestampNanosecond(NOW
 -- SQLNESS REPLACE (peers.*) REDACTED
