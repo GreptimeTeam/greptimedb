@@ -18,7 +18,6 @@ use api::v1::CreateTableExpr;
 use api::v1::region::{CreateRequests, RegionRequest, RegionRequestHeader, region_request};
 use common_telemetry::debug;
 use common_telemetry::tracing_context::TracingContext;
-use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::storage::{RegionId, TableId};
 use table::metadata::RawTableInfo;
 
@@ -103,6 +102,6 @@ pub fn create_region_request_builder_from_raw_table_info(
     raw_table_info: &RawTableInfo,
     physical_table_id: TableId,
 ) -> Result<CreateRequestBuilder> {
-    let template = build_template_from_raw_table_info(raw_table_info, METRIC_ENGINE_NAME)?;
+    let template = build_template_from_raw_table_info(raw_table_info)?;
     Ok(CreateRequestBuilder::new(template, Some(physical_table_id)))
 }

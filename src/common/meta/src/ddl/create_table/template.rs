@@ -30,10 +30,7 @@ use crate::wal_provider::prepare_wal_options;
 /// Constructs a [CreateRequest] based on the provided [RawTableInfo].
 ///
 /// Note: This function is primarily intended for creating logical tables or allocating placeholder regions.
-pub fn build_template_from_raw_table_info(
-    raw_table_info: &RawTableInfo,
-    engine: &str,
-) -> Result<CreateRequest> {
+pub fn build_template_from_raw_table_info(raw_table_info: &RawTableInfo) -> Result<CreateRequest> {
     let primary_key_indices = &raw_table_info.meta.primary_key_indices;
     let column_defs = raw_table_info
         .meta
@@ -58,7 +55,7 @@ pub fn build_template_from_raw_table_info(
     let options = HashMap::from(&raw_table_info.meta.options);
     let template = CreateRequest {
         region_id: 0,
-        engine: engine.to_string(),
+        engine: raw_table_info.meta.engine.clone(),
         column_defs,
         primary_key: primary_key_indices.iter().map(|i| *i as u32).collect(),
         path: String::new(),
