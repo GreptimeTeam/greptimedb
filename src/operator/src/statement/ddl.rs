@@ -79,6 +79,7 @@ use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterKind, AlterTableRequest, COMMENT_KEY, TableOptions};
 use table::table_name::TableName;
+use table::table_reference::TableReference;
 
 use crate::error::{
     self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
@@ -1284,22 +1285,24 @@ impl StatementExecutor {
             }
         );
 
-        let catalog_name = request.catalog_name;
-        let schema_name = request.schema_name;
-        let table_name = request.table_name;
+        let table_ref = TableReference::full(
+            &request.catalog_name,
+            &request.schema_name,
+            &request.table_name,
+        );
         // Get the table from the catalog.
         let table = self
             .catalog_manager
             .table(
-                &catalog_name,
-                &schema_name,
-                &table_name,
+                &request.catalog_name,
+                &request.schema_name,
+                &request.table_name,
                 Some(query_context),
             )
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                table_name: format_full_table_name(&catalog_name, &schema_name, &table_name),
+                table_name: table_ref.to_string(),
             })?;
         let table_id = table.table_info().ident.table_id;
         // Get existing partition expressions from the table route.
@@ -1319,34 +1322,23 @@ impl StatementExecutor {
 
         let table_info = table.table_info();
         // Get partition column names from the table metadata.
-        let existing_partition_columns: Vec<String> =
-            table_info.meta.partition_column_names().cloned().collect();
+        let existing_partition_columns = table_info.meta.partition_columns().collect::<Vec<_>>();
         // Repartition requires the table to have partition columns.
         ensure!(
             !existing_partition_columns.is_empty(),
             InvalidPartitionRuleSnafu {
                 reason: format!(
-                    "table {}.{}.{} does not have partition columns, cannot repartition",
-                    catalog_name, schema_name, table_name
+                    "table {} does not have partition columns, cannot repartition",
+                    table_ref
                 )
             }
         );
 
-        // Build column name to type mapping for partition columns only.
-        let table_schema = &table_info.meta.schema;
-        let column_schemas = table_schema.column_schemas();
         // Repartition operations involving columns outside the existing partition columns are not supported.
         // This restriction ensures repartition only applies to current partition columns.
-        let column_name_and_type: HashMap<&String, ConcreteDataType> = existing_partition_columns
+        let column_name_and_type = existing_partition_columns
             .iter()
-            .map(|pc| {
-                let column = column_schemas
-                    .iter()
-                    .find(|c| &c.name == pc)
-                    // partition column must exist in schema
-                    .unwrap();
-                (&column.name, column.data_type.clone())
-            })
+            .map(|column| (&column.name, column.data_type.clone()))
             .collect();
         let timezone = query_context.timezone();
         // Convert SQL Exprs to PartitionExprs.
@@ -1387,8 +1379,8 @@ impl StatementExecutor {
                 existing_partition_exprs.contains(from_expr),
                 InvalidPartitionRuleSnafu {
                     reason: format!(
-                        "partition expression '{}' does not exist in table {}.{}.{}",
-                        from_expr, catalog_name, schema_name, table_name
+                        "partition expression '{}' does not exist in table {}",
+                        from_expr, table_ref
                     )
                 }
             );
@@ -1405,7 +1397,10 @@ impl StatementExecutor {
 
         // Validate the new partition expressions using MultiDimPartitionRule and PartitionChecker.
         let _ = MultiDimPartitionRule::try_new(
-            existing_partition_columns.clone(),
+            existing_partition_columns
+                .iter()
+                .map(|c| c.name.clone())
+                .collect(),
             vec![],
             new_partition_exprs,
             true,
@@ -1413,10 +1408,8 @@ impl StatementExecutor {
         .context(InvalidPartitionSnafu)?;
 
         info!(
-            "Repartition table {}.{}.{} (table_id={}) from {:?} to {:?}, new partition count: {}",
-            catalog_name,
-            schema_name,
-            table_name,
+            "Repartition table {} (table_id={}) from {:?} to {:?}, new partition count: {}",
+            table_ref,
             table_id,
             from_partition_exprs,
             into_partition_exprs,

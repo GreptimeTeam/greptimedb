@@ -239,6 +239,12 @@ impl TableMeta {
             .map(|idx| &columns_schemas[*idx].name)
     }
 
+    pub fn partition_columns(&self) -> impl Iterator<Item = &ColumnSchema> {
+        self.partition_key_indices
+            .iter()
+            .map(|idx| &self.schema.column_schemas()[*idx])
+    }
+
     /// Returns the new [TableMetaBuilder] after applying given `alter_kind`.
     ///
     /// The returned builder would derive the next column id of this meta.
