@@ -111,12 +111,34 @@
 | Rate of meta KV Ops | `rate(greptime_meta_kv_request_elapsed_count[$__rate_interval])` | `timeseries` | Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads. | `prometheus` | `none` | `{{pod}}-{{op}} p99` |
 | DDL Latency | `histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_tables_bucket))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_table))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_view))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_flow))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_drop_table))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_alter_table))` | `timeseries` | Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads. | `prometheus` | `s` | `CreateLogicalTables-{{step}} p90` |
 | Reconciliation stats | `greptime_meta_reconciliation_stats` | `timeseries` | Reconciliation stats | `prometheus` | `s` | `{{pod}}-{{table_type}}-{{type}}` |
-| Reconciliation steps | `histogram_quantile(0.9, greptime_meta_reconciliation_procedure_bucket)` | `timeseries` | Elapsed of Reconciliation steps  | `prometheus` | `s` | `{{procedure_name}}-{{step}}-P90` |
+| Reconciliation steps | `histogram_quantile(0.9, greptime_meta_reconciliation_procedure_bucket)` | `timeseries` | Elapsed of Reconciliation steps | `prometheus` | `s` | `{{procedure_name}}-{{step}}-P90` |
 # Flownode
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
 | Flow Ingest / Output Rate | `sum by(instance, pod, direction) (rate(greptime_flow_processed_rows[$__rate_interval]))` | `timeseries` | Flow Ingest / Output Rate. | `prometheus` | -- | `[{{pod}}]-[{{instance}}]-[{{direction}}]` |
 | Flow Ingest Latency | `histogram_quantile(0.95, sum(rate(greptime_flow_insert_elapsed_bucket[$__rate_interval])) by (le, instance, pod))`<br/>`histogram_quantile(0.99, sum(rate(greptime_flow_insert_elapsed_bucket[$__rate_interval])) by (le, instance, pod))` | `timeseries` | Flow Ingest Latency. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]-p95` |
 | Flow Operation Latency | `histogram_quantile(0.95, sum(rate(greptime_flow_processing_time_bucket[$__rate_interval])) by (le,instance,pod,type))`<br/>`histogram_quantile(0.99, sum(rate(greptime_flow_processing_time_bucket[$__rate_interval])) by (le,instance,pod,type))` | `timeseries` | Flow Operation Latency. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]-[{{type}}]-p95` |
-| Flow Buffer Size per Instance | `greptime_flow_input_buf_size` | `timeseries` | Flow Buffer Size per Instance. | `prometheus` | -- | `[{{instance}}]-[{{pod}]` |
+| Flow Buffer Size per Instance | `greptime_flow_input_buf_size` | `timeseries` | Flow Buffer Size per Instance. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]` |
 | Flow Processing Error per Instance | `sum by(instance,pod,code) (rate(greptime_flow_errors[$__rate_interval]))` | `timeseries` | Flow Processing Error per Instance. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]-[{{code}}]` |
+# Trigger
+| Title | Query | Type | Description | Datasource | Unit | Legend Format |
+| --- | --- | --- | --- | --- | --- | --- |
+| Trigger Count | `greptime_trigger_count{}` | `timeseries` | Total number of triggers currently defined. | `prometheus` | -- | `__auto` |
+| Trigger Eval Elapsed | `histogram_quantile(0.99, 
+  rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])
+)`<br/>`histogram_quantile(0.75, 
+  rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])
+)` | `timeseries` | Elapsed time for trigger evaluation, including query execution and condition evaluation. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-p99` |
+| Trigger Eval Failure Rate | `rate(greptime_trigger_evaluate_failure_count[$__rate_interval])` | `timeseries` | Rate of failed trigger evaluations. | `prometheus` | `none` | `__auto` |
+| Send Alert Elapsed | `histogram_quantile(0.99, 
+  rate(greptime_trigger_send_alert_elapsed_bucket[$__rate_interval])
+)`<br/>`histogram_quantile(0.75, 
+  rate(greptime_trigger_send_alert_elapsed_bucket[$__rate_interval])
+)` | `timeseries` | Elapsed time to send trigger alerts to notification channels. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{channel_type}}]-p99` |
+| Send Alert Failure Rate | `rate(greptime_trigger_send_alert_failure_count[$__rate_interval])` | `timeseries` | Rate of failures when sending trigger alerts. | `prometheus` | `none` | `__auto` |
+| Save Alert Elapsed | `histogram_quantile(0.99, 
+  rate(greptime_trigger_save_alert_record_elapsed_bucket[$__rate_interval])
+)`<br/>`histogram_quantile(0.75, 
+  rate(greptime_trigger_save_alert_record_elapsed_bucket[$__rate_interval])
+)` | `timeseries` | Elapsed time to persist trigger alert records. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{storage_type}}]-p99` |
+| Save Alert Failure Rate | `rate(greptime_trigger_save_alert_record_failure_count[$__rate_interval])` | `timeseries` | Rate of failures when persisting trigger alert records. | `prometheus` | `none` | `__auto` |
