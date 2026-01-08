@@ -1008,7 +1008,7 @@ impl RegionScanner for SinglePartitionScanner {
         &mut self,
         filter_exprs: Vec<Arc<dyn datafusion_physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
-        todo!()
+        vec![false; filter_exprs.len()]
     }
 
     fn metadata(&self) -> RegionMetadataRef {
