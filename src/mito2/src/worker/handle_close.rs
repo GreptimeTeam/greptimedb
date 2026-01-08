@@ -15,23 +15,50 @@
 //! Handling close request.
 
 use common_telemetry::info;
-use store_api::region_request::AffectedRows;
+use store_api::logstore::LogStore;
+use store_api::logstore::provider::Provider;
+use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
 
-use crate::error::Result;
+use crate::flush::FlushReason;
+use crate::request::OptionOutputTx;
 use crate::worker::RegionWorkerLoop;
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_close_request(
         &mut self,
         region_id: RegionId,
-    ) -> Result<AffectedRows> {
+        sender: OptionOutputTx,
+    ) {
         let Some(region) = self.regions.get_region(region_id) else {
-            return Ok(0);
+            sender.send(Ok(0));
+            return;
         };
 
         info!("Try to close region {}, worker: {}", region_id, self.id);
 
+        // If the region is using Noop WAL and has data in memtable,
+        // we should flush it before closing to ensure durability.
+        if region.provider == Provider::Noop
+            && !region
+                .version_control
+                .current()
+                .version
+                .memtables
+                .is_empty()
+        {
+            self.handle_flush_request(
+                region_id,
+                RegionFlushRequest {
+                    row_group_size: None,
+                },
+                Some(FlushReason::Closing),
+                sender,
+            );
+            return;
+        }
+
+        // WAL configured or memtable is empty, flush is not necessary.
         region.stop().await;
         self.regions.remove_region(region_id);
         // Clean flush status.
@@ -40,11 +67,8 @@ impl<S> RegionWorkerLoop<S> {
         self.compaction_scheduler.on_region_closed(region_id);
         // clean index build status.
         self.index_build_scheduler.on_region_closed(region_id).await;
-
         info!("Region {} closed, worker: {}", region_id, self.id);
-
         self.region_count.dec();
-
-        Ok(0)
+        sender.send(Ok(0))
     }
 }

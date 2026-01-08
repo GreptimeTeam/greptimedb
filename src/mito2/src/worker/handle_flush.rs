@@ -165,6 +165,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionFlushRequest,
+        reason: Option<FlushReason>,
         mut sender: OptionOutputTx,
     ) {
         let Some(region) = self.regions.flushable_region_or(region_id, &mut sender) else {
@@ -175,11 +176,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // when handling flush request instead of in `schedule_flush` or `flush_finished`.
         self.update_topic_latest_entry_id(&region);
 
-        let reason = if region.is_downgrading() {
-            FlushReason::Downgrading
-        } else {
-            FlushReason::Manual
-        };
+        let reason = reason.unwrap_or_else(|| {
+            if region.is_downgrading() {
+                FlushReason::Downgrading
+            } else {
+                FlushReason::Manual
+            }
+        });
         let mut task =
             self.new_flush_task(&region, reason, request.row_group_size, self.config.clone());
         task.push_sender(sender);
@@ -277,6 +280,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
+        let flush_on_close = request.flush_reason == FlushReason::Closing;
         let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
 
         // Notifies waiters and observes the flush timer.
@@ -316,6 +320,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.schedule_compaction(&region).await;
 
         self.listener.on_flush_success(region_id);
+        if flush_on_close {
+            // For flush on close, we need to remove region from region server.
+            region.stop().await;
+            self.regions.remove_region(region_id);
+            // Clean flush status.
+            self.flush_scheduler.on_region_closed(region_id);
+            // Clean compaction status.
+            self.compaction_scheduler.on_region_closed(region_id);
+            // clean index build status.
+            self.index_build_scheduler.on_region_closed(region_id).await;
+            info!("Region {} closed, worker: {}", region_id, self.id);
+            self.region_count.dec();
+        }
     }
 
     /// Updates the latest entry id since flush of the region.

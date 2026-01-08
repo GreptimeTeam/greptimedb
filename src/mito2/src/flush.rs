@@ -219,6 +219,7 @@ pub enum FlushReason {
     Downgrading,
     /// Enter staging mode.
     EnterStaging,
+    Closing,
 }
 
 impl FlushReason {
@@ -320,6 +321,7 @@ impl RegionFlushTask {
                     edit,
                     memtables_to_remove,
                     is_staging: self.is_staging,
+                    flush_reason: self.reason,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,

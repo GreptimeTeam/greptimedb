@@ -50,6 +50,7 @@ use crate::error::{
     FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, MissingPartitionExprSnafu,
     Result, UnexpectedSnafu,
 };
+use crate::flush::FlushReason;
 use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
@@ -914,6 +915,8 @@ pub(crate) struct FlushFinished {
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
     /// Whether the region is in staging mode.
     pub(crate) is_staging: bool,
+    /// Reason for flush.
+    pub(crate) flush_reason: FlushReason,
 }
 
 impl FlushFinished {
