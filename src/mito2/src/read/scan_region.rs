@@ -1036,8 +1036,7 @@ impl ScanInput {
         let predicate = self.predicate_for_file(file);
         let filter_mode = pre_filter_mode(self.append_mode, self.merge_mode);
         let decode_pk_values = !self.compaction && self.mapper.has_tags();
-        #[cfg_attr(not(feature = "vector_index"), allow(unused_mut))]
-        let mut reader = self
+        let reader = self
             .access_layer
             .read_sst(file.clone())
             .predicate(predicate)
@@ -1047,10 +1046,12 @@ impl ScanInput {
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
             .fulltext_index_appliers(self.fulltext_index_appliers.clone());
         #[cfg(feature = "vector_index")]
-        {
+        let reader = {
+            let mut reader = reader;
             reader =
                 reader.vector_index_applier(self.vector_index_applier.clone(), self.vector_index_k);
-        }
+            reader
+        };
         let res = reader
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .flat_format(self.flat_format)

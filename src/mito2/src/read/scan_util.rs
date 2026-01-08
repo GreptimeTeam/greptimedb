@@ -646,6 +646,7 @@ impl ScanMetricsSet {
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rg_bloom_filtered as u64);
+        #[cfg(feature = "vector_index")]
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["vector_index_filtered"])
             .inc_by(self.rg_vector_filtered as u64);
@@ -665,6 +666,7 @@ impl ScanMetricsSet {
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rows_bloom_filtered as u64);
+        #[cfg(feature = "vector_index")]
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["vector_index_filtered"])
             .inc_by(self.rows_vector_filtered as u64);
