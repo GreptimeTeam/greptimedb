@@ -374,8 +374,7 @@ impl RegionScanner for SeriesScan {
             warn!("Failed to get mutable reference to stream_ctx when updating dynamic filters");
             return vec![false; filter_exprs.len()];
         };
-        let supported = stream_ctx.update_predicate_with_dyn_filter(filter_exprs);
-        supported
+        stream_ctx.update_predicate_with_dyn_filter(filter_exprs)
     }
 
     fn set_logical_region(&mut self, logical_region: bool) {
