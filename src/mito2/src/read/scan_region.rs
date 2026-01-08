@@ -804,7 +804,6 @@ fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
 }
 
 /// Common input for different scanners.
-#[derive(Clone)]
 pub struct ScanInput {
     /// Region SST access layer.
     access_layer: AccessLayerRef,
@@ -1415,7 +1414,6 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
 
 /// Context shared by different streams from a scanner.
 /// It contains the input and ranges to scan.
-#[derive(Clone)]
 pub struct StreamContext {
     /// Input memtables and files.
     pub input: ScanInput,
