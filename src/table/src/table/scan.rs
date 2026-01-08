@@ -30,7 +30,7 @@ use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::filter_pushdown::{
-    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation,
+    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation, PushedDown,
 };
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -453,7 +453,20 @@ impl ExecutionPlan for RegionScanExec {
             .map(|f| f.filter)
             .collect::<Vec<_>>();
 
-        todo!()
+        let supported = self
+            .scanner
+            .lock()
+            .unwrap()
+            .update_predicate_with_dyn_filter(parent_filters);
+        let new_self = Arc::new(self.clone());
+
+        Ok(FilterPushdownPropagation {
+            filters: supported
+                .into_iter()
+                .map(|s| if s { PushedDown::Yes } else { PushedDown::No })
+                .collect(),
+            updated_node: Some(new_self),
+        })
     }
 }
 
