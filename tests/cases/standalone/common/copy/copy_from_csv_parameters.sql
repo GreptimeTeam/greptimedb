@@ -45,7 +45,7 @@ Copy disable_long_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv
 
 SELECT count(*) FROM disable_long_fields;
 
-SELECT * FROM disable_long_fields;
+SELECT * FROM disable_long_fields order by ts;
 
 -- Test the number of CSV fields is fewer than the table’s. (header=false) (table: 5, file: 3)
 
@@ -55,7 +55,7 @@ Copy disable_short_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_2.cs
 
 SELECT count(*) FROM disable_short_fields;
 
-SELECT * FROM disable_short_fields;
+SELECT * FROM disable_short_fields order by ts;
 
 -- Test the order of CSV fields differs from the table’s. (header=true, continue_on_error=false)
 
