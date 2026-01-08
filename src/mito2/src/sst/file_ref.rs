@@ -103,7 +103,6 @@ impl FileReferenceManager {
 
         // get file refs from related regions' manifests
         for (dst_region, src_regions) in &dst_region_to_src_regions {
-            let src_regions = src_regions.iter().cloned().collect::<HashSet<_>>();
             let manifest = dst_region.manifest_ctx.manifest().await;
             for meta in manifest.files.values() {
                 if src_regions.contains(&meta.region_id) {
