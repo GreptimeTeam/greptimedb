@@ -9366,7 +9366,7 @@
               "editorMode": "code",
               "expr": "greptime_flow_input_buf_size",
               "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}]",
+              "legendFormat": "[{{instance}}]-[{{pod}}]",
               "range": true,
               "refId": "A"
             }

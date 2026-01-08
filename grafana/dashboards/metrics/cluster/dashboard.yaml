@@ -1057,7 +1057,7 @@ groups:
               datasource:
                 type: prometheus
                 uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}]'
+              legendFormat: '[{{instance}}]-[{{pod}}]'
         - title: Flow Processing Error per Instance
           type: timeseries
           description: Flow Processing Error per Instance.

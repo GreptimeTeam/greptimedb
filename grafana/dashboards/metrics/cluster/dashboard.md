@@ -118,7 +118,7 @@
 | Flow Ingest / Output Rate | `sum by(instance, pod, direction) (rate(greptime_flow_processed_rows[$__rate_interval]))` | `timeseries` | Flow Ingest / Output Rate. | `prometheus` | -- | `[{{pod}}]-[{{instance}}]-[{{direction}}]` |
 | Flow Ingest Latency | `histogram_quantile(0.95, sum(rate(greptime_flow_insert_elapsed_bucket[$__rate_interval])) by (le, instance, pod))`<br/>`histogram_quantile(0.99, sum(rate(greptime_flow_insert_elapsed_bucket[$__rate_interval])) by (le, instance, pod))` | `timeseries` | Flow Ingest Latency. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]-p95` |
 | Flow Operation Latency | `histogram_quantile(0.95, sum(rate(greptime_flow_processing_time_bucket[$__rate_interval])) by (le,instance,pod,type))`<br/>`histogram_quantile(0.99, sum(rate(greptime_flow_processing_time_bucket[$__rate_interval])) by (le,instance,pod,type))` | `timeseries` | Flow Operation Latency. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]-[{{type}}]-p95` |
-| Flow Buffer Size per Instance | `greptime_flow_input_buf_size` | `timeseries` | Flow Buffer Size per Instance. | `prometheus` | -- | `[{{instance}}]-[{{pod}]` |
+| Flow Buffer Size per Instance | `greptime_flow_input_buf_size` | `timeseries` | Flow Buffer Size per Instance. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]` |
 | Flow Processing Error per Instance | `sum by(instance,pod,code) (rate(greptime_flow_errors[$__rate_interval]))` | `timeseries` | Flow Processing Error per Instance. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]-[{{code}}]` |
 # Trigger
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
