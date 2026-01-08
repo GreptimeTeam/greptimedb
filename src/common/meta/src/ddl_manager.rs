@@ -16,13 +16,15 @@ use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_procedure::{
-    BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId, watcher,
+    BoxedProcedure, BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef,
+    ProcedureWithId, watcher,
 };
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, info, tracing};
 use derive_builder::Builder;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::TableId;
+use table::table_name::TableName;
 
 use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
@@ -40,9 +42,10 @@ use crate::ddl::drop_view::DropViewProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{DdlContext, utils};
 use crate::error::{
-    EmptyDdlTasksSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu, Result,
-    SubmitProcedureSnafu, TableInfoNotFoundSnafu, TableNotFoundSnafu, TableRouteNotFoundSnafu,
-    UnexpectedLogicalRouteTableSnafu, WaitProcedureSnafu,
+    EmptyDdlTasksSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu,
+    RegisterRepartitionProcedureLoaderSnafu, Result, SubmitProcedureSnafu, TableInfoNotFoundSnafu,
+    TableNotFoundSnafu, TableRouteNotFoundSnafu, UnexpectedLogicalRouteTableSnafu,
+    WaitProcedureSnafu,
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
@@ -90,6 +93,7 @@ pub type BoxedProcedureLoaderFactory = dyn Fn(DdlContext) -> BoxedProcedureLoade
 pub struct DdlManager {
     ddl_context: DdlContext,
     procedure_manager: ProcedureManagerRef,
+    repartition_procedure_factory: RepartitionProcedureFactoryRef,
     #[cfg(feature = "enterprise")]
     trigger_ddl_manager: Option<TriggerDdlManagerRef>,
 }
@@ -143,16 +147,37 @@ macro_rules! procedure_loader {
     };
 }
 
+pub type RepartitionProcedureFactoryRef = Arc<dyn RepartitionProcedureFactory>;
+
+pub trait RepartitionProcedureFactory: Send + Sync {
+    fn create(
+        &self,
+        ddl_ctx: &DdlContext,
+        table_name: TableName,
+        table_id: TableId,
+        from_exprs: Vec<String>,
+        to_exprs: Vec<String>,
+    ) -> std::result::Result<BoxedProcedure, BoxedError>;
+
+    fn register_loaders(
+        &self,
+        ddl_ctx: &DdlContext,
+        procedure_manager: &ProcedureManagerRef,
+    ) -> std::result::Result<(), BoxedError>;
+}
+
 impl DdlManager {
     /// Returns a new [DdlManager] with all Ddl [BoxedProcedureLoader](common_procedure::procedure::BoxedProcedureLoader)s registered.
     pub fn try_new(
         ddl_context: DdlContext,
         procedure_manager: ProcedureManagerRef,
+        repartition_procedure_factory: RepartitionProcedureFactoryRef,
         register_loaders: bool,
     ) -> Result<Self> {
         let manager = Self {
             ddl_context,
             procedure_manager,
+            repartition_procedure_factory,
             #[cfg(feature = "enterprise")]
             trigger_ddl_manager: None,
         };
@@ -203,6 +228,10 @@ impl DdlManager {
                 .register_loader(type_name, loader_factory(context))
                 .context(RegisterProcedureLoaderSnafu { type_name })?;
         }
+
+        self.repartition_procedure_factory
+            .register_loaders(&self.ddl_context, &self.procedure_manager)
+            .context(RegisterRepartitionProcedureLoaderSnafu)?;
 
         Ok(())
     }
@@ -947,8 +976,12 @@ async fn handle_comment_on_task(
 mod tests {
     use std::sync::Arc;
 
+    use common_error::ext::BoxedError;
     use common_procedure::local::LocalManager;
     use common_procedure::test_util::InMemoryPoisonStore;
+    use common_procedure::{BoxedProcedure, ProcedureManagerRef};
+    use store_api::storage::TableId;
+    use table::table_name::TableName;
 
     use super::DdlManager;
     use crate::cache_invalidator::DummyCacheInvalidator;
@@ -959,6 +992,7 @@ mod tests {
     use crate::ddl::table_meta::TableMetadataAllocator;
     use crate::ddl::truncate_table::TruncateTableProcedure;
     use crate::ddl::{DdlContext, NoopRegionFailureDetectorControl};
+    use crate::ddl_manager::RepartitionProcedureFactory;
     use crate::key::TableMetadataManager;
     use crate::key::flow::FlowMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
@@ -984,6 +1018,30 @@ mod tests {
     impl FlownodeManager for DummyDatanodeManager {
         async fn flownode(&self, _node: &Peer) -> FlownodeRef {
             unimplemented!()
+        }
+    }
+
+    struct DummyRepartitionProcedureFactory;
+
+    #[async_trait::async_trait]
+    impl RepartitionProcedureFactory for DummyRepartitionProcedureFactory {
+        fn create(
+            &self,
+            _ddl_ctx: &DdlContext,
+            _table_name: TableName,
+            _table_id: TableId,
+            _from_exprs: Vec<String>,
+            _to_exprs: Vec<String>,
+        ) -> std::result::Result<BoxedProcedure, BoxedError> {
+            unimplemented!()
+        }
+
+        fn register_loaders(
+            &self,
+            _ddl_ctx: &DdlContext,
+            _procedure_manager: &ProcedureManagerRef,
+        ) -> std::result::Result<(), BoxedError> {
+            Ok(())
         }
     }
 
@@ -1023,6 +1081,7 @@ mod tests {
                 region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
             },
             procedure_manager.clone(),
+            Arc::new(DummyRepartitionProcedureFactory),
             true,
         );
 

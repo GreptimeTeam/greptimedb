@@ -104,6 +104,13 @@ pub enum Error {
         source: common_procedure::error::Error,
     },
 
+    #[snafu(display("Failed to register repartition procedure loader"))]
+    RegisterRepartitionProcedureLoader {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to submit procedure"))]
     SubmitProcedure {
         #[snafu(implicit)]
@@ -1170,6 +1177,7 @@ impl ErrorExt for Error {
             PutPoison { source, .. } => source.status_code(),
             ConvertColumnDef { source, .. } => source.status_code(),
             ProcedureStateReceiver { source, .. } => source.status_code(),
+            RegisterRepartitionProcedureLoader { source, .. } => source.status_code(),
 
             ParseProcedureId { .. }
             | InvalidNumTopics { .. }

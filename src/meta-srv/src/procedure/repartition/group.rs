@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
+use common_meta::ddl::DdlContext;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::{DatanodeTableValue, RegionInfo};
 use common_meta::key::table_route::TableRouteValue;
@@ -34,7 +35,7 @@ use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock};
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
-use common_procedure::error::ToJsonSnafu;
+use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status, StringKey, UserMetadata,
@@ -60,8 +61,20 @@ pub struct RepartitionGroupProcedure {
     context: Context,
 }
 
+#[derive(Debug, Serialize)]
+struct RepartitionGroupData<'a> {
+    persistent_ctx: &'a PersistentContext,
+    state: &'a dyn State,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepartitionGroupDataOwned {
+    persistent_ctx: PersistentContext,
+    state: Box<dyn State>,
+}
+
 impl RepartitionGroupProcedure {
-    const TYPE_NAME: &'static str = "metasrv-procedure::RepartitionGroup";
+    pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::RepartitionGroup";
 
     pub fn new(persistent_context: PersistentContext, context: &repartition::Context) -> Self {
         let state = Box::new(RepartitionStart);
@@ -77,12 +90,19 @@ impl RepartitionGroupProcedure {
             },
         }
     }
-}
 
-#[derive(Debug, Serialize)]
-pub struct RepartitionGroupData<'a> {
-    persistent_ctx: &'a PersistentContext,
-    state: &'a dyn State,
+    pub fn from_json<F>(json: &str, ctx_factory: F) -> ProcedureResult<Self>
+    where
+        F: FnOnce(PersistentContext) -> Context,
+    {
+        let RepartitionGroupDataOwned {
+            state,
+            persistent_ctx,
+        } = serde_json::from_str(json).context(FromJsonSnafu)?;
+        let context = ctx_factory(persistent_ctx);
+
+        Ok(Self { state, context })
+    }
 }
 
 #[async_trait::async_trait]
@@ -147,6 +167,23 @@ pub struct Context {
     pub mailbox: MailboxRef,
 
     pub server_addr: String,
+}
+
+impl Context {
+    pub fn new(
+        ddl_ctx: &DdlContext,
+        mailbox: MailboxRef,
+        server_addr: String,
+        persistent_ctx: PersistentContext,
+    ) -> Self {
+        Self {
+            persistent_ctx,
+            cache_invalidator: ddl_ctx.cache_invalidator.clone(),
+            table_metadata_manager: ddl_ctx.table_metadata_manager.clone(),
+            mailbox,
+            server_addr,
+        }
+    }
 }
 
 /// The result of the group preparation phase, containing validated region routes.
