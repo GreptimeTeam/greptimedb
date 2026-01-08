@@ -541,24 +541,16 @@ impl ScanMetricsSet {
     /// Merges the local scanner metrics.
     fn merge_scanner_metrics(&mut self, other: &ScannerMetrics) {
         let ScannerMetrics {
-            prepare_scan_cost,
-            build_reader_cost,
             scan_cost,
             yield_cost,
             num_batches,
             num_rows,
-            num_mem_ranges,
-            num_file_ranges,
         } = other;
 
-        self.prepare_scan_cost += *prepare_scan_cost;
-        self.build_reader_cost += *build_reader_cost;
         self.scan_cost += *scan_cost;
         self.yield_cost += *yield_cost;
         self.num_rows += *num_rows;
         self.num_batches += *num_batches;
-        self.num_mem_ranges += *num_mem_ranges;
-        self.num_file_ranges += *num_file_ranges;
     }
 
     /// Merges the local reader metrics.
@@ -943,9 +935,6 @@ impl PartitionMetrics {
 
     /// Merges [ScannerMetrics], `build_reader_cost`, `scan_cost` and `yield_cost`.
     pub(crate) fn merge_metrics(&self, metrics: &ScannerMetrics) {
-        self.0
-            .build_reader_cost
-            .add_duration(metrics.build_reader_cost);
         self.0.scan_cost.add_duration(metrics.scan_cost);
         self.record_elapsed_compute(metrics.scan_cost);
         self.0.yield_cost.add_duration(metrics.yield_cost);
