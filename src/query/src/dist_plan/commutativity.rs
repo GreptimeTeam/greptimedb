@@ -263,7 +263,7 @@ impl Categorizer {
                     }
                 }
                 // all group by expressions are partition columns can push down, unless
-                // another push down(including `Limit` or `Sort`) is already in progress(which will then prvent next cond commutative node from being push down).
+                // another push down(including `Limit` or `Sort`) is already in progress(which will then prevent next cond commutative node from being push down).
                 // TODO(discord9): This is a temporary solution(that works), a better description of
                 // commutativity is needed under this situation.
                 Commutativity::ConditionalCommutative(None)
