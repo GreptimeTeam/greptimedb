@@ -49,7 +49,8 @@ use store_api::region_engine::{
     SyncRegionFromResponse,
 };
 use store_api::region_request::{
-    BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+    AffectedRows, BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest,
+    RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
@@ -497,13 +498,10 @@ impl MetricEngine {
     }
 
     /// Batch put operation for multiple logical regions.
-    ///
-    /// This is an optimized path for writing to multiple logical regions that share
-    /// the same physical region. It merges all requests into a single physical write.
     pub async fn put_regions_batch(
         &self,
-        requests: Vec<(RegionId, store_api::region_request::RegionPutRequest)>,
-    ) -> Result<HashMap<RegionId, Result<store_api::region_request::AffectedRows>>> {
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Result<AffectedRows> {
         self.inner.put_regions_batch(requests).await
     }
 

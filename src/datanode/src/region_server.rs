@@ -590,22 +590,13 @@ impl RegionServer {
                     violated: "Failed to downcast to MetricEngine",
                 })?;
 
-        let results = metric_engine
+        let total_affected = metric_engine
             .put_regions_batch(put_requests)
             .await
             .map_err(BoxedError::new)
             .context(HandleRegionRequestSnafu {
                 region_id: first_region_id,
             })?;
-
-        // Aggregate results
-        let mut total_affected = 0;
-        for (region_id, result) in results {
-            let affected = result
-                .map_err(BoxedError::new)
-                .context(HandleRegionRequestSnafu { region_id })?;
-            total_affected += affected;
-        }
 
         Ok(Either::Left(RegionResponse {
             affected_rows: total_affected,

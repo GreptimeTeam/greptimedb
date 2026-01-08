@@ -14,7 +14,9 @@
 
 use std::collections::HashMap;
 
-use api::v1::{Rows, WriteHint};
+use api::v1::{
+    ColumnSchema, PrimaryKeyEncoding as PrimaryKeyEncodingProto, Row, Rows, Value, WriteHint,
+};
 use common_telemetry::{error, info};
 use snafu::{OptionExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
@@ -29,7 +31,7 @@ use crate::error::{
     PhysicalRegionNotFoundSnafu, Result, UnsupportedRegionRequestSnafu,
 };
 use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_OPERATION_ELAPSED};
-use crate::row_modifier::RowsIter;
+use crate::row_modifier::{RowsIter, TableIdInput};
 use crate::utils::to_data_region_id;
 
 impl MetricEngineInner {
@@ -56,18 +58,17 @@ impl MetricEngineInner {
 
     /// Batch write multiple logical regions to the same physical region.
     ///
-    /// Precondition: All requests should belong to the same physical region.
-    /// This is typically ensured by the frontend routing layer.
+    /// Dispatch region put requests in batch.
     ///
-    /// Returns a map of per-logical-region results. Individual request failures
-    /// (e.g., in verify_rows) don't block other requests. However, if the final
-    /// physical write fails, all previously successful requests are marked as failed.
+    /// Requests may span multiple physical regions. We group them by physical
+    /// region and write sequentially. This method fails fast on validation or
+    /// preparation errors within a group and stops at the first failure.
     pub async fn put_regions_batch(
         &self,
         requests: Vec<(RegionId, RegionPutRequest)>,
-    ) -> Result<HashMap<RegionId, Result<AffectedRows>>> {
+    ) -> Result<AffectedRows> {
         if requests.is_empty() {
-            return Ok(HashMap::new());
+            return Ok(0);
         }
 
         let _timer = MITO_OPERATION_ELAPSED
@@ -77,74 +78,56 @@ impl MetricEngineInner {
         // Fast path: single request, no batching overhead
         if requests.len() == 1 {
             let (logical_id, req) = requests.into_iter().next().unwrap();
-            let result = self.put_logical_region(logical_id, req).await;
-            return Ok([(logical_id, result)].into_iter().collect());
+            return self.put_logical_region(logical_id, req).await;
         }
 
-        // Get physical region metadata from the first logical region
-        let first_logical_id = requests[0].0;
-        let (physical_region_id, data_region_id, primary_key_encoding) =
-            self.find_data_region_meta(first_logical_id)?;
-
-        // Process each request: verify and modify
-        let mut merged_schema = None;
-        let mut merged_rows = Vec::new();
-        let mut results = HashMap::with_capacity(requests.len());
-
-        for (logical_region_id, mut request) in requests {
-            // Verify rows
-            match self
-                .verify_rows(logical_region_id, physical_region_id, &request.rows)
-                .await
-            {
-                Ok(()) => {}
-                Err(e) => {
-                    results.insert(logical_region_id, Err(e));
-                    continue;
-                }
-            }
-
-            // Modify rows (adds __table_id and __tsid)
-            match self.modify_rows(
-                physical_region_id,
-                logical_region_id.table_id(),
-                &mut request.rows,
-                primary_key_encoding,
-            ) {
-                Ok(()) => {}
-                Err(e) => {
-                    results.insert(logical_region_id, Err(e));
-                    continue;
-                }
-            }
-
-            // Accumulate for merging
-            let row_count = request.rows.rows.len();
-            if merged_schema.is_none() {
-                merged_schema = Some(request.rows.schema.clone());
-            }
-            merged_rows.extend(request.rows.rows);
-            results.insert(logical_region_id, Ok(row_count as AffectedRows));
+        let mut requests_per_physical: HashMap<RegionId, Vec<(RegionId, RegionPutRequest)>> =
+            HashMap::new();
+        for (logical_region_id, request) in requests {
+            let physical_region_id = self.find_physical_region_id(logical_region_id)?;
+            requests_per_physical
+                .entry(physical_region_id)
+                .or_default()
+                .push((logical_region_id, request));
         }
 
-        // If all requests failed, return early
-        if merged_rows.is_empty() {
-            return Ok(results);
+        let mut total_affected_rows: AffectedRows = 0;
+        for (physical_region_id, requests) in requests_per_physical {
+            let affected_rows = self
+                .put_regions_batch_single_physical(physical_region_id, requests)
+                .await?;
+            total_affected_rows += affected_rows;
         }
 
-        // Merge into a single physical write
-        let merged_request = RegionPutRequest {
-            rows: Rows {
-                schema: merged_schema.unwrap(),
-                rows: merged_rows,
-            },
-            hint: if primary_key_encoding == PrimaryKeyEncoding::Sparse {
-                Some(WriteHint {
-                    primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
-                })
-            } else {
-                None
-            },
+        Ok(total_affected_rows)
+    }
+
+    /// Write a batch of requests that all belong to the same physical region.
+    ///
+    /// This function orchestrates the batch write process:
+    /// 1. Validates all requests
+    /// 2. Merges requests according to the encoding strategy (sparse or dense)
+    /// 3. Writes the merged batch to the physical region
+    async fn put_regions_batch_single_physical(
+        &self,
+        physical_region_id: RegionId,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Result<AffectedRows> {
+        if requests.is_empty() {
+            return Ok(0);
+        }
+
+        let data_region_id = to_data_region_id(physical_region_id);
+        let primary_key_encoding = self.get_primary_key_encoding(data_region_id)?;
+
+        // Validate all requests
+        self.validate_batch_requests(physical_region_id, &requests)
+            .await?;
+
+        // Merge requests according to encoding strategy
+        let (merged_request, total_affected_rows) = match primary_key_encoding {
+            PrimaryKeyEncoding::Sparse => self.merge_sparse_batch(physical_region_id, requests)?,
+            PrimaryKeyEncoding::Dense => self.merge_dense_batch(data_region_id, requests)?,
         };
 
         // Write once to the physical region
@@ -152,7 +135,197 @@ impl MetricEngineInner {
             .write_data(data_region_id, RegionRequest::Put(merged_request))
             .await?;
 
-        Ok(results)
+        Ok(total_affected_rows)
+    }
+
+    /// Get primary key encoding for a data region.
+    fn get_primary_key_encoding(&self, data_region_id: RegionId) -> Result<PrimaryKeyEncoding> {
+        let state = self.state.read().unwrap();
+        state
+            .get_primary_key_encoding(data_region_id)
+            .context(PhysicalRegionNotFoundSnafu {
+                region_id: data_region_id,
+            })
+    }
+
+    /// Validates all requests in a batch.
+    async fn validate_batch_requests(
+        &self,
+        physical_region_id: RegionId,
+        requests: &[(RegionId, RegionPutRequest)],
+    ) -> Result<()> {
+        for (logical_region_id, request) in requests {
+            self.verify_rows(*logical_region_id, physical_region_id, &request.rows)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Merges multiple requests using sparse primary key encoding.
+    fn merge_sparse_batch(
+        &self,
+        physical_region_id: RegionId,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Result<(RegionPutRequest, AffectedRows)> {
+        let total_rows: usize = requests.iter().map(|(_, req)| req.rows.rows.len()).sum();
+        let mut merged_rows = Vec::with_capacity(total_rows);
+        let mut total_affected_rows: AffectedRows = 0;
+        let mut output_schema: Option<Vec<ColumnSchema>> = None;
+
+        // Modify and collect rows from each request
+        for (logical_region_id, mut request) in requests {
+            self.modify_rows(
+                physical_region_id,
+                logical_region_id.table_id(),
+                &mut request.rows,
+                PrimaryKeyEncoding::Sparse,
+            )?;
+
+            let row_count = request.rows.rows.len();
+            total_affected_rows += row_count as AffectedRows;
+
+            // Capture the output schema from the first modified request
+            if output_schema.is_none() {
+                output_schema = Some(request.rows.schema.clone());
+            }
+
+            merged_rows.extend(request.rows.rows);
+        }
+
+        // Safe to unwrap: requests is guaranteed non-empty by caller
+        let schema = output_schema.unwrap();
+
+        let merged_request = RegionPutRequest {
+            rows: Rows {
+                schema,
+                rows: merged_rows,
+            },
+            hint: Some(WriteHint {
+                primary_key_encoding: PrimaryKeyEncodingProto::Sparse.into(),
+            }),
+        };
+
+        Ok((merged_request, total_affected_rows))
+    }
+
+    /// Merges multiple requests using dense primary key encoding.
+    ///
+    /// In dense mode, different requests can have different columns.
+    /// We merge all schemas into a union schema, align each row to this schema,
+    /// then batch-modify all rows together (adding __table_id and __tsid).
+    fn merge_dense_batch(
+        &self,
+        data_region_id: RegionId,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Result<(RegionPutRequest, AffectedRows)> {
+        // Build union schema from all requests
+        let merged_schema = Self::build_union_schema(&requests);
+
+        // Align all rows to the merged schema and collect table_ids
+        let (merged_rows, table_ids, total_affected_rows) =
+            Self::align_requests_to_schema(requests, &merged_schema);
+
+        // Batch-modify all rows (add __table_id and __tsid columns)
+        let final_rows = {
+            let state = self.state.read().unwrap();
+            let name_to_id = state
+                .physical_region_states()
+                .get(&data_region_id)
+                .with_context(|| PhysicalRegionNotFoundSnafu {
+                    region_id: data_region_id,
+                })?
+                .physical_columns();
+
+            let iter = RowsIter::new(
+                Rows {
+                    schema: merged_schema,
+                    rows: merged_rows,
+                },
+                name_to_id,
+            );
+
+            self.row_modifier.modify_rows(
+                iter,
+                TableIdInput::Batch(&table_ids),
+                PrimaryKeyEncoding::Dense,
+            )?
+        };
+
+        let merged_request = RegionPutRequest {
+            rows: final_rows,
+            hint: None,
+        };
+
+        Ok((merged_request, total_affected_rows))
+    }
+
+    /// Builds a union schema containing all columns from all requests.
+    fn build_union_schema(requests: &[(RegionId, RegionPutRequest)]) -> Vec<ColumnSchema> {
+        let mut schema_map: HashMap<&str, ColumnSchema> = HashMap::new();
+        for (_, request) in requests {
+            for col in &request.rows.schema {
+                schema_map
+                    .entry(col.column_name.as_str())
+                    .or_insert_with(|| col.clone());
+            }
+        }
+        schema_map.into_values().collect()
+    }
+
+    fn align_requests_to_schema(
+        requests: Vec<(RegionId, RegionPutRequest)>,
+        merged_schema: &[ColumnSchema],
+    ) -> (Vec<Row>, Vec<TableId>, AffectedRows) {
+        // Pre-calculate total capacity
+        let total_rows: usize = requests.iter().map(|(_, req)| req.rows.rows.len()).sum();
+        let mut merged_rows = Vec::with_capacity(total_rows);
+        let mut table_ids = Vec::with_capacity(total_rows);
+        let mut total_affected_rows: AffectedRows = 0;
+
+        let null_value = Value { value_data: None };
+
+        for (logical_region_id, request) in requests {
+            let col_name_to_idx: HashMap<&str, usize> = request
+                .rows
+                .schema
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| (col.column_name.as_str(), idx))
+                .collect();
+
+            let row_count = request.rows.rows.len();
+            total_affected_rows += row_count as AffectedRows;
+            let table_id = logical_region_id.table_id();
+
+            for mut row in request.rows.rows {
+                let mut aligned_values = Vec::with_capacity(merged_schema.len());
+                for col in merged_schema {
+                    if let Some(&idx) = col_name_to_idx.get(col.column_name.as_str()) {
+                        aligned_values.push(std::mem::take(&mut row.values[idx]));
+                    } else {
+                        aligned_values.push(null_value.clone());
+                    }
+                }
+                merged_rows.push(Row {
+                    values: aligned_values,
+                });
+                table_ids.push(table_id);
+            }
+        }
+
+        (merged_rows, table_ids, total_affected_rows)
+    }
+
+    /// Find the physical region id for a logical region.
+    fn find_physical_region_id(&self, logical_region_id: RegionId) -> Result<RegionId> {
+        let state = self.state.read().unwrap();
+        state
+            .logical_regions()
+            .get(&logical_region_id)
+            .copied()
+            .context(LogicalRegionNotFoundSnafu {
+                region_id: logical_region_id,
+            })
     }
 
     /// Dispatch region delete request
@@ -201,7 +374,7 @@ impl MetricEngineInner {
         )?;
         if primary_key_encoding == PrimaryKeyEncoding::Sparse {
             request.hint = Some(WriteHint {
-                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+                primary_key_encoding: PrimaryKeyEncodingProto::Sparse.into(),
             });
         }
         self.data_region
@@ -234,7 +407,7 @@ impl MetricEngineInner {
         )?;
         if primary_key_encoding == PrimaryKeyEncoding::Sparse {
             request.hint = Some(WriteHint {
-                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+                primary_key_encoding: PrimaryKeyEncodingProto::Sparse.into(),
             });
         }
         self.data_region
@@ -327,7 +500,9 @@ impl MetricEngineInner {
                 .physical_columns();
             RowsIter::new(input, name_to_id)
         };
-        let output = self.row_modifier.modify_rows(iter, table_id, encoding)?;
+        let output =
+            self.row_modifier
+                .modify_rows(iter, TableIdInput::Single(table_id), encoding)?;
         *rows = output;
         Ok(())
     }
@@ -557,22 +732,8 @@ mod tests {
         ];
 
         // Batch write
-        let results = engine.inner.put_regions_batch(requests).await.unwrap();
-
-        // Verify all succeeded
-        assert_eq!(results.len(), 3);
-        assert_eq!(
-            *results.get(&logical_region_1).unwrap().as_ref().unwrap(),
-            3
-        );
-        assert_eq!(
-            *results.get(&logical_region_2).unwrap().as_ref().unwrap(),
-            2
-        );
-        assert_eq!(
-            *results.get(&logical_region_3).unwrap().as_ref().unwrap(),
-            5
-        );
+        let affected_rows = engine.inner.put_regions_batch(requests).await.unwrap();
+        assert_eq!(affected_rows, 10);
 
         // Verify physical region contains data from all logical regions
         let request = ScanRequest::default();
@@ -637,15 +798,10 @@ mod tests {
         ];
 
         // Batch write
-        let results = engine.inner.put_regions_batch(requests).await.unwrap();
+        let result = engine.inner.put_regions_batch(requests).await;
+        assert!(result.is_err());
 
-        // Verify results
-        assert_eq!(results.len(), 3);
-        assert!(results.get(&logical_region_1).unwrap().is_ok());
-        assert!(results.get(&nonexistent_region).unwrap().is_err());
-        assert!(results.get(&logical_region_2).unwrap().is_ok());
-
-        // Verify physical region contains data from valid regions only
+        // Verify physical region remains empty due to fail-fast
         let request = ScanRequest::default();
         let stream = env
             .metric()
@@ -654,8 +810,7 @@ mod tests {
             .unwrap();
         let batches = RecordBatches::try_collect(stream).await.unwrap();
 
-        // Should have 3 + 5 = 8 rows (nonexistent_region skipped)
-        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 8);
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
     }
 
     #[tokio::test]
@@ -679,13 +834,8 @@ mod tests {
             },
         )];
 
-        let results = engine.inner.put_regions_batch(requests).await.unwrap();
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(
-            *results.get(&logical_region_id).unwrap().as_ref().unwrap(),
-            5
-        );
+        let affected_rows = engine.inner.put_regions_batch(requests).await.unwrap();
+        assert_eq!(affected_rows, 5);
     }
 
     #[tokio::test]
@@ -694,10 +844,10 @@ mod tests {
         env.init_metric_region().await;
         let engine = env.metric();
 
-        // Empty batch should return empty results
+        // Empty batch should return zero affected rows
         let requests = vec![];
-        let results = engine.inner.put_regions_batch(requests).await.unwrap();
+        let affected_rows = engine.inner.put_regions_batch(requests).await.unwrap();
 
-        assert_eq!(results.len(), 0);
+        assert_eq!(affected_rows, 0);
     }
 }
