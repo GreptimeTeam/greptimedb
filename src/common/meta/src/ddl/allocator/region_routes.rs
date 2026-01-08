@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use common_telemetry::debug;
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::{RegionId, RegionNumber, TableId};
 
 use crate::error::Result;
 use crate::peer::PeerAllocator;
@@ -28,7 +28,7 @@ pub trait RegionRoutesAllocator: Send + Sync {
     async fn allocate(
         &self,
         table_id: TableId,
-        region_number_and_partition_exprs: &[(u32, &str)],
+        regions_and_partitions: &[(RegionNumber, &str)],
     ) -> Result<Vec<RegionRoute>>;
 }
 
@@ -37,13 +37,13 @@ impl<T: PeerAllocator> RegionRoutesAllocator for T {
     async fn allocate(
         &self,
         table_id: TableId,
-        region_number_and_partition_exprs: &[(u32, &str)],
+        regions_and_partitions: &[(RegionNumber, &str)],
     ) -> Result<Vec<RegionRoute>> {
-        let regions = region_number_and_partition_exprs.len().max(1);
+        let regions = regions_and_partitions.len().max(1);
         let peers = self.alloc(regions).await?;
         debug!("Allocated peers {:?} for table {}", peers, table_id,);
 
-        let mut region_routes = region_number_and_partition_exprs
+        let mut region_routes = regions_and_partitions
             .iter()
             .enumerate()
             .map(|(i, (region_number, partition))| {

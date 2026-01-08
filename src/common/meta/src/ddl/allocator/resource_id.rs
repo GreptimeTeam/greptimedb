@@ -21,11 +21,15 @@ pub type ResourceIdAllocatorRef = Arc<dyn ResourceIdAllocator>;
 
 #[async_trait::async_trait]
 pub trait ResourceIdAllocator: Send + Sync {
+    /// Returns the next value and increments the sequence.
     async fn next(&self) -> Result<u64>;
 
+    /// Returns the current value stored in the remote storage without incrementing the sequence.
     async fn peek(&self) -> Result<u64>;
 
+    /// Jumps to the given value.
     async fn jump_to(&self, next: u64) -> Result<()>;
 
+    /// Returns the range of available sequences.
     async fn min_max(&self) -> Range<u64>;
 }
