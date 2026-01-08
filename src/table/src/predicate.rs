@@ -60,7 +60,7 @@ pub struct Predicate {
     /// dynamic filter physical exprs, only useful if dynamic filtering is enabled
     ///
     /// They are usually from `TopK` or `Join` operators, and can dynamically filter data during query execution by using current runtime information to further reduce data scanning
-    dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>,
+    dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
 }
 
 impl Predicate {
@@ -70,12 +70,12 @@ impl Predicate {
     pub fn new(exprs: Vec<Expr>) -> Self {
         Self {
             exprs: Arc::new(exprs),
-            dyn_filters: Arc::new(vec![]),
+            dyn_filters: vec![],
         }
     }
 
     /// Sets the dynamic filter physical exprs.
-    pub fn with_dyn_filters(self, dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>) -> Self {
+    pub fn with_dyn_filters(self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) -> Self {
         Self {
             exprs: self.exprs,
             dyn_filters,
@@ -89,7 +89,7 @@ impl Predicate {
 
     /// Returns the dynamic filter physical exprs. Notice this return a live dynamic filters which
     /// can change during query execution.
-    pub fn dyn_filters(&self) -> &Arc<Vec<DynamicFilterPhysicalExpr>> {
+    pub fn dyn_filters(&self) -> &Vec<Arc<DynamicFilterPhysicalExpr>> {
         &self.dyn_filters
     }
 
