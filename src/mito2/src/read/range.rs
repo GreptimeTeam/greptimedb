@@ -53,7 +53,7 @@ pub struct RowGroupIndex {
 /// Meta data of a partition range.
 /// If the scanner is [UnorderedScan], each meta only has one row group or memtable.
 /// If the scanner is [SeqScan], each meta may have multiple row groups and memtables.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub(crate) struct RangeMeta {
     /// The time range of the range.
     pub(crate) time_range: FileTimeRange,
@@ -450,6 +450,7 @@ impl FileRangeBuilder {
 }
 
 /// Builder to create mem ranges.
+#[derive(Clone)]
 pub(crate) struct MemRangeBuilder {
     /// Ranges of a memtable.
     range: MemtableRange,

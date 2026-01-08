@@ -84,7 +84,7 @@ impl BulkIterContext {
 
         let dyn_filters = predicate
             .as_ref()
-            .map(|pred| pred.dyn_filters().clone())
+            .map(|pred| pred.dyn_filters().as_ref().clone())
             .unwrap_or_default();
 
         Ok(Self {

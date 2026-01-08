@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use common_telemetry::{error, warn};
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
@@ -60,7 +61,7 @@ pub struct Predicate {
     /// dynamic filter physical exprs, only useful if dynamic filtering is enabled
     ///
     /// They are usually from `TopK` or `Join` operators, and can dynamically filter data during query execution by using current runtime information to further reduce data scanning
-    dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>,
+    dyn_filters: Arc<ArcSwap<Vec<Arc<DynamicFilterPhysicalExpr>>>>,
 }
 
 impl Predicate {
@@ -70,16 +71,20 @@ impl Predicate {
     pub fn new(exprs: Vec<Expr>) -> Self {
         Self {
             exprs: Arc::new(exprs),
-            dyn_filters: Arc::new(vec![]),
+            dyn_filters: Arc::new(ArcSwap::new(Arc::new(vec![]))),
         }
     }
 
     /// Sets the dynamic filter physical exprs.
-    pub fn with_dyn_filters(self, dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>) -> Self {
+    pub fn with_dyn_filters(self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) -> Self {
         Self {
             exprs: self.exprs,
-            dyn_filters,
+            dyn_filters: Arc::new(ArcSwap::new(Arc::new(dyn_filters))),
         }
+    }
+
+    pub fn set_dyn_filters(&self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) {
+        self.dyn_filters.store(Arc::new(dyn_filters));
     }
 
     /// Returns the logical exprs.
@@ -89,14 +94,15 @@ impl Predicate {
 
     /// Returns the dynamic filter physical exprs. Notice this return a live dynamic filters which
     /// can change during query execution.
-    pub fn dyn_filters(&self) -> &Arc<Vec<DynamicFilterPhysicalExpr>> {
-        &self.dyn_filters
+    pub fn dyn_filters(&self) -> Arc<Vec<Arc<DynamicFilterPhysicalExpr>>> {
+        self.dyn_filters.load_full()
     }
 
     /// Returns the dynamic filter as physical exprs. Notice this return a "snapshot" of
     /// dynamic filters at the time of calling this method.
     pub fn dyn_filter_phy_exprs(&self) -> error::Result<Vec<Arc<dyn PhysicalExpr>>> {
         self.dyn_filters
+            .load()
             .iter()
             .map(|e| e.current())
             .collect::<Result<Vec<_>, _>>()
