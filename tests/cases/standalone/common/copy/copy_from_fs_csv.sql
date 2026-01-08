@@ -15,7 +15,7 @@ Copy demo TO '${SQLNESS_HOME}/demo/export/csv/demo.csv' with (format='csv');
 
 CREATE TABLE with_filename(host string, cpu double, memory double, ts timestamp time index);
 
-Copy with_filename FROM '${SQLNESS_HOME}/demo/export/csv/demo.csv' with (format='csv', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:39');
+Copy with_filename FROM '${SQLNESS_HOME}/demo/export/csv/demo.csv' with (format='csv', header='false', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:39');
 
 select * from with_filename order by ts;
 
