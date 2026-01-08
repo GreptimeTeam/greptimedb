@@ -1067,7 +1067,7 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{code}}]'
-    - title: Row title
+    - title: Trigger
       panels:
         - title: Trigger Count
           type: timeseries
