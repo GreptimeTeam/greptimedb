@@ -9491,7 +9491,7 @@
         "type": "prometheus",
         "uid": "bf9fzta69bhtsa"
       },
-      "description": "Number of triggers currently defined.",
+      "description": "Total number of triggers currently defined.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -9588,7 +9588,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Time to eval trigger.",
+      "description": "Elapsed time for trigger evaluation, including query execution and condition evaluation.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -9701,7 +9701,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Failure rate of trigger evaluation.",
+      "description": "Rate of failed trigger evaluations.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -9801,7 +9801,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Time to send trigger alerts.",
+      "description": "Elapsed time to send trigger alerts to notification channels.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -9914,7 +9914,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Failure rate of sending trigger alerts.",
+      "description": "Rate of failures when sending trigger alerts.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -10014,7 +10014,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Time to persist trigger alert records.",
+      "description": "Elapsed time to persist trigger alert records.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -10127,7 +10127,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Failure rate of saving trigger alert records.",
+      "description": "Rate of failures when persisting trigger alert records.",
       "fieldConfig": {
         "defaults": {
           "color": {

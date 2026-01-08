@@ -123,22 +123,22 @@
 # Trigger
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
-| Trigger Count | `greptime_trigger_count{}` | `timeseries` | Number of triggers currently defined. | `prometheus` | -- | `__auto` |
+| Trigger Count | `greptime_trigger_count{}` | `timeseries` | Total number of triggers currently defined. | `prometheus` | -- | `__auto` |
 | Trigger Eval Elapsed | `histogram_quantile(0.99, 
   rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])
 )`<br/>`histogram_quantile(0.75, 
   rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])
-)` | `timeseries` | Time to eval trigger. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-p99` |
-| Trigger Eval Failure Rate | `rate(greptime_trigger_evaluate_failure_count[$__rate_interval])` | `timeseries` | Failure rate of trigger evaluation. | `prometheus` | `none` | `__auto` |
+)` | `timeseries` | Elapsed time for trigger evaluation, including query execution and condition evaluation. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-p99` |
+| Trigger Eval Failure Rate | `rate(greptime_trigger_evaluate_failure_count[$__rate_interval])` | `timeseries` | Rate of failed trigger evaluations. | `prometheus` | `none` | `__auto` |
 | Send Alert Elapsed | `histogram_quantile(0.99, 
   rate(greptime_trigger_send_alert_elapsed_bucket[$__rate_interval])
 )`<br/>`histogram_quantile(0.75, 
   rate(greptime_trigger_send_alert_elapsed_bucket[$__rate_interval])
-)` | `timeseries` | Time to send trigger alerts. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{channel_type}}]-p99` |
-| Send Alert Failure Rate | `rate(greptime_trigger_send_alert_failure_count[$__rate_interval])` | `timeseries` | Failure rate of sending trigger alerts. | `prometheus` | `none` | `__auto` |
+)` | `timeseries` | Elapsed time to send trigger alerts to notification channels. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{channel_type}}]-p99` |
+| Send Alert Failure Rate | `rate(greptime_trigger_send_alert_failure_count[$__rate_interval])` | `timeseries` | Rate of failures when sending trigger alerts. | `prometheus` | `none` | `__auto` |
 | Save Alert Elapsed | `histogram_quantile(0.99, 
   rate(greptime_trigger_save_alert_record_elapsed_bucket[$__rate_interval])
 )`<br/>`histogram_quantile(0.75, 
   rate(greptime_trigger_save_alert_record_elapsed_bucket[$__rate_interval])
-)` | `timeseries` | Time to persist trigger alert records. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{storage_type}}]-p99` |
-| Save Alert Failure Rate | `rate(greptime_trigger_save_alert_record_failure_count[$__rate_interval])` | `timeseries` | Failure rate of saving trigger alert records. | `prometheus` | `none` | `__auto` |
+)` | `timeseries` | Elapsed time to persist trigger alert records. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{storage_type}}]-p99` |
+| Save Alert Failure Rate | `rate(greptime_trigger_save_alert_record_failure_count[$__rate_interval])` | `timeseries` | Rate of failures when persisting trigger alert records. | `prometheus` | `none` | `__auto` |

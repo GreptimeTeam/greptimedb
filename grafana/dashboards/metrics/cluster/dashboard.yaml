@@ -1071,7 +1071,7 @@ groups:
       panels:
         - title: Trigger Count
           type: timeseries
-          description: Number of triggers currently defined.
+          description: Total number of triggers currently defined.
           queries:
             - expr: greptime_trigger_count{}
               datasource:
@@ -1080,7 +1080,7 @@ groups:
               legendFormat: __auto
         - title: Trigger Eval Elapsed
           type: timeseries
-          description: Time to eval trigger.
+          description: Elapsed time for trigger evaluation, including query execution and condition evaluation.
           unit: s
           queries:
             - expr: "histogram_quantile(0.99, \n  rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])\n)"
@@ -1095,7 +1095,7 @@ groups:
               legendFormat: '[{{instance}}]-[{{pod}}]-p75'
         - title: Trigger Eval Failure Rate
           type: timeseries
-          description: Failure rate of trigger evaluation.
+          description: Rate of failed trigger evaluations.
           unit: none
           queries:
             - expr: rate(greptime_trigger_evaluate_failure_count[$__rate_interval])
@@ -1105,7 +1105,7 @@ groups:
               legendFormat: __auto
         - title: Send Alert Elapsed
           type: timeseries
-          description: Time to send trigger alerts.
+          description: Elapsed time to send trigger alerts to notification channels.
           unit: s
           queries:
             - expr: "histogram_quantile(0.99, \n  rate(greptime_trigger_send_alert_elapsed_bucket[$__rate_interval])\n)"
@@ -1120,7 +1120,7 @@ groups:
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{channel_type}}]-p75'
         - title: Send Alert Failure Rate
           type: timeseries
-          description: Failure rate of sending trigger alerts.
+          description: Rate of failures when sending trigger alerts.
           unit: none
           queries:
             - expr: rate(greptime_trigger_send_alert_failure_count[$__rate_interval])
@@ -1130,7 +1130,7 @@ groups:
               legendFormat: __auto
         - title: Save Alert Elapsed
           type: timeseries
-          description: Time to persist trigger alert records.
+          description: Elapsed time to persist trigger alert records.
           unit: s
           queries:
             - expr: "histogram_quantile(0.99, \n  rate(greptime_trigger_save_alert_record_elapsed_bucket[$__rate_interval])\n)"
@@ -1145,7 +1145,7 @@ groups:
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{storage_type}}]-p75'
         - title: Save Alert Failure Rate
           type: timeseries
-          description: Failure rate of saving trigger alert records.
+          description: Rate of failures when persisting trigger alert records.
           unit: none
           queries:
             - expr: rate(greptime_trigger_save_alert_record_failure_count[$__rate_interval])
