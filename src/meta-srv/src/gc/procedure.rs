@@ -531,7 +531,9 @@ impl BatchGcProcedure {
             all_report.merge(report);
         }
 
-        warn!("Regions need retry after batch GC: {:?}", all_need_retry);
+        if !all_need_retry.is_empty() {
+            warn!("Regions need retry after batch GC: {:?}", all_need_retry);
+        }
 
         Ok(all_report)
     }
@@ -589,7 +591,7 @@ impl Procedure for BatchGcProcedure {
                         "Batch GC completed successfully for regions {:?}",
                         self.data.regions
                     );
-                    let Some(report) = self.data.gc_report.clone() else {
+                    let Some(report) = self.data.gc_report.take() else {
                         return common_procedure::error::UnexpectedSnafu {
                             err_msg: "GC report should be present after GC completion".to_string(),
                         }
