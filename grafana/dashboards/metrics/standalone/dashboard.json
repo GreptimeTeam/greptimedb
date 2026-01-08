@@ -8863,7 +8863,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Time spent evaluating triggers.",
+      "description": "Elapsed of Reconciliation steps",
       "fieldConfig": {
         "defaults": {
           "color": {

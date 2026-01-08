@@ -1002,7 +1002,7 @@ groups:
               legendFormat: '{{pod}}-{{table_type}}-{{type}}'
         - title: Reconciliation steps
           type: timeseries
-          description: Time spent evaluating triggers.
+          description: Elapsed of Reconciliation steps
           unit: s
           queries:
             - expr: histogram_quantile(0.9, greptime_meta_reconciliation_procedure_bucket)
