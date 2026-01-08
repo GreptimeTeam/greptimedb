@@ -420,7 +420,10 @@ mod tests {
 
     use api::v1::SemanticType;
     use datafusion_expr::{col, lit};
-    use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, UInt8Array, UInt64Array};
+    use datatypes::arrow::array::{
+        ArrayRef, BinaryArray, DictionaryArray, Int64Array, StringArray, UInt8Array, UInt32Array,
+        UInt64Array,
+    };
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
@@ -570,5 +573,129 @@ mod tests {
             &expect_sequence,
             result[0].column(result[0].num_columns() - 2)
         );
+    }
+
+    #[test]
+    fn test_bulk_part_batch_iter_multiple_batches() {
+        // Create a simple schema
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key1", DataType::Utf8, false),
+            Field::new("field1", DataType::Int64, false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+                false,
+            ),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ]));
+
+        // Create first batch with 2 rows
+        let key1_1 = Arc::new(StringArray::from_iter_values(["key1", "key2"]));
+        let field1_1 = Arc::new(Int64Array::from(vec![11, 12]));
+        let timestamp_1 = Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
+            vec![1000, 2000],
+        ));
+        let values_1 = Arc::new(BinaryArray::from_iter_values([b"key1", b"key2"]));
+        let keys_1 = UInt32Array::from(vec![0, 1]);
+        let primary_key_1 = Arc::new(DictionaryArray::new(keys_1, values_1));
+        let sequence_1 = Arc::new(UInt64Array::from(vec![1, 2]));
+        let op_type_1 = Arc::new(UInt8Array::from(vec![1, 1]));
+
+        let batch1 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                key1_1,
+                field1_1,
+                timestamp_1,
+                primary_key_1,
+                sequence_1,
+                op_type_1,
+            ],
+        )
+        .unwrap();
+
+        // Create second batch with 3 rows
+        let key1_2 = Arc::new(StringArray::from_iter_values(["key3", "key4", "key5"]));
+        let field1_2 = Arc::new(Int64Array::from(vec![13, 14, 15]));
+        let timestamp_2 = Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
+            vec![3000, 4000, 5000],
+        ));
+        let values_2 = Arc::new(BinaryArray::from_iter_values([b"key3", b"key4", b"key5"]));
+        let keys_2 = UInt32Array::from(vec![0, 1, 2]);
+        let primary_key_2 = Arc::new(DictionaryArray::new(keys_2, values_2));
+        let sequence_2 = Arc::new(UInt64Array::from(vec![3, 4, 5]));
+        let op_type_2 = Arc::new(UInt8Array::from(vec![1, 1, 1]));
+
+        let batch2 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                key1_2,
+                field1_2,
+                timestamp_2,
+                primary_key_2,
+                sequence_2,
+                op_type_2,
+            ],
+        )
+        .unwrap();
+
+        // Create region metadata
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "key1",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field1",
+                    ConcreteDataType::int64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "timestamp",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![0]);
+
+        let region_metadata = builder.build().unwrap();
+
+        // Create context
+        let context = Arc::new(
+            BulkIterContext::new(
+                Arc::new(region_metadata),
+                None, // No projection
+                None, // No predicate
+                false,
+            )
+            .unwrap(),
+        );
+
+        // Create iterator with multiple batches
+        let expect_batches = vec![batch1, batch2];
+        let iter = BulkPartBatchIter::new(expect_batches.clone(), context.clone(), None, 0, None);
+
+        // Collect all results
+        let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
+        assert_eq!(expect_batches, result);
     }
 }
