@@ -34,7 +34,7 @@ use table::requests::{
 };
 
 use crate::error::{
-    ColumnNotFoundSnafu, InvalidColumnDefSnafu, InvalidIndexOptionSnafu,
+    self, ColumnNotFoundSnafu, InvalidColumnDefSnafu, InvalidIndexOptionSnafu,
     InvalidSetFulltextOptionRequestSnafu, InvalidSetSkippingIndexOptionRequestSnafu,
     InvalidSetTableOptionRequestSnafu, InvalidUnsetTableOptionRequestSnafu,
     MissingAlterIndexOptionSnafu, MissingFieldSnafu, MissingTableMetaSnafu,
@@ -251,6 +251,10 @@ pub fn alter_expr_to_request(
                 .collect::<Result<Vec<_>>>()?;
             AlterKind::SetDefaults { defaults }
         }
+        Kind::Repartition(_) => error::UnexpectedSnafu {
+            err_msg: "Repartition operation is not supported",
+        }
+        .fail()?,
     };
 
     let request = AlterTableRequest {

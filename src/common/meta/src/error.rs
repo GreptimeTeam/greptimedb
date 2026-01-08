@@ -111,6 +111,13 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to create repartition procedure"))]
+    CreateRepartitionProcedure {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to submit procedure"))]
     SubmitProcedure {
         #[snafu(implicit)]
@@ -1178,6 +1185,7 @@ impl ErrorExt for Error {
             ConvertColumnDef { source, .. } => source.status_code(),
             ProcedureStateReceiver { source, .. } => source.status_code(),
             RegisterRepartitionProcedureLoader { source, .. } => source.status_code(),
+            CreateRepartitionProcedure { source, .. } => source.status_code(),
 
             ParseProcedureId { .. }
             | InvalidNumTopics { .. }
