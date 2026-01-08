@@ -367,10 +367,8 @@ impl RegionScanner for SeriesScan {
         &mut self,
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
-        let mut new_stream_ctx = self.stream_ctx.as_ref().clone();
-        let supported = new_stream_ctx.update_predicate_with_dyn_filter(filter_exprs);
-        self.stream_ctx = Arc::new(new_stream_ctx);
-
+        let stream_ctx = Arc::make_mut(&mut self.stream_ctx);
+        let supported = stream_ctx.update_predicate_with_dyn_filter(filter_exprs);
         supported
     }
 
