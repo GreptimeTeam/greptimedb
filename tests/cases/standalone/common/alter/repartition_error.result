@@ -1,4 +1,4 @@
--- Test repartition error cases
+-- Test split partition and merge partition error cases
 -- Setup: Create a physical table with partitions
 CREATE TABLE repartition_test_table(
   device_id INT,
@@ -31,16 +31,41 @@ Affected Rows: 0
 
 -- Test 0: Logical table cannot be repartitioned
 ALTER TABLE logical_metric_table REPARTITION (
-  device_id < '100'
+  device_id < 100
 ) INTO (
-  device_id < '50',
-  device_id >= '50' AND device_id < '100'
+  device_id < 50,
+  device_id >= 50 AND device_id < 100
+);
+
+Error: 1001(Unsupported), Not supported: REPARTITION on logical tables
+
+ALTER TABLE logical_metric_table SPLIT PARTITION (
+  device_id < 100
+) INTO (
+  device_id < 50,
+  device_id >= 50 AND device_id < 100
+);
+
+Error: 1001(Unsupported), Not supported: REPARTITION on logical tables
+
+ALTER TABLE logical_metric_table MERGE PARTITION (
+  device_id < 100,
+  device_id >= 100 AND device_id < 200
 );
 
 Error: 1001(Unsupported), Not supported: REPARTITION on logical tables
 
 -- Test 1: New partition rule contains non-partition column (ts is not a partition column)
 ALTER TABLE repartition_test_table REPARTITION (
+  device_id < 100
+) INTO (
+  device_id < 50,
+  device_id >= 50 AND device_id < 100 AND ts < 1000
+);
+
+Error: 1004(InvalidArguments), Cannot find column by name: ts
+
+ALTER TABLE repartition_test_table SPLIT PARTITION (
   device_id < 100
 ) INTO (
   device_id < 50,
@@ -60,6 +85,22 @@ ALTER TABLE repartition_test_table REPARTITION (
 
 Error: 1004(InvalidArguments), Invalid partition rule: partition expression 'device_id < 50' does not exist in table greptime.public.repartition_test_table
 
+ALTER TABLE repartition_test_table SPLIT PARTITION (
+  device_id < 50
+) INTO (
+  device_id < 25,
+  device_id >= 25 AND device_id < 50
+);
+
+Error: 1004(InvalidArguments), Invalid partition rule: partition expression 'device_id < 50' does not exist in table greptime.public.repartition_test_table
+
+ALTER TABLE repartition_test_table MERGE PARTITION (
+  device_id < 50,
+  device_id >= 50 AND device_id < 75
+);
+
+Error: 1004(InvalidArguments), Invalid partition rule: partition expression 'device_id < 50' does not exist in table greptime.public.repartition_test_table
+
 -- Test 3: New partition rule is incomplete (cannot pass checker)
 -- This creates a gap: device_id < 50 and device_id >= 100, missing [50, 100)
 -- The existing partitions are: device_id < 100, device_id >= 100 AND device_id < 200, device_id >= 200
@@ -75,12 +116,30 @@ ALTER TABLE repartition_test_table REPARTITION (
 
 Error: 1004(InvalidArguments), Checkpoint `device_id=50` is not covered
 
+ALTER TABLE repartition_test_table SPLIT PARTITION (
+  device_id < 100
+) INTO (
+  device_id < 50,
+  device_id >= 100
+);
+
+Error: 1004(InvalidArguments), Checkpoint `device_id=50` is not covered
+
 -- Test 4: New partition rule has overlapping partitions
 -- This creates overlapping ranges: device_id < 100 and device_id >= 50 AND device_id < 150
 -- After removing device_id < 100, we have: device_id >= 100 AND device_id < 200, device_id >= 200
 -- Adding the new ones: device_id < 100, device_id >= 50 AND device_id < 150
 -- This overlaps: [0, 100) and [50, 150) overlap in [50, 100)
 ALTER TABLE repartition_test_table REPARTITION (
+  device_id < 100
+) INTO (
+  device_id < 100,
+  device_id >= 50 AND device_id < 150
+);
+
+Error: 1004(InvalidArguments), Checkpoint `device_id=50` is overlapped
+
+ALTER TABLE repartition_test_table SPLIT PARTITION (
   device_id < 100
 ) INTO (
   device_id < 100,

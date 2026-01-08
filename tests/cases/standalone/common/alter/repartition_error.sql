@@ -1,4 +1,4 @@
--- Test repartition error cases
+-- Test split partition and merge partition error cases
 
 -- Setup: Create a physical table with partitions
 CREATE TABLE repartition_test_table(
@@ -25,14 +25,28 @@ CREATE TABLE logical_metric_table(
 ) ENGINE = metric WITH ("on_physical_table" = "physical_metric_table");
 
 -- Test 0: Logical table cannot be repartitioned
+
 ALTER TABLE logical_metric_table REPARTITION (
-  device_id < '100'
+  device_id < 100
 ) INTO (
-  device_id < '50',
-  device_id >= '50' AND device_id < '100'
+  device_id < 50,
+  device_id >= 50 AND device_id < 100
+);
+
+ALTER TABLE logical_metric_table SPLIT PARTITION (
+  device_id < 100
+) INTO (
+  device_id < 50,
+  device_id >= 50 AND device_id < 100
+);
+
+ALTER TABLE logical_metric_table MERGE PARTITION (
+  device_id < 100,
+  device_id >= 100 AND device_id < 200
 );
 
 -- Test 1: New partition rule contains non-partition column (ts is not a partition column)
+
 ALTER TABLE repartition_test_table REPARTITION (
   device_id < 100
 ) INTO (
@@ -40,13 +54,34 @@ ALTER TABLE repartition_test_table REPARTITION (
   device_id >= 50 AND device_id < 100 AND ts < 1000
 );
 
+ALTER TABLE repartition_test_table SPLIT PARTITION (
+  device_id < 100
+) INTO (
+  device_id < 50,
+  device_id >= 50 AND device_id < 100 AND ts < 1000
+);
+
+
 -- Test 2: From partition expr does not exist in existing partition exprs
 -- device_id < 50 is not in the existing partitions (which are < 100, >= 100 AND < 200, >= 200)
+
 ALTER TABLE repartition_test_table REPARTITION (
   device_id < 50
 ) INTO (
   device_id < 25,
   device_id >= 25 AND device_id < 50
+);
+
+ALTER TABLE repartition_test_table SPLIT PARTITION (
+  device_id < 50
+) INTO (
+  device_id < 25,
+  device_id >= 25 AND device_id < 50
+);
+
+ALTER TABLE repartition_test_table MERGE PARTITION (
+  device_id < 50,
+  device_id >= 50 AND device_id < 75
 );
 
 -- Test 3: New partition rule is incomplete (cannot pass checker)
@@ -55,7 +90,15 @@ ALTER TABLE repartition_test_table REPARTITION (
 -- After removing device_id < 100 and adding device_id < 50 and device_id >= 100, we get:
 -- device_id < 50, device_id >= 100 AND device_id < 200, device_id >= 200
 -- This leaves a gap [50, 100)
+
 ALTER TABLE repartition_test_table REPARTITION (
+  device_id < 100
+) INTO (
+  device_id < 50,
+  device_id >= 100
+);
+
+ALTER TABLE repartition_test_table SPLIT PARTITION (
   device_id < 100
 ) INTO (
   device_id < 50,
@@ -67,7 +110,15 @@ ALTER TABLE repartition_test_table REPARTITION (
 -- After removing device_id < 100, we have: device_id >= 100 AND device_id < 200, device_id >= 200
 -- Adding the new ones: device_id < 100, device_id >= 50 AND device_id < 150
 -- This overlaps: [0, 100) and [50, 150) overlap in [50, 100)
+
 ALTER TABLE repartition_test_table REPARTITION (
+  device_id < 100
+) INTO (
+  device_id < 100,
+  device_id >= 50 AND device_id < 150
+);
+
+ALTER TABLE repartition_test_table SPLIT PARTITION (
   device_id < 100
 ) INTO (
   device_id < 100,
