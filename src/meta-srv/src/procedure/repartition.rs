@@ -23,6 +23,7 @@ pub mod repartition_start;
 pub mod utils;
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::Debug;
 
 use common_error::ext::BoxedError;
@@ -50,7 +51,7 @@ use common_telemetry::error;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::TableId;
+use store_api::storage::{RegionNumber, TableId};
 use table::table_name::TableName;
 
 use crate::error::{self, Result};
@@ -198,6 +199,7 @@ impl Context {
         &self,
         current_table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
         new_region_routes: Vec<RegionRoute>,
+        new_region_wal_options: HashMap<RegionNumber, String>,
     ) -> Result<()> {
         let table_id = self.persistent_ctx.table_id;
         if new_region_routes.is_empty() {
@@ -221,6 +223,16 @@ impl Context {
             region_wal_options,
             ..
         } = &datanode_table_value.region_info;
+
+        // Merge and validate the new region wal options.
+        let validated_region_wal_options =
+            crate::procedure::repartition::utils::merge_and_validate_region_wal_options(
+                region_wal_options,
+                new_region_wal_options,
+                &new_region_routes,
+                table_id,
+            )?;
+
         self.table_metadata_manager
             .update_table_route(
                 table_id,
@@ -228,7 +240,7 @@ impl Context {
                 current_table_route_value,
                 new_region_routes,
                 region_options,
-                region_wal_options,
+                &validated_region_wal_options,
             )
             .await
             .context(error::TableMetadataManagerSnafu)
