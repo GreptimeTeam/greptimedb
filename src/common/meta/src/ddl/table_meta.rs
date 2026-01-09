@@ -184,4 +184,8 @@ impl TableMetadataAllocator {
     pub fn table_id_sequence(&self) -> SequenceRef {
         self.table_id_sequence.clone()
     }
+
+    pub fn wal_options_allocator(&self) -> &WalOptionsAllocatorRef {
+        &self.wal_options_allocator
+    }
 }

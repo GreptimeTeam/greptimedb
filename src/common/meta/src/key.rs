@@ -1119,6 +1119,7 @@ impl TableMetadataManager {
         current_table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
         region_distribution: Option<RegionDistribution>,
         new_table_info: RawTableInfo,
+        new_region_wal_options: Option<std::collections::HashMap<store_api::storage::RegionNumber, String>>,
     ) -> Result<()> {
         let table_id = current_table_info_value.table_info.ident.table_id;
         let new_table_info_value = current_table_info_value.update(new_table_info);
@@ -1133,7 +1134,12 @@ impl TableMetadataManager {
             let new_region_options = new_table_info_value.table_info.to_region_options();
             let update_datanode_table_options_txn = self
                 .datanode_table_manager
-                .build_update_table_options_txn(table_id, region_distribution, new_region_options)
+                .build_update_table_options_txn(
+                    table_id,
+                    region_distribution,
+                    new_region_options,
+                    new_region_wal_options,
+                )
                 .await?;
             Txn::merge_all([update_table_info_txn, update_datanode_table_options_txn])
         } else {
@@ -1993,12 +1999,12 @@ mod tests {
             DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info.clone()));
         // should be ok.
         table_metadata_manager
-            .update_table_info(&current_table_info_value, None, new_table_info.clone())
+            .update_table_info(&current_table_info_value, None, new_table_info.clone(), None)
             .await
             .unwrap();
         // if table info was updated, it should be ok.
         table_metadata_manager
-            .update_table_info(&current_table_info_value, None, new_table_info.clone())
+            .update_table_info(&current_table_info_value, None, new_table_info.clone(), None)
             .await
             .unwrap();
 
@@ -2021,7 +2027,7 @@ mod tests {
         // The ABA problem.
         assert!(
             table_metadata_manager
-                .update_table_info(&wrong_table_info_value, None, new_table_info)
+                .update_table_info(&wrong_table_info_value, None, new_table_info, None)
                 .await
                 .is_err()
         )

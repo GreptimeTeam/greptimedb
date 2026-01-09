@@ -121,6 +121,7 @@ impl AlterTableExecutor {
         region_distribution: Option<&RegionDistribution>,
         mut raw_table_info: RawTableInfo,
         column_metadatas: &[ColumnMetadata],
+        new_region_wal_options: Option<std::collections::HashMap<store_api::storage::RegionNumber, String>>,
     ) -> Result<()> {
         let table_ref = self.table.table_ref();
         let table_id = self.table_id;
@@ -155,6 +156,7 @@ impl AlterTableExecutor {
                     current_table_info_value,
                     region_distribution.cloned(),
                     raw_table_info,
+                    new_region_wal_options,
                 )
                 .await?;
         }

@@ -1,0 +1,121 @@
+CREATE TABLE skip_wal_test (
+    host STRING,
+    cpu_util DOUBLE,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+-- Test setting skip_wal to true
+ALTER TABLE skip_wal_test SET 'skip_wal'='true';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE skip_wal_test;
+
++---------------+-----------------------------------------------------------+
+| Table         | Create Table                                              |
++---------------+-----------------------------------------------------------+
+| skip_wal_test | CREATE TABLE IF NOT EXISTS "skip_wal_test" (              |
+|               |   "host" STRING NULL,                                     |
+|               |   "cpu_util" DOUBLE NULL,                                 |
+|               |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|               |   TIME INDEX ("ts")                                       |
+|               | )                                                         |
+|               |                                                           |
+|               | ENGINE=mito                                               |
+|               | WITH(                                                     |
+|               |   skip_wal = 'true'                                       |
+|               | )                                                         |
++---------------+-----------------------------------------------------------+
+
+-- Test setting skip_wal to false
+ALTER TABLE skip_wal_test SET 'skip_wal'='false';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE skip_wal_test;
+
++---------------+-----------------------------------------------------------+
+| Table         | Create Table                                              |
++---------------+-----------------------------------------------------------+
+| skip_wal_test | CREATE TABLE IF NOT EXISTS "skip_wal_test" (              |
+|               |   "host" STRING NULL,                                     |
+|               |   "cpu_util" DOUBLE NULL,                                 |
+|               |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|               |   TIME INDEX ("ts")                                       |
+|               | )                                                         |
+|               |                                                           |
+|               | ENGINE=mito                                               |
+|               |                                                           |
++---------------+-----------------------------------------------------------+
+
+-- Test unsetting skip_wal (should set to false)
+ALTER TABLE skip_wal_test UNSET 'skip_wal';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE skip_wal_test;
+
++---------------+-----------------------------------------------------------+
+| Table         | Create Table                                              |
++---------------+-----------------------------------------------------------+
+| skip_wal_test | CREATE TABLE IF NOT EXISTS "skip_wal_test" (              |
+|               |   "host" STRING NULL,                                     |
+|               |   "cpu_util" DOUBLE NULL,                                 |
+|               |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|               |   TIME INDEX ("ts")                                       |
+|               | )                                                         |
+|               |                                                           |
+|               | ENGINE=mito                                               |
+|               |                                                           |
++---------------+-----------------------------------------------------------+
+
+-- Test setting skip_wal to true again
+ALTER TABLE skip_wal_test SET 'skip_wal'='true';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE skip_wal_test;
+
++---------------+-----------------------------------------------------------+
+| Table         | Create Table                                              |
++---------------+-----------------------------------------------------------+
+| skip_wal_test | CREATE TABLE IF NOT EXISTS "skip_wal_test" (              |
+|               |   "host" STRING NULL,                                     |
+|               |   "cpu_util" DOUBLE NULL,                                 |
+|               |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|               |   TIME INDEX ("ts")                                       |
+|               | )                                                         |
+|               |                                                           |
+|               | ENGINE=mito                                               |
+|               | WITH(                                                     |
+|               |   skip_wal = 'true'                                       |
+|               | )                                                         |
++---------------+-----------------------------------------------------------+
+
+-- SQLNESS ARG restart=true
+-- Verify persistence after restart
+SHOW CREATE TABLE skip_wal_test;
+
++---------------+-----------------------------------------------------------+
+| Table         | Create Table                                              |
++---------------+-----------------------------------------------------------+
+| skip_wal_test | CREATE TABLE IF NOT EXISTS "skip_wal_test" (              |
+|               |   "host" STRING NULL,                                     |
+|               |   "cpu_util" DOUBLE NULL,                                 |
+|               |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|               |   TIME INDEX ("ts")                                       |
+|               | )                                                         |
+|               |                                                           |
+|               | ENGINE=mito                                               |
+|               | WITH(                                                     |
+|               |   skip_wal = 'true'                                       |
+|               | )                                                         |
++---------------+-----------------------------------------------------------+
+
+DROP TABLE skip_wal_test;
+
+Affected Rows: 0
+

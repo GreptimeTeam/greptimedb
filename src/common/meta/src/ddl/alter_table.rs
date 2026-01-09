@@ -51,6 +51,7 @@ use crate::metrics;
 use crate::poison_key::table_poison_key;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{RegionRoute, find_leaders, region_distribution};
+use crate::wal_options_allocator::allocate_region_wal_options;
 
 /// The alter table procedure
 pub struct AlterTableProcedure {
@@ -283,6 +284,36 @@ impl AlterTableProcedure {
         };
 
         // Safety: region distribution is set in `submit_alter_region_requests`.
+        // Check if skip_wal changed and update WAL options if needed
+        let current_skip_wal = table_info_value.table_info.meta.options.skip_wal;
+        let new_skip_wal = new_info.meta.options.skip_wal;
+        let new_region_wal_options = if current_skip_wal != new_skip_wal
+            && self.data.region_distribution.is_some()
+        {
+            // Get region numbers from region_distribution
+            let region_distribution = self.data.region_distribution.as_ref().unwrap();
+            let region_numbers: Vec<_> = region_distribution
+                .values()
+                .flat_map(|region_role_set| {
+                    region_role_set
+                        .leader_regions
+                        .iter()
+                        .chain(region_role_set.follower_regions.iter())
+                        .copied()
+                })
+                .collect();
+            // Allocate new WAL options based on skip_wal
+            Some(
+                allocate_region_wal_options(
+                    region_numbers,
+                    self.context.table_metadata_allocator.wal_options_allocator(),
+                    new_skip_wal,
+                )?,
+            )
+        } else {
+            None
+        };
+
         self.executor
             .on_alter_metadata(
                 &self.context.table_metadata_manager,
@@ -290,6 +321,7 @@ impl AlterTableProcedure {
                 self.data.region_distribution.as_ref(),
                 new_info.into(),
                 &self.data.column_metadatas,
+                new_region_wal_options,
             )
             .await?;
 
