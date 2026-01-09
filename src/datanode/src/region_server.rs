@@ -590,8 +590,14 @@ impl RegionServer {
                     violated: "Failed to downcast to MetricEngine",
                 })?;
 
+        let tracing_context = TracingContext::from_current_span();
+        let span = tracing_context.attach(info_span!(
+            "RegionServer::handle_metric_batch_puts",
+            batch_size = put_requests.len(),
+        ));
         let total_affected = metric_engine
             .put_regions_batch(put_requests)
+            .trace(span)
             .await
             .map_err(BoxedError::new)
             .context(HandleRegionRequestSnafu {
