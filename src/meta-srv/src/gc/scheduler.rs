@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -37,29 +37,6 @@ use crate::service::mailbox::MailboxRef;
 pub struct GcJobReport {
     pub per_datanode_reports: HashMap<DatanodeId, GcReport>,
     pub failed_datanodes: HashMap<DatanodeId, Vec<Error>>,
-}
-impl GcJobReport {
-    pub fn merge(&mut self, mut other: GcJobReport) {
-        // merge per_datanode_reports&failed_datanodes
-        for (dn_id, report) in other.per_datanode_reports {
-            let self_report = self.per_datanode_reports.entry(dn_id).or_default();
-            self_report.merge(report);
-        }
-        let all_failed_dn_ids = self
-            .failed_datanodes
-            .keys()
-            .cloned()
-            .chain(other.failed_datanodes.keys().cloned())
-            .collect::<HashSet<_>>();
-        for dn_id in all_failed_dn_ids {
-            let entry = self.failed_datanodes.entry(dn_id).or_default();
-            if let Some(other_errors) = other.failed_datanodes.remove(&dn_id) {
-                entry.extend(other_errors);
-            }
-        }
-        self.failed_datanodes
-            .retain(|dn_id, _| !self.per_datanode_reports.contains_key(dn_id));
-    }
 }
 
 /// [`Event`] represents various types of events that can be processed by the gc ticker.
