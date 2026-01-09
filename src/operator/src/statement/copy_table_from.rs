@@ -517,8 +517,8 @@ fn can_cast_types_for_greptime(from: &ArrowDataType, to: &ArrowDataType) -> bool
 fn check_file_header(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
     if from.fields().len() != to.fields().len() {
         return error::InvalidHeaderSnafu {
-            table_schema: to.to_string(),
-            file_schema: from.to_string(),
+            table_schema: to.fields().len(),
+            file_schema: from.fields().len(),
         }
         .fail();
     }

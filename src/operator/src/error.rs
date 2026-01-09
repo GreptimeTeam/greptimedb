@@ -596,13 +596,13 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Header from CSV file not match, expected table schema: {}, actual file schema: {}",
+        "The number of fields in the CSV file does not match the table schema, expected table schema: {}, actual file schema: {}",
         table_schema,
         file_schema
     ))]
     InvalidHeader {
-        table_schema: String,
-        file_schema: String,
+        table_schema: usize,
+        file_schema: usize,
         #[snafu(implicit)]
         location: Location,
     },
