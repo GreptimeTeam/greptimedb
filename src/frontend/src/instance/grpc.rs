@@ -37,6 +37,7 @@ use datafusion::datasource::DefaultTableSource;
 use futures::Stream;
 use futures::stream::StreamExt;
 use query::parser::PromQuery;
+use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -73,10 +74,20 @@ impl GrpcQueryHandler for Instance {
 
         let output = match request {
             Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
-            Request::RowInserts(requests) => {
-                self.handle_row_inserts(requests, ctx.clone(), false, false)
+            Request::RowInserts(requests) => match ctx.extension(PHYSICAL_TABLE_PARAM) {
+                Some(physical_table) => {
+                    self.handle_metric_row_inserts(
+                        requests,
+                        ctx.clone(),
+                        physical_table.to_string(),
+                    )
                     .await?
-            }
+                }
+                None => {
+                    self.handle_row_inserts(requests, ctx.clone(), false, false)
+                        .await?
+                }
+            },
             Request::Deletes(requests) => self.handle_deletes(requests, ctx.clone()).await?,
             Request::RowDeletes(requests) => self.handle_row_deletes(requests, ctx.clone()).await?,
             Request::Query(query_request) => {
