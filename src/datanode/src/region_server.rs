@@ -539,11 +539,15 @@ impl RegionServer {
         }
 
         // Quick check: verify first request is Put and is metric engine
-        let first_region_id = requests[0].0;
         if !matches!(requests[0].1, RegionRequest::Put(_)) {
             return Ok(Either::Right(requests));
         }
+        let first_region_id = requests[0].0;
+        let request_type = requests[0].1.request_type();
 
+        // SAFETY: If the first request belongs to metric engine, then ALL requests
+        // in this batch are guaranteed to belong to metric engine. This invariant
+        // is maintained by the request batching logic upstream.
         let engine = match self
             .inner
             .get_engine(first_region_id, &RegionChange::None)?
@@ -591,24 +595,34 @@ impl RegionServer {
                 })?;
 
         let tracing_context = TracingContext::from_current_span();
+        let batch_size = put_requests.len();
         let span = tracing_context.attach(info_span!(
             "RegionServer::handle_metric_batch_puts",
-            batch_size = put_requests.len(),
+            batch_size = batch_size,
         ));
-        let total_affected = metric_engine
+        let result = metric_engine
             .put_regions_batch(put_requests)
             .trace(span)
             .await
             .map_err(BoxedError::new)
             .context(HandleRegionRequestSnafu {
                 region_id: first_region_id,
-            })?;
+            });
 
-        Ok(Either::Left(RegionResponse {
-            affected_rows: total_affected,
-            extensions: HashMap::new(),
-            metadata: Vec::new(),
-        }))
+        match result {
+            Ok(total_affected) => {
+                crate::metrics::REGION_CHANGED_ROW_COUNT
+                    .with_label_values(&[request_type])
+                    .inc_by(total_affected as u64);
+                Ok(Either::Left(RegionResponse::new(total_affected)))
+            }
+            Err(err) => {
+                crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
+                    .with_label_values(&[request_type])
+                    .inc_by(batch_size as u64);
+                Err(err)
+            }
+        }
     }
 
     async fn handle_sync_region_request(&self, request: &SyncRequest) -> Result<RegionResponse> {
