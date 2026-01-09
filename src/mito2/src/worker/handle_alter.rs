@@ -20,9 +20,9 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_wal::options::WalOptions;
 use humantime_serde::re::humantime;
 use snafu::{ResultExt, ensure};
-use common_wal::options::WalOptions;
 use store_api::logstore::LogStore;
 use store_api::metadata::{
     InvalidSetRegionOptionRequestSnafu, MetadataError, RegionMetadata, RegionMetadataBuilder,

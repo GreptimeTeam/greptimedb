@@ -52,8 +52,8 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    SKIP_WAL_KEY,
-    SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
+    SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
+    TWCS_TRIGGER_FILE_NUM,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -1319,7 +1319,8 @@ impl TryFrom<&PbOption> for SetRegionOption {
             }
             SST_FORMAT_KEY => Ok(Self::Format(value.clone())),
             SKIP_WAL_KEY => {
-                let skip_wal = value.parse::<bool>()
+                let skip_wal = value
+                    .parse::<bool>()
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
                 Ok(Self::SkipWal(skip_wal))
             }

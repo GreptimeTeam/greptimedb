@@ -1119,7 +1119,9 @@ impl TableMetadataManager {
         current_table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
         region_distribution: Option<RegionDistribution>,
         new_table_info: RawTableInfo,
-        new_region_wal_options: Option<std::collections::HashMap<store_api::storage::RegionNumber, String>>,
+        new_region_wal_options: Option<
+            std::collections::HashMap<store_api::storage::RegionNumber, String>,
+        >,
     ) -> Result<()> {
         let table_id = current_table_info_value.table_info.ident.table_id;
         let new_table_info_value = current_table_info_value.update(new_table_info);
@@ -1999,12 +2001,22 @@ mod tests {
             DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info.clone()));
         // should be ok.
         table_metadata_manager
-            .update_table_info(&current_table_info_value, None, new_table_info.clone(), None)
+            .update_table_info(
+                &current_table_info_value,
+                None,
+                new_table_info.clone(),
+                None,
+            )
             .await
             .unwrap();
         // if table info was updated, it should be ok.
         table_metadata_manager
-            .update_table_info(&current_table_info_value, None, new_table_info.clone(), None)
+            .update_table_info(
+                &current_table_info_value,
+                None,
+                new_table_info.clone(),
+                None,
+            )
             .await
             .unwrap();
 

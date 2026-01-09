@@ -35,7 +35,8 @@ use sql::statements::{self, OptionMap};
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{
-    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, SKIP_WAL_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY,
+    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, SKIP_WAL_KEY, TTL_KEY,
+    WRITE_BUFFER_SIZE_KEY,
 };
 
 use crate::error::{
