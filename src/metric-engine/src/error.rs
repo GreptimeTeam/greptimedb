@@ -240,6 +240,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Table id count mismatch. Expect {}, got {}", expected, actual))]
+    TableIdCountMismatch {
+        expected: usize,
+        actual: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Alter request to physical region is forbidden"))]
     ForbiddenPhysicalAlter {
         #[snafu(implicit)]
@@ -368,6 +376,7 @@ impl ErrorExt for Error {
             | MissingRegionOption { .. }
             | ConflictRegionOption { .. }
             | ColumnTypeMismatch { .. }
+            | TableIdCountMismatch { .. }
             | PhysicalRegionBusy { .. }
             | MultipleFieldColumn { .. }
             | NoFieldColumn { .. }

@@ -4050,6 +4050,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
+ "either",
  "file-engine",
  "futures",
  "futures-util",
