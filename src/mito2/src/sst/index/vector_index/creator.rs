@@ -683,7 +683,78 @@ impl VectorIndexer {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use api::v1::SemanticType;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::value::ValueRef;
+    use datatypes::vectors::{TimestampMillisecondVector, UInt8Vector, UInt64Vector};
+    use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+    use store_api::storage::{ColumnId, FileId, RegionId};
+
     use super::*;
+    use crate::read::BatchColumn;
+
+    fn mock_region_metadata_with_vector() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("tag", ConcreteDataType::int64_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("vec", ConcreteDataType::vector_datatype(2), true),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field_u64",
+                    ConcreteDataType::uint64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .primary_key(vec![2]);
+
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn new_batch_missing_vector_column(column_id: ColumnId, rows: usize) -> Batch {
+        let fields = vec![(0, SortField::new(ConcreteDataType::int64_datatype()))];
+        let codec = DensePrimaryKeyCodec::with_fields(fields);
+        let primary_key = codec.encode([ValueRef::Int64(1)].into_iter()).unwrap();
+
+        let field = BatchColumn {
+            column_id,
+            data: Arc::new(UInt64Vector::from_iter_values(0..rows as u64)),
+        };
+
+        Batch::new(
+            primary_key,
+            Arc::new(TimestampMillisecondVector::from_values(
+                (0..rows).map(|i| i as i64).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Vector::from_iter_values(std::iter::repeat_n(0, rows))),
+            Arc::new(UInt8Vector::from_iter_values(std::iter::repeat_n(1, rows))),
+            vec![field],
+        )
+        .unwrap()
+    }
 
     #[test]
     fn test_vector_index_creator() {
@@ -881,5 +952,40 @@ mod tests {
         assert_eq!(restored_bitmap.len(), 2); // 2 nulls
         assert!(restored_bitmap.contains(1));
         assert!(restored_bitmap.contains(3));
+    }
+
+    #[tokio::test]
+    async fn test_vector_index_missing_column_as_nulls() {
+        let tempdir = common_test_util::temp_dir::create_temp_dir(
+            "test_vector_index_missing_column_as_nulls_",
+        );
+        let intm_mgr = IntermediateManager::init_fs(tempdir.path().to_string_lossy())
+            .await
+            .unwrap();
+        let region_metadata = mock_region_metadata_with_vector();
+
+        let mut vector_index_options = HashMap::new();
+        vector_index_options.insert(3, VectorIndexOptions::default());
+
+        let mut indexer = VectorIndexer::new(
+            FileId::random(),
+            &region_metadata,
+            intm_mgr,
+            None,
+            &vector_index_options,
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut batch = new_batch_missing_vector_column(4, 3);
+        indexer.update(&mut batch).await.unwrap();
+
+        let creator = indexer.creators.get(&3).unwrap();
+        assert_eq!(creator.size(), 0);
+        assert_eq!(creator.current_row_offset, 3);
+        assert_eq!(creator.null_bitmap.len(), 3);
+        for idx in 0..3 {
+            assert!(creator.null_bitmap.contains(idx as u32));
+        }
     }
 }
