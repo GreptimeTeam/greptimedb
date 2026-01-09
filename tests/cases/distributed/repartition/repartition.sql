@@ -10,7 +10,6 @@ CREATE TABLE alter_repartition_table(
   device_id >= 200
 );
 
--- valid grammar, currently not implemented
 ALTER TABLE alter_repartition_table REPARTITION (
   device_id < 100
 ) INTO (
@@ -18,19 +17,17 @@ ALTER TABLE alter_repartition_table REPARTITION (
   device_id < 100 AND area >= 'South'
 );
 
--- valid grammar, currently not implemented
-ALTER TABLE alter_repartition_table SPLIT PARTITION (
-  device_id < 100
-) INTO (
+SHOW CREATE TABLE alter_repartition_table;
+
+ALTER TABLE alter_repartition_table MERGE PARTITION (
   device_id < 100 AND area < 'South',
   device_id < 100 AND area >= 'South'
 );
 
--- valid grammar, currently not implemented
-ALTER TABLE alter_repartition_table MERGE PARTITION (
-  device_id < 100,
-  device_id >= 100 AND device_id < 200
-);
+SHOW CREATE TABLE alter_repartition_table;
+
+-- FIXME(weny): Object store is not configured for the test environment,
+-- so staging manifest may not be applied in some cases.
 
 -- invalid: empty source clause
 ALTER TABLE alter_repartition_table REPARTITION () INTO (

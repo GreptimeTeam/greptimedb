@@ -64,8 +64,8 @@ use plugins::frontend::context::{
 use plugins::standalone::context::DdlManagerConfigureContext;
 use servers::tls::{TlsMode, TlsOption, merge_tls_option};
 use snafu::ResultExt;
-use standalone::StandaloneInformationExtension;
 use standalone::options::StandaloneOptions;
+use standalone::{StandaloneInformationExtension, StandaloneRepartitionProcedureFactory};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{OtherSnafu, Result, StartFlownodeSnafu};
@@ -509,8 +509,13 @@ impl StartCommand {
             region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
         };
 
-        let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager.clone(), true)
-            .context(error::InitDdlManagerSnafu)?;
+        let ddl_manager = DdlManager::try_new(
+            ddl_context,
+            procedure_manager.clone(),
+            Arc::new(StandaloneRepartitionProcedureFactory),
+            true,
+        )
+        .context(error::InitDdlManagerSnafu)?;
 
         let ddl_manager = if let Some(configurator) =
             plugins.get::<DdlManagerConfiguratorRef<DdlManagerConfigureContext>>()

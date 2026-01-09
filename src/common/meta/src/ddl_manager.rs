@@ -14,15 +14,19 @@
 
 use std::sync::Arc;
 
+use api::v1::Repartition;
+use api::v1::alter_table_expr::Kind;
 use common_error::ext::BoxedError;
 use common_procedure::{
-    BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId, watcher,
+    BoxedProcedure, BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef,
+    ProcedureWithId, watcher,
 };
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, info, tracing};
 use derive_builder::Builder;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::TableId;
+use table::table_name::TableName;
 
 use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
@@ -40,7 +44,8 @@ use crate::ddl::drop_view::DropViewProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{DdlContext, utils};
 use crate::error::{
-    EmptyDdlTasksSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu, Result,
+    CreateRepartitionProcedureSnafu, EmptyDdlTasksSnafu, ProcedureOutputSnafu,
+    RegisterProcedureLoaderSnafu, RegisterRepartitionProcedureLoaderSnafu, Result,
     SubmitProcedureSnafu, TableInfoNotFoundSnafu, TableNotFoundSnafu, TableRouteNotFoundSnafu,
     UnexpectedLogicalRouteTableSnafu, WaitProcedureSnafu,
 };
@@ -90,6 +95,7 @@ pub type BoxedProcedureLoaderFactory = dyn Fn(DdlContext) -> BoxedProcedureLoade
 pub struct DdlManager {
     ddl_context: DdlContext,
     procedure_manager: ProcedureManagerRef,
+    repartition_procedure_factory: RepartitionProcedureFactoryRef,
     #[cfg(feature = "enterprise")]
     trigger_ddl_manager: Option<TriggerDdlManagerRef>,
 }
@@ -143,16 +149,37 @@ macro_rules! procedure_loader {
     };
 }
 
+pub type RepartitionProcedureFactoryRef = Arc<dyn RepartitionProcedureFactory>;
+
+pub trait RepartitionProcedureFactory: Send + Sync {
+    fn create(
+        &self,
+        ddl_ctx: &DdlContext,
+        table_name: TableName,
+        table_id: TableId,
+        from_exprs: Vec<String>,
+        to_exprs: Vec<String>,
+    ) -> std::result::Result<BoxedProcedure, BoxedError>;
+
+    fn register_loaders(
+        &self,
+        ddl_ctx: &DdlContext,
+        procedure_manager: &ProcedureManagerRef,
+    ) -> std::result::Result<(), BoxedError>;
+}
+
 impl DdlManager {
     /// Returns a new [DdlManager] with all Ddl [BoxedProcedureLoader](common_procedure::procedure::BoxedProcedureLoader)s registered.
     pub fn try_new(
         ddl_context: DdlContext,
         procedure_manager: ProcedureManagerRef,
+        repartition_procedure_factory: RepartitionProcedureFactoryRef,
         register_loaders: bool,
     ) -> Result<Self> {
         let manager = Self {
             ddl_context,
             procedure_manager,
+            repartition_procedure_factory,
             #[cfg(feature = "enterprise")]
             trigger_ddl_manager: None,
         };
@@ -204,7 +231,61 @@ impl DdlManager {
                 .context(RegisterProcedureLoaderSnafu { type_name })?;
         }
 
+        self.repartition_procedure_factory
+            .register_loaders(&self.ddl_context, &self.procedure_manager)
+            .context(RegisterRepartitionProcedureLoaderSnafu)?;
+
         Ok(())
+    }
+
+    /// Submits a repartition procedure for the specified table.
+    ///
+    /// This creates a repartition procedure using the provided `table_id`,
+    /// `table_name`, and `Repartition` configuration, and then either executes it
+    /// to completion or just submits it for asynchronous execution.
+    ///
+    /// The `Repartition` argument contains the original (`from_partition_exprs`)
+    /// and target (`into_partition_exprs`) partition expressions that define how
+    /// the table should be repartitioned.
+    ///
+    /// The `wait` flag controls whether this method waits for the repartition
+    /// procedure to finish:
+    /// - If `wait` is `true`, the procedure is executed and this method awaits
+    ///   its completion, returning both the generated `ProcedureId` and the
+    ///   final `Output` of the procedure.
+    /// - If `wait` is `false`, the procedure is only submitted to the procedure
+    ///   manager for asynchronous execution, and this method returns the
+    ///   `ProcedureId` along with `None` as the output.
+    async fn submit_repartition_task(
+        &self,
+        table_id: TableId,
+        table_name: TableName,
+        Repartition {
+            from_partition_exprs,
+            into_partition_exprs,
+            wait,
+        }: Repartition,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+
+        let procedure = self
+            .repartition_procedure_factory
+            .create(
+                &context,
+                table_name,
+                table_id,
+                from_partition_exprs,
+                into_partition_exprs,
+            )
+            .context(CreateRepartitionProcedureSnafu)?;
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        if wait {
+            self.execute_procedure_and_wait(procedure_with_id).await
+        } else {
+            self.submit_procedure(procedure_with_id)
+                .await
+                .map(|p| (p, None))
+        }
     }
 
     /// Submits and executes an alter table task.
@@ -214,13 +295,28 @@ impl DdlManager {
         table_id: TableId,
         alter_table_task: AlterTableTask,
     ) -> Result<(ProcedureId, Option<Output>)> {
-        let context = self.create_context();
+        // make alter_table_task mutable so we can call .take() on its field
+        let mut alter_table_task = alter_table_task;
+        if let Some(Kind::Repartition(_)) = alter_table_task.alter_table.kind.as_ref()
+            && let Kind::Repartition(repartition) =
+                alter_table_task.alter_table.kind.take().unwrap()
+        {
+            let table_name = TableName::new(
+                alter_table_task.alter_table.catalog_name,
+                alter_table_task.alter_table.schema_name,
+                alter_table_task.alter_table.table_name,
+            );
+            return self
+                .submit_repartition_task(table_id, table_name, repartition)
+                .await;
+        }
 
+        let context = self.create_context();
         let procedure = AlterTableProcedure::new(table_id, alter_table_task, context)?;
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
-        self.submit_procedure(procedure_with_id).await
+        self.execute_procedure_and_wait(procedure_with_id).await
     }
 
     /// Submits and executes a create table task.
@@ -235,7 +331,7 @@ impl DdlManager {
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
-        self.submit_procedure(procedure_with_id).await
+        self.execute_procedure_and_wait(procedure_with_id).await
     }
 
     /// Submits and executes a `[CreateViewTask]`.
@@ -250,7 +346,7 @@ impl DdlManager {
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
-        self.submit_procedure(procedure_with_id).await
+        self.execute_procedure_and_wait(procedure_with_id).await
     }
 
     /// Submits and executes a create multiple logical table tasks.
@@ -267,7 +363,7 @@ impl DdlManager {
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
-        self.submit_procedure(procedure_with_id).await
+        self.execute_procedure_and_wait(procedure_with_id).await
     }
 
     /// Submits and executes alter multiple table tasks.
@@ -284,7 +380,7 @@ impl DdlManager {
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
-        self.submit_procedure(procedure_with_id).await
+        self.execute_procedure_and_wait(procedure_with_id).await
     }
 
     /// Submits and executes a drop table task.
@@ -299,7 +395,7 @@ impl DdlManager {
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
-        self.submit_procedure(procedure_with_id).await
+        self.execute_procedure_and_wait(procedure_with_id).await
     }
 
     /// Submits and executes a create database task.
@@ -318,7 +414,7 @@ impl DdlManager {
             CreateDatabaseProcedure::new(catalog, schema, create_if_not_exists, options, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
-        self.submit_procedure(procedure_with_id).await
+        self.execute_procedure_and_wait(procedure_with_id).await
     }
 
     /// Submits and executes a drop table task.
@@ -335,7 +431,7 @@ impl DdlManager {
         let procedure = DropDatabaseProcedure::new(catalog, schema, drop_if_exists, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
-        self.submit_procedure(procedure_with_id).await
+        self.execute_procedure_and_wait(procedure_with_id).await
     }
 
     pub async fn submit_alter_database(
@@ -346,7 +442,7 @@ impl DdlManager {
         let procedure = AlterDatabaseProcedure::new(alter_database_task, context)?;
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
-        self.submit_procedure(procedure_with_id).await
+        self.execute_procedure_and_wait(procedure_with_id).await
     }
 
     /// Submits and executes a create flow task.
@@ -360,7 +456,7 @@ impl DdlManager {
         let procedure = CreateFlowProcedure::new(create_flow, query_context, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
-        self.submit_procedure(procedure_with_id).await
+        self.execute_procedure_and_wait(procedure_with_id).await
     }
 
     /// Submits and executes a drop flow task.
@@ -373,7 +469,7 @@ impl DdlManager {
         let procedure = DropFlowProcedure::new(drop_flow, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
-        self.submit_procedure(procedure_with_id).await
+        self.execute_procedure_and_wait(procedure_with_id).await
     }
 
     /// Submits and executes a drop view task.
@@ -386,7 +482,7 @@ impl DdlManager {
         let procedure = DropViewProcedure::new(drop_view, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
-        self.submit_procedure(procedure_with_id).await
+        self.execute_procedure_and_wait(procedure_with_id).await
     }
 
     /// Submits and executes a truncate table task.
@@ -407,7 +503,7 @@ impl DdlManager {
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
-        self.submit_procedure(procedure_with_id).await
+        self.execute_procedure_and_wait(procedure_with_id).await
     }
 
     /// Submits and executes a comment on task.
@@ -420,10 +516,11 @@ impl DdlManager {
         let procedure = CommentOnProcedure::new(comment_on_task, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
-        self.submit_procedure(procedure_with_id).await
+        self.execute_procedure_and_wait(procedure_with_id).await
     }
 
-    async fn submit_procedure(
+    /// Executes a procedure and waits for the result.
+    async fn execute_procedure_and_wait(
         &self,
         procedure_with_id: ProcedureWithId,
     ) -> Result<(ProcedureId, Option<Output>)> {
@@ -440,6 +537,18 @@ impl DdlManager {
             .context(WaitProcedureSnafu)?;
 
         Ok((procedure_id, output))
+    }
+
+    /// Submits a procedure and returns the procedure id.
+    async fn submit_procedure(&self, procedure_with_id: ProcedureWithId) -> Result<ProcedureId> {
+        let procedure_id = procedure_with_id.id;
+        let _ = self
+            .procedure_manager
+            .submit(procedure_with_id)
+            .await
+            .context(SubmitProcedureSnafu)?;
+
+        Ok(procedure_id)
     }
 
     pub async fn submit_ddl_task(
@@ -947,8 +1056,12 @@ async fn handle_comment_on_task(
 mod tests {
     use std::sync::Arc;
 
+    use common_error::ext::BoxedError;
     use common_procedure::local::LocalManager;
     use common_procedure::test_util::InMemoryPoisonStore;
+    use common_procedure::{BoxedProcedure, ProcedureManagerRef};
+    use store_api::storage::TableId;
+    use table::table_name::TableName;
 
     use super::DdlManager;
     use crate::cache_invalidator::DummyCacheInvalidator;
@@ -959,6 +1072,7 @@ mod tests {
     use crate::ddl::table_meta::TableMetadataAllocator;
     use crate::ddl::truncate_table::TruncateTableProcedure;
     use crate::ddl::{DdlContext, NoopRegionFailureDetectorControl};
+    use crate::ddl_manager::RepartitionProcedureFactory;
     use crate::key::TableMetadataManager;
     use crate::key::flow::FlowMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
@@ -984,6 +1098,30 @@ mod tests {
     impl FlownodeManager for DummyDatanodeManager {
         async fn flownode(&self, _node: &Peer) -> FlownodeRef {
             unimplemented!()
+        }
+    }
+
+    struct DummyRepartitionProcedureFactory;
+
+    #[async_trait::async_trait]
+    impl RepartitionProcedureFactory for DummyRepartitionProcedureFactory {
+        fn create(
+            &self,
+            _ddl_ctx: &DdlContext,
+            _table_name: TableName,
+            _table_id: TableId,
+            _from_exprs: Vec<String>,
+            _to_exprs: Vec<String>,
+        ) -> std::result::Result<BoxedProcedure, BoxedError> {
+            unimplemented!()
+        }
+
+        fn register_loaders(
+            &self,
+            _ddl_ctx: &DdlContext,
+            _procedure_manager: &ProcedureManagerRef,
+        ) -> std::result::Result<(), BoxedError> {
+            Ok(())
         }
     }
 
@@ -1023,6 +1161,7 @@ mod tests {
                 region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
             },
             procedure_manager.clone(),
+            Arc::new(DummyRepartitionProcedureFactory),
             true,
         );
 

@@ -16,9 +16,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::alter_table_expr::Kind;
 use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
 use api::v1::{
-    AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr, column_def,
+    AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    Repartition, column_def,
 };
 #[cfg(feature = "enterprise")]
 use api::v1::{
@@ -88,8 +90,9 @@ use crate::error::{
     FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
     InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu,
     PartitionExprToPbSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu,
-    SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    SerializePartitionExprSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
+    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
+    ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest};
 use crate::statement::StatementExecutor;
@@ -1408,20 +1411,56 @@ impl StatementExecutor {
         .context(InvalidPartitionSnafu)?;
 
         info!(
-            "Repartition table {} (table_id={}) from {:?} to {:?}, new partition count: {}",
+            "Submitting repartition task for table {} (table_id={}), from {} to {} partitions",
             table_ref,
             table_id,
-            from_partition_exprs,
-            into_partition_exprs,
+            from_partition_exprs.len(),
             new_partition_exprs_len
         );
 
-        // TODO(weny): Implement the repartition procedure submission.
-        // The repartition procedure infrastructure is not yet fully integrated with the DDL task system.
-        NotSupportedSnafu {
-            feat: "ALTER TABLE REPARTITION",
-        }
-        .fail()
+        let serialize_exprs = |exprs: Vec<PartitionExpr>| -> Result<Vec<String>> {
+            let mut json_exprs = Vec::with_capacity(exprs.len());
+            for expr in exprs {
+                json_exprs.push(expr.as_json_str().context(SerializePartitionExprSnafu)?);
+            }
+            Ok(json_exprs)
+        };
+        let from_partition_exprs_json = serialize_exprs(from_partition_exprs)?;
+        let into_partition_exprs_json = serialize_exprs(into_partition_exprs)?;
+        let req = SubmitDdlTaskRequest {
+            query_context: query_context.clone(),
+            task: DdlTask::new_alter_table(AlterTableExpr {
+                catalog_name: request.catalog_name.clone(),
+                schema_name: request.schema_name.clone(),
+                table_name: request.table_name.clone(),
+                kind: Some(Kind::Repartition(Repartition {
+                    from_partition_exprs: from_partition_exprs_json,
+                    into_partition_exprs: into_partition_exprs_json,
+                    // TODO(weny): allow passing 'wait' from SQL options or QueryContext
+                    wait: true,
+                })),
+            }),
+        };
+        let invalidate_keys = vec![
+            CacheIdent::TableId(table_id),
+            CacheIdent::TableName(TableName::new(
+                request.catalog_name,
+                request.schema_name,
+                request.table_name,
+            )),
+        ];
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), req)
+            .await
+            .context(error::ExecuteDdlSnafu)?;
+
+        // Invalidates local cache ASAP.
+        self.cache_invalidator
+            .invalidate(&Context::default(), &invalidate_keys)
+            .await
+            .context(error::InvalidateTableCacheSnafu)?;
+
+        Ok(Output::new_with_affected_rows(0))
     }
 
     #[tracing::instrument(skip_all)]

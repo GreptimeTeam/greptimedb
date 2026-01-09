@@ -1038,10 +1038,24 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to serialize partition expression: {}", source))]
+    #[snafu(display("Failed to serialize partition expression"))]
     SerializePartitionExpr {
         #[snafu(source)]
         source: partition::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to deserialize partition expression"))]
+    DeserializePartitionExpr {
+        #[snafu(source)]
+        source: partition::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Empty partition expression"))]
+    EmptyPartitionExpr {
         #[snafu(implicit)]
         location: Location,
     },
@@ -1163,7 +1177,8 @@ impl ErrorExt for Error {
             | Error::MailboxChannelClosed { .. }
             | Error::IsNotLeader { .. } => StatusCode::IllegalState,
             Error::RetryLaterWithSource { source, .. } => source.status_code(),
-            Error::SerializePartitionExpr { source, .. } => source.status_code(),
+            Error::SerializePartitionExpr { source, .. }
+            | Error::DeserializePartitionExpr { source, .. } => source.status_code(),
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
@@ -1189,7 +1204,8 @@ impl ErrorExt for Error {
             | Error::RepartitionSourceRegionMissing { .. }
             | Error::RepartitionTargetRegionMissing { .. }
             | Error::PartitionExprMismatch { .. }
-            | Error::RepartitionSourceExprMismatch { .. } => StatusCode::InvalidArguments,
+            | Error::RepartitionSourceExprMismatch { .. }
+            | Error::EmptyPartitionExpr { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
             | Error::InvalidRegionKeyFromUtf8 { .. }
