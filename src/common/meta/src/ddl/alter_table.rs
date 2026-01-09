@@ -51,7 +51,6 @@ use crate::metrics;
 use crate::poison_key::table_poison_key;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{RegionRoute, find_leaders, region_distribution};
-use crate::wal_options_allocator::allocate_region_wal_options;
 
 /// The alter table procedure
 pub struct AlterTableProcedure {
@@ -304,11 +303,11 @@ impl AlterTableProcedure {
                 .collect();
             // Allocate new WAL options based on skip_wal
             Some(
-                allocate_region_wal_options(
-                    region_numbers,
-                    self.context.table_metadata_allocator.wal_options_allocator(),
-                    new_skip_wal,
-                )?,
+                self.context
+                    .table_metadata_allocator
+                    .wal_options_allocator()
+                    .allocate(&region_numbers, new_skip_wal)
+                    .await?,
             )
         } else {
             None
