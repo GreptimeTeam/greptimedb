@@ -595,6 +595,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "The number of fields in the CSV file does not match the table schema, expected table schema: {}, actual file schema: {}",
+        table_schema,
+        file_schema
+    ))]
+    InvalidHeader {
+        table_schema: usize,
+        file_schema: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to project schema"))]
     ProjectSchema {
         #[snafu(source)]
@@ -944,6 +956,7 @@ impl ErrorExt for Error {
             | Error::InvalidTableName { .. }
             | Error::InvalidViewName { .. }
             | Error::InvalidFlowName { .. }
+            | Error::InvalidHeader { .. }
             | Error::InvalidView { .. }
             | Error::InvalidExpr { .. }
             | Error::AdminFunctionNotFound { .. }
